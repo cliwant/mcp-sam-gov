@@ -1,0 +1,61 @@
+{
+  "name": "@govicon/mcp-sam-gov",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server for SAM.gov + USAspending — drop-in tools for Claude Desktop, Codex CLI, Cursor, Continue, Gemini CLI, and any MCP-aware host.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "sam.gov",
+    "usaspending",
+    "federal-contracting",
+    "govcon",
+    "claude-desktop",
+    "claude-code",
+    "codex",
+    "cursor",
+    "continue",
+    "gemini-cli",
+    "ai-tools"
+  ],
+  "license": "MIT",
+  "author": "GovIcon contributors",
+  "homepage": "https://github.com/seungdo-keum/govicon-mcp-sam-gov",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seungdo-keum/govicon-mcp-sam-gov.git"
+  },
+  "type": "module",
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "bin": {
+    "govicon-mcp-sam-gov": "./dist/server.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "README.ko.md",
+    "README.ja.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@govicon/sam-gov": "github:seungdo-keum/govicon-sam-gov",
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.5.0"
+  }
+}
