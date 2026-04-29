@@ -58,25 +58,19 @@ function buildFilters(args) {
         filters.psc_codes = args.pscCodes;
     return filters;
 }
+import { fetchWithRetry } from "./errors.js";
+import { memoize } from "./cache.js";
 async function postUsas(endpoint, body) {
-    const r = await fetch(`${USAS}/${endpoint}`, {
+    const r = await fetchWithRetry(`${USAS}/${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(15_000),
-    });
-    if (!r.ok) {
-        throw new Error(`USAspending POST ${endpoint} returned ${r.status}`);
-    }
+    }, `usaspending:${endpoint}`);
     return (await r.json());
 }
 async function getUsas(endpoint) {
-    const r = await fetch(`${USAS}/${endpoint}`, {
-        signal: AbortSignal.timeout(15_000),
-    });
-    if (!r.ok) {
-        throw new Error(`USAspending GET ${endpoint} returned ${r.status}`);
-    }
+    const r = await fetchWithRetry(`${USAS}/${endpoint}`, { signal: AbortSignal.timeout(15_000) }, `usaspending:${endpoint}`);
     return (await r.json());
 }
 // ─── Aggregate share-of-wallet ───────────────────────────────────
@@ -461,95 +455,109 @@ export async function getRecipientProfile(recipientId) {
 }
 // ─── Reference / autocomplete ─────────────────────────────────────
 export async function lookupAgency(searchText) {
-    try {
-        const r = await fetch(`${USAS}/autocomplete/funding_agency/`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ search_text: searchText, limit: 5 }),
-            signal: AbortSignal.timeout(10_000),
-        });
-        if (!r.ok)
+    // Cache: agency lookups are extremely repeat-prone (`VA`, `DHS`, etc.)
+    // and effectively static across a session.
+    return memoize(`usas:agency:${searchText.toLowerCase()}`, async () => {
+        try {
+            const r = await fetch(`${USAS}/autocomplete/funding_agency/`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ search_text: searchText, limit: 5 }),
+                signal: AbortSignal.timeout(10_000),
+            });
+            if (!r.ok)
+                return { matches: [] };
+            const json = (await r.json());
+            return {
+                matches: (json.results ?? []).map((r) => ({
+                    name: r.toptier_agency?.name ?? "",
+                    abbreviation: r.toptier_agency?.abbreviation,
+                    toptierCode: r.toptier_agency?.toptier_code,
+                    isToptier: !!r.toptier_flag,
+                })),
+            };
+        }
+        catch {
             return { matches: [] };
-        const json = (await r.json());
-        return {
-            matches: (json.results ?? []).map((r) => ({
-                name: r.toptier_agency?.name ?? "",
-                abbreviation: r.toptier_agency?.abbreviation,
-                toptierCode: r.toptier_agency?.toptier_code,
-                isToptier: !!r.toptier_flag,
-            })),
-        };
-    }
-    catch {
-        return { matches: [] };
-    }
+        }
+    });
 }
 export async function autocompleteNaics(args) {
-    const json = await postUsas("autocomplete/naics/", {
-        search_text: args.searchText,
-        limit: args.limit ?? 10,
+    return memoize(`usas:naics:${args.searchText.toLowerCase()}:${args.limit ?? 10}`, async () => {
+        const json = await postUsas("autocomplete/naics/", {
+            search_text: args.searchText,
+            limit: args.limit ?? 10,
+        });
+        return {
+            naics: (json.results ?? []).map((r) => ({
+                code: r.naics ?? "",
+                description: r.naics_description ?? "",
+                retired: !!r.year_retired,
+            })),
+        };
     });
-    return {
-        naics: (json.results ?? []).map((r) => ({
-            code: r.naics ?? "",
-            description: r.naics_description ?? "",
-            retired: !!r.year_retired,
-        })),
-    };
 }
 export async function autocompleteRecipient(args) {
-    const json = await postUsas("autocomplete/recipient/", {
-        search_text: args.searchText,
-        limit: args.limit ?? 10,
+    return memoize(`usas:recipient:${args.searchText.toLowerCase()}:${args.limit ?? 10}`, async () => {
+        const json = await postUsas("autocomplete/recipient/", {
+            search_text: args.searchText,
+            limit: args.limit ?? 10,
+        });
+        return {
+            recipients: (json.results ?? []).map((r) => ({
+                name: r.recipient_name ?? "",
+                uei: r.uei,
+                duns: r.duns,
+            })),
+        };
     });
-    return {
-        recipients: (json.results ?? []).map((r) => ({
-            name: r.recipient_name ?? "",
-            uei: r.uei,
-            duns: r.duns,
-        })),
-    };
 }
 export async function naicsHierarchy(args) {
-    const path = args.naicsFilter
-        ? `references/naics/?filter=${encodeURIComponent(args.naicsFilter)}`
-        : "references/naics/";
-    const json = await getUsas(path);
-    return {
-        hierarchy: (json.results ?? []).map((r) => ({
-            code: r.naics ?? "",
-            description: r.naics_description ?? "",
-            count: r.count ?? 0,
-            hasChildren: !!(r.children && r.children.length > 0),
-        })),
-    };
+    return memoize(`usas:naics-hierarchy:${args.naicsFilter ?? ""}`, async () => {
+        const path = args.naicsFilter
+            ? `references/naics/?filter=${encodeURIComponent(args.naicsFilter)}`
+            : "references/naics/";
+        const json = await getUsas(path);
+        return {
+            hierarchy: (json.results ?? []).map((r) => ({
+                code: r.naics ?? "",
+                description: r.naics_description ?? "",
+                count: r.count ?? 0,
+                hasChildren: !!(r.children && r.children.length > 0),
+            })),
+        };
+    });
 }
 export async function glossary(args) {
-    const params = new URLSearchParams();
-    params.set("limit", String(args.limit ?? 25));
-    if (args.search)
-        params.set("search", args.search);
-    const json = await getUsas(`references/glossary/?${params.toString()}`);
-    return {
-        totalRecords: json.page_metadata?.count ?? 0,
-        terms: (json.results ?? []).map((r) => ({
-            term: r.term ?? "",
-            slug: r.slug ?? "",
-            definition: r.plain ?? "",
-        })),
-    };
+    return memoize(`usas:glossary:${args.search ?? ""}:${args.limit ?? 25}`, async () => {
+        const params = new URLSearchParams();
+        params.set("limit", String(args.limit ?? 25));
+        if (args.search)
+            params.set("search", args.search);
+        const json = await getUsas(`references/glossary/?${params.toString()}`);
+        return {
+            totalRecords: json.page_metadata?.count ?? 0,
+            terms: (json.results ?? []).map((r) => ({
+                term: r.term ?? "",
+                slug: r.slug ?? "",
+                definition: r.plain ?? "",
+            })),
+        };
+    });
 }
 export async function listToptierAgencies(args) {
-    const json = await getUsas(`references/toptier_agencies/?limit=${args.limit ?? 50}`);
-    return {
-        agencies: (json.results ?? []).map((r) => ({
-            name: r.agency_name ?? "",
-            abbreviation: r.abbreviation,
-            toptierCode: r.toptier_code,
-            slug: r.agency_slug,
-            activeFiscalYear: r.active_fy,
-            obligatedAmount: r.obligated_amount ?? 0,
-        })),
-    };
+    return memoize(`usas:toptier:${args.limit ?? 50}`, async () => {
+        const json = await getUsas(`references/toptier_agencies/?limit=${args.limit ?? 50}`);
+        return {
+            agencies: (json.results ?? []).map((r) => ({
+                name: r.agency_name ?? "",
+                abbreviation: r.abbreviation,
+                toptierCode: r.toptier_code,
+                slug: r.agency_slug,
+                activeFiscalYear: r.active_fy,
+                obligatedAmount: r.obligated_amount ?? 0,
+            })),
+        };
+    });
 }
 //# sourceMappingURL=usaspending.js.map

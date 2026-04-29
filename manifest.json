@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "mcp-sam-gov",
   "display_name": "SAM.gov + USAspending (Cliwant)",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "36 keyless tools for US federal contracting + spending + regulation: SAM.gov, USAspending, Federal Register, eCFR, Grants.gov.",
   "long_description": "One-click Claude Desktop extension. Search SAM.gov opportunities, pull RFP attachments, analyze USAspending awards (recipients, sub-agencies, time-series, NAICS / PSC / state / CFDA breakdowns), browse Federal Register rules, search eCFR / FAR regulations, and discover Grants.gov opportunities — all without registering an API key. Anti-hallucination autocomplete tools (NAICS, recipient, agency) keep responses grounded in real federal data.\n\nWorks with Claude Desktop on macOS and Windows. Auth: zero. Set SAM_GOV_API_KEY only if you need higher SAM.gov rate limits or archives older than 12 months.",
   "author": {

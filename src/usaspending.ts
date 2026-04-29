@@ -66,29 +66,32 @@ function buildFilters(args: {
   return filters;
 }
 
+import { fetchWithRetry } from "./errors.js";
+import { memoize } from "./cache.js";
+
 async function postUsas<T>(
   endpoint: string,
   body: Record<string, unknown>,
 ): Promise<T> {
-  const r = await fetch(`${USAS}/${endpoint}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!r.ok) {
-    throw new Error(`USAspending POST ${endpoint} returned ${r.status}`);
-  }
+  const r = await fetchWithRetry(
+    `${USAS}/${endpoint}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    },
+    `usaspending:${endpoint}`,
+  );
   return (await r.json()) as T;
 }
 
 async function getUsas<T>(endpoint: string): Promise<T> {
-  const r = await fetch(`${USAS}/${endpoint}`, {
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!r.ok) {
-    throw new Error(`USAspending GET ${endpoint} returned ${r.status}`);
-  }
+  const r = await fetchWithRetry(
+    `${USAS}/${endpoint}`,
+    { signal: AbortSignal.timeout(15_000) },
+    `usaspending:${endpoint}`,
+  );
   return (await r.json()) as T;
 }
 
@@ -776,6 +779,9 @@ export async function getRecipientProfile(recipientId: string) {
 // ─── Reference / autocomplete ─────────────────────────────────────
 
 export async function lookupAgency(searchText: string) {
+  // Cache: agency lookups are extremely repeat-prone (`VA`, `DHS`, etc.)
+  // and effectively static across a session.
+  return memoize(`usas:agency:${searchText.toLowerCase()}`, async () => {
   try {
     const r = await fetch(`${USAS}/autocomplete/funding_agency/`, {
       method: "POST",
@@ -806,120 +812,137 @@ export async function lookupAgency(searchText: string) {
   } catch {
     return { matches: [] };
   }
+  });
 }
 
 export async function autocompleteNaics(args: {
   searchText: string;
   limit?: number;
 }) {
-  type Resp = {
-    results?: {
-      naics?: string;
-      naics_description?: string;
-      year_retired?: string | null;
-    }[];
-  };
-  const json = await postUsas<Resp>("autocomplete/naics/", {
-    search_text: args.searchText,
-    limit: args.limit ?? 10,
-  });
-  return {
-    naics: (json.results ?? []).map((r) => ({
-      code: r.naics ?? "",
-      description: r.naics_description ?? "",
-      retired: !!r.year_retired,
-    })),
-  };
+  return memoize(
+    `usas:naics:${args.searchText.toLowerCase()}:${args.limit ?? 10}`,
+    async () => {
+      type Resp = {
+        results?: {
+          naics?: string;
+          naics_description?: string;
+          year_retired?: string | null;
+        }[];
+      };
+      const json = await postUsas<Resp>("autocomplete/naics/", {
+        search_text: args.searchText,
+        limit: args.limit ?? 10,
+      });
+      return {
+        naics: (json.results ?? []).map((r) => ({
+          code: r.naics ?? "",
+          description: r.naics_description ?? "",
+          retired: !!r.year_retired,
+        })),
+      };
+    },
+  );
 }
 
 export async function autocompleteRecipient(args: {
   searchText: string;
   limit?: number;
 }) {
-  type Resp = {
-    results?: {
-      recipient_name?: string;
-      uei?: string;
-      duns?: string;
-    }[];
-  };
-  const json = await postUsas<Resp>("autocomplete/recipient/", {
-    search_text: args.searchText,
-    limit: args.limit ?? 10,
-  });
-  return {
-    recipients: (json.results ?? []).map((r) => ({
-      name: r.recipient_name ?? "",
-      uei: r.uei,
-      duns: r.duns,
-    })),
-  };
+  return memoize(
+    `usas:recipient:${args.searchText.toLowerCase()}:${args.limit ?? 10}`,
+    async () => {
+      type Resp = {
+        results?: {
+          recipient_name?: string;
+          uei?: string;
+          duns?: string;
+        }[];
+      };
+      const json = await postUsas<Resp>("autocomplete/recipient/", {
+        search_text: args.searchText,
+        limit: args.limit ?? 10,
+      });
+      return {
+        recipients: (json.results ?? []).map((r) => ({
+          name: r.recipient_name ?? "",
+          uei: r.uei,
+          duns: r.duns,
+        })),
+      };
+    },
+  );
 }
 
 export async function naicsHierarchy(args: { naicsFilter?: string }) {
-  type Resp = {
-    results?: {
-      naics?: string;
-      naics_description?: string;
-      count?: number;
-      children?: unknown[];
-    }[];
-  };
-  const path = args.naicsFilter
-    ? `references/naics/?filter=${encodeURIComponent(args.naicsFilter)}`
-    : "references/naics/";
-  const json = await getUsas<Resp>(path);
-  return {
-    hierarchy: (json.results ?? []).map((r) => ({
-      code: r.naics ?? "",
-      description: r.naics_description ?? "",
-      count: r.count ?? 0,
-      hasChildren: !!(r.children && r.children.length > 0),
-    })),
-  };
+  return memoize(`usas:naics-hierarchy:${args.naicsFilter ?? ""}`, async () => {
+    type Resp = {
+      results?: {
+        naics?: string;
+        naics_description?: string;
+        count?: number;
+        children?: unknown[];
+      }[];
+    };
+    const path = args.naicsFilter
+      ? `references/naics/?filter=${encodeURIComponent(args.naicsFilter)}`
+      : "references/naics/";
+    const json = await getUsas<Resp>(path);
+    return {
+      hierarchy: (json.results ?? []).map((r) => ({
+        code: r.naics ?? "",
+        description: r.naics_description ?? "",
+        count: r.count ?? 0,
+        hasChildren: !!(r.children && r.children.length > 0),
+      })),
+    };
+  });
 }
 
 export async function glossary(args: { limit?: number; search?: string }) {
-  type Resp = {
-    page_metadata?: { count?: number };
-    results?: { term?: string; slug?: string; plain?: string }[];
-  };
-  const params = new URLSearchParams();
-  params.set("limit", String(args.limit ?? 25));
-  if (args.search) params.set("search", args.search);
-  const json = await getUsas<Resp>(`references/glossary/?${params.toString()}`);
-  return {
-    totalRecords: json.page_metadata?.count ?? 0,
-    terms: (json.results ?? []).map((r) => ({
-      term: r.term ?? "",
-      slug: r.slug ?? "",
-      definition: r.plain ?? "",
-    })),
-  };
+  return memoize(`usas:glossary:${args.search ?? ""}:${args.limit ?? 25}`, async () => {
+    type Resp = {
+      page_metadata?: { count?: number };
+      results?: { term?: string; slug?: string; plain?: string }[];
+    };
+    const params = new URLSearchParams();
+    params.set("limit", String(args.limit ?? 25));
+    if (args.search) params.set("search", args.search);
+    const json = await getUsas<Resp>(`references/glossary/?${params.toString()}`);
+    return {
+      totalRecords: json.page_metadata?.count ?? 0,
+      terms: (json.results ?? []).map((r) => ({
+        term: r.term ?? "",
+        slug: r.slug ?? "",
+        definition: r.plain ?? "",
+      })),
+    };
+  });
 }
 
 export async function listToptierAgencies(args: { limit?: number }) {
-  type Resp = {
-    results?: {
-      agency_name?: string;
-      abbreviation?: string;
-      toptier_code?: string;
-      agency_slug?: string;
-      active_fy?: string;
-      obligated_amount?: number;
-    }[];
-  };
-  const json = await getUsas<Resp>(
-    `references/toptier_agencies/?limit=${args.limit ?? 50}`,
-  );
-  return {
-    agencies: (json.results ?? []).map((r) => ({
-      name: r.agency_name ?? "",
-      abbreviation: r.abbreviation,
-      toptierCode: r.toptier_code,
-      slug: r.agency_slug,
-      activeFiscalYear: r.active_fy,
-      obligatedAmount: r.obligated_amount ?? 0,
-    })),
-  };
+  return memoize(`usas:toptier:${args.limit ?? 50}`, async () => {
+    type Resp = {
+      results?: {
+        agency_name?: string;
+        abbreviation?: string;
+        toptier_code?: string;
+        agency_slug?: string;
+        active_fy?: string;
+        obligated_amount?: number;
+      }[];
+    };
+    const json = await getUsas<Resp>(
+      `references/toptier_agencies/?limit=${args.limit ?? 50}`,
+    );
+    return {
+      agencies: (json.results ?? []).map((r) => ({
+        name: r.agency_name ?? "",
+        abbreviation: r.abbreviation,
+        toptierCode: r.toptier_code,
+        slug: r.agency_slug,
+        activeFiscalYear: r.active_fy,
+        obligatedAmount: r.obligated_amount ?? 0,
+      })),
+    };
+  });
 }
