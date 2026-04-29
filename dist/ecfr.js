@@ -12,29 +12,31 @@
  *
  * Both keyless. Documented at https://www.ecfr.gov/developers/.
  */
+import { fetchWithRetry } from "./errors.js";
+import { memoize } from "./cache.js";
 const ECFR = "https://www.ecfr.gov/api";
 async function fetchJson(url) {
-    const r = await fetch(url, {
+    const r = await fetchWithRetry(url, {
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(15_000),
-    });
-    if (!r.ok) {
-        throw new Error(`eCFR ${url} returned ${r.status}`);
-    }
+    }, `ecfr:${url.split("/api/")[1] ?? url}`);
     return (await r.json());
 }
 export async function listTitles() {
-    const json = await fetchJson(`${ECFR}/versioner/v1/titles.json`);
-    return {
-        titles: (json.titles ?? []).map((t) => ({
-            number: t.number ?? 0,
-            name: t.name ?? "",
-            latestAmendedOn: t.latest_amended_on,
-            latestIssueDate: t.latest_issue_date,
-            upToDateAsOf: t.up_to_date_as_of,
-            reserved: !!t.reserved,
-        })),
-    };
+    // 50 CFR titles change very infrequently. Cache aggressively (5 min).
+    return memoize("ecfr:titles", async () => {
+        const json = await fetchJson(`${ECFR}/versioner/v1/titles.json`);
+        return {
+            titles: (json.titles ?? []).map((t) => ({
+                number: t.number ?? 0,
+                name: t.name ?? "",
+                latestAmendedOn: t.latest_amended_on,
+                latestIssueDate: t.latest_issue_date,
+                upToDateAsOf: t.up_to_date_as_of,
+                reserved: !!t.reserved,
+            })),
+        };
+    });
 }
 export async function search(args) {
     const url = new URL(`${ECFR}/search/v1/results`);

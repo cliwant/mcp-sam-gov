@@ -17,16 +17,20 @@
  * Rate-limit: documented as ~1000 req/hour per IP (informal).
  */
 
+import { fetchWithRetry } from "./errors.js";
+import { memoize } from "./cache.js";
+
 const FED_REG = "https://www.federalregister.gov/api/v1";
 
 async function fetchJson<T>(url: string): Promise<T> {
-  const r = await fetch(url, {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!r.ok) {
-    throw new Error(`Federal Register ${url} returned ${r.status}`);
-  }
+  const r = await fetchWithRetry(
+    url,
+    {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(15_000),
+    },
+    `federal-register:${url.split("/api/v1/")[1] ?? url}`,
+  );
   return (await r.json()) as T;
 }
 
@@ -166,26 +170,28 @@ export async function getDocument(documentNumber: string) {
 }
 
 export async function listAgencies(args: { perPage?: number }) {
-  type Resp = Array<{
-    id?: number;
-    name?: string;
-    short_name?: string;
-    slug?: string;
-    description?: string;
-    parent_id?: number | null;
-    json_url?: string;
-  }>;
-  const json = await fetchJson<Resp>(
-    `${FED_REG}/agencies.json?per_page=${args.perPage ?? 100}`,
-  );
-  return {
-    agencies: (json ?? []).map((a) => ({
-      id: a.id ?? 0,
-      name: a.name ?? "",
-      shortName: a.short_name,
-      slug: a.slug ?? "",
-      description: a.description ?? "",
-      parentId: a.parent_id,
-    })),
-  };
+  return memoize(`fedreg:agencies:${args.perPage ?? 100}`, async () => {
+    type Resp = Array<{
+      id?: number;
+      name?: string;
+      short_name?: string;
+      slug?: string;
+      description?: string;
+      parent_id?: number | null;
+      json_url?: string;
+    }>;
+    const json = await fetchJson<Resp>(
+      `${FED_REG}/agencies.json?per_page=${args.perPage ?? 100}`,
+    );
+    return {
+      agencies: (json ?? []).map((a) => ({
+        id: a.id ?? 0,
+        name: a.name ?? "",
+        shortName: a.short_name,
+        slug: a.slug ?? "",
+        description: a.description ?? "",
+        parentId: a.parent_id,
+      })),
+    };
+  });
 }

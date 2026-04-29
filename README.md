@@ -1,11 +1,61 @@
+<div align="center">
+
 # @cliwant/mcp-sam-gov
 
-> **The most comprehensive keyless federal-data MCP server.**
-> 36 tools for SAM.gov + USAspending + Federal Register + eCFR + Grants.gov.
-> No API key, no registration, no signup. Works in Claude Desktop, Claude Code,
-> Codex CLI, Cursor, Continue, Gemini CLI, and any MCP-aware host.
+### **$4 trillion of public federal data, one `npm install` away.**
 
-[한국어 README](./README.ko.md) · [日本語 README](./README.ja.md)
+The most comprehensive **keyless** MCP server for US federal contracting + spending + regulation. **36 tools** that work today, in any AI agent.
+
+[![npm](https://img.shields.io/npm/v/@cliwant/mcp-sam-gov?color=cb3837&label=%40cliwant%2Fmcp-sam-gov&logo=npm)](https://www.npmjs.com/package/@cliwant/mcp-sam-gov)
+[![mcp-registry](https://img.shields.io/badge/MCP%20Registry-active-2ea44f?logo=anthropic)](https://registry.modelcontextprotocol.io/v0/servers?search=cliwant)
+[![Glama score](https://glama.ai/mcp/servers/cliwant/mcp-sam-gov/badges/score.svg)](https://glama.ai/mcp/servers/cliwant/mcp-sam-gov)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Daily smoke](https://github.com/cliwant/mcp-sam-gov/actions/workflows/daily-smoke.yml/badge.svg)](https://github.com/cliwant/mcp-sam-gov/actions/workflows/daily-smoke.yml)
+
+[English](./README.md) · [한국어](./README.ko.md) · [日本語](./README.ja.md)
+
+</div>
+
+---
+
+## See it in action
+
+```text
+👤  user        Find active SAM.gov solicitations under NAICS 541512 closing this month
+                                                                                          
+🤖  Claude     → sam_search_opportunities { ncode: "541512", limit: 5 }                  
+✓  47,478 active opportunities indexed                                                  
+                                                                                          
+   • 5ef3db5d…  VA Bulk Oxygen Tank Rental         closes 2026-05-15  ($1.05M)         
+   • a000339c…  Articulating Boom Lifts             closes 2026-05-30  ($310K)          
+   • be9c24ef…  CMOP Hazardous Waste Removal        closes 2026-06-12  ($2.7M)          
+
+👤  user        Pull the SOW + contracting officer for the first one
+                                                                                          
+🤖  Claude     → sam_get_opportunity { noticeId: "5ef3db5d…" }                          
+✓  Department of Veterans Affairs · Combined Synopsis/Solicitation                       
+   POC:           Rebecca Gobble  <rebecca.gobble@va.gov>  +1-410-642-2411                 
+   Set-aside:     Total Small Business                                                    
+   Attachments:   1   ↓ 36C24526Q0460_1.docx (172 KB)                                     
+   SOW preview:   "RFQ# 36C24526Q0460 — Bulk Oxygen Tank Rental, Fill, Telemetry…"        
+```
+
+**Zero API key. Zero registration. Zero signup.** Just plug it in and ask.
+
+---
+
+## Why this exists
+
+| Status quo | With this MCP |
+|---|---|
+| GovWin: $30K-$100K/yr per seat | Free, MIT license |
+| API key registration → wait 24h → quota tier shopping | `npm install` → working in 60s |
+| 5 separate vendor APIs / scrapers | 1 unified surface, 36 tools |
+| LLMs hallucinate NAICS codes / agency names | Anti-hallucination autocomplete guards built-in |
+| Brittle scraping breaks weekly | Daily live smoke test ([badge above](#)) |
+| Procurement officer → IT ticket → 3-week wait | Claude Desktop double-click install |
+
+The federal data this wraps is **public domain**. There is no good reason it should cost a five-figure subscription to query.
 
 ---
 

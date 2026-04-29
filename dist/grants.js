@@ -11,17 +11,15 @@
  *
  * Documented at https://grants.gov/web/grants/s2s/grantor/schemas/grants-search-2-soap.html
  */
+import { fetchWithRetry } from "./errors.js";
 const GRANTS = "https://api.grants.gov/v1/api";
 async function postJson(endpoint, body) {
-    const r = await fetch(`${GRANTS}/${endpoint}`, {
+    const r = await fetchWithRetry(`${GRANTS}/${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(15_000),
-    });
-    if (!r.ok) {
-        throw new Error(`Grants.gov ${endpoint} returned ${r.status}`);
-    }
+    }, `grants.gov:${endpoint}`);
     return (await r.json());
 }
 export async function searchGrants(args) {

@@ -25,8 +25,9 @@ import * as usas from "./usaspending.js";
 import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
+import { toToolError } from "./errors.js";
 const SERVER_NAME = "mcp-sam-gov";
-const SERVER_VERSION = "0.2.1";
+const SERVER_VERSION = "0.3.0";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
     query: z.string().optional().describe("Free-text title query"),
@@ -436,17 +437,25 @@ async function main() {
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const { name, arguments: args } = req.params;
         try {
-            const result = await runTool(name, args ?? {}, sam);
+            const data = await runTool(name, args ?? {}, sam);
+            // Structured success envelope. Calling agent can rely on
+            // `ok: true` to know the payload is in `data`.
+            const envelope = { ok: true, data };
             return {
                 content: [
-                    { type: "text", text: JSON.stringify(result, null, 2) },
+                    { type: "text", text: JSON.stringify(envelope, null, 2) },
                 ],
             };
         }
         catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
+            // Structured error envelope. The agent can read `error.kind`
+            // and `error.retryable` to decide what to do next.
+            const error = toToolError(err, name);
+            const envelope = { ok: false, error };
             return {
-                content: [{ type: "text", text: `Tool error: ${message}` }],
+                content: [
+                    { type: "text", text: JSON.stringify(envelope, null, 2) },
+                ],
                 isError: true,
             };
         }
