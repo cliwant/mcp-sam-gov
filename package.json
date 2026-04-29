@@ -1,6 +1,6 @@
 {
   "name": "@cliwant/mcp-sam-gov",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "mcpName": "io.github.cliwant/mcp-sam-gov",
   "description": "Most comprehensive keyless MCP server for US federal contracting + spending + regulation: SAM.gov, USAspending, Federal Register, eCFR, Grants.gov. 36 tools, no API key, plug into Claude Desktop / Claude Code / Codex CLI / Cursor / Continue / Gemini CLI.",
   "keywords": [

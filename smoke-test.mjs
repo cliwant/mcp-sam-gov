@@ -64,13 +64,22 @@ async function callTool(name, args) {
   const r = await rpc("tools/call", { name, arguments: args });
   const ms = Date.now() - start;
   const text = r.result?.content?.[0]?.text ?? "";
-  let parsed = null;
+  let envelope = null;
   try {
-    parsed = JSON.parse(text);
+    envelope = JSON.parse(text);
   } catch {
-    parsed = text;
+    envelope = { ok: false, raw: text };
   }
-  return { ms, isError: !!r.result?.isError, parsed, raw: r };
+  // Unwrap structured envelope: tools now return { ok: true, data }
+  // or { ok: false, error }. Pass through .data for the verify fns.
+  const parsed =
+    envelope && typeof envelope === "object" && "ok" in envelope
+      ? envelope.ok
+        ? envelope.data
+        : envelope
+      : envelope;
+  const isError = envelope && envelope.ok === false;
+  return { ms, isError: !!r.result?.isError || isError, parsed, raw: r };
 }
 
 const tests = [

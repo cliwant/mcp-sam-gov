@@ -16,15 +16,14 @@
  * All endpoints are public + keyless (no API key, no registration).
  * Rate-limit: documented as ~1000 req/hour per IP (informal).
  */
+import { fetchWithRetry } from "./errors.js";
+import { memoize } from "./cache.js";
 const FED_REG = "https://www.federalregister.gov/api/v1";
 async function fetchJson(url) {
-    const r = await fetch(url, {
+    const r = await fetchWithRetry(url, {
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(15_000),
-    });
-    if (!r.ok) {
-        throw new Error(`Federal Register ${url} returned ${r.status}`);
-    }
+    }, `federal-register:${url.split("/api/v1/")[1] ?? url}`);
     return (await r.json());
 }
 const TYPE_MAP = {
@@ -102,16 +101,18 @@ export async function getDocument(documentNumber) {
     };
 }
 export async function listAgencies(args) {
-    const json = await fetchJson(`${FED_REG}/agencies.json?per_page=${args.perPage ?? 100}`);
-    return {
-        agencies: (json ?? []).map((a) => ({
-            id: a.id ?? 0,
-            name: a.name ?? "",
-            shortName: a.short_name,
-            slug: a.slug ?? "",
-            description: a.description ?? "",
-            parentId: a.parent_id,
-        })),
-    };
+    return memoize(`fedreg:agencies:${args.perPage ?? 100}`, async () => {
+        const json = await fetchJson(`${FED_REG}/agencies.json?per_page=${args.perPage ?? 100}`);
+        return {
+            agencies: (json ?? []).map((a) => ({
+                id: a.id ?? 0,
+                name: a.name ?? "",
+                shortName: a.short_name,
+                slug: a.slug ?? "",
+                description: a.description ?? "",
+                parentId: a.parent_id,
+            })),
+        };
+    });
 }
 //# sourceMappingURL=federal-register.js.map
