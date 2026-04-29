@@ -342,6 +342,52 @@ Get a free key at [sam.gov/SAM/pages/public/searchKeyData.jsf](https://sam.gov/S
 
 ---
 
+## Use as a TypeScript / JavaScript library (no MCP)
+
+Beyond the MCP server, this package also exports the underlying federal-data
+clients as importable modules. Useful if you're building your own SaaS, AI
+agent, or CLI and want programmatic access without spawning an MCP server.
+
+```bash
+npm install @govicon/mcp-sam-gov
+```
+
+```ts
+// SAM.gov client
+import { SamGovClient } from "@govicon/mcp-sam-gov/sam-gov";
+
+const sam = new SamGovClient(); // keyless
+const result = await sam.searchOpportunities({ ncode: "541512", limit: 5 });
+const opp = await sam.getOpportunity("5ef3db5daeb54099a96d487783a38bd0");
+```
+
+```ts
+// USAspending wrappers (22 functions)
+import * as usas from "@govicon/mcp-sam-gov/usaspending";
+
+const recompete = await usas.searchExpiringContracts({
+  agency: "Department of Veterans Affairs",
+  naics: "541512",
+  monthsUntilExpiry: 12,
+});
+const recipient = await usas.getRecipientProfile("ed02855e-60d7-2540-...-P");
+```
+
+```ts
+// Federal Register / eCFR / Grants.gov
+import * as fedreg from "@govicon/mcp-sam-gov/federal-register";
+import * as ecfr from "@govicon/mcp-sam-gov/ecfr";
+import * as grants from "@govicon/mcp-sam-gov/grants";
+
+const farResults = await ecfr.search({ query: "SDVOSB", titleNumber: 48 });
+```
+
+This is the canonical home for the GovIcon federal-data libraries — there
+is no separate `@govicon/sam-gov` package. The previous standalone
+`govicon-sam-gov` repo has been archived and consolidated here. All
+client code lives in `src/sam-gov/`, `src/usaspending.ts`,
+`src/federal-register.ts`, `src/ecfr.ts`, `src/grants.ts`.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
