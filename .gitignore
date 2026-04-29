@@ -14,3 +14,8 @@ node_modules/
 
 # .mcpb release artifacts go to GitHub releases, not git history
 *.mcpb
+
+# Marketing playbook stays internal only — never commit
+marketing/
+.local-marketing/
+LAUNCH-COPY.md
