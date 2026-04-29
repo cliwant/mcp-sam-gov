@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.cliwant/mcp-sam-gov",
+  "description": "Most comprehensive keyless MCP server for US federal contracting + spending + regulation. 36 tools across SAM.gov, USAspending, Federal Register, eCFR, Grants.gov. No API key required.",
+  "repository": {
+    "url": "https://github.com/cliwant/mcp-sam-gov",
+    "source": "github"
+  },
+  "version": "0.2.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@cliwant/mcp-sam-gov",
+      "version": "0.2.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "SAM_GOV_API_KEY",
+          "description": "Optional. SAM.gov public API key. Leave unset for keyless mode (default). Set only for higher rate limits + archives older than 12 months.",
+          "isSecret": true,
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
