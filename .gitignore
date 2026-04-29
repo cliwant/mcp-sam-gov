@@ -11,3 +11,6 @@ node_modules/
 # not reliably resolve `node_modules/.bin/tsc` on PATH. Committing
 # pre-built dist/ removes the build step entirely and makes
 # github-install a pure copy.
+
+# .mcpb release artifacts go to GitHub releases, not git history
+*.mcpb

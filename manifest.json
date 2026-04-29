@@ -1,0 +1,98 @@
+{
+  "manifest_version": "0.3",
+  "name": "govicon-mcp-sam-gov",
+  "display_name": "SAM.gov + USAspending (GovIcon)",
+  "version": "0.2.0",
+  "description": "36 keyless tools for US federal contracting + spending + regulation: SAM.gov, USAspending, Federal Register, eCFR, Grants.gov.",
+  "long_description": "One-click Claude Desktop extension. Search SAM.gov opportunities, pull RFP attachments, analyze USAspending awards (recipients, sub-agencies, time-series, NAICS / PSC / state / CFDA breakdowns), browse Federal Register rules, search eCFR / FAR regulations, and discover Grants.gov opportunities — all without registering an API key. Anti-hallucination autocomplete tools (NAICS, recipient, agency) keep responses grounded in real federal data.\n\nWorks with Claude Desktop on macOS and Windows. Auth: zero. Set SAM_GOV_API_KEY only if you need higher SAM.gov rate limits or archives older than 12 months.",
+  "author": {
+    "name": "GovIcon contributors",
+    "url": "https://github.com/cliwant/govicon-mcp-sam-gov"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cliwant/govicon-mcp-sam-gov.git"
+  },
+  "homepage": "https://github.com/cliwant/govicon-mcp-sam-gov",
+  "documentation": "https://github.com/cliwant/govicon-mcp-sam-gov#readme",
+  "support": "https://github.com/cliwant/govicon-mcp-sam-gov/issues",
+  "keywords": [
+    "sam.gov",
+    "usaspending",
+    "federal-contracting",
+    "govcon",
+    "federal-register",
+    "ecfr",
+    "far",
+    "grants.gov",
+    "ai-tools"
+  ],
+  "license": "MIT",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/server.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/server.js"],
+      "env": {
+        "SAM_GOV_API_KEY": "${user_config.sam_gov_api_key}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "sam_search_opportunities", "description": "Search SAM.gov federal contracting opportunities (keyless)" },
+    { "name": "sam_get_opportunity", "description": "Get full detail for a single SAM.gov notice by 32-char hex noticeId" },
+    { "name": "sam_fetch_description", "description": "Get the full RFP body text as plain text" },
+    { "name": "sam_attachment_url", "description": "Build the public download URL for an attachment resourceId" },
+    { "name": "sam_lookup_organization", "description": "Resolve a SAM.gov federal-organization id to its full path name" },
+    { "name": "usas_search_awards", "description": "Aggregate share-of-wallet at agency × NAICS × fiscal year" },
+    { "name": "usas_search_individual_awards", "description": "Line-item federal contracts (recipient + amount + sub-agency + state + description)" },
+    { "name": "usas_search_subagency_spending", "description": "Break down agency spending by sub-agency / office" },
+    { "name": "usas_lookup_agency", "description": "Resolve agency abbreviation ('VA') to canonical name + toptier code" },
+    { "name": "usas_search_awards_by_recipient", "description": "Recipient win history at agency × NAICS slice" },
+    { "name": "usas_search_subawards", "description": "Subcontracts on prime awards — supply-chain map" },
+    { "name": "usas_search_expiring_contracts", "description": "Recompete radar — contracts expiring in next N months" },
+    { "name": "usas_get_award_detail", "description": "Per-award rich detail (period of performance, options, set-aside, competition)" },
+    { "name": "usas_spending_over_time", "description": "Time-series — group by fiscal_year / quarter / month" },
+    { "name": "usas_search_psc_spending", "description": "Spending by Product Service Code (PSC)" },
+    { "name": "usas_search_state_spending", "description": "Geographic — top states by federal $" },
+    { "name": "usas_search_cfda_spending", "description": "Grant program (CFDA) breakdown" },
+    { "name": "usas_search_federal_account_spending", "description": "Map money to budget line items (Treasury Account Symbols)" },
+    { "name": "usas_search_agency_spending", "description": "Top buying agencies for a NAICS / set-aside" },
+    { "name": "usas_get_agency_profile", "description": "Agency mission, abbreviation, website, subtier count" },
+    { "name": "usas_get_agency_awards_summary", "description": "High-level agency award activity (transaction count + obligations)" },
+    { "name": "usas_get_agency_budget_function", "description": "Budget breakdown by program area" },
+    { "name": "usas_search_recipients", "description": "Search USAspending recipient list with parent/child hierarchy" },
+    { "name": "usas_get_recipient_profile", "description": "Full recipient detail (DUNS, UEI, alternate names, business types, totals)" },
+    { "name": "usas_autocomplete_naics", "description": "Autocomplete NAICS codes — anti-hallucination guard" },
+    { "name": "usas_autocomplete_recipient", "description": "Autocomplete recipient names — anti-hallucination guard" },
+    { "name": "usas_naics_hierarchy", "description": "Navigate NAICS tree (2-digit → 6-digit)" },
+    { "name": "usas_glossary", "description": "151 federal-spending terms (TAS, obligation vs outlay, etc.)" },
+    { "name": "usas_list_toptier_agencies", "description": "List all toptier federal agencies + current FY obligations" },
+    { "name": "fed_register_search_documents", "description": "Search Federal Register rules / notices / proclamations" },
+    { "name": "fed_register_get_document", "description": "Federal Register document detail (citation, body URL, CFR refs)" },
+    { "name": "fed_register_list_agencies", "description": "List Federal Register agencies + slugs" },
+    { "name": "ecfr_search", "description": "Full-text search across CFR (Title 48 = FAR)" },
+    { "name": "ecfr_list_titles", "description": "List all 50 CFR titles + last-amended dates" },
+    { "name": "grants_search", "description": "Search Grants.gov federal grant opportunities" },
+    { "name": "grants_get_opportunity", "description": "Federal grant detail (description, dates, award ceiling, applicant types)" }
+  ],
+  "tools_generated": false,
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  },
+  "user_config": {
+    "sam_gov_api_key": {
+      "type": "string",
+      "title": "SAM.gov API key (optional)",
+      "description": "Leave blank for keyless mode. Set this only if you need higher SAM.gov rate limits or archives older than 12 months. Get a free key at https://sam.gov/SAM/pages/public/searchKeyData.jsf",
+      "required": false,
+      "sensitive": true,
+      "default": ""
+    }
+  }
+}
