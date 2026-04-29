@@ -1,7 +1,7 @@
 /**
- * Vendored copy of @govicon/sam-gov.
+ * Vendored copy of @cliwant/mcp-sam-gov/sam-gov.
  *
- * Why vendored: when `@govicon/mcp-sam-gov` is installed via
+ * Why vendored: when `@cliwant/mcp-sam-gov` is installed via
  * `npm install -g github:owner/repo`, npm cannot resolve a nested
  * github dep on Windows reliably (it tries to cd into a non-existent
  * directory during the install transaction). Inlining the source
@@ -12,7 +12,7 @@
  * one-line re-export of the upstream package without any consumer
  * changes (the public API surface is identical).
  *
- * Source: https://github.com/seungdo-keum/govicon-sam-gov
+ * Canonical home: https://github.com/cliwant/mcp-sam-gov
  */
 export { SamGovClient } from "./client.js";
 //# sourceMappingURL=index.js.map

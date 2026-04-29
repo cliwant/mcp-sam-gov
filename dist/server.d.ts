@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * @govicon/mcp-sam-gov — Model Context Protocol server for SAM.gov
+ * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov.
  *
  * 34 keyless tools wrapping every public federal-contracting data

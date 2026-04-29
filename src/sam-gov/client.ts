@@ -1,5 +1,5 @@
 /**
- * @govicon/sam-gov — keyless SAM.gov client.
+ * @cliwant/mcp-sam-gov/sam-gov — keyless SAM.gov client.
  *
  * Two endpoint layers, one normalized contract:
  *   1. Authenticated `api.sam.gov/opportunities/v2/search` —
@@ -26,7 +26,7 @@ const ENTITY_BASE = "https://api.sam.gov/entity-information/v3/entities";
 const PUBLIC_BASE = "https://sam.gov/api/prod";
 
 const DEFAULT_USER_AGENT =
-  "Mozilla/5.0 (compatible; @govicon/sam-gov; +https://github.com/seungdo-keum/govicon-sam-gov)";
+  "Mozilla/5.0 (compatible; @cliwant/mcp-sam-gov; +https://github.com/cliwant/mcp-sam-gov)";
 
 export class SamGovClient {
   private readonly apiKey?: string;
@@ -468,7 +468,7 @@ export class SamGovClient {
   }
 
   private warn(msg: string, err?: unknown) {
-    if (this.logger.warn) this.logger.warn(`[govicon-sam-gov] ${msg}`, err);
+    if (this.logger.warn) this.logger.warn(`[mcp-sam-gov/sam-gov] ${msg}`, err);
   }
 }
 
