@@ -49,7 +49,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@govicon/sam-gov": "github:seungdo-keum/govicon-sam-gov",
     "@modelcontextprotocol/sdk": "^1.20.0",
     "zod": "^3.24.0"
   },

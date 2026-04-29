@@ -36,7 +36,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { SamGovClient, type SamSetAside } from "@govicon/sam-gov";
+import { SamGovClient, type SamSetAside } from "./sam-gov/index.js";
 import {
   lookupAgency,
   searchAwards,

@@ -32,7 +32,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { SamGovClient } from "@govicon/sam-gov";
+import { SamGovClient } from "./sam-gov/index.js";
 import { lookupAgency, searchAwards, searchIndividualAwards, searchSubAgencySpending, } from "./usaspending.js";
 const SERVER_NAME = "govicon-mcp-sam-gov";
 const SERVER_VERSION = "0.1.0";
