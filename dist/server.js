@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * @govicon/mcp-sam-gov — Model Context Protocol server for SAM.gov
+ * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov.
  *
  * 34 keyless tools wrapping every public federal-contracting data
@@ -25,8 +25,8 @@ import * as usas from "./usaspending.js";
 import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
-const SERVER_NAME = "govicon-mcp-sam-gov";
-const SERVER_VERSION = "0.2.0";
+const SERVER_NAME = "mcp-sam-gov";
+const SERVER_VERSION = "0.2.1";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
     query: z.string().optional().describe("Free-text title query"),
@@ -453,7 +453,7 @@ async function main() {
     });
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error(`[govicon-mcp-sam-gov] v${SERVER_VERSION} listening on stdio (${TOOLS.length} tools).`);
+    console.error(`[mcp-sam-gov] v${SERVER_VERSION} listening on stdio (${TOOLS.length} tools).`);
 }
 async function runTool(name, args, sam) {
     switch (name) {
@@ -679,7 +679,7 @@ function zodToJsonSchema(schema) {
     return { type: "string", ...(description ? { description } : {}) };
 }
 main().catch((err) => {
-    console.error("[govicon-mcp-sam-gov] FATAL:", err);
+    console.error("[mcp-sam-gov] FATAL:", err);
     process.exit(1);
 });
 //# sourceMappingURL=server.js.map

@@ -1,21 +1,21 @@
 {
   "manifest_version": "0.3",
-  "name": "govicon-mcp-sam-gov",
-  "display_name": "SAM.gov + USAspending (GovIcon)",
-  "version": "0.2.0",
+  "name": "mcp-sam-gov",
+  "display_name": "SAM.gov + USAspending (Cliwant)",
+  "version": "0.2.1",
   "description": "36 keyless tools for US federal contracting + spending + regulation: SAM.gov, USAspending, Federal Register, eCFR, Grants.gov.",
   "long_description": "One-click Claude Desktop extension. Search SAM.gov opportunities, pull RFP attachments, analyze USAspending awards (recipients, sub-agencies, time-series, NAICS / PSC / state / CFDA breakdowns), browse Federal Register rules, search eCFR / FAR regulations, and discover Grants.gov opportunities — all without registering an API key. Anti-hallucination autocomplete tools (NAICS, recipient, agency) keep responses grounded in real federal data.\n\nWorks with Claude Desktop on macOS and Windows. Auth: zero. Set SAM_GOV_API_KEY only if you need higher SAM.gov rate limits or archives older than 12 months.",
   "author": {
-    "name": "GovIcon contributors",
-    "url": "https://github.com/cliwant/govicon-mcp-sam-gov"
+    "name": "Cliwant contributors",
+    "url": "https://github.com/cliwant/mcp-sam-gov"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cliwant/govicon-mcp-sam-gov.git"
+    "url": "https://github.com/cliwant/mcp-sam-gov.git"
   },
-  "homepage": "https://github.com/cliwant/govicon-mcp-sam-gov",
-  "documentation": "https://github.com/cliwant/govicon-mcp-sam-gov#readme",
-  "support": "https://github.com/cliwant/govicon-mcp-sam-gov/issues",
+  "homepage": "https://github.com/cliwant/mcp-sam-gov",
+  "documentation": "https://github.com/cliwant/mcp-sam-gov#readme",
+  "support": "https://github.com/cliwant/mcp-sam-gov/issues",
   "keywords": [
     "sam.gov",
     "usaspending",
