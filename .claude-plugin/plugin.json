@@ -1,0 +1,19 @@
+{
+  "name": "sam-gov",
+  "description": "SAM.gov + USAspending tools for Claude — search federal opportunities, pull RFPs with attachments, analyze contract awards. 8 tools wrapped as MCP server + Skill workflow guide.",
+  "version": "0.1.0",
+  "author": {
+    "name": "GovIcon contributors",
+    "url": "https://github.com/seungdo-keum"
+  },
+  "homepage": "https://github.com/seungdo-keum/govicon-mcp-sam-gov",
+  "repository": "https://github.com/seungdo-keum/govicon-mcp-sam-gov",
+  "license": "MIT",
+  "keywords": [
+    "sam.gov",
+    "usaspending",
+    "federal-contracting",
+    "govcon",
+    "mcp"
+  ]
+}

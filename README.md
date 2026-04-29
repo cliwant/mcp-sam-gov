@@ -1,7 +1,10 @@
 # @govicon/mcp-sam-gov
 
-> **Model Context Protocol** server for SAM.gov + USAspending.
-> Drop-in tools for Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI — any MCP-aware host.
+> **MCP server + Claude Skill** for SAM.gov + USAspending.
+> Two distribution formats from one repo:
+>
+> 1. **MCP server** (universal) — works with Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, or any MCP-aware host
+> 2. **Claude Code Plugin / Skill** (Claude Code only) — `/plugin install` registers BOTH the MCP server *and* a workflow-guide skill that teaches Claude when + how to use the tools
 
 [한국어 README](./README.ko.md) · [日本語 README](./README.ja.md)
 
@@ -24,7 +27,20 @@
 
 ---
 
-## Pre-publish install (private repo)
+## Pick your install path
+
+There are two separate install flows depending on what you're using:
+
+| Flow | Use when | Format |
+|---|---|---|
+| **A. MCP server** | You're on Claude Desktop, Codex CLI, Cursor, Continue, Gemini CLI, or any non-Claude-Code MCP host | Standalone npm package + manual host config |
+| **B. Claude Plugin** | You're using Claude Code (the CLI) | `/plugin install` registers the MCP server **and** the SKILL.md workflow guide together |
+
+Flow A works everywhere. Flow B is a Claude-Code-specific superset that adds the workflow-guide skill on top of the same MCP server.
+
+---
+
+## Flow A — MCP server (any host)
 
 `npm install -g github:...` direct is **broken on Windows** for this style
 of package due to a long-standing npm bug with git-deps + symlinks (the
@@ -32,7 +48,7 @@ github clone gets evicted from npm's tmp cache before extraction
 completes, leaving a dangling symlink). Use **clone + local global-install**
 on every OS — it works identically everywhere.
 
-### Recommended — clone + install (Windows / macOS / Linux)
+### A.1 — Recommended: clone + install (Windows / macOS / Linux)
 
 ```bash
 # Requires `gh auth login` (private repo clone permission).
@@ -45,7 +61,10 @@ npm install -g .         # registers `govicon-mcp-sam-gov` on PATH globally
 govicon-mcp-sam-gov   # speaks MCP over stdio
 ```
 
-### Alternative — direct path (no global install)
+Then [wire it into your AI host](#wire-it-into-your-ai-host) using the
+`govicon-mcp-sam-gov` command.
+
+### A.2 — Alternative: direct path (no global install)
 
 Skip the `npm install -g .` step and point your MCP host at the absolute
 path to `dist/server.js`:
@@ -61,11 +80,47 @@ path to `dist/server.js`:
 }
 ```
 
-### Once we publish to npm proper
+### A.3 — Once we publish to npm proper
 
 ```bash
 npx -y @govicon/mcp-sam-gov   # zero-install run
 ```
+
+---
+
+## Flow B — Claude Code plugin (MCP server + Skill workflow guide)
+
+If you use **Claude Code** (the CLI), install via the plugin system to get
+both the MCP server *and* a [SKILL.md workflow guide](./skills/sam-gov/SKILL.md)
+that teaches Claude when + how to use the 8 tools (with worked examples
+for opportunity discovery, recompete radar, teaming maps, etc.).
+
+### Install via `/plugin`
+
+In a Claude Code session:
+
+```
+/plugin install seungdo-keum/govicon-mcp-sam-gov
+```
+
+This single command:
+1. Clones the repo to your Claude plugin dir.
+2. Reads `.claude-plugin/plugin.json` to register the plugin.
+3. Reads `.mcp.json` to register the `sam-gov` MCP server (uses the global `govicon-mcp-sam-gov` binary — install Flow A first to put it on PATH, OR edit `.mcp.json` to use a `node`-with-absolute-path command).
+4. Loads `skills/sam-gov/SKILL.md` so Claude auto-triggers it on relevant queries ("find SAM.gov opportunities", "analyze federal contracts", etc.).
+
+### What you get with the plugin (vs MCP server alone)
+
+| Capability | Flow A (MCP only) | Flow B (Plugin) |
+|---|---|---|
+| 8 SAM.gov + USAspending tools | ✅ | ✅ |
+| Workflow guidance ("when do I use which tool?") | ❌ — Claude infers from tool descriptions | ✅ — explicit SKILL.md walks through 4 named workflows |
+| Auto-trigger on natural language | Depends on host | ✅ — skill `description` field tunes activation |
+| Anti-hallucination guardrails ("never invent noticeIds", "demo-* IDs are fictional") | ❌ | ✅ — codified in skill body |
+| Multi-step playbooks (recompete radar, teaming map) | ❌ | ✅ |
+| Works on Claude Desktop / Codex / Cursor / Gemini | ✅ | ❌ — Claude Code only |
+
+For non-Claude-Code hosts, stick with Flow A.
 
 ---
 
