@@ -26,27 +26,42 @@
 
 ## Pre-publish install (private repo)
 
-While this server is in private review, install + run from GitHub:
+`npm install -g github:...` direct is **broken on Windows** for this style
+of package due to a long-standing npm bug with git-deps + symlinks (the
+github clone gets evicted from npm's tmp cache before extraction
+completes, leaving a dangling symlink). Use **clone + local global-install**
+on every OS — it works identically everywhere.
+
+### Recommended — clone + install (Windows / macOS / Linux)
 
 ```bash
-# Requires `gh auth login` (so npm can clone the private repo).
-# The `prepare` script auto-builds dist/ during install.
-npm install -g github:seungdo-keum/govicon-mcp-sam-gov
+# Requires `gh auth login` (private repo clone permission).
+gh repo clone seungdo-keum/govicon-mcp-sam-gov
+cd govicon-mcp-sam-gov
+npm install --omit=dev   # runtime deps only — dist/ is pre-built and committed
+npm install -g .         # registers `govicon-mcp-sam-gov` on PATH globally
 
 # After install, this binary is on your PATH:
 govicon-mcp-sam-gov   # speaks MCP over stdio
 ```
 
-Or clone + run from source:
+### Alternative — direct path (no global install)
 
-```bash
-gh repo clone seungdo-keum/govicon-mcp-sam-gov
-cd govicon-mcp-sam-gov
-npm install        # auto-builds dist/
-node dist/server.js
+Skip the `npm install -g .` step and point your MCP host at the absolute
+path to `dist/server.js`:
+
+```jsonc
+{
+  "mcpServers": {
+    "sam-gov": {
+      "command": "node",
+      "args": ["C:\\Users\\you\\govicon-mcp-sam-gov\\dist\\server.js"]
+    }
+  }
+}
 ```
 
-Once the package goes public on npm, the install becomes:
+### Once we publish to npm proper
 
 ```bash
 npx -y @govicon/mcp-sam-gov   # zero-install run
@@ -190,11 +205,14 @@ It calls the right tool sequence automatically — no prompt engineering require
 
 | Symptom | Fix |
 |---|---|
-| `command not found: govicon-mcp-sam-gov` | Confirm `npm install -g …` succeeded; check that npm's global `bin` is on your PATH (`npm config get prefix`) |
-| Claude Desktop doesn't show the tools | Restart Claude Desktop after editing config; check `~/Library/Logs/Claude/mcp.log` |
-| "permission denied" on Linux/macOS | `chmod +x $(which govicon-mcp-sam-gov)` (the package marks the bin executable, but some installers strip it) |
+| `MODULE_NOT_FOUND ...dist/server.js` after `npm install -g github:...` on Windows | npm bug with git-dep symlinks. Don't use `npm install -g github:...`; use the clone + `npm install -g .` recipe above. |
+| `EPERM: operation not permitted, rmdir` during install | A previous failed install left dangling files. Run: `rmdir /s /q "%APPDATA%\npm\node_modules\@govicon"` then retry. |
+| `'tsc' is not recognized` during install | You're hitting the (now-removed) prepare hook from an old version of the package. `git pull` + reinstall. |
+| `command not found: govicon-mcp-sam-gov` | Confirm `npm install -g .` succeeded; check that npm's global `bin` is on your PATH (`npm config get prefix`) |
+| Claude Desktop doesn't show the tools | Restart Claude Desktop after editing config; check `~/Library/Logs/Claude/mcp.log` (macOS) or `%APPDATA%\Claude\logs\mcp*.log` (Windows) |
+| "permission denied" on Linux/macOS | `chmod +x $(which govicon-mcp-sam-gov)` |
 | `npm install` fails with "private repo" | Run `gh auth login` and `gh auth setup-git` first |
-| Tools call but return empty | SAM.gov throttles aggressive callers; wait a minute. Or set `SAM_GOV_API_KEY` to use the higher-rate authenticated path |
+| Tools call but return empty | SAM.gov throttles aggressive callers; wait a minute. Or set `SAM_GOV_API_KEY` for the higher-rate authenticated path |
 
 ---
 

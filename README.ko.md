@@ -26,24 +26,38 @@ AI 에이전트가 대화 중 직접 호출할 수 있는 8개 도구:
 
 ## 설치 (private repo 단계)
 
+`npm install -g github:...` 직접 설치는 **Windows에서 깨집니다** — npm 의 git-dep
++ symlink 처리 버그 때문에 dist 파일이 추출되지 않습니다. 모든 OS 에서 동일하게
+동작하는 **clone + local global-install** 을 권장합니다.
+
+### 권장 — clone + 글로벌 설치 (Windows / macOS / Linux 동일)
+
 ```bash
 # gh auth login 필요 (private repo clone 권한)
-npm install -g github:seungdo-keum/govicon-mcp-sam-gov
-
-# 설치 후 PATH 에 등록됨
-govicon-mcp-sam-gov
-```
-
-또는 클론해서 직접:
-
-```bash
 gh repo clone seungdo-keum/govicon-mcp-sam-gov
 cd govicon-mcp-sam-gov
-npm install   # dist/ 자동 빌드
-node dist/server.js
+npm install --omit=dev   # 런타임 deps 만 — dist/ 는 git 에 미리 빌드되어 있음
+npm install -g .         # `govicon-mcp-sam-gov` 가 PATH 에 등록됨
+
+govicon-mcp-sam-gov   # stdio MCP 서버
 ```
 
-npm 공개 후에는:
+### 대안 — 글로벌 설치 없이 직접 경로
+
+`npm install -g .` 단계를 건너뛰고 host config 에서 절대 경로 사용:
+
+```jsonc
+{
+  "mcpServers": {
+    "sam-gov": {
+      "command": "node",
+      "args": ["C:\\Users\\you\\govicon-mcp-sam-gov\\dist\\server.js"]
+    }
+  }
+}
+```
+
+### npm 공개 후
 
 ```bash
 npx -y @govicon/mcp-sam-gov

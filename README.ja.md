@@ -26,23 +26,38 @@ AI エージェントが会話中に直接呼び出せる 8 つのツール：
 
 ## インストール（private repo 段階）
 
+`npm install -g github:...` の直接インストールは **Windows で動作しません** —
+npm の git-dep + symlink 処理のバグにより dist ファイルが展開されないためです。
+全 OS で同じように動く **clone + local global-install** を推奨します。
+
+### 推奨 — clone + グローバルインストール（Windows / macOS / Linux 共通）
+
 ```bash
 # gh auth login が必要（private repo の clone 権限）
-npm install -g github:seungdo-keum/govicon-mcp-sam-gov
-
-govicon-mcp-sam-gov
-```
-
-または clone して直接実行：
-
-```bash
 gh repo clone seungdo-keum/govicon-mcp-sam-gov
 cd govicon-mcp-sam-gov
-npm install   # dist/ 自動ビルド
-node dist/server.js
+npm install --omit=dev   # ランタイム deps のみ — dist/ は git に事前ビルド済み
+npm install -g .         # `govicon-mcp-sam-gov` が PATH に登録される
+
+govicon-mcp-sam-gov   # stdio MCP サーバー
 ```
 
-npm 公開後は：
+### 代替 — グローバルインストールなしで直接パス
+
+`npm install -g .` をスキップして、host config で絶対パスを指定：
+
+```jsonc
+{
+  "mcpServers": {
+    "sam-gov": {
+      "command": "node",
+      "args": ["C:\\Users\\you\\govicon-mcp-sam-gov\\dist\\server.js"]
+    }
+  }
+}
+```
+
+### npm 公開後
 
 ```bash
 npx -y @govicon/mcp-sam-gov
