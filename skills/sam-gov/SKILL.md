@@ -8,9 +8,9 @@ user-invocable: true
 
 # SAM.gov + USAspending + Federal Register + eCFR + Grants.gov skill
 
-This skill teaches Claude how to use the **`sam-gov` MCP server** (36 keyless tools wrapped from `@govicon/mcp-sam-gov`) to answer the full surface of US federal contracting / spending / regulation questions end-to-end.
+This skill teaches Claude how to use the **`sam-gov` MCP server** (36 keyless tools wrapped from `@cliwant/mcp-sam-gov`) to answer the full surface of US federal contracting / spending / regulation questions end-to-end.
 
-> **Setup requirement:** the `sam-gov` MCP server must be reachable. If you installed via `/plugin install seungdo-keum/govicon-mcp-sam-gov`, the bundled `.mcp.json` registers the server automatically. Otherwise see the [repo README](https://github.com/cliwant/govicon-mcp-sam-gov) for manual MCP setup.
+> **Setup requirement:** the `sam-gov` MCP server must be reachable. If you installed via `/plugin install seungdo-keum/mcp-sam-gov`, the bundled `.mcp.json` registers the server automatically. Otherwise see the [repo README](https://github.com/cliwant/mcp-sam-gov) for manual MCP setup.
 
 ## Available tools — 36 total, all keyless
 

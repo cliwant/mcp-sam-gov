@@ -1,6 +1,6 @@
 {
-  "name": "@govicon/mcp-sam-gov",
-  "version": "0.2.0",
+  "name": "@cliwant/mcp-sam-gov",
+  "version": "0.2.1",
   "description": "Most comprehensive keyless MCP server for US federal contracting + spending + regulation: SAM.gov, USAspending, Federal Register, eCFR, Grants.gov. 36 tools, no API key, plug into Claude Desktop / Claude Code / Codex CLI / Cursor / Continue / Gemini CLI.",
   "keywords": [
     "mcp",
@@ -18,17 +18,17 @@
     "ai-tools"
   ],
   "license": "MIT",
-  "author": "GovIcon contributors",
-  "homepage": "https://github.com/cliwant/govicon-mcp-sam-gov",
+  "author": "Cliwant contributors",
+  "homepage": "https://github.com/cliwant/mcp-sam-gov",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cliwant/govicon-mcp-sam-gov.git"
+    "url": "git+https://github.com/cliwant/mcp-sam-gov.git"
   },
   "type": "module",
   "main": "./dist/server.js",
   "types": "./dist/server.d.ts",
   "bin": {
-    "govicon-mcp-sam-gov": "./dist/server.js"
+    "mcp-sam-gov": "./dist/server.js"
   },
   "exports": {
     ".": {

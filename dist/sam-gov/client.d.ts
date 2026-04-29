@@ -1,5 +1,5 @@
 /**
- * @govicon/sam-gov — keyless SAM.gov client.
+ * @cliwant/mcp-sam-gov/sam-gov — keyless SAM.gov client.
  *
  * Two endpoint layers, one normalized contract:
  *   1. Authenticated `api.sam.gov/opportunities/v2/search` —

@@ -1,4 +1,4 @@
-# @govicon/mcp-sam-gov
+# @cliwant/mcp-sam-gov
 
 > **The most comprehensive keyless federal-data MCP server.**
 > 36 tools for SAM.gov + USAspending + Federal Register + eCFR + Grants.gov.
@@ -33,7 +33,7 @@
 
 Best for non-developers. Just download a file and double-click.
 
-1. Download **`govicon-mcp-sam-gov.mcpb`** from the [latest release](https://github.com/cliwant/govicon-mcp-sam-gov/releases/latest).
+1. Download **`mcp-sam-gov.mcpb`** from the [latest release](https://github.com/cliwant/mcp-sam-gov/releases/latest).
 2. Double-click the file. Claude Desktop opens with an "Install Extension" dialog.
 3. Click **Install**.
 4. Done. Start a new conversation and ask "Find active SAM.gov opportunities under NAICS 541512".
@@ -47,7 +47,7 @@ That's it. No PowerShell, no `npm`, nothing.
 If you already use Claude Code (the CLI):
 
 ```bash
-/plugin install cliwant/govicon-mcp-sam-gov
+/plugin install cliwant/mcp-sam-gov
 ```
 
 This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 36 tools.
@@ -57,19 +57,19 @@ This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) wo
 For Codex CLI / Cursor / Continue / Gemini CLI / anything that speaks MCP:
 
 ```bash
-gh repo clone cliwant/govicon-mcp-sam-gov
-cd govicon-mcp-sam-gov
+gh repo clone cliwant/mcp-sam-gov
+cd mcp-sam-gov
 npm install --omit=dev
 npm install -g .
 ```
 
-After install, the binary `govicon-mcp-sam-gov` is on your PATH. Add this to your host config:
+After install, the binary `mcp-sam-gov` is on your PATH. Add this to your host config:
 
 ```json
 {
   "mcpServers": {
     "sam-gov": {
-      "command": "govicon-mcp-sam-gov"
+      "command": "mcp-sam-gov"
     }
   }
 }
@@ -82,8 +82,8 @@ Specific config locations per host: see [Host configurations](#host-configuratio
 Skip installation entirely:
 
 ```bash
-gh repo clone cliwant/govicon-mcp-sam-gov
-cd govicon-mcp-sam-gov
+gh repo clone cliwant/mcp-sam-gov
+cd mcp-sam-gov
 npm install --omit=dev   # only runtime deps; dist/ is pre-built
 ```
 
@@ -94,7 +94,7 @@ Then point your host config at the absolute path:
   "mcpServers": {
     "sam-gov": {
       "command": "node",
-      "args": ["C:\\Users\\you\\govicon-mcp-sam-gov\\dist\\server.js"]
+      "args": ["C:\\Users\\you\\mcp-sam-gov\\dist\\server.js"]
     }
   }
 }
@@ -111,7 +111,7 @@ Then point your host config at the absolute path:
 ```json
 {
   "mcpServers": {
-    "sam-gov": { "command": "govicon-mcp-sam-gov" }
+    "sam-gov": { "command": "mcp-sam-gov" }
   }
 }
 ```
@@ -125,13 +125,13 @@ Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS),
 Per-project `.mcp.json`:
 
 ```json
-{ "mcpServers": { "sam-gov": { "command": "govicon-mcp-sam-gov" } } }
+{ "mcpServers": { "sam-gov": { "command": "mcp-sam-gov" } } }
 ```
 
 Or globally:
 
 ```bash
-claude mcp add sam-gov govicon-mcp-sam-gov
+claude mcp add sam-gov mcp-sam-gov
 ```
 
 ### Codex CLI
@@ -140,7 +140,7 @@ claude mcp add sam-gov govicon-mcp-sam-gov
 
 ```toml
 [mcp_servers.sam-gov]
-command = "govicon-mcp-sam-gov"
+command = "mcp-sam-gov"
 args = []
 ```
 
@@ -149,7 +149,7 @@ args = []
 Settings → MCP → Add new MCP server:
 
 ```json
-{ "mcpServers": { "sam-gov": { "command": "govicon-mcp-sam-gov" } } }
+{ "mcpServers": { "sam-gov": { "command": "mcp-sam-gov" } } }
 ```
 
 ### Continue
@@ -160,7 +160,7 @@ Settings → MCP → Add new MCP server:
 {
   "experimental": {
     "modelContextProtocolServer": {
-      "transport": { "type": "stdio", "command": "govicon-mcp-sam-gov" }
+      "transport": { "type": "stdio", "command": "mcp-sam-gov" }
     }
   }
 }
@@ -171,12 +171,12 @@ Settings → MCP → Add new MCP server:
 `~/.gemini/settings.json`:
 
 ```json
-{ "mcpServers": { "sam-gov": { "command": "govicon-mcp-sam-gov" } } }
+{ "mcpServers": { "sam-gov": { "command": "mcp-sam-gov" } } }
 ```
 
 ### Anything else
 
-If your host speaks MCP over stdio, point it at `govicon-mcp-sam-gov`. No host-specific code.
+If your host speaks MCP over stdio, point it at `mcp-sam-gov`. No host-specific code.
 
 ---
 
@@ -232,7 +232,7 @@ The MCP server runs **keyless** by default. For higher SAM.gov rate limits + the
 {
   "mcpServers": {
     "sam-gov": {
-      "command": "govicon-mcp-sam-gov",
+      "command": "mcp-sam-gov",
       "env": { "SAM_GOV_API_KEY": "your-key-here" }
     }
   }
@@ -333,10 +333,10 @@ Get a free key at [sam.gov/SAM/pages/public/searchKeyData.jsf](https://sam.gov/S
 | Symptom | Fix |
 |---|---|
 | Claude Desktop 🔨 menu doesn't show `sam-gov` | Fully quit Claude Desktop (system tray on Windows / Quit menu on macOS) and reopen. Check `%APPDATA%\Claude\logs\mcp*.log` |
-| `command not found: govicon-mcp-sam-gov` | Confirm `npm install -g .` succeeded; check that npm's global bin is on PATH (`npm config get prefix`) |
+| `command not found: mcp-sam-gov` | Confirm `npm install -g .` succeeded; check that npm's global bin is on PATH (`npm config get prefix`) |
 | `MODULE_NOT_FOUND ...dist/server.js` after `npm install -g github:...` | npm bug with git-dep symlinks on Windows. Use the clone + `npm install -g .` recipe (Path 3) instead. |
-| `EPERM: operation not permitted, rmdir` during install | Previous failed install left dangling files. Run `rmdir /s /q "%APPDATA%\npm\node_modules\@govicon"` then retry. |
-| `npm install` fails with "private repo" / 404 | The repo is now public — should not happen. If it does, try `git clone https://github.com/cliwant/govicon-mcp-sam-gov.git` directly. |
+| `EPERM: operation not permitted, rmdir` during install | Previous failed install left dangling files. Run `rmdir /s /q "%APPDATA%\npm\node_modules\@cliwant"` (or `@govicon` if you installed an early version) then retry. |
+| `npm install` fails with "private repo" / 404 | The repo is now public — should not happen. If it does, try `git clone https://github.com/cliwant/mcp-sam-gov.git` directly. |
 | Tools return empty results | SAM.gov rate-limits aggressive callers. Wait 1 minute. Or set `SAM_GOV_API_KEY` for the higher-rate authenticated path. |
 | "Tool error: USAspending POST returned 400" | Usually means a field has a wrong type (e.g. fiscal year as string). Check the tool input schema in your host's tool browser. |
 
@@ -349,12 +349,12 @@ clients as importable modules. Useful if you're building your own SaaS, AI
 agent, or CLI and want programmatic access without spawning an MCP server.
 
 ```bash
-npm install @govicon/mcp-sam-gov
+npm install @cliwant/mcp-sam-gov
 ```
 
 ```ts
 // SAM.gov client
-import { SamGovClient } from "@govicon/mcp-sam-gov/sam-gov";
+import { SamGovClient } from "@cliwant/mcp-sam-gov/sam-gov";
 
 const sam = new SamGovClient(); // keyless
 const result = await sam.searchOpportunities({ ncode: "541512", limit: 5 });
@@ -363,7 +363,7 @@ const opp = await sam.getOpportunity("5ef3db5daeb54099a96d487783a38bd0");
 
 ```ts
 // USAspending wrappers (22 functions)
-import * as usas from "@govicon/mcp-sam-gov/usaspending";
+import * as usas from "@cliwant/mcp-sam-gov/usaspending";
 
 const recompete = await usas.searchExpiringContracts({
   agency: "Department of Veterans Affairs",
@@ -375,16 +375,16 @@ const recipient = await usas.getRecipientProfile("ed02855e-60d7-2540-...-P");
 
 ```ts
 // Federal Register / eCFR / Grants.gov
-import * as fedreg from "@govicon/mcp-sam-gov/federal-register";
-import * as ecfr from "@govicon/mcp-sam-gov/ecfr";
-import * as grants from "@govicon/mcp-sam-gov/grants";
+import * as fedreg from "@cliwant/mcp-sam-gov/federal-register";
+import * as ecfr from "@cliwant/mcp-sam-gov/ecfr";
+import * as grants from "@cliwant/mcp-sam-gov/grants";
 
 const farResults = await ecfr.search({ query: "SDVOSB", titleNumber: 48 });
 ```
 
-This is the canonical home for the GovIcon federal-data libraries — there
-is no separate `@govicon/sam-gov` package. The previous standalone
-`govicon-sam-gov` repo has been archived and consolidated here. All
+This is the canonical home for the Cliwant federal-data libraries — there
+is no separate library package. Two earlier repos (`govicon-sam-gov` and
+`govicon-mcp-sam-gov`) have been archived and consolidated here. All
 client code lives in `src/sam-gov/`, `src/usaspending.ts`,
 `src/federal-register.ts`, `src/ecfr.ts`, `src/grants.ts`.
 
