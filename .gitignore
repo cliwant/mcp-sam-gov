@@ -1,7 +1,13 @@
 node_modules/
-dist/
 *.log
 .DS_Store
 .env
 .env.local
 *.tsbuildinfo
+
+# NOTE: dist/ IS committed.
+# Reason: this repo is consumed via `npm install -g github:owner/repo`.
+# When npm clones a git dep on Windows, the `prepare` lifecycle does
+# not reliably resolve `node_modules/.bin/tsc` on PATH. Committing
+# pre-built dist/ removes the build step entirely and makes
+# github-install a pure copy.
