@@ -30,6 +30,32 @@
   "bin": {
     "govicon-mcp-sam-gov": "./dist/server.js"
   },
+  "exports": {
+    ".": {
+      "import": "./dist/server.js",
+      "types": "./dist/server.d.ts"
+    },
+    "./sam-gov": {
+      "import": "./dist/sam-gov/index.js",
+      "types": "./dist/sam-gov/index.d.ts"
+    },
+    "./usaspending": {
+      "import": "./dist/usaspending.js",
+      "types": "./dist/usaspending.d.ts"
+    },
+    "./federal-register": {
+      "import": "./dist/federal-register.js",
+      "types": "./dist/federal-register.d.ts"
+    },
+    "./ecfr": {
+      "import": "./dist/ecfr.js",
+      "types": "./dist/ecfr.d.ts"
+    },
+    "./grants": {
+      "import": "./dist/grants.js",
+      "types": "./dist/grants.d.ts"
+    }
+  },
   "files": [
     "dist",
     "src",
