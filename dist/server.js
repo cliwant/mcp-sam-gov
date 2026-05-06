@@ -25,9 +25,13 @@ import * as usas from "./usaspending.js";
 import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
+import * as sba from "./sba.js";
+import * as naicsXwalk from "./naics-crosswalk.js";
+import * as workflows from "./workflows.js";
+import * as fedRegClassifier from "./fedreg-classifier.js";
 import { toToolError } from "./errors.js";
-const SERVER_NAME = "mcp-sam-gov";
-const SERVER_VERSION = "0.3.0";
+export const SERVER_NAME = "mcp-sam-gov";
+export const SERVER_VERSION = "0.5.0";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
     query: z.string().optional().describe("Free-text title query"),
@@ -223,21 +227,135 @@ const GrantsGetInput = z.object({
 const SamLookupOrgInput = z.object({
     organizationId: z.string().describe("SAM.gov federal-organization id (numeric)"),
 });
-const TOOLS = [
+// SBA size standards (13 CFR §121.201)
+const SbaLookupInput = z.object({
+    naicsCode: z
+        .string()
+        .describe("6-digit NAICS code (e.g. '541512'). Use usas_autocomplete_naics first if you don't have a code."),
+});
+const SbaCheckQualificationInput = z.object({
+    naicsCode: z
+        .string()
+        .describe("6-digit NAICS code under which the firm is bidding."),
+    averageAnnualRevenueUsd: z
+        .number()
+        .nonnegative()
+        .optional()
+        .describe("Firm's 3-year average annual revenue in USD. Required if the NAICS uses revenue-based size standard."),
+    averageEmployees: z
+        .number()
+        .nonnegative()
+        .optional()
+        .describe("Firm's 12-month average employee count. Required if the NAICS uses employee-based size standard."),
+});
+// Federal Register classifier
+const FedRegClassifyInput = z.object({
+    documentNumber: z
+        .string()
+        .optional()
+        .describe("Federal Register document number to fetch + classify (e.g. '2024-12345'). Provide either documentNumber OR raw {title, abstract, type, agencies, cfrReferences}. Pass documentNumber for one-shot classification of a specific notice."),
+    title: z.string().optional().describe("Document title (used if documentNumber omitted)."),
+    abstract: z.string().optional().describe("Document abstract (used if documentNumber omitted)."),
+    type: z
+        .enum(["RULE", "PRORULE", "NOTICE", "PRESDOCU", "UNKNOWN"])
+        .optional()
+        .describe("Federal Register type code (used if documentNumber omitted)."),
+    typeDisplay: z.string().optional().describe("Human display type (e.g. 'Rule', 'Notice')."),
+    agencies: z
+        .array(z.object({ name: z.string().optional(), slug: z.string().optional() }))
+        .optional()
+        .describe("Agency objects (used if documentNumber omitted)."),
+    cfrReferences: z
+        .array(z.object({
+        title: z.union([z.string(), z.number()]).optional(),
+        part: z.string().optional(),
+        chapter: z.string().optional(),
+    }))
+        .optional()
+        .describe("CFR references (used if documentNumber omitted)."),
+});
+const FedRegClassifyBatchInput = z.object({
+    query: z.string().optional().describe("Free-text query (passed to fed_register_search_documents)."),
+    agencySlugs: z
+        .array(z.string())
+        .optional()
+        .describe("Federal Register agency slugs (e.g. ['small-business-administration'])."),
+    type: z
+        .enum(["RULE", "PRORULE", "NOTICE", "PRESDOCU"])
+        .optional()
+        .describe("Restrict to one Federal Register type."),
+    publicationDateFrom: z
+        .string()
+        .optional()
+        .describe("ISO date YYYY-MM-DD lower bound for publication."),
+    publicationDateTo: z
+        .string()
+        .optional()
+        .describe("ISO date YYYY-MM-DD upper bound for publication."),
+    perPage: z.number().int().min(1).max(50).optional().describe("Page size 1-50, default 20."),
+});
+// NAICS revision crosswalk
+const NaicsRevisionCheckInput = z.object({
+    naicsCode: z
+        .string()
+        .describe("6-digit NAICS code to verify. Returns validity in NAICS 2022 + any historical change (renumbered / split / retired)."),
+});
+// Sub-award aggregation + sub-recipient profile
+const UsasAggregateSubawardsInput = z.object({
+    primeRecipientName: z.string().optional(),
+    agency: z.string().optional(),
+    naics: z.string().optional(),
+    fiscalYear: z.number().int().min(2007).optional(),
+    limit: z.number().min(1).max(50).optional(),
+});
+const UsasGetSubRecipientProfileInput = z.object({
+    subRecipientName: z
+        .string()
+        .describe("Sub-recipient firm name (full or partial — matches via search text)"),
+    agency: z.string().optional(),
+    fiscalYear: z.number().int().min(2007).optional(),
+    limit: z.number().min(1).max(50).optional(),
+});
+// Workflow primitives (composite tools)
+const WorkflowCaptureBriefInput = z.object({
+    agency: z
+        .string()
+        .describe("Agency name or abbreviation (e.g. 'VA', 'Department of Defense')"),
+    naics: z.string().describe("6-digit NAICS code (e.g. '541512')"),
+    fiscalYear: z
+        .number()
+        .int()
+        .min(2007)
+        .optional()
+        .describe("Default: current fiscal year"),
+});
+const WorkflowRecompeteRadarInput = z.object({
+    agency: z.string(),
+    naics: z.string(),
+    monthsUntilExpiry: z.number().min(1).max(36).optional().describe("Default 12"),
+    minAwardValueUsd: z.number().optional(),
+});
+const WorkflowVendorProfileInput = z.object({
+    recipientName: z
+        .string()
+        .describe("Vendor name or partial — e.g. 'Booz Allen', 'Accenture Federal'"),
+    fiscalYear: z.number().int().min(2007).optional(),
+});
+export const TOOLS = [
     // ━━━ SAM.gov (5) ━━━
     {
         name: "sam_search_opportunities",
-        description: "Search SAM.gov federal contracting opportunities (keyless HAL). Returns up to 50 active notices with title, agency, NAICS, noticeId. Use for discovery — narrow with NAICS / agency / set-aside / state.",
+        description: "Search SAM.gov federal contracting opportunities (keyless HAL). Returns up to 50 ACTIVE notices with title, agency, NAICS, noticeId. Use for DISCOVERY — narrow with NAICS / agency / set-aside / state. Returns SUMMARIES only — call sam_get_opportunity afterward to drill into a specific notice's full detail. For HISTORICAL / awarded contracts (not active solicitations), use usas_search_individual_awards instead.",
         inputSchema: SamSearchInput,
     },
     {
         name: "sam_get_opportunity",
-        description: "Fetch full detail for a single SAM.gov notice by 32-char hex noticeId. Returns title, agency, solicitation #, POCs, response deadline, attachments (with download URLs), inline description body. Call BEFORE drafting bid/no-bid or compliance work.",
+        description: "Fetch full detail for a single SAM.gov notice by 32-char hex noticeId (from sam_search_opportunities). Returns title, agency, solicitation #, POCs, response deadline, attachment URLs, INLINE description body when available. Call BEFORE drafting bid/no-bid or compliance work. If description body is a URL instead of inline text, call sam_fetch_description next.",
         inputSchema: SamGetOpportunityInput,
     },
     {
         name: "sam_fetch_description",
-        description: "Return the full description / RFP body text for a notice as plain text. Useful when sam_get_opportunity returned a description URL instead of inline body, or for an LLM-friendly text dump.",
+        description: "Return the full description / RFP body text for a notice as plain text. Use when sam_get_opportunity returned a description URL instead of inline body, OR when you want an LLM-friendly text dump for analysis. Always prefer sam_get_opportunity FIRST for the structured envelope; this tool is for the raw body only.",
         inputSchema: SamFetchDescriptionInput,
     },
     {
@@ -253,22 +371,22 @@ const TOOLS = [
     // ━━━ USAspending — Awards & Recipients (8) ━━━
     {
         name: "usas_search_awards",
-        description: "Aggregate share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns top recipients by total $ + count. Use for competitive landscape ('who wins at VA in 541512?').",
+        description: "AGGREGATE share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns TOP RECIPIENTS by total $ + transaction count (rolled up, not line items). Use for competitive landscape questions ('who wins at VA in 541512?'). For specific contracts/line items, use usas_search_individual_awards instead. For HISTORICAL awarded contracts only — for active solicitations use sam_search_opportunities.",
         inputSchema: UsasFiltersBase,
     },
     {
         name: "usas_search_individual_awards",
-        description: "Line-item federal contracts on USAspending. Returns specific awards (recipient + $ + sub-agency + state + description). Use AFTER usas_search_awards when the user wants 'show me the actual contracts'. Each result includes a generatedInternalId for usas_get_award_detail follow-ups.",
+        description: "LINE-ITEM federal contracts on USAspending. Returns SPECIFIC AWARDS (recipient + $ + sub-agency + state + description), not aggregates. Use AFTER usas_search_awards when the user wants 'show me the actual contracts' or 'list specific awards'. Each result includes a generatedInternalId — pass it to usas_get_award_detail to fetch period_of_performance, options, set-aside fields.",
         inputSchema: UsasIndividualAwardsInput,
     },
     {
         name: "usas_search_subagency_spending",
-        description: "Break down a parent agency's spending by sub-agency / office. Surfaces which office holds the budget (e.g. VA OI&T vs VHA, DoD vs Army vs DISA).",
+        description: "Break down a PARENT AGENCY's spending by sub-agency / office. Surfaces which office holds the budget (e.g. inside VA: OI&T vs VHA vs VBA; inside DoD: Army vs Navy vs DISA). Use AFTER usas_lookup_agency confirms the parent agency name. For agency-vs-agency comparison (different parents), use usas_search_agency_spending.",
         inputSchema: UsasSubAgencyInput,
     },
     {
         name: "usas_lookup_agency",
-        description: "Resolve a user-friendly agency reference ('VA', 'Veterans Affairs', 'DHS') to USAspending's canonical toptier name + 4-digit code. ALWAYS call this FIRST if the user uses an abbreviation — other USAspending tools require the canonical name.",
+        description: "Resolve a user-friendly agency reference ('VA', 'Veterans Affairs', 'DHS') to USAspending's canonical toptier name + 4-digit code. ANTI-HALLUCINATION GUARD — ALWAYS call this FIRST if the user uses an abbreviation, partial name, or non-canonical phrasing. Other USAspending tools (search_awards, agency_profile, etc.) need the canonical name to match. For SAM.gov's federal-organization hierarchy (different identifier system), use sam_lookup_organization instead.",
         inputSchema: UsasLookupAgencyInput,
     },
     {
@@ -278,12 +396,12 @@ const TOOLS = [
     },
     {
         name: "usas_search_subawards",
-        description: "Enumerate subcontracts on prime awards. Use for 'who teams with Leidos at DISA' or 'show small-business subs on Accenture's DHS contracts' — surfaces the prime/sub network for teaming-map artifacts.",
+        description: "Enumerate SUBCONTRACTS reported on prime awards via FFATA. Use for 'who teams with Leidos at DISA?' or 'show small-business subs on Accenture's DHS contracts' — surfaces the prime/sub network for teaming-map artifacts. Coverage caveat: FFATA reporting is self-reported quarterly by primes — top primes report most subs, mid-tier primes have notable gaps. For PRIME-level analysis use usas_search_individual_awards instead.",
         inputSchema: UsasSubawardsInput,
     },
     {
         name: "usas_search_expiring_contracts",
-        description: "Find federal contracts at agency × NAICS that expire within N months. Recompete radar — end-date sorted, top 10 by value. Use for 'what VA cloud contracts are up for recompete' or 'show 541512 contracts expiring in 6 months'.",
+        description: "RECOMPETE RADAR — find federal contracts at agency × NAICS that expire within N months. End-date sorted, top 10 by value. Use for 'what VA cloud contracts are up for recompete?' or 'show 541512 contracts expiring in 6 months'. Returns each award's generatedInternalId — pipe to usas_get_award_detail for the full period_of_performance + options + set-aside fields needed for capture briefs.",
         inputSchema: UsasExpiringInput,
     },
     {
@@ -299,27 +417,27 @@ const TOOLS = [
     },
     {
         name: "usas_search_psc_spending",
-        description: "Spending broken down by Product Service Code (PSC). Use for 'what PSC categories see the most $ at DoD' — surfaces market structure beyond NAICS (e.g. PSC R425 = engineering support services).",
+        description: "Spending broken down by Product Service Code (PSC). Use for CONTRACT market structure ('what PSC categories see the most $ at DoD?') — surfaces market segments beyond NAICS (e.g. PSC R425 = engineering support services, PSC D316 = IT-end user, PSC D318 = IT-data center). Sibling tool routing: NAICS-style market = this tool; geography = usas_search_state_spending; budget account = usas_search_federal_account_spending; buyer = usas_search_agency_spending; grants (not contracts) = usas_search_cfda_spending.",
         inputSchema: UsasCategorySpendingInput,
     },
     {
         name: "usas_search_state_spending",
-        description: "Spending broken down by state / territory. Use for 'where is the most federal $ flowing for NAICS 541512' — answers like 'VA $128B, MD $66B, DC $58B'.",
+        description: "Spending broken down by state / territory. Use for GEOGRAPHIC analysis ('where is federal $ flowing for NAICS 541512?') — typical answer pattern: 'VA $128B, MD $66B, DC $58B'. Sibling routing: state geography = this tool; market structure = usas_search_psc_spending; budget account = usas_search_federal_account_spending.",
         inputSchema: UsasCategorySpendingInput,
     },
     {
         name: "usas_search_cfda_spending",
-        description: "Spending broken down by CFDA grant program code. Use for grant analysis — 'top federal grant programs by $'. Note: CFDA is grants (award_type 02-05), not contracts. Use usas_search_psc_spending for contract market analysis.",
+        description: "Spending broken down by CFDA grant program code. FOR GRANTS ONLY — CFDA = financial assistance (award_type 02-05), NOT contracts. Use this for 'top federal grant programs by $'. For contract market analysis, switch to usas_search_psc_spending. For grant OPPORTUNITIES (not historical spending), use grants_search.",
         inputSchema: UsasCfdaInput,
     },
     {
         name: "usas_search_federal_account_spending",
-        description: "Spending broken down by federal account / Treasury Account Symbol (TAS). Use to map money to the actual budget line item (e.g. '036-0167 = Information Technology Systems, VA').",
+        description: "Spending broken down by federal account / Treasury Account Symbol (TAS). Use to map money to the actual BUDGET LINE ITEM (e.g. '036-0167 = Information Technology Systems, VA'). For BUDGET / appropriations questions ('which TAS funds X?'). For market segments use usas_search_psc_spending; for buyer breakdown use usas_search_agency_spending.",
         inputSchema: UsasCategorySpendingInput,
     },
     {
         name: "usas_search_agency_spending",
-        description: "Spending broken down by awarding agency. Use for 'which agencies spend the most on NAICS 541512' — top buyers by $.",
+        description: "Spending broken down by AWARDING AGENCY. Use for 'which agencies spend the most on NAICS 541512?' — top buyers by $. Sibling routing: BUYER = this tool; sub-agency / office breakdown = usas_search_subagency_spending; agency PROFILE / metadata = usas_get_agency_profile.",
         inputSchema: UsasAgencySpendingInput,
     },
     // ━━━ USAspending — Agency Profile (3) ━━━
@@ -341,7 +459,7 @@ const TOOLS = [
     // ━━━ USAspending — Recipient Profile (2) ━━━
     {
         name: "usas_search_recipients",
-        description: "Search USAspending recipient list with parent/child/recipient hierarchy. Returns recipients with id, duns, uei, level (P=parent, C=child, R=recipient), total_amount. Use for 'find the recipient_id for Booz Allen' before usas_get_recipient_profile.",
+        description: "Search USAspending recipient list with FULL parent/child/recipient hierarchy. Returns recipients with id, duns, uei, level (P=parent, C=child, R=recipient), total_amount. Use to FIND the recipient_id (e.g. 'find Booz Allen's parent recipient_id') before calling usas_get_recipient_profile. For QUICK fuzzy name resolution (without hierarchy), prefer usas_autocomplete_recipient — it's faster and works for anti-hallucination prep.",
         inputSchema: UsasSearchRecipientsInput,
     },
     {
@@ -352,17 +470,17 @@ const TOOLS = [
     // ━━━ USAspending — Reference / Autocomplete (4) ━━━
     {
         name: "usas_autocomplete_naics",
-        description: "Autocomplete NAICS codes by free-text. ANTI-HALLUCINATION GUARD — call this when the user mentions a NAICS theme but no specific code (e.g. 'computer systems design' → 541512). Avoids inventing NAICS codes.",
+        description: "Autocomplete NAICS codes by free-text. ANTI-HALLUCINATION GUARD — call this when the user mentions a NAICS theme but no specific code (e.g. 'computer systems design' → 541512, 'cloud computing' → 541512 or 518210). Returns top fuzzy matches with code + title. Use BEFORE any search tool that takes a NAICS code. For navigating PARENT/CHILD relationships (e.g. 'show all 6-digit NAICS under 5415'), use usas_naics_hierarchy instead.",
         inputSchema: UsasAutocompleteInput,
     },
     {
         name: "usas_autocomplete_recipient",
-        description: "Autocomplete recipient names. ANTI-HALLUCINATION — confirm a recipient's exact USAspending-canonical legal name before searching by name. Returns up to 10 fuzzy matches with UEI/DUNS where available.",
+        description: "Autocomplete recipient names — FAST fuzzy lookup. ANTI-HALLUCINATION GUARD — call this BEFORE any tool that filters by recipient name to confirm the exact USAspending-canonical legal name (e.g. 'Booz Allen' → 'BOOZ ALLEN HAMILTON INC'). Returns up to 10 matches with UEI/DUNS. For full hierarchy + total spend (parent vs child relationships), use usas_search_recipients instead.",
         inputSchema: UsasAutocompleteInput,
     },
     {
         name: "usas_naics_hierarchy",
-        description: "Navigate the NAICS hierarchy (2-digit → 4-digit → 6-digit). Returns parent/child relationships + active-contract count per code. Use to explore market scope ('what's under NAICS 541' = 'Professional, Scientific, and Technical Services').",
+        description: "Navigate the NAICS hierarchy tree (2-digit → 3-digit → 4-digit → 6-digit). Returns parent/child relationships + active-contract count per code. Use for MARKET SCOPE exploration ('what 6-digit NAICS exist under 5415?', 'how many active contracts under NAICS 541?'). For free-text → code resolution, use usas_autocomplete_naics instead.",
         inputSchema: UsasNaicsHierarchyInput,
     },
     {
@@ -378,7 +496,7 @@ const TOOLS = [
     // ━━━ Federal Register (3) ━━━
     {
         name: "fed_register_search_documents",
-        description: "Search Federal Register documents (proposed rules, final rules, notices, presidential documents) by query / agency / type / date range. Use for regulatory-context queries ('what new VA cybersecurity rules came out this quarter?').",
+        description: "Search Federal Register documents (proposed rules, final rules, notices, presidential documents) by query / agency / type / date range. Federal Register = NEW REGULATORY ACTIVITY (rules being made / changed / proposed) — time-sensitive, dated. Use for 'what new VA cybersecurity rules came out this quarter?' or 'when does the new FAR clause take effect?'. For CURRENT codified regulation text (rules as they stand right now), use ecfr_search instead.",
         inputSchema: FedRegSearchInput,
     },
     {
@@ -391,10 +509,20 @@ const TOOLS = [
         description: "List all Federal Register agencies with slugs (needed for fed_register_search_documents). Use to resolve 'what's the FedReg slug for Veterans Affairs?'",
         inputSchema: FedRegListAgenciesInput,
     },
+    {
+        name: "fed_register_classify",
+        description: "CLASSIFY a Federal Register notice into one of 5 federal-contracting-relevant classes: far_amendment / set_aside_policy / system_retirement / rule_change / admin_paperwork (or uncategorized). Heuristic + deterministic (no model call). Pass documentNumber for one-shot classification (auto-fetches), OR pass raw {title, abstract, type, agencies, cfrReferences} for in-batch use. Returns primaryClass + confidence (high/medium/low) + matched signals + per-class scores so the caller can quote evidence. Use to triage 'is this a real rule change or just a Paperwork Reduction Act notice?' before reading the full document.",
+        inputSchema: FedRegClassifyInput,
+    },
+    {
+        name: "fed_register_classify_batch",
+        description: "Search Federal Register AND classify each result in one call. Wraps fed_register_search_documents → classifies every result via the same 5-class heuristic → returns documents[] + a histogram of class counts. Use for 'of the last 50 SBA notices, how many were real set-aside policy changes vs. paperwork?' Pass the same filters as fed_register_search_documents (query / agencySlugs / type / date range / perPage). Saves 1 round-trip vs. calling search + classify separately.",
+        inputSchema: FedRegClassifyBatchInput,
+    },
     // ━━━ eCFR (2) ━━━
     {
         name: "ecfr_search",
-        description: "Full-text search across the entire CFR (Code of Federal Regulations). Use for compliance questions — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns excerpt + section path + ecfrUrl.",
+        description: "Full-text search across the entire CFR (Code of Federal Regulations) — the CURRENT codified regulation as it stands right now. Use for COMPLIANCE / CITATION questions — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns excerpt + section path + ecfrUrl. For NEW regulatory activity (rules being changed), use fed_register_search_documents instead. For 'what's in title X' overview, use ecfr_list_titles first.",
         inputSchema: EcfrSearchInput,
     },
     {
@@ -402,10 +530,54 @@ const TOOLS = [
         description: "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
         inputSchema: EcfrListTitlesInput,
     },
+    // ━━━ Sub-award aggregation (2) ━━━
+    {
+        name: "usas_aggregate_subawards",
+        description: "AGGREGATE sub-awards by sub-recipient name across a filter slice. Use for 'top subs to Booz Allen FY2025' (pass primeRecipientName), 'top sub-recipients in NAICS 541512' (pass naics), or 'top subs at VA in NAICS 541512' (pass agency + naics). Returns each sub-recipient's total sub-award amount + count + distinct prime count, sorted descending. Differs from usas_search_subawards: that tool returns LINE ITEMS; this tool aggregates by sub-recipient. Coverage: aggregates from first 100 matching FFATA filings (primes self-report quarterly; coverage uneven).",
+        inputSchema: UsasAggregateSubawardsInput,
+    },
+    {
+        name: "usas_get_sub_recipient_profile",
+        description: "Given a SUB-RECIPIENT firm name, return their federal sub-contracting footprint: distinct primes that used them, total sub-revenue, count of distinct prime awards. Use for 'how does IBM appear as a sub in federal data?' or 'what's our competitor's sub-tier exposure?'. For PRIME profile (firm as prime contractor), use workflow_vendor_profile or usas_get_recipient_profile instead. FFATA coverage caveat applies.",
+        inputSchema: UsasGetSubRecipientProfileInput,
+    },
+    // ━━━ NAICS revision crosswalk (1) ━━━
+    {
+        name: "naics_revision_check",
+        description: "Check whether a NAICS code is valid in NAICS 2022 and surface any historical change (2002 → 2007 → 2012 → 2017 → 2022 revisions). Returns validity flag + status (stable / renumbered / split / retired) + canonical 2022 successor if changed. Catches old codes still cited in legacy SOWs (e.g. 541510 retired in 2007, 511210 renumbered to 513210 in 2022, 519130 split in 2022). Use BEFORE running USAspending or SAM.gov searches with any code from a pre-2022 contract document. Coverage v0.5: ~60 federal-contracting-relevant codes; falls back to Census concordance hint for unknown codes. For free-text → code resolution, use usas_autocomplete_naics instead.",
+        inputSchema: NaicsRevisionCheckInput,
+    },
+    // ━━━ Workflow primitives — composite tools (3) ━━━
+    {
+        name: "workflow_capture_brief",
+        description: "COMPOSITE TOOL — federal capture intelligence for an agency × NAICS, in 1 call instead of 5-6 chained tool calls. Internally chains usas_lookup_agency → usas_search_subagency_spending → usas_search_awards → usas_search_expiring_contracts → fed_register_search_documents → sam_search_opportunities. Returns 6 sections each as { ok: true, data } or { ok: false, error } so partial failures don't block the rest. Plus a synthesized one-line summary. Use this BEFORE diving into individual tools when the user wants 'a brief on X agency in Y NAICS' — saves ~6 round-trips and avoids orchestration mistakes.",
+        inputSchema: WorkflowCaptureBriefInput,
+    },
+    {
+        name: "workflow_recompete_radar",
+        description: "COMPOSITE TOOL — focused recompete intelligence in 1 call. Lighter than workflow_capture_brief — purpose-built for 'what's expiring + who holds it + any rule changes affecting recompete'. Chains usas_lookup_agency → usas_search_expiring_contracts → usas_search_awards (current FY incumbents) → fed_register_search_documents (recent rules). Use when user asks 'what's the recompete pipeline for X agency in Y NAICS over next N months?'",
+        inputSchema: WorkflowRecompeteRadarInput,
+    },
+    {
+        name: "workflow_vendor_profile",
+        description: "COMPOSITE TOOL — full picture of a federal vendor in 1 call. Chains usas_autocomplete_recipient (canonicalize) → usas_search_recipients (parent/child hierarchy) → usas_search_awards_by_recipient (recent prime awards) → usas_search_subawards (where they appear as a sub). Use when user asks 'tell me about [vendor]' or 'show me Booz Allen's recent federal work'. Anti-hallucination: starts with autocomplete to confirm canonical name before downstream calls.",
+        inputSchema: WorkflowVendorProfileInput,
+    },
+    // ━━━ SBA size standards (2) ━━━
+    {
+        name: "sba_size_standard_lookup",
+        description: "Look up the SBA small-business size standard for a given 6-digit NAICS code (13 CFR §121.201, effective 2023-03-17). Returns the cap as either revenue ($M, 3-year avg) or employee count, plus the citation. Some NAICS have MULTIPLE entries (alternative caps for sub-industries — e.g. NAICS 541330 Engineering Services has $25.5M default but $47M for military/marine work) — qualifying under ANY one is enough. Coverage: ~50 most-used services/IT/R&D NAICS in v0.4 (full eCFR fallback noted in response). Use BEFORE bidding to confirm 'small business' eligibility.",
+        inputSchema: SbaLookupInput,
+    },
+    {
+        name: "sba_check_size_qualification",
+        description: "Check whether a firm qualifies as 'small business' under SBA size standards for a given NAICS, given its avg annual revenue OR employee count. Returns qualifies: true/false/indeterminate plus per-entry breakdown. Handles multi-entry NAICS correctly (firm qualifies if ANY one alternative cap is satisfied). Provide averageAnnualRevenueUsd for revenue-based standards, averageEmployees for employee-based. Source: 13 CFR §121.201 effective 2023-03-17.",
+        inputSchema: SbaCheckQualificationInput,
+    },
     // ━━━ Grants.gov (2) ━━━
     {
         name: "grants_search",
-        description: "Search Grants.gov federal grant opportunities (financial assistance, distinct from contracts on SAM.gov). Filter by keyword / CFDA / agency / opportunity number. Default status = forecasted + posted.",
+        description: "Search Grants.gov federal GRANT opportunities (financial assistance — distinct from contracts on SAM.gov). Filter by keyword / CFDA / agency / opportunity number. Default status = forecasted + posted (active). For HISTORICAL grant SPENDING (not opportunities), use usas_search_cfda_spending. For CONTRACT opportunities (not grants), use sam_search_opportunities.",
         inputSchema: GrantsSearchInput,
     },
     {
@@ -464,7 +636,7 @@ async function main() {
     await server.connect(transport);
     console.error(`[mcp-sam-gov] v${SERVER_VERSION} listening on stdio (${TOOLS.length} tools).`);
 }
-async function runTool(name, args, sam) {
+export async function runTool(name, args, sam) {
     switch (name) {
         // SAM.gov
         case "sam_search_opportunities": {
@@ -616,6 +788,55 @@ async function runTool(name, args, sam) {
             return await fedreg.getDocument(FedRegGetDocInput.parse(args).documentNumber);
         case "fed_register_list_agencies":
             return await fedreg.listAgencies(FedRegListAgenciesInput.parse(args));
+        case "fed_register_classify": {
+            const input = FedRegClassifyInput.parse(args);
+            if (input.documentNumber) {
+                const doc = await fedreg.getDocument(input.documentNumber);
+                const classification = fedRegClassifier.classifyDocument({
+                    title: doc.title,
+                    abstract: doc.abstract,
+                    type: doc.type,
+                    typeDisplay: doc.typeDisplay,
+                    agencies: doc.agencies,
+                    cfrReferences: doc.cfrReferences,
+                });
+                return {
+                    documentNumber: doc.documentNumber,
+                    title: doc.title,
+                    typeDisplay: doc.typeDisplay,
+                    publicationDate: doc.publicationDate,
+                    classification,
+                };
+            }
+            // Inline classification path
+            return fedRegClassifier.classifyDocument({
+                title: input.title,
+                abstract: input.abstract,
+                type: input.type,
+                typeDisplay: input.typeDisplay,
+                agencies: input.agencies,
+                cfrReferences: input.cfrReferences,
+            });
+        }
+        case "fed_register_classify_batch": {
+            const input = FedRegClassifyBatchInput.parse(args);
+            const search = await fedreg.searchDocuments({
+                query: input.query,
+                agencySlugs: input.agencySlugs,
+                type: input.type,
+                publicationDateFrom: input.publicationDateFrom,
+                publicationDateTo: input.publicationDateTo,
+                perPage: input.perPage ?? 20,
+            });
+            const batch = fedRegClassifier.classifyBatch(search.documents);
+            return {
+                totalRecords: search.totalRecords,
+                totalPages: search.totalPages,
+                sampleSize: batch.documents.length,
+                histogram: batch.histogram,
+                documents: batch.documents,
+            };
+        }
         // eCFR
         case "ecfr_search":
             return await ecfr.search(EcfrSearchInput.parse(args));
@@ -626,6 +847,42 @@ async function runTool(name, args, sam) {
             return await grants.searchGrants(GrantsSearchInput.parse(args));
         case "grants_get_opportunity":
             return await grants.getGrant(GrantsGetInput.parse(args));
+        // Sub-award aggregation + sub-recipient profile
+        case "usas_aggregate_subawards":
+            return await usas.aggregateSubawards(UsasAggregateSubawardsInput.parse(args));
+        case "usas_get_sub_recipient_profile":
+            return await usas.getSubRecipientProfile(UsasGetSubRecipientProfileInput.parse(args));
+        // NAICS revision crosswalk
+        case "naics_revision_check": {
+            const { naicsCode } = NaicsRevisionCheckInput.parse(args);
+            return naicsXwalk.checkNaicsRevision(naicsCode);
+        }
+        // Workflow primitives (composite tools)
+        case "workflow_capture_brief": {
+            const input = WorkflowCaptureBriefInput.parse(args);
+            return await workflows.captureBrief({ ...input, sam });
+        }
+        case "workflow_recompete_radar": {
+            const input = WorkflowRecompeteRadarInput.parse(args);
+            return await workflows.recompeteRadar(input);
+        }
+        case "workflow_vendor_profile": {
+            const input = WorkflowVendorProfileInput.parse(args);
+            return await workflows.vendorProfile(input);
+        }
+        // SBA size standards
+        case "sba_size_standard_lookup": {
+            const { naicsCode } = SbaLookupInput.parse(args);
+            return sba.lookupSizeStandard(naicsCode);
+        }
+        case "sba_check_size_qualification": {
+            const input = SbaCheckQualificationInput.parse(args);
+            return sba.checkQualification({
+                naicsCode: input.naicsCode,
+                averageAnnualRevenueUsd: input.averageAnnualRevenueUsd,
+                averageEmployees: input.averageEmployees,
+            });
+        }
         default:
             throw new Error(`Unknown tool: ${name}`);
     }
@@ -633,7 +890,7 @@ async function runTool(name, args, sam) {
 /**
  * Hand-rolled Zod → JSON Schema converter (subset we use).
  */
-function zodToJsonSchema(schema) {
+export function zodToJsonSchema(schema) {
     const def = schema._def;
     const tn = def.typeName;
     const description = schema.description;

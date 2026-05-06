@@ -7,6 +7,153 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-06 (NAICS crosswalk + sub-award FFATA + FedReg classifier + hosted demo)
+
+### Added — 5 new tools (41 → 46 total)
+
+**NAICS revision crosswalk (1)** — catch retired / renumbered codes before they tank a search.
+- `naics_revision_check` — given a 6-digit NAICS, returns validity in NAICS 2022 + status
+  (`stable` / `renumbered` / `split` / `retired`) + canonical 2022 successor when changed.
+  Catches the 2022 Information-sector reorg (`511210` → `513210`, `519130` split into 3,
+  the `511xxx` publishers → `513xxx` renumbering) plus the historic `541510` retirement.
+  Coverage v0.5: ~60 federal-contracting-relevant codes; falls back to Census concordance
+  hint for unknown codes.
+
+**Sub-award aggregation (2)** — turn raw FFATA line items into actionable answers.
+- `usas_aggregate_subawards` — aggregate sub-awards by sub-recipient name across any
+  filter slice (prime, NAICS, agency, fiscal year). Returns sub-recipients sorted by
+  total sub-award amount + count + distinct prime count.
+- `usas_get_sub_recipient_profile` — pivot on a sub-recipient firm name; returns the
+  primes that used them + their total sub-revenue exposure. Useful for "how does Acme
+  Tech appear as a sub in federal data?" Coverage caveat surfaced in response (FFATA
+  primes self-report quarterly; coverage uneven).
+
+**Federal Register classifier (2)** — heuristic, deterministic, citeable.
+- `fed_register_classify` — map any FedReg notice to one of 5 federal-contracting-
+  relevant classes: `far_amendment` / `set_aside_policy` / `system_retirement` /
+  `rule_change` / `admin_paperwork`. Pass `documentNumber` for one-shot (auto-fetches)
+  or raw `{title, abstract, type, agencies, cfrReferences}` for in-batch use. Returns
+  primaryClass + confidence + matched signals + per-class scores.
+- `fed_register_classify_batch` — search Federal Register AND classify each result in
+  one call. Returns documents[] + a class histogram so callers can immediately answer
+  "of the last 50 SBA notices, how many were paperwork vs. real rules?"
+
+### Added — hosted demo
+
+**Cloudflare Worker** at `worker/` — HTTP-JSON facade exposing a 9-tool keyless
+subset (USAspending lookups + Federal Register + SBA + NAICS) so external evaluators
+can curl the surface without installing the npm package. Deploy via `cd worker && npm
+run deploy`. Documented in `docs/HOSTED-DEMO.md`. Plain HTTP, not Streamable-HTTP MCP
+yet — that's a deliberate next step.
+
+### Added — cookbook recipes 6-10
+
+Five more end-to-end recipes in `cookbook/`:
+- `06-federal-ai-landscape.md` — multi-agency AI/ML spending pull
+- `07-set-aside-pipeline.md` — small-business set-aside discovery flow
+- `08-multi-agency-comparison.md` — cross-agency NAICS comparison
+- `09-far-clause-research.md` — clause lookup via eCFR + FedReg
+- `10-daily-snapshot.md` — daily diff routine for active opportunities
+
+### Changed
+
+- `sba.ts` and `naics-crosswalk.ts` grow an `_injectData()` escape hatch so the
+  Cloudflare Worker build can populate the loader cache without `node:fs`. Node path
+  unchanged.
+- `server.ts` exports `TOOLS`, `runTool`, `zodToJsonSchema`, `SERVER_NAME`,
+  `SERVER_VERSION` for downstream reuse.
+- 21 tool descriptions tuned with sibling-tool routing hints (continued from v0.4).
+- Edge tests: 35 → 44.
+- README.ko.md / README.ja.md tool counts updated 36 → 46.
+
+## [0.4.0] — 2026-04-30 (foundation hardening + composite tools)
+
+### Added — 5 new tools (36 → 41 total)
+
+**SBA size standards (2)** — first-class small-business eligibility tooling.
+- `sba_size_standard_lookup` — given a 6-digit NAICS, returns the official
+  size standard (revenue cap or employee cap) from 13 CFR §121.201
+  (effective 2023-03-17). Multi-entry NAICS (e.g. 541330 Engineering
+  Services has $25.5M default but $47M for military/marine work) returns
+  ALL applicable entries — firm qualifies under ANY one.
+- `sba_check_size_qualification` — given (NAICS, avg revenue OR avg
+  employees), returns `qualifies: true | false | indeterminate` plus
+  per-entry breakdown. Honors any-of semantics for multi-entry NAICS.
+- Coverage: ~50 most-used services / IT / R&D / consulting / construction
+  NAICS in v0.4. Misses fall back to `ecfr_search` (hint surfaced in the
+  error response).
+
+**Workflow primitives — composite tools (3)** — single-call wrappers that
+chain 4-7 underlying tools, handle partial failures, and synthesize a
+one-line summary.
+- `workflow_capture_brief` — federal capture intelligence in 1 call.
+  Internally chains `usas_lookup_agency` → `usas_search_subagency_spending`
+  → `usas_search_awards` → `usas_search_expiring_contracts` →
+  `fed_register_search_documents` → `sam_search_opportunities`. Saves
+  ~6 round-trips and avoids agent orchestration mistakes.
+- `workflow_recompete_radar` — focused recompete intelligence. Chains
+  `usas_lookup_agency` → `usas_search_expiring_contracts` →
+  `usas_search_awards` (current incumbents) → `fed_register_search_documents`
+  (rules affecting recompetes).
+- `workflow_vendor_profile` — full vendor picture in 1 call. Chains
+  `usas_autocomplete_recipient` (canonicalize) → `usas_search_recipients`
+  (parent/child) → `usas_search_awards_by_recipient` (recent prime awards)
+  → `usas_search_subawards` (sub appearances).
+- Architecture: `Promise.all` for parallel sub-calls where no dependency
+  exists; partial-failure isolation per section (each wrapped in
+  `{ ok: true, data } | { ok: false, error }`); structured one-line
+  summary synthesized at the end.
+
+### Changed — agent-side reliability
+
+**Tool descriptions tuned (21 of 36 existing tools)** — every description
+now names the SIBLING TOOL to use instead when the user's intent maps
+better there. Reduces "agent picked wrong tool first try" failures.
+Examples:
+- SAM.gov vs USAspending: "active solicitations" vs "historical contracts"
+- `usas_search_awards` (aggregate) vs `usas_search_individual_awards` (line items)
+- `fed_register_search_documents` vs `ecfr_search`: "new regulatory activity"
+  vs "current codified text"
+- `usas_autocomplete_naics` vs `usas_naics_hierarchy`: "free-text → code"
+  vs "navigate parent/child"
+- 5 spending category tools (psc / state / cfda / federal_account / agency)
+  cross-referenced with explicit routing guidance.
+
+**Error envelope upgrade — `hint` field + 4 new ErrorKinds.** Errors now
+carry an actionable next-step suggestion pointing at the sibling tool to
+call instead, or the input format to fix. Catches the most common
+agent-side recovery loops:
+- `sam_get_opportunity` bad noticeId → "Use `sam_search_opportunities` first."
+- `usas_get_award_detail` bad ID → "Use `usas_search_individual_awards`
+  first; IDs look like CONT_AWD_*."
+- `fed_register_get_document` bad number → "Doc numbers are YYYY-NNNNN."
+- `usas_get_agency_*` bad code → "Toptier codes from `usas_lookup_agency`."
+- New ErrorKinds: `id_format_invalid`, `date_invalid`, `agency_not_resolved`,
+  `naics_invalid`.
+
+**ZodError handling** — input validation errors now caught explicitly →
+`invalid_input` envelope with hint, instead of falling through to
+`unknown`. Previously a malformed input crashed the dispatch with
+"unknown error: ..."; now the agent sees actionable feedback.
+
+### Tested
+
+Edge case test suite: 10 → 29 cases.
+- New: negative limit / over-max limit Zod rejections, empty noticeId,
+  HTML / SQL-injection / whitespace-only input safety, hint-presence
+  verification on FedReg / USAspending recipient errors, ecfr title=0,
+  9 SBA size-standards cases (incl. multi-entry any-of qualification).
+- 29/29 passing on production federal APIs.
+
+### Backward compatibility
+
+- All 36 v0.3 tools unchanged in name + input schema.
+- Error envelope additive: existing readers of `{ ok, error: { kind, message,
+  retryable } }` see new optional `hint` field; existing ErrorKinds
+  unchanged, 4 new ones introduced.
+- Tool list grows from 36 → 41 — agents that auto-discover tools see new
+  ones, agents with hard-coded tool lists are unaffected.
+
 ## [0.3.0] — 2026-04-29 (hardening release)
 
 ### Added
@@ -80,7 +227,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stdio JSON-RPC transport.
 - Claude Code plugin scaffold.
 
-[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.4.0
 [0.3.0]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.3.0
 [0.2.1]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.2.1
 [0.2.0]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.2.0

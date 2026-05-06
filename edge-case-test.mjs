@@ -130,6 +130,320 @@ const cases = [
     args: { ncode: "541512", limit: 50 },
     accept: ({ env }) => env.ok && env.data.opportunities?.length <= 50,
   },
+  // ─── v0.4 — hint-bearing errors + new edge cases ──────────────
+  {
+    label: "negative limit rejected by Zod",
+    name: "sam_search_opportunities",
+    args: { ncode: "541512", limit: -5 },
+    accept: ({ env }) =>
+      !env.ok && env.error.kind === "invalid_input" && !env.error.retryable,
+  },
+  {
+    label: "limit over maximum rejected by Zod",
+    name: "sam_search_opportunities",
+    args: { ncode: "541512", limit: 9999 },
+    accept: ({ env }) =>
+      !env.ok && env.error.kind === "invalid_input" && !env.error.retryable,
+  },
+  {
+    label: "empty noticeId graceful",
+    name: "sam_get_opportunity",
+    args: { noticeId: "" },
+    accept: ({ env }) =>
+      (env.ok && env.data?.found === false) ||
+      (!env.ok && !env.error.retryable),
+  },
+  {
+    label: "HTML tag in query (no crash, no injection)",
+    name: "sam_search_opportunities",
+    args: { query: "<script>alert(1)</script>", limit: 2 },
+    accept: ({ env }) => env.ok && Array.isArray(env.data.opportunities),
+  },
+  {
+    label: "SQL-injection style input safely passes through",
+    name: "usas_autocomplete_naics",
+    args: { searchText: "'; DROP TABLE awards; --", limit: 3 },
+    accept: ({ env }) => env.ok && Array.isArray(env.data.naics),
+  },
+  {
+    label: "whitespace-only query handled",
+    name: "sam_search_opportunities",
+    args: { query: "   ", limit: 2 },
+    accept: ({ env }) => env.ok && Array.isArray(env.data.opportunities),
+  },
+  {
+    label: "FedReg bad doc ID returns hint",
+    name: "fed_register_get_document",
+    args: { documentNumber: "totally-not-a-real-doc-id" },
+    accept: ({ env }) =>
+      !env.ok &&
+      env.error.kind === "not_found" &&
+      typeof env.error.hint === "string" &&
+      env.error.hint.includes("YYYY-NNNNN"),
+  },
+  {
+    label: "USAspending award detail bad ID handled (hint or null)",
+    name: "usas_get_award_detail",
+    args: { generatedInternalId: "totally-not-a-real-award-id-XYZ" },
+    accept: ({ env }) =>
+      // Accept either: ok:true with null sentinel, OR ok:false with hint pointing to the search tool
+      (env.ok && env.data === null) ||
+      (!env.ok && typeof env.error.hint === "string"),
+  },
+  {
+    label: "USAspending recipient profile bad ID returns hint",
+    name: "usas_get_recipient_profile",
+    args: { recipientId: "totally-not-a-real-recipient-id" },
+    accept: ({ env }) =>
+      !env.ok &&
+      typeof env.error.hint === "string" &&
+      env.error.hint.includes("usas_search_recipients"),
+  },
+  {
+    label: "eCFR title=0 (out of range)",
+    name: "ecfr_search",
+    args: { query: "test", titleNumber: 0, perPage: 1 },
+    // Either Zod rejects (invalid_input) OR upstream returns empty (ok:true)
+    accept: ({ env }) =>
+      (env.ok && Array.isArray(env.data.results)) ||
+      (!env.ok && !env.error.retryable),
+  },
+  // ─── v0.4 — SBA size standards ──────────────────────────────────
+  {
+    label: "SBA lookup NAICS 541512 (revenue cap $34M)",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "541512" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === true &&
+      env.data.entries?.[0]?.thresholdMillionsUsd === 34 &&
+      env.data.entries?.[0]?.type === "revenue",
+  },
+  {
+    label: "SBA lookup NAICS 541330 (multi-entry: $25.5M / $47M)",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "541330" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === true &&
+      env.data.entries?.length >= 2 &&
+      env.data.notes?.includes("ALTERNATIVES"),
+  },
+  {
+    label: "SBA lookup NAICS 541715 (employee-based: 1000-1500)",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "541715" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === true &&
+      env.data.entries?.some((e) => e.type === "employee"),
+  },
+  {
+    label: "SBA lookup NAICS not in table — returns hint to ecfr_search",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "999999" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === false &&
+      typeof env.data.hint === "string" &&
+      env.data.hint.includes("ecfr_search"),
+  },
+  {
+    label: "SBA lookup malformed NAICS",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "abc" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === false &&
+      env.data.hint?.includes("6 digits"),
+  },
+  {
+    label: "SBA qualification check: $20M firm under 541512 ($34M cap) → qualifies",
+    name: "sba_check_size_qualification",
+    args: { naicsCode: "541512", averageAnnualRevenueUsd: 20_000_000 },
+    accept: ({ env }) => env.ok && env.data.qualifies === true,
+  },
+  {
+    label: "SBA qualification check: $50M firm under 541512 ($34M cap) → fails",
+    name: "sba_check_size_qualification",
+    args: { naicsCode: "541512", averageAnnualRevenueUsd: 50_000_000 },
+    accept: ({ env }) => env.ok && env.data.qualifies === false,
+  },
+  {
+    label: "SBA qualification check: 541330 firm at $40M qualifies under military entry",
+    name: "sba_check_size_qualification",
+    args: { naicsCode: "541330", averageAnnualRevenueUsd: 40_000_000 },
+    // Default $25.5M FAILS, but military $47M PASSES → qualifies (any-of)
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.qualifies === true &&
+      env.data.byEntry?.some((b) => b.qualifies === true) &&
+      env.data.byEntry?.some((b) => b.qualifies === false),
+  },
+  {
+    label: "SBA qualification check: no metric provided → indeterminate",
+    name: "sba_check_size_qualification",
+    args: { naicsCode: "541512" },
+    accept: ({ env }) =>
+      env.ok && env.data.qualifies === "indeterminate",
+  },
+  // ─── v0.5 — NAICS revision crosswalk ───────────────────────────
+  {
+    label: "NAICS 541512 stable in 2022",
+    name: "naics_revision_check",
+    args: { naicsCode: "541512" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.valid_in_2022 === true &&
+      env.data.status === "stable",
+  },
+  {
+    label: "NAICS 511210 renumbered to 513210 in 2022",
+    name: "naics_revision_check",
+    args: { naicsCode: "511210" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.valid_in_2022 === false &&
+      env.data.status === "renumbered" &&
+      env.data.canonical2022 === "513210",
+  },
+  {
+    label: "NAICS 519130 split in 2022 → multiple successors",
+    name: "naics_revision_check",
+    args: { naicsCode: "519130" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.valid_in_2022 === false &&
+      env.data.status === "split" &&
+      Array.isArray(env.data.splitInto) &&
+      env.data.splitInto.length >= 2,
+  },
+  {
+    label: "NAICS 541510 retired in 2007",
+    name: "naics_revision_check",
+    args: { naicsCode: "541510" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.valid_in_2022 === false &&
+      env.data.status === "retired",
+  },
+  {
+    label: "NAICS not in curation set returns unknown + Census fallback hint",
+    name: "naics_revision_check",
+    args: { naicsCode: "999999" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.status === "unknown" &&
+      env.data.note?.includes("Census"),
+  },
+  {
+    label: "NAICS revision check rejects malformed input",
+    name: "naics_revision_check",
+    args: { naicsCode: "abc" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.status === "unknown" &&
+      env.data.note?.includes("6 digits"),
+  },
+  // ─── v0.5 — Sub-award aggregation ──────────────────────────────
+  {
+    label: "Sub-award aggregate by prime recipient (Booz Allen FY2024)",
+    name: "usas_aggregate_subawards",
+    args: { primeRecipientName: "BOOZ ALLEN HAMILTON", fiscalYear: 2024 },
+    // Coverage is uneven; accept ok:true with array (possibly empty) OR ok:false non-retryable
+    accept: ({ env }) =>
+      (env.ok && Array.isArray(env.data?.sub_recipients)) ||
+      (!env.ok && !env.error.retryable),
+  },
+  {
+    label: "Sub-award aggregate with no filter args → invalid_input",
+    name: "usas_aggregate_subawards",
+    args: {},
+    accept: ({ env }) =>
+      !env.ok && env.error.kind === "invalid_input" && !env.error.retryable,
+  },
+  {
+    label: "Sub-recipient profile lookup (graceful when not found)",
+    name: "usas_get_sub_recipient_profile",
+    args: { recipientName: "ZZZ_NONEXISTENT_SUB_RECIPIENT_XYZ", fiscalYear: 2024 },
+    accept: ({ env }) =>
+      (env.ok &&
+        (env.data?.sampleSize === 0 || Array.isArray(env.data?.primes))) ||
+      (!env.ok && !env.error.retryable),
+  },
+  // ─── v0.5 — FedReg classifier (heuristic, deterministic) ───────
+  {
+    label: "FedReg classify: FAR amendment via CFR title 48 + 'FAR clause'",
+    name: "fed_register_classify",
+    args: {
+      title: "Federal Acquisition Regulation: FAR Case 2023-001; Amendment to FAR clause 52.204-21",
+      abstract: "DoD, GSA, and NASA propose to amend the Federal Acquisition Regulation.",
+      type: "PRORULE",
+      typeDisplay: "Proposed Rule",
+      cfrReferences: [{ title: "48", part: "52" }],
+    },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.primaryClass === "far_amendment" &&
+      (env.data.confidence === "high" || env.data.confidence === "medium"),
+  },
+  {
+    label: "FedReg classify: set-aside policy via small-business + 8(a)",
+    name: "fed_register_classify",
+    args: {
+      title: "Small Business Size Standards; 8(a) Business Development Program Updates",
+      abstract: "SBA proposes revisions to size standards for various NAICS codes.",
+      type: "PRORULE",
+      typeDisplay: "Proposed Rule",
+      agencies: [{ name: "Small Business Administration", slug: "small-business-administration" }],
+      cfrReferences: [{ title: "13", part: "121" }],
+    },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "set_aside_policy",
+  },
+  {
+    label: "FedReg classify: system retirement via 'sunset' in title",
+    name: "fed_register_classify",
+    args: {
+      title: "Sunset of the Legacy SAM.gov Reporting Portal; System Retirement Notice",
+      abstract: "The portal will be retired effective 2025-12-31. Users should migrate to the new system.",
+      type: "NOTICE",
+      typeDisplay: "Notice",
+    },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "system_retirement",
+  },
+  {
+    label: "FedReg classify: admin paperwork (Paperwork Reduction Act)",
+    name: "fed_register_classify",
+    args: {
+      title: "Agency Information Collection Activities; Submission to OMB; Paperwork Reduction Act 30-Day Notice",
+      abstract: "Standard PRA notice — request for comments on existing information collection.",
+      type: "NOTICE",
+      typeDisplay: "Notice",
+    },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "admin_paperwork",
+  },
+  {
+    label: "FedReg classify: generic rule change (no specific signal)",
+    name: "fed_register_classify",
+    args: {
+      title: "Final Rule: Amendments to Disposal Procedures",
+      abstract: "Final rule amending procedures for routine disposal.",
+      type: "RULE",
+      typeDisplay: "Rule",
+    },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "rule_change",
+  },
+  {
+    label: "FedReg classify: empty input → uncategorized",
+    name: "fed_register_classify",
+    args: { title: "", abstract: "" },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "uncategorized" && env.data.score === 0,
+  },
 ];
 
 async function main() {

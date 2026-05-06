@@ -102,6 +102,71 @@ export declare function searchSubawards(args: {
         primeAwardId: string;
     }[];
 }>;
+/**
+ * Aggregate sub-awards by sub-recipient. Returns top N sub-recipients
+ * across the filter slice, with each sub-recipient's total sub-award
+ * amount + count + distinct prime count.
+ *
+ * Use cases:
+ *   - "Top subs to Booz Allen FY2025" → pass primeRecipientName
+ *   - "Top subs in NAICS 541512 FY2025" → pass naics
+ *   - "Top subs in NAICS 541512 at VA FY2025" → pass naics + agency
+ *
+ * Implementation: fetches up to 100 line-item subawards (USAspending
+ * doesn't have a server-side aggregation endpoint for sub-awards),
+ * then aggregates client-side by `Sub-Award Recipient` name.
+ *
+ * Coverage caveat (FFATA): sub-award reporting is self-reported by
+ * primes quarterly. Top primes typically report ~80% of subs;
+ * mid-tier primes have notable gaps. Aggregates surface relative
+ * patterns, not exhaustive totals.
+ */
+export declare function aggregateSubawards(args: {
+    primeRecipientName?: string;
+    agency?: string;
+    naics?: string;
+    fiscalYear?: number;
+    limit?: number;
+}): Promise<{
+    aggregateBy: string;
+    coverageWindow: string;
+    sampleSize: number;
+    sub_recipients: {
+        subRecipient: string;
+        totalAmount: number;
+        subAwardCount: number;
+        distinctPrimeAwards: number;
+    }[];
+}>;
+/**
+ * Sub-recipient profile: given a firm name, return their federal
+ * sub-contracting footprint — distinct primes that used them,
+ * total sub-revenue, NAICS distribution, FY context.
+ *
+ * Use case: "What's IBM's federal sub-tier presence in FY2025?"
+ *
+ * Implementation: searches sub-awards where Sub-Award Recipient
+ * matches, aggregates client-side by prime.
+ */
+export declare function getSubRecipientProfile(args: {
+    subRecipientName: string;
+    agency?: string;
+    fiscalYear?: number;
+    limit?: number;
+}): Promise<{
+    subRecipient: string;
+    fiscalYear: number | undefined;
+    sampleSize: number;
+    coverageCaveat: string;
+    totalSubAmount: number;
+    distinctPrimes: number;
+    primes: {
+        primeName: string;
+        totalSubAmount: number;
+        subAwardCount: number;
+        distinctPrimeAwards: number;
+    }[];
+}>;
 export declare function getAwardDetail(generatedInternalId: string): Promise<{
     awardId: string;
     recipient: string;

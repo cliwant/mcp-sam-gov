@@ -1,0 +1,135 @@
+{
+  "$source": "Census 2017→2022 NAICS Concordance + 2012→2017 + 2007→2012",
+  "$citationUrl": "https://www.census.gov/naics/concordances/",
+  "$officialDocs": {
+    "2017_to_2022": "https://www.census.gov/naics/concordances/2017_to_2022_NAICS.xlsx",
+    "2012_to_2017": "https://www.census.gov/naics/concordances/2012_to_2017_NAICS.xlsx",
+    "2007_to_2012": "https://www.census.gov/naics/concordances/2007_to_2012_NAICS.xlsx"
+  },
+  "$lastUpdatedAt": "2026-04-30",
+  "$coverage": "v0.5 — federal-contracting-relevant changes from 2017→2022 NAICS revision. Most 541xxx (Professional/Scientific/Technical Services) and 561xxx (Admin Services) NAICS were UNCHANGED in 2022. The notable changes affect Information sector (51) — software publishing and Internet publishing splits.",
+  "$notes": [
+    "Federal contracting historically uses services NAICS (5xxxxx), most of which were stable across the 2017→2022 revision.",
+    "The 2022 revision split or renumbered ~50 codes overall; this table covers the ~15 that touch federal contracting.",
+    "When a code is not in this table, it is either (a) UNCHANGED from 2017 to 2022, or (b) outside federal-contracting common usage. Use ecfr_search or census.gov for full concordance.",
+    "Direction matters: passing a 2017 code returns its 2022 mapping; passing a 2022 code returns its 2017 origin. The 'changeType' field identifies the relationship."
+  ],
+  "stable2022Codes": [
+    "541110", "541211", "541330", "541380", "541410", "541420", "541490",
+    "541511", "541512", "541513", "541519",
+    "541611", "541612", "541613", "541614", "541618", "541620", "541690",
+    "541713", "541714", "541715", "541720",
+    "541810", "541820", "541830", "541910",
+    "541921", "541922", "541930", "541940", "541990",
+    "561110", "561210", "561311", "561312", "561330", "561410", "561421", "561422", "561499",
+    "561612", "561621", "561720",
+    "611310", "611430", "611710",
+    "236118", "236210", "236220", "237110", "237310", "238210",
+    "334111", "334118", "334412", "336411", "336414", "336992",
+    "517111", "517112",
+    "518210"
+  ],
+  "changes": {
+    "511210": {
+      "from": "2017",
+      "to": "2022",
+      "newCode": "513210",
+      "newTitle": "Software Publishers",
+      "changeType": "renumbered",
+      "note": "NAICS 511210 (Software Publishers, 2017) was renumbered to 513210 in the 2022 revision. The Information sector (51) reorganization moved publishers under a new 513 subsector. Federal contracts under the old 511210 should now use 513210."
+    },
+    "513210": {
+      "from": "2022",
+      "to": "2017",
+      "oldCode": "511210",
+      "oldTitle": "Software Publishers (2017)",
+      "changeType": "renumbered_from",
+      "note": "NAICS 513210 (Software Publishers, 2022) was 511210 in the 2017 NAICS. Pre-2022 historical contracts may still cite 511210."
+    },
+    "519130": {
+      "from": "2017",
+      "to": "2022",
+      "newCode": null,
+      "newTitle": "(split into 513210 + 518210 + 519290)",
+      "changeType": "split",
+      "note": "NAICS 519130 (Internet Publishing and Broadcasting and Web Search Portals, 2017) was SPLIT in the 2022 revision: software publishers → 513210, web hosting → 518210, all other Internet services → 519290. Determine the correct 2022 code by primary activity:\n  • If primarily publishing software products → 513210\n  • If primarily web hosting / data processing / cloud infrastructure → 518210\n  • Other Internet services not elsewhere classified → 519290",
+      "splitInto": ["513210", "518210", "519290"]
+    },
+    "519290": {
+      "from": "2022",
+      "to": "2017",
+      "oldCode": "519130",
+      "oldTitle": "Internet Publishing and Broadcasting and Web Search Portals (2017)",
+      "changeType": "split_origin",
+      "note": "NAICS 519290 (All Other Information Services, 2022) absorbed part of the old 519130. Other parts went to 513210 and 518210."
+    },
+    "519290_2007": {
+      "$displayName": "519130 historical reference",
+      "note": "Note: NAICS 519130 also existed in NAICS 2007 with the same title. The 2022 split applies whenever migrating from any pre-2022 vintage."
+    },
+    "511110": {
+      "from": "2017",
+      "to": "2022",
+      "newCode": "513110",
+      "newTitle": "Newspaper Publishers",
+      "changeType": "renumbered",
+      "note": "511110 → 513110 in the 2022 reorganization of sector 51. Same scope (newspaper publishers); just renumbered."
+    },
+    "511120": {
+      "from": "2017",
+      "to": "2022",
+      "newCode": "513120",
+      "newTitle": "Periodical Publishers",
+      "changeType": "renumbered",
+      "note": "511120 → 513120 in 2022."
+    },
+    "511130": {
+      "from": "2017",
+      "to": "2022",
+      "newCode": "513130",
+      "newTitle": "Book Publishers",
+      "changeType": "renumbered",
+      "note": "511130 → 513130 in 2022."
+    },
+    "511140": {
+      "from": "2017",
+      "to": "2022",
+      "newCode": "513140",
+      "newTitle": "Directory and Mailing List Publishers",
+      "changeType": "renumbered",
+      "note": "511140 → 513140 in 2022."
+    },
+    "511191": {
+      "from": "2017",
+      "to": "2022",
+      "newCode": "513191",
+      "newTitle": "Greeting Card Publishers",
+      "changeType": "renumbered",
+      "note": "511191 → 513191 in 2022."
+    },
+    "511199": {
+      "from": "2017",
+      "to": "2022",
+      "newCode": "513199",
+      "newTitle": "All Other Publishers",
+      "changeType": "renumbered",
+      "note": "511199 → 513199 in 2022."
+    },
+    "541510": {
+      "from": "2002",
+      "to": "2007",
+      "newCode": "(split into 541511, 541512, 541513, 541519)",
+      "newTitle": "(Computer Systems Design and Related Services 4-digit roll-up no longer a leaf code)",
+      "changeType": "retired",
+      "note": "NAICS 541510 was a 6-digit 'Computer Systems Design and Related Services' code in NAICS 2002 (and earlier). Retired in NAICS 2007 — the work was distributed across new 6-digit children: 541511 (Custom Programming), 541512 (Systems Design), 541513 (Facilities Management), 541519 (Other Computer Related). Federal contracts using 541510 in solicitations are USING A RETIRED CODE — flag the SOW and use one of the four child codes instead."
+    },
+    "541310": {
+      "from": "2002",
+      "to": "2007",
+      "newCode": null,
+      "newTitle": "Architectural Services",
+      "changeType": "stable",
+      "note": "541310 is a stable code from 2002 onward. (Listed here as a verification anchor — explicit stable codes do NOT need this lookup; this entry exists because users sometimes search to verify 'is this still valid'.)"
+    }
+  }
+}

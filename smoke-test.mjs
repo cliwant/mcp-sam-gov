@@ -284,6 +284,62 @@ const tests = [
     chain: { from: "grants_search", path: "grants[0].id" },
     verify: (r) => typeof r.opportunityNumber === "string",
   },
+
+  // ━━━ Workflow primitives (composite tools)
+  {
+    name: "workflow_capture_brief",
+    args: { agency: "Department of Veterans Affairs", naics: "541512", fiscalYear: 2025 },
+    // Composite tools return SectionResult<T> shapes; happy path = sections object exists
+    verify: (r) => typeof r === "object" && r !== null && typeof r.sections === "object",
+  },
+  {
+    name: "workflow_recompete_radar",
+    args: { agency: "Department of Veterans Affairs", naics: "541512", monthsUntilExpiry: 24 },
+    verify: (r) => typeof r === "object" && r !== null && typeof r.sections === "object",
+  },
+  {
+    name: "workflow_vendor_profile",
+    args: { recipientName: "Booz Allen Hamilton", fiscalYear: 2025 },
+    verify: (r) => typeof r === "object" && r !== null && typeof r.sections === "object",
+  },
+
+  // ━━━ SBA size standards (local data — fast)
+  {
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "541512" },
+    verify: (r) => r.found === true && Array.isArray(r.entries) && r.entries.length > 0,
+  },
+  {
+    name: "sba_check_size_qualification",
+    args: { naicsCode: "541512", averageAnnualRevenueUsd: 20_000_000 },
+    verify: (r) => r.qualifies === true,
+  },
+
+  // ━━━ NAICS revision crosswalk (local data — fast)
+  {
+    name: "naics_revision_check",
+    args: { naicsCode: "541512" },
+    verify: (r) => r.valid_in_2022 === true && r.status === "stable",
+  },
+
+  // ━━━ Sub-award aggregation (FFATA — uneven coverage)
+  {
+    name: "usas_aggregate_subawards",
+    args: { primeRecipientName: "Booz Allen Hamilton", fiscalYear: 2024 },
+    verify: (r) => Array.isArray(r.sub_recipients),
+  },
+
+  // ━━━ FedReg classifier (heuristic — local)
+  {
+    name: "fed_register_classify",
+    args: {
+      title: "Federal Acquisition Regulation: FAR Case 2024-001",
+      type: "PRORULE",
+      cfrReferences: [{ title: "48", part: "52" }],
+    },
+    verify: (r) =>
+      r.primaryClass === "far_amendment" && typeof r.confidence === "string",
+  },
 ];
 
 function pickPath(obj, path) {
