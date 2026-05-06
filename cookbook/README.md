@@ -17,6 +17,11 @@ required for any of these workflows.
 | 3 | [SBA size eligibility before bidding](./03-sba-size-eligibility.md) | Confirm a firm qualifies as "small business" under the right NAICS size standard | `sba_size_standard_lookup`, `sba_check_size_qualification` |
 | 4 | [Vendor profile / competitive research](./04-vendor-profile.md) | Full picture of a federal vendor — recent awards, sub-award appearances, hierarchy | `workflow_vendor_profile` |
 | 5 | [NAICS code disambiguation](./05-naics-disambiguation.md) | Resolve a free-text market description into the right NAICS code (anti-hallucination) | `usas_autocomplete_naics`, `usas_naics_hierarchy` |
+| 6 | [Federal AI procurement landscape scan](./06-federal-ai-landscape.md) | Map where federal AI dollars actually flow — NAICS × agency × time series + regulatory pulse | `usas_search_psc_spending`, `usas_spending_over_time`, `fed_register_search_documents`, `sam_search_opportunities` |
+| 7 | [Set-aside pipeline scan](./07-set-aside-pipeline.md) | Find contracts reserved for your set-aside type, sized to your firm, expiring in your window | `sba_check_size_qualification`, `usas_search_expiring_contracts`, `sam_search_opportunities` |
+| 8 | [Multi-agency competitive intelligence](./08-multi-agency-comparison.md) | Compare 2-3 agencies side-by-side — where to focus capture investment | `workflow_capture_brief` × N |
+| 9 | [FAR clause research workflow](./09-far-clause-research.md) | Find the right FAR clause + recent amendments for compliance questions | `ecfr_search`, `fed_register_search_documents` |
+| 10 | [Daily federal data snapshot (automation)](./10-daily-snapshot.md) | Cron-style daily brief: yesterday's new opps, FedReg, awards across your portfolio | `sam_search_opportunities`, `fed_register_search_documents`, `usas_search_individual_awards`, `workflow_recompete_radar` |
 
 ## How to run a recipe
 
