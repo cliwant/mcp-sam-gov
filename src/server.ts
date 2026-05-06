@@ -30,6 +30,7 @@ import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
 import * as sba from "./sba.js";
+import * as workflows from "./workflows.js";
 import { toToolError } from "./errors.js";
 
 const SERVER_NAME = "mcp-sam-gov";
@@ -305,6 +306,34 @@ const SbaCheckQualificationInput = z.object({
     ),
 });
 
+// Workflow primitives (composite tools)
+const WorkflowCaptureBriefInput = z.object({
+  agency: z
+    .string()
+    .describe("Agency name or abbreviation (e.g. 'VA', 'Department of Defense')"),
+  naics: z.string().describe("6-digit NAICS code (e.g. '541512')"),
+  fiscalYear: z
+    .number()
+    .int()
+    .min(2007)
+    .optional()
+    .describe("Default: current fiscal year"),
+});
+
+const WorkflowRecompeteRadarInput = z.object({
+  agency: z.string(),
+  naics: z.string(),
+  monthsUntilExpiry: z.number().min(1).max(36).optional().describe("Default 12"),
+  minAwardValueUsd: z.number().optional(),
+});
+
+const WorkflowVendorProfileInput = z.object({
+  recipientName: z
+    .string()
+    .describe("Vendor name or partial — e.g. 'Booz Allen', 'Accenture Federal'"),
+  fiscalYear: z.number().int().min(2007).optional(),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -532,6 +561,26 @@ const TOOLS: ToolDef[] = [
     description:
       "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
     inputSchema: EcfrListTitlesInput,
+  },
+
+  // ━━━ Workflow primitives — composite tools (3) ━━━
+  {
+    name: "workflow_capture_brief",
+    description:
+      "COMPOSITE TOOL — federal capture intelligence for an agency × NAICS, in 1 call instead of 5-6 chained tool calls. Internally chains usas_lookup_agency → usas_search_subagency_spending → usas_search_awards → usas_search_expiring_contracts → fed_register_search_documents → sam_search_opportunities. Returns 6 sections each as { ok: true, data } or { ok: false, error } so partial failures don't block the rest. Plus a synthesized one-line summary. Use this BEFORE diving into individual tools when the user wants 'a brief on X agency in Y NAICS' — saves ~6 round-trips and avoids orchestration mistakes.",
+    inputSchema: WorkflowCaptureBriefInput,
+  },
+  {
+    name: "workflow_recompete_radar",
+    description:
+      "COMPOSITE TOOL — focused recompete intelligence in 1 call. Lighter than workflow_capture_brief — purpose-built for 'what's expiring + who holds it + any rule changes affecting recompete'. Chains usas_lookup_agency → usas_search_expiring_contracts → usas_search_awards (current FY incumbents) → fed_register_search_documents (recent rules). Use when user asks 'what's the recompete pipeline for X agency in Y NAICS over next N months?'",
+    inputSchema: WorkflowRecompeteRadarInput,
+  },
+  {
+    name: "workflow_vendor_profile",
+    description:
+      "COMPOSITE TOOL — full picture of a federal vendor in 1 call. Chains usas_autocomplete_recipient (canonicalize) → usas_search_recipients (parent/child hierarchy) → usas_search_awards_by_recipient (recent prime awards) → usas_search_subawards (where they appear as a sub). Use when user asks 'tell me about [vendor]' or 'show me Booz Allen's recent federal work'. Anti-hallucination: starts with autocomplete to confirm canonical name before downstream calls.",
+    inputSchema: WorkflowVendorProfileInput,
   },
 
   // ━━━ SBA size standards (2) ━━━
@@ -839,6 +888,20 @@ async function runTool(
       return await grants.searchGrants(GrantsSearchInput.parse(args));
     case "grants_get_opportunity":
       return await grants.getGrant(GrantsGetInput.parse(args));
+
+    // Workflow primitives (composite tools)
+    case "workflow_capture_brief": {
+      const input = WorkflowCaptureBriefInput.parse(args);
+      return await workflows.captureBrief({ ...input, sam });
+    }
+    case "workflow_recompete_radar": {
+      const input = WorkflowRecompeteRadarInput.parse(args);
+      return await workflows.recompeteRadar(input);
+    }
+    case "workflow_vendor_profile": {
+      const input = WorkflowVendorProfileInput.parse(args);
+      return await workflows.vendorProfile(input);
+    }
 
     // SBA size standards
     case "sba_size_standard_lookup": {
