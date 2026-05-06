@@ -227,17 +227,17 @@ const TOOLS = [
     // ━━━ SAM.gov (5) ━━━
     {
         name: "sam_search_opportunities",
-        description: "Search SAM.gov federal contracting opportunities (keyless HAL). Returns up to 50 active notices with title, agency, NAICS, noticeId. Use for discovery — narrow with NAICS / agency / set-aside / state.",
+        description: "Search SAM.gov federal contracting opportunities (keyless HAL). Returns up to 50 ACTIVE notices with title, agency, NAICS, noticeId. Use for DISCOVERY — narrow with NAICS / agency / set-aside / state. Returns SUMMARIES only — call sam_get_opportunity afterward to drill into a specific notice's full detail. For HISTORICAL / awarded contracts (not active solicitations), use usas_search_individual_awards instead.",
         inputSchema: SamSearchInput,
     },
     {
         name: "sam_get_opportunity",
-        description: "Fetch full detail for a single SAM.gov notice by 32-char hex noticeId. Returns title, agency, solicitation #, POCs, response deadline, attachments (with download URLs), inline description body. Call BEFORE drafting bid/no-bid or compliance work.",
+        description: "Fetch full detail for a single SAM.gov notice by 32-char hex noticeId (from sam_search_opportunities). Returns title, agency, solicitation #, POCs, response deadline, attachment URLs, INLINE description body when available. Call BEFORE drafting bid/no-bid or compliance work. If description body is a URL instead of inline text, call sam_fetch_description next.",
         inputSchema: SamGetOpportunityInput,
     },
     {
         name: "sam_fetch_description",
-        description: "Return the full description / RFP body text for a notice as plain text. Useful when sam_get_opportunity returned a description URL instead of inline body, or for an LLM-friendly text dump.",
+        description: "Return the full description / RFP body text for a notice as plain text. Use when sam_get_opportunity returned a description URL instead of inline body, OR when you want an LLM-friendly text dump for analysis. Always prefer sam_get_opportunity FIRST for the structured envelope; this tool is for the raw body only.",
         inputSchema: SamFetchDescriptionInput,
     },
     {
@@ -253,22 +253,22 @@ const TOOLS = [
     // ━━━ USAspending — Awards & Recipients (8) ━━━
     {
         name: "usas_search_awards",
-        description: "Aggregate share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns top recipients by total $ + count. Use for competitive landscape ('who wins at VA in 541512?').",
+        description: "AGGREGATE share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns TOP RECIPIENTS by total $ + transaction count (rolled up, not line items). Use for competitive landscape questions ('who wins at VA in 541512?'). For specific contracts/line items, use usas_search_individual_awards instead. For HISTORICAL awarded contracts only — for active solicitations use sam_search_opportunities.",
         inputSchema: UsasFiltersBase,
     },
     {
         name: "usas_search_individual_awards",
-        description: "Line-item federal contracts on USAspending. Returns specific awards (recipient + $ + sub-agency + state + description). Use AFTER usas_search_awards when the user wants 'show me the actual contracts'. Each result includes a generatedInternalId for usas_get_award_detail follow-ups.",
+        description: "LINE-ITEM federal contracts on USAspending. Returns SPECIFIC AWARDS (recipient + $ + sub-agency + state + description), not aggregates. Use AFTER usas_search_awards when the user wants 'show me the actual contracts' or 'list specific awards'. Each result includes a generatedInternalId — pass it to usas_get_award_detail to fetch period_of_performance, options, set-aside fields.",
         inputSchema: UsasIndividualAwardsInput,
     },
     {
         name: "usas_search_subagency_spending",
-        description: "Break down a parent agency's spending by sub-agency / office. Surfaces which office holds the budget (e.g. VA OI&T vs VHA, DoD vs Army vs DISA).",
+        description: "Break down a PARENT AGENCY's spending by sub-agency / office. Surfaces which office holds the budget (e.g. inside VA: OI&T vs VHA vs VBA; inside DoD: Army vs Navy vs DISA). Use AFTER usas_lookup_agency confirms the parent agency name. For agency-vs-agency comparison (different parents), use usas_search_agency_spending.",
         inputSchema: UsasSubAgencyInput,
     },
     {
         name: "usas_lookup_agency",
-        description: "Resolve a user-friendly agency reference ('VA', 'Veterans Affairs', 'DHS') to USAspending's canonical toptier name + 4-digit code. ALWAYS call this FIRST if the user uses an abbreviation — other USAspending tools require the canonical name.",
+        description: "Resolve a user-friendly agency reference ('VA', 'Veterans Affairs', 'DHS') to USAspending's canonical toptier name + 4-digit code. ANTI-HALLUCINATION GUARD — ALWAYS call this FIRST if the user uses an abbreviation, partial name, or non-canonical phrasing. Other USAspending tools (search_awards, agency_profile, etc.) need the canonical name to match. For SAM.gov's federal-organization hierarchy (different identifier system), use sam_lookup_organization instead.",
         inputSchema: UsasLookupAgencyInput,
     },
     {
@@ -278,12 +278,12 @@ const TOOLS = [
     },
     {
         name: "usas_search_subawards",
-        description: "Enumerate subcontracts on prime awards. Use for 'who teams with Leidos at DISA' or 'show small-business subs on Accenture's DHS contracts' — surfaces the prime/sub network for teaming-map artifacts.",
+        description: "Enumerate SUBCONTRACTS reported on prime awards via FFATA. Use for 'who teams with Leidos at DISA?' or 'show small-business subs on Accenture's DHS contracts' — surfaces the prime/sub network for teaming-map artifacts. Coverage caveat: FFATA reporting is self-reported quarterly by primes — top primes report most subs, mid-tier primes have notable gaps. For PRIME-level analysis use usas_search_individual_awards instead.",
         inputSchema: UsasSubawardsInput,
     },
     {
         name: "usas_search_expiring_contracts",
-        description: "Find federal contracts at agency × NAICS that expire within N months. Recompete radar — end-date sorted, top 10 by value. Use for 'what VA cloud contracts are up for recompete' or 'show 541512 contracts expiring in 6 months'.",
+        description: "RECOMPETE RADAR — find federal contracts at agency × NAICS that expire within N months. End-date sorted, top 10 by value. Use for 'what VA cloud contracts are up for recompete?' or 'show 541512 contracts expiring in 6 months'. Returns each award's generatedInternalId — pipe to usas_get_award_detail for the full period_of_performance + options + set-aside fields needed for capture briefs.",
         inputSchema: UsasExpiringInput,
     },
     {
@@ -299,27 +299,27 @@ const TOOLS = [
     },
     {
         name: "usas_search_psc_spending",
-        description: "Spending broken down by Product Service Code (PSC). Use for 'what PSC categories see the most $ at DoD' — surfaces market structure beyond NAICS (e.g. PSC R425 = engineering support services).",
+        description: "Spending broken down by Product Service Code (PSC). Use for CONTRACT market structure ('what PSC categories see the most $ at DoD?') — surfaces market segments beyond NAICS (e.g. PSC R425 = engineering support services, PSC D316 = IT-end user, PSC D318 = IT-data center). Sibling tool routing: NAICS-style market = this tool; geography = usas_search_state_spending; budget account = usas_search_federal_account_spending; buyer = usas_search_agency_spending; grants (not contracts) = usas_search_cfda_spending.",
         inputSchema: UsasCategorySpendingInput,
     },
     {
         name: "usas_search_state_spending",
-        description: "Spending broken down by state / territory. Use for 'where is the most federal $ flowing for NAICS 541512' — answers like 'VA $128B, MD $66B, DC $58B'.",
+        description: "Spending broken down by state / territory. Use for GEOGRAPHIC analysis ('where is federal $ flowing for NAICS 541512?') — typical answer pattern: 'VA $128B, MD $66B, DC $58B'. Sibling routing: state geography = this tool; market structure = usas_search_psc_spending; budget account = usas_search_federal_account_spending.",
         inputSchema: UsasCategorySpendingInput,
     },
     {
         name: "usas_search_cfda_spending",
-        description: "Spending broken down by CFDA grant program code. Use for grant analysis — 'top federal grant programs by $'. Note: CFDA is grants (award_type 02-05), not contracts. Use usas_search_psc_spending for contract market analysis.",
+        description: "Spending broken down by CFDA grant program code. FOR GRANTS ONLY — CFDA = financial assistance (award_type 02-05), NOT contracts. Use this for 'top federal grant programs by $'. For contract market analysis, switch to usas_search_psc_spending. For grant OPPORTUNITIES (not historical spending), use grants_search.",
         inputSchema: UsasCfdaInput,
     },
     {
         name: "usas_search_federal_account_spending",
-        description: "Spending broken down by federal account / Treasury Account Symbol (TAS). Use to map money to the actual budget line item (e.g. '036-0167 = Information Technology Systems, VA').",
+        description: "Spending broken down by federal account / Treasury Account Symbol (TAS). Use to map money to the actual BUDGET LINE ITEM (e.g. '036-0167 = Information Technology Systems, VA'). For BUDGET / appropriations questions ('which TAS funds X?'). For market segments use usas_search_psc_spending; for buyer breakdown use usas_search_agency_spending.",
         inputSchema: UsasCategorySpendingInput,
     },
     {
         name: "usas_search_agency_spending",
-        description: "Spending broken down by awarding agency. Use for 'which agencies spend the most on NAICS 541512' — top buyers by $.",
+        description: "Spending broken down by AWARDING AGENCY. Use for 'which agencies spend the most on NAICS 541512?' — top buyers by $. Sibling routing: BUYER = this tool; sub-agency / office breakdown = usas_search_subagency_spending; agency PROFILE / metadata = usas_get_agency_profile.",
         inputSchema: UsasAgencySpendingInput,
     },
     // ━━━ USAspending — Agency Profile (3) ━━━
@@ -341,7 +341,7 @@ const TOOLS = [
     // ━━━ USAspending — Recipient Profile (2) ━━━
     {
         name: "usas_search_recipients",
-        description: "Search USAspending recipient list with parent/child/recipient hierarchy. Returns recipients with id, duns, uei, level (P=parent, C=child, R=recipient), total_amount. Use for 'find the recipient_id for Booz Allen' before usas_get_recipient_profile.",
+        description: "Search USAspending recipient list with FULL parent/child/recipient hierarchy. Returns recipients with id, duns, uei, level (P=parent, C=child, R=recipient), total_amount. Use to FIND the recipient_id (e.g. 'find Booz Allen's parent recipient_id') before calling usas_get_recipient_profile. For QUICK fuzzy name resolution (without hierarchy), prefer usas_autocomplete_recipient — it's faster and works for anti-hallucination prep.",
         inputSchema: UsasSearchRecipientsInput,
     },
     {
@@ -352,17 +352,17 @@ const TOOLS = [
     // ━━━ USAspending — Reference / Autocomplete (4) ━━━
     {
         name: "usas_autocomplete_naics",
-        description: "Autocomplete NAICS codes by free-text. ANTI-HALLUCINATION GUARD — call this when the user mentions a NAICS theme but no specific code (e.g. 'computer systems design' → 541512). Avoids inventing NAICS codes.",
+        description: "Autocomplete NAICS codes by free-text. ANTI-HALLUCINATION GUARD — call this when the user mentions a NAICS theme but no specific code (e.g. 'computer systems design' → 541512, 'cloud computing' → 541512 or 518210). Returns top fuzzy matches with code + title. Use BEFORE any search tool that takes a NAICS code. For navigating PARENT/CHILD relationships (e.g. 'show all 6-digit NAICS under 5415'), use usas_naics_hierarchy instead.",
         inputSchema: UsasAutocompleteInput,
     },
     {
         name: "usas_autocomplete_recipient",
-        description: "Autocomplete recipient names. ANTI-HALLUCINATION — confirm a recipient's exact USAspending-canonical legal name before searching by name. Returns up to 10 fuzzy matches with UEI/DUNS where available.",
+        description: "Autocomplete recipient names — FAST fuzzy lookup. ANTI-HALLUCINATION GUARD — call this BEFORE any tool that filters by recipient name to confirm the exact USAspending-canonical legal name (e.g. 'Booz Allen' → 'BOOZ ALLEN HAMILTON INC'). Returns up to 10 matches with UEI/DUNS. For full hierarchy + total spend (parent vs child relationships), use usas_search_recipients instead.",
         inputSchema: UsasAutocompleteInput,
     },
     {
         name: "usas_naics_hierarchy",
-        description: "Navigate the NAICS hierarchy (2-digit → 4-digit → 6-digit). Returns parent/child relationships + active-contract count per code. Use to explore market scope ('what's under NAICS 541' = 'Professional, Scientific, and Technical Services').",
+        description: "Navigate the NAICS hierarchy tree (2-digit → 3-digit → 4-digit → 6-digit). Returns parent/child relationships + active-contract count per code. Use for MARKET SCOPE exploration ('what 6-digit NAICS exist under 5415?', 'how many active contracts under NAICS 541?'). For free-text → code resolution, use usas_autocomplete_naics instead.",
         inputSchema: UsasNaicsHierarchyInput,
     },
     {
@@ -378,7 +378,7 @@ const TOOLS = [
     // ━━━ Federal Register (3) ━━━
     {
         name: "fed_register_search_documents",
-        description: "Search Federal Register documents (proposed rules, final rules, notices, presidential documents) by query / agency / type / date range. Use for regulatory-context queries ('what new VA cybersecurity rules came out this quarter?').",
+        description: "Search Federal Register documents (proposed rules, final rules, notices, presidential documents) by query / agency / type / date range. Federal Register = NEW REGULATORY ACTIVITY (rules being made / changed / proposed) — time-sensitive, dated. Use for 'what new VA cybersecurity rules came out this quarter?' or 'when does the new FAR clause take effect?'. For CURRENT codified regulation text (rules as they stand right now), use ecfr_search instead.",
         inputSchema: FedRegSearchInput,
     },
     {
@@ -394,7 +394,7 @@ const TOOLS = [
     // ━━━ eCFR (2) ━━━
     {
         name: "ecfr_search",
-        description: "Full-text search across the entire CFR (Code of Federal Regulations). Use for compliance questions — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns excerpt + section path + ecfrUrl.",
+        description: "Full-text search across the entire CFR (Code of Federal Regulations) — the CURRENT codified regulation as it stands right now. Use for COMPLIANCE / CITATION questions — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns excerpt + section path + ecfrUrl. For NEW regulatory activity (rules being changed), use fed_register_search_documents instead. For 'what's in title X' overview, use ecfr_list_titles first.",
         inputSchema: EcfrSearchInput,
     },
     {
@@ -405,7 +405,7 @@ const TOOLS = [
     // ━━━ Grants.gov (2) ━━━
     {
         name: "grants_search",
-        description: "Search Grants.gov federal grant opportunities (financial assistance, distinct from contracts on SAM.gov). Filter by keyword / CFDA / agency / opportunity number. Default status = forecasted + posted.",
+        description: "Search Grants.gov federal GRANT opportunities (financial assistance — distinct from contracts on SAM.gov). Filter by keyword / CFDA / agency / opportunity number. Default status = forecasted + posted (active). For HISTORICAL grant SPENDING (not opportunities), use usas_search_cfda_spending. For CONTRACT opportunities (not grants), use sam_search_opportunities.",
         inputSchema: GrantsSearchInput,
     },
     {
