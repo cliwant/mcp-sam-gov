@@ -4,7 +4,7 @@
 
 ### **$4 trillion of public federal data, one `npm install` away.**
 
-The most comprehensive **keyless** MCP server for US federal contracting + spending + regulation. **36 tools** that work today, in any AI agent.
+The most comprehensive **keyless** MCP server for US federal contracting + spending + regulation. **41 tools** (incl. SBA size standards + composite workflow primitives) that work today, in any AI agent.
 
 [![npm](https://img.shields.io/npm/v/@cliwant/mcp-sam-gov?color=cb3837&label=%40cliwant%2Fmcp-sam-gov&logo=npm)](https://www.npmjs.com/package/@cliwant/mcp-sam-gov)
 [![mcp-registry](https://img.shields.io/badge/MCP%20Registry-active-2ea44f?logo=anthropic)](https://registry.modelcontextprotocol.io/v0/servers?search=cliwant)
@@ -50,7 +50,7 @@ The most comprehensive **keyless** MCP server for US federal contracting + spend
 |---|---|
 | GovWin: $30K-$100K/yr per seat | Free, MIT license |
 | API key registration → wait 24h → quota tier shopping | `npm install` → working in 60s |
-| 5 separate vendor APIs / scrapers | 1 unified surface, 36 tools |
+| 5 separate vendor APIs / scrapers | 1 unified surface, 41 tools |
 | LLMs hallucinate NAICS codes / agency names | Anti-hallucination autocomplete guards built-in |
 | Brittle scraping breaks weekly | Daily live smoke test ([badge above](#)) |
 | Procurement officer → IT ticket → 3-week wait | Claude Desktop double-click install |
@@ -72,8 +72,24 @@ The federal data this wraps is **public domain**. There is no good reason it sho
 | 📜 **Federal Register** | "What VA cybersecurity rules were published this quarter?" | 3 tools |
 | ⚖️ **Regulations (FAR/CFR)** | "Find FAR sections about SDVOSB set-aside" | 2 eCFR tools |
 | 🎓 **Federal grants** | "Cybersecurity grants posted in the last 30 days" | 2 Grants.gov tools |
+| 🏷 **SBA size standards** | "Do we qualify as small business under NAICS 541512 with $28M revenue?" | 2 SBA tools (v0.4) |
+| ⚡ **Composite workflows** | "Give me a capture brief on VA in NAICS 541512" | 3 workflow primitives (v0.4) |
 
-**36 tools total. Zero API keys. p50 latency 257ms, p95 766ms** (live benchmarks against federal APIs).
+**41 tools total. Zero API keys. p50 latency 257ms, p95 766ms** (live benchmarks against federal APIs).
+
+### Composite workflow primitives (new in v0.4)
+
+For the most common chains, single-call composite tools save ~6 round-trips per query:
+
+| Tool | What it does | Replaces |
+|---|---|---|
+| `workflow_capture_brief` | 6-section federal capture intelligence in 1 call | 6 chained calls |
+| `workflow_recompete_radar` | Contracts expiring + current incumbents + relevant rule changes | 4 chained calls |
+| `workflow_vendor_profile` | Full vendor picture — canonical name, hierarchy, recent awards, sub-award trail | 4 chained calls |
+
+Each composite handles partial failures gracefully (per-section `{ ok, data | error }` envelope) and synthesizes a one-line summary the agent can use as the "tl;dr".
+
+See [cookbook/](./cookbook/) for working recipes for each.
 
 ---
 
