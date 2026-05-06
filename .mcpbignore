@@ -1,0 +1,53 @@
+# .mcpbignore — files excluded from the .mcpb bundle.
+#
+# Keep the bundle minimal. Only ship runtime artifacts the
+# extension actually loads:
+#   - dist/      (compiled JS)
+#   - node_modules/ (runtime deps installed via prepare)
+#   - manifest.json
+#   - LICENSE
+#   - README.md (one is enough for in-extension display)
+
+# Source — not needed at runtime
+src/
+
+# Test artifacts
+smoke-test.mjs
+edge-case-test.mjs
+*.test.ts
+tests/
+
+# Tooling — not needed by Claude Desktop
+.tools/
+.github/
+.git/
+.gitignore
+.mcpbignore
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Marketing — not for Desktop users
+marketing/
+
+# Trilingual READMEs — keep only English for Desktop UI
+README.ko.md
+README.ja.md
+
+# Plugin manifest — only used by Claude Code, not Claude Desktop
+.claude-plugin/
+.mcp.json
+skills/
+
+# Server registry metadata — for npm/Registry, not the bundle
+server.json
+
+# Other
+CHANGELOG.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+*.tsbuildinfo
+*.log

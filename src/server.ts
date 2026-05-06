@@ -34,7 +34,7 @@ import * as workflows from "./workflows.js";
 import { toToolError } from "./errors.js";
 
 const SERVER_NAME = "mcp-sam-gov";
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.4.0";
 
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 
