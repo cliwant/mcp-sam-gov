@@ -371,6 +371,79 @@ const cases = [
         (env.data?.sampleSize === 0 || Array.isArray(env.data?.primes))) ||
       (!env.ok && !env.error.retryable),
   },
+  // ─── v0.5 — FedReg classifier (heuristic, deterministic) ───────
+  {
+    label: "FedReg classify: FAR amendment via CFR title 48 + 'FAR clause'",
+    name: "fed_register_classify",
+    args: {
+      title: "Federal Acquisition Regulation: FAR Case 2023-001; Amendment to FAR clause 52.204-21",
+      abstract: "DoD, GSA, and NASA propose to amend the Federal Acquisition Regulation.",
+      type: "PRORULE",
+      typeDisplay: "Proposed Rule",
+      cfrReferences: [{ title: "48", part: "52" }],
+    },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.primaryClass === "far_amendment" &&
+      (env.data.confidence === "high" || env.data.confidence === "medium"),
+  },
+  {
+    label: "FedReg classify: set-aside policy via small-business + 8(a)",
+    name: "fed_register_classify",
+    args: {
+      title: "Small Business Size Standards; 8(a) Business Development Program Updates",
+      abstract: "SBA proposes revisions to size standards for various NAICS codes.",
+      type: "PRORULE",
+      typeDisplay: "Proposed Rule",
+      agencies: [{ name: "Small Business Administration", slug: "small-business-administration" }],
+      cfrReferences: [{ title: "13", part: "121" }],
+    },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "set_aside_policy",
+  },
+  {
+    label: "FedReg classify: system retirement via 'sunset' in title",
+    name: "fed_register_classify",
+    args: {
+      title: "Sunset of the Legacy SAM.gov Reporting Portal; System Retirement Notice",
+      abstract: "The portal will be retired effective 2025-12-31. Users should migrate to the new system.",
+      type: "NOTICE",
+      typeDisplay: "Notice",
+    },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "system_retirement",
+  },
+  {
+    label: "FedReg classify: admin paperwork (Paperwork Reduction Act)",
+    name: "fed_register_classify",
+    args: {
+      title: "Agency Information Collection Activities; Submission to OMB; Paperwork Reduction Act 30-Day Notice",
+      abstract: "Standard PRA notice — request for comments on existing information collection.",
+      type: "NOTICE",
+      typeDisplay: "Notice",
+    },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "admin_paperwork",
+  },
+  {
+    label: "FedReg classify: generic rule change (no specific signal)",
+    name: "fed_register_classify",
+    args: {
+      title: "Final Rule: Amendments to Disposal Procedures",
+      abstract: "Final rule amending procedures for routine disposal.",
+      type: "RULE",
+      typeDisplay: "Rule",
+    },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "rule_change",
+  },
+  {
+    label: "FedReg classify: empty input → uncategorized",
+    name: "fed_register_classify",
+    args: { title: "", abstract: "" },
+    accept: ({ env }) =>
+      env.ok && env.data.primaryClass === "uncategorized" && env.data.score === 0,
+  },
 ];
 
 async function main() {

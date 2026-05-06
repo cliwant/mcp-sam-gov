@@ -32,6 +32,7 @@ import * as grants from "./grants.js";
 import * as sba from "./sba.js";
 import * as naicsXwalk from "./naics-crosswalk.js";
 import * as workflows from "./workflows.js";
+import * as fedRegClassifier from "./fedreg-classifier.js";
 import { toToolError } from "./errors.js";
 
 const SERVER_NAME = "mcp-sam-gov";
@@ -307,6 +308,58 @@ const SbaCheckQualificationInput = z.object({
     ),
 });
 
+// Federal Register classifier
+const FedRegClassifyInput = z.object({
+  documentNumber: z
+    .string()
+    .optional()
+    .describe(
+      "Federal Register document number to fetch + classify (e.g. '2024-12345'). Provide either documentNumber OR raw {title, abstract, type, agencies, cfrReferences}. Pass documentNumber for one-shot classification of a specific notice.",
+    ),
+  title: z.string().optional().describe("Document title (used if documentNumber omitted)."),
+  abstract: z.string().optional().describe("Document abstract (used if documentNumber omitted)."),
+  type: z
+    .enum(["RULE", "PRORULE", "NOTICE", "PRESDOCU", "UNKNOWN"])
+    .optional()
+    .describe("Federal Register type code (used if documentNumber omitted)."),
+  typeDisplay: z.string().optional().describe("Human display type (e.g. 'Rule', 'Notice')."),
+  agencies: z
+    .array(z.object({ name: z.string().optional(), slug: z.string().optional() }))
+    .optional()
+    .describe("Agency objects (used if documentNumber omitted)."),
+  cfrReferences: z
+    .array(
+      z.object({
+        title: z.union([z.string(), z.number()]).optional(),
+        part: z.string().optional(),
+        chapter: z.string().optional(),
+      }),
+    )
+    .optional()
+    .describe("CFR references (used if documentNumber omitted)."),
+});
+
+const FedRegClassifyBatchInput = z.object({
+  query: z.string().optional().describe("Free-text query (passed to fed_register_search_documents)."),
+  agencySlugs: z
+    .array(z.string())
+    .optional()
+    .describe("Federal Register agency slugs (e.g. ['small-business-administration'])."),
+  type: z
+    .enum(["RULE", "PRORULE", "NOTICE", "PRESDOCU"])
+    .optional()
+    .describe("Restrict to one Federal Register type."),
+  publicationDateFrom: z
+    .string()
+    .optional()
+    .describe("ISO date YYYY-MM-DD lower bound for publication."),
+  publicationDateTo: z
+    .string()
+    .optional()
+    .describe("ISO date YYYY-MM-DD upper bound for publication."),
+  perPage: z.number().int().min(1).max(50).optional().describe("Page size 1-50, default 20."),
+});
+
 // NAICS revision crosswalk
 const NaicsRevisionCheckInput = z.object({
   naicsCode: z
@@ -575,6 +628,18 @@ const TOOLS: ToolDef[] = [
     description:
       "List all Federal Register agencies with slugs (needed for fed_register_search_documents). Use to resolve 'what's the FedReg slug for Veterans Affairs?'",
     inputSchema: FedRegListAgenciesInput,
+  },
+  {
+    name: "fed_register_classify",
+    description:
+      "CLASSIFY a Federal Register notice into one of 5 federal-contracting-relevant classes: far_amendment / set_aside_policy / system_retirement / rule_change / admin_paperwork (or uncategorized). Heuristic + deterministic (no model call). Pass documentNumber for one-shot classification (auto-fetches), OR pass raw {title, abstract, type, agencies, cfrReferences} for in-batch use. Returns primaryClass + confidence (high/medium/low) + matched signals + per-class scores so the caller can quote evidence. Use to triage 'is this a real rule change or just a Paperwork Reduction Act notice?' before reading the full document.",
+    inputSchema: FedRegClassifyInput,
+  },
+  {
+    name: "fed_register_classify_batch",
+    description:
+      "Search Federal Register AND classify each result in one call. Wraps fed_register_search_documents → classifies every result via the same 5-class heuristic → returns documents[] + a histogram of class counts. Use for 'of the last 50 SBA notices, how many were real set-aside policy changes vs. paperwork?' Pass the same filters as fed_register_search_documents (query / agencySlugs / type / date range / perPage). Saves 1 round-trip vs. calling search + classify separately.",
+    inputSchema: FedRegClassifyBatchInput,
   },
 
   // ━━━ eCFR (2) ━━━
@@ -926,6 +991,55 @@ async function runTool(
       );
     case "fed_register_list_agencies":
       return await fedreg.listAgencies(FedRegListAgenciesInput.parse(args));
+    case "fed_register_classify": {
+      const input = FedRegClassifyInput.parse(args);
+      if (input.documentNumber) {
+        const doc = await fedreg.getDocument(input.documentNumber);
+        const classification = fedRegClassifier.classifyDocument({
+          title: doc.title,
+          abstract: doc.abstract,
+          type: doc.type,
+          typeDisplay: doc.typeDisplay,
+          agencies: doc.agencies,
+          cfrReferences: doc.cfrReferences,
+        });
+        return {
+          documentNumber: doc.documentNumber,
+          title: doc.title,
+          typeDisplay: doc.typeDisplay,
+          publicationDate: doc.publicationDate,
+          classification,
+        };
+      }
+      // Inline classification path
+      return fedRegClassifier.classifyDocument({
+        title: input.title,
+        abstract: input.abstract,
+        type: input.type,
+        typeDisplay: input.typeDisplay,
+        agencies: input.agencies,
+        cfrReferences: input.cfrReferences,
+      });
+    }
+    case "fed_register_classify_batch": {
+      const input = FedRegClassifyBatchInput.parse(args);
+      const search = await fedreg.searchDocuments({
+        query: input.query,
+        agencySlugs: input.agencySlugs,
+        type: input.type,
+        publicationDateFrom: input.publicationDateFrom,
+        publicationDateTo: input.publicationDateTo,
+        perPage: input.perPage ?? 20,
+      });
+      const batch = fedRegClassifier.classifyBatch(search.documents);
+      return {
+        totalRecords: search.totalRecords,
+        totalPages: search.totalPages,
+        sampleSize: batch.documents.length,
+        histogram: batch.histogram,
+        documents: batch.documents,
+      };
+    }
 
     // eCFR
     case "ecfr_search":
