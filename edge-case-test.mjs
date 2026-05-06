@@ -208,6 +208,85 @@ const cases = [
       (env.ok && Array.isArray(env.data.results)) ||
       (!env.ok && !env.error.retryable),
   },
+  // ─── v0.4 — SBA size standards ──────────────────────────────────
+  {
+    label: "SBA lookup NAICS 541512 (revenue cap $34M)",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "541512" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === true &&
+      env.data.entries?.[0]?.thresholdMillionsUsd === 34 &&
+      env.data.entries?.[0]?.type === "revenue",
+  },
+  {
+    label: "SBA lookup NAICS 541330 (multi-entry: $25.5M / $47M)",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "541330" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === true &&
+      env.data.entries?.length >= 2 &&
+      env.data.notes?.includes("ALTERNATIVES"),
+  },
+  {
+    label: "SBA lookup NAICS 541715 (employee-based: 1000-1500)",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "541715" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === true &&
+      env.data.entries?.some((e) => e.type === "employee"),
+  },
+  {
+    label: "SBA lookup NAICS not in table — returns hint to ecfr_search",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "999999" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === false &&
+      typeof env.data.hint === "string" &&
+      env.data.hint.includes("ecfr_search"),
+  },
+  {
+    label: "SBA lookup malformed NAICS",
+    name: "sba_size_standard_lookup",
+    args: { naicsCode: "abc" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.found === false &&
+      env.data.hint?.includes("6 digits"),
+  },
+  {
+    label: "SBA qualification check: $20M firm under 541512 ($34M cap) → qualifies",
+    name: "sba_check_size_qualification",
+    args: { naicsCode: "541512", averageAnnualRevenueUsd: 20_000_000 },
+    accept: ({ env }) => env.ok && env.data.qualifies === true,
+  },
+  {
+    label: "SBA qualification check: $50M firm under 541512 ($34M cap) → fails",
+    name: "sba_check_size_qualification",
+    args: { naicsCode: "541512", averageAnnualRevenueUsd: 50_000_000 },
+    accept: ({ env }) => env.ok && env.data.qualifies === false,
+  },
+  {
+    label: "SBA qualification check: 541330 firm at $40M qualifies under military entry",
+    name: "sba_check_size_qualification",
+    args: { naicsCode: "541330", averageAnnualRevenueUsd: 40_000_000 },
+    // Default $25.5M FAILS, but military $47M PASSES → qualifies (any-of)
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.qualifies === true &&
+      env.data.byEntry?.some((b) => b.qualifies === true) &&
+      env.data.byEntry?.some((b) => b.qualifies === false),
+  },
+  {
+    label: "SBA qualification check: no metric provided → indeterminate",
+    name: "sba_check_size_qualification",
+    args: { naicsCode: "541512" },
+    accept: ({ env }) =>
+      env.ok && env.data.qualifies === "indeterminate",
+  },
 ];
 
 async function main() {

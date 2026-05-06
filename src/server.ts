@@ -29,6 +29,7 @@ import * as usas from "./usaspending.js";
 import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
+import * as sba from "./sba.js";
 import { toToolError } from "./errors.js";
 
 const SERVER_NAME = "mcp-sam-gov";
@@ -275,6 +276,35 @@ const SamLookupOrgInput = z.object({
   organizationId: z.string().describe("SAM.gov federal-organization id (numeric)"),
 });
 
+// SBA size standards (13 CFR §121.201)
+const SbaLookupInput = z.object({
+  naicsCode: z
+    .string()
+    .describe(
+      "6-digit NAICS code (e.g. '541512'). Use usas_autocomplete_naics first if you don't have a code.",
+    ),
+});
+
+const SbaCheckQualificationInput = z.object({
+  naicsCode: z
+    .string()
+    .describe("6-digit NAICS code under which the firm is bidding."),
+  averageAnnualRevenueUsd: z
+    .number()
+    .nonnegative()
+    .optional()
+    .describe(
+      "Firm's 3-year average annual revenue in USD. Required if the NAICS uses revenue-based size standard.",
+    ),
+  averageEmployees: z
+    .number()
+    .nonnegative()
+    .optional()
+    .describe(
+      "Firm's 12-month average employee count. Required if the NAICS uses employee-based size standard.",
+    ),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -502,6 +532,20 @@ const TOOLS: ToolDef[] = [
     description:
       "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
     inputSchema: EcfrListTitlesInput,
+  },
+
+  // ━━━ SBA size standards (2) ━━━
+  {
+    name: "sba_size_standard_lookup",
+    description:
+      "Look up the SBA small-business size standard for a given 6-digit NAICS code (13 CFR §121.201, effective 2023-03-17). Returns the cap as either revenue ($M, 3-year avg) or employee count, plus the citation. Some NAICS have MULTIPLE entries (alternative caps for sub-industries — e.g. NAICS 541330 Engineering Services has $25.5M default but $47M for military/marine work) — qualifying under ANY one is enough. Coverage: ~50 most-used services/IT/R&D NAICS in v0.4 (full eCFR fallback noted in response). Use BEFORE bidding to confirm 'small business' eligibility.",
+    inputSchema: SbaLookupInput,
+  },
+  {
+    name: "sba_check_size_qualification",
+    description:
+      "Check whether a firm qualifies as 'small business' under SBA size standards for a given NAICS, given its avg annual revenue OR employee count. Returns qualifies: true/false/indeterminate plus per-entry breakdown. Handles multi-entry NAICS correctly (firm qualifies if ANY one alternative cap is satisfied). Provide averageAnnualRevenueUsd for revenue-based standards, averageEmployees for employee-based. Source: 13 CFR §121.201 effective 2023-03-17.",
+    inputSchema: SbaCheckQualificationInput,
   },
 
   // ━━━ Grants.gov (2) ━━━
@@ -795,6 +839,20 @@ async function runTool(
       return await grants.searchGrants(GrantsSearchInput.parse(args));
     case "grants_get_opportunity":
       return await grants.getGrant(GrantsGetInput.parse(args));
+
+    // SBA size standards
+    case "sba_size_standard_lookup": {
+      const { naicsCode } = SbaLookupInput.parse(args);
+      return sba.lookupSizeStandard(naicsCode);
+    }
+    case "sba_check_size_qualification": {
+      const input = SbaCheckQualificationInput.parse(args);
+      return sba.checkQualification({
+        naicsCode: input.naicsCode,
+        averageAnnualRevenueUsd: input.averageAnnualRevenueUsd,
+        averageEmployees: input.averageEmployees,
+      });
+    }
 
     default:
       throw new Error(`Unknown tool: ${name}`);
