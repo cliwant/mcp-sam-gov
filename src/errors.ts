@@ -29,6 +29,14 @@ export type ErrorKind =
   | "invalid_input"
   /** API returned 200 but we couldn't parse / shape doesn't match. */
   | "schema_drift"
+  /** Notice/award/document ID has wrong shape (length/format). Don't retry. */
+  | "id_format_invalid"
+  /** Date string (e.g. fiscal year, publication date) is unparseable or out of supported range. Don't retry. */
+  | "date_invalid"
+  /** Caller passed an agency abbreviation/partial name that didn't resolve. Hint: call lookup tool first. */
+  | "agency_not_resolved"
+  /** Caller passed a NAICS code that's retired or never existed. Hint: call autocomplete first. */
+  | "naics_invalid"
   /** Anything else. Don't retry. */
   | "unknown";
 
@@ -41,8 +49,14 @@ export type ToolError = {
   retryAfterSeconds?: number;
   /** Echo upstream HTTP status when available — helps debug. */
   upstreamStatus?: number;
-  /** Endpoint that failed — for ops. */
+  /** Endpoint / tool name that failed — for ops + hint resolution. */
   upstreamEndpoint?: string;
+  /**
+   * Actionable next-step suggestion the calling agent can use to recover.
+   * Names a SIBLING TOOL or input fix where applicable.
+   * Example: "Notice IDs are 32-char hex. Use sam_search_opportunities to get a real noticeId first."
+   */
+  hint?: string;
 };
 
 export type ToolResult<T> =
@@ -186,35 +200,149 @@ function parseRetryAfter(value: string | null): number {
 }
 
 /**
+ * Compute a tool-specific actionable hint for an error.
+ *
+ * Maps (ErrorKind, tool name) -> next-step suggestion. Names sibling
+ * tools the agent should call first, or input format corrections.
+ * Returns undefined when no canonical hint applies.
+ */
+export function hintFor(
+  kind: ErrorKind,
+  toolOrEndpoint: string | undefined,
+): string | undefined {
+  if (!toolOrEndpoint) return undefined;
+  const t = toolOrEndpoint;
+
+  // Tool-specific hints — common kinds for ID-bearing tools.
+  // 400 / 404 / id-shape errors all benefit from the same "use the
+  // search tool first" hint.
+  const isIdShapeError =
+    kind === "not_found" ||
+    kind === "id_format_invalid" ||
+    kind === "invalid_input";
+  if (isIdShapeError) {
+    if (t.startsWith("sam_get_opportunity") || t.startsWith("sam_fetch_description")) {
+      return "Notice IDs are 32-char hex. Use sam_search_opportunities first to get a real noticeId.";
+    }
+    if (t === "usas_get_award_detail") {
+      return "Award IDs are generatedInternalId from usas_search_individual_awards (e.g. CONT_AWD_*). Run that search first.";
+    }
+    if (t === "usas_get_recipient_profile") {
+      return "Recipient IDs come from usas_search_recipients (e.g. 'ed02855e-...-P'). Search by name first.";
+    }
+    if (t === "fed_register_get_document") {
+      return "Federal Register doc numbers look like 'YYYY-NNNNN' (e.g. '2026-08333'). Use fed_register_search_documents to find a real one.";
+    }
+    if (t === "grants_get_opportunity") {
+      return "Grants.gov opportunity IDs are numeric strings from grants_search.";
+    }
+    if (t === "sam_lookup_organization") {
+      return "Organization IDs come from sam_get_opportunity (organizationHierarchy field) — fetch a notice first.";
+    }
+    if (t.startsWith("usas_get_agency_")) {
+      return "Toptier codes are 3-4 digits from usas_lookup_agency (e.g. '036' for VA). Call lookup first.";
+    }
+  }
+
+  if (kind === "agency_not_resolved") {
+    return "Agency name didn't match a USAspending canonical entry. Call usas_lookup_agency('VA' / 'DHS' / etc.) FIRST to get the canonical toptier name.";
+  }
+  if (kind === "naics_invalid") {
+    return "NAICS code didn't resolve. Call usas_autocomplete_naics with a free-text description first (e.g. 'cloud computing' → 541512).";
+  }
+  if (kind === "invalid_input") {
+    if (t.startsWith("usas_") && t.includes("agency")) {
+      return "If you used an abbreviation, call usas_lookup_agency first to get the canonical name.";
+    }
+  }
+
+  // Generic hints for transport-layer kinds
+  if (kind === "rate_limited") {
+    return "USAspending / SAM.gov enforce per-minute caps. Wait `retryAfterSeconds` and retry. Aggressive callers should reduce concurrency.";
+  }
+  if (kind === "upstream_unavailable") {
+    return "Federal endpoints are sometimes flaky. Most retries complete in <800ms. If repeated, check status.usaspending.gov or sam.gov status.";
+  }
+  if (kind === "schema_drift") {
+    return "Upstream API shape changed. Daily smoke CI catches this within 24h — please open an issue at github.com/cliwant/mcp-sam-gov/issues.";
+  }
+  return undefined;
+}
+
+/**
+ * Attach a hint to an existing ToolError if one is available.
+ */
+export function withHint(err: ToolError): ToolError {
+  if (err.hint) return err;
+  const hint = hintFor(err.kind, err.upstreamEndpoint);
+  return hint ? { ...err, hint } : err;
+}
+
+/**
  * Convert any thrown error into a serializable ToolError envelope.
  * Used at the dispatcher boundary — server.ts catches everything
  * and wraps before returning to the MCP client.
+ *
+ * The `endpointLabel` here is the MCP TOOL NAME (e.g.
+ * "fed_register_get_document") which `hintFor()` uses to resolve
+ * tool-specific hints. The carrier's stored upstreamEndpoint is
+ * the API-level identifier (e.g. "federal-register:documents/...")
+ * — we keep that for ops/debug but always recompute hints from the
+ * outer tool name.
  */
 export function toToolError(e: unknown, endpointLabel?: string): ToolError {
-  if (e instanceof ToolErrorCarrier) return e.toolError;
+  if (e instanceof ToolErrorCarrier) {
+    const inner = e.toolError;
+    // Recompute hint using the outer tool name (not the inner upstream endpoint)
+    // so sibling-tool routing hints fire correctly.
+    if (!inner.hint) {
+      const hint = hintFor(inner.kind, endpointLabel);
+      if (hint) return { ...inner, hint };
+    }
+    return inner;
+  }
   if (e instanceof Error) {
     const msg = e.message;
+    // Zod validation errors → invalid_input with shape hint
+    if (e.name === "ZodError" || /zod/i.test(msg) || /Required|Expected/.test(msg)) {
+      return withHintFromTool({
+        kind: "invalid_input",
+        message: `Input validation failed for ${endpointLabel ?? "tool"}: ${msg}`,
+        retryable: false,
+        upstreamEndpoint: endpointLabel,
+      }, endpointLabel);
+    }
     // Common fetch timeout signature
     if (e.name === "TimeoutError" || /timeout|aborted/i.test(msg)) {
-      return {
+      return withHintFromTool({
         kind: "upstream_unavailable",
         message: `${endpointLabel ?? "upstream"} timed out: ${msg}`,
         retryable: true,
         retryAfterSeconds: 30,
         upstreamEndpoint: endpointLabel,
-      };
+      }, endpointLabel);
     }
-    return {
+    return withHintFromTool({
       kind: "unknown",
       message: msg,
       retryable: false,
       upstreamEndpoint: endpointLabel,
-    };
+    }, endpointLabel);
   }
-  return {
+  return withHintFromTool({
     kind: "unknown",
     message: String(e),
     retryable: false,
     upstreamEndpoint: endpointLabel,
-  };
+  }, endpointLabel);
+}
+
+/**
+ * Apply hint using an explicit tool-name override (separate from
+ * upstreamEndpoint, which may be an API-level identifier).
+ */
+function withHintFromTool(err: ToolError, toolName: string | undefined): ToolError {
+  if (err.hint) return err;
+  const hint = hintFor(err.kind, toolName);
+  return hint ? { ...err, hint } : err;
 }
