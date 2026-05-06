@@ -130,6 +130,84 @@ const cases = [
     args: { ncode: "541512", limit: 50 },
     accept: ({ env }) => env.ok && env.data.opportunities?.length <= 50,
   },
+  // ─── v0.4 — hint-bearing errors + new edge cases ──────────────
+  {
+    label: "negative limit rejected by Zod",
+    name: "sam_search_opportunities",
+    args: { ncode: "541512", limit: -5 },
+    accept: ({ env }) =>
+      !env.ok && env.error.kind === "invalid_input" && !env.error.retryable,
+  },
+  {
+    label: "limit over maximum rejected by Zod",
+    name: "sam_search_opportunities",
+    args: { ncode: "541512", limit: 9999 },
+    accept: ({ env }) =>
+      !env.ok && env.error.kind === "invalid_input" && !env.error.retryable,
+  },
+  {
+    label: "empty noticeId graceful",
+    name: "sam_get_opportunity",
+    args: { noticeId: "" },
+    accept: ({ env }) =>
+      (env.ok && env.data?.found === false) ||
+      (!env.ok && !env.error.retryable),
+  },
+  {
+    label: "HTML tag in query (no crash, no injection)",
+    name: "sam_search_opportunities",
+    args: { query: "<script>alert(1)</script>", limit: 2 },
+    accept: ({ env }) => env.ok && Array.isArray(env.data.opportunities),
+  },
+  {
+    label: "SQL-injection style input safely passes through",
+    name: "usas_autocomplete_naics",
+    args: { searchText: "'; DROP TABLE awards; --", limit: 3 },
+    accept: ({ env }) => env.ok && Array.isArray(env.data.naics),
+  },
+  {
+    label: "whitespace-only query handled",
+    name: "sam_search_opportunities",
+    args: { query: "   ", limit: 2 },
+    accept: ({ env }) => env.ok && Array.isArray(env.data.opportunities),
+  },
+  {
+    label: "FedReg bad doc ID returns hint",
+    name: "fed_register_get_document",
+    args: { documentNumber: "totally-not-a-real-doc-id" },
+    accept: ({ env }) =>
+      !env.ok &&
+      env.error.kind === "not_found" &&
+      typeof env.error.hint === "string" &&
+      env.error.hint.includes("YYYY-NNNNN"),
+  },
+  {
+    label: "USAspending award detail bad ID handled (hint or null)",
+    name: "usas_get_award_detail",
+    args: { generatedInternalId: "totally-not-a-real-award-id-XYZ" },
+    accept: ({ env }) =>
+      // Accept either: ok:true with null sentinel, OR ok:false with hint pointing to the search tool
+      (env.ok && env.data === null) ||
+      (!env.ok && typeof env.error.hint === "string"),
+  },
+  {
+    label: "USAspending recipient profile bad ID returns hint",
+    name: "usas_get_recipient_profile",
+    args: { recipientId: "totally-not-a-real-recipient-id" },
+    accept: ({ env }) =>
+      !env.ok &&
+      typeof env.error.hint === "string" &&
+      env.error.hint.includes("usas_search_recipients"),
+  },
+  {
+    label: "eCFR title=0 (out of range)",
+    name: "ecfr_search",
+    args: { query: "test", titleNumber: 0, perPage: 1 },
+    // Either Zod rejects (invalid_input) OR upstream returns empty (ok:true)
+    accept: ({ env }) =>
+      (env.ok && Array.isArray(env.data.results)) ||
+      (!env.ok && !env.error.retryable),
+  },
 ];
 
 async function main() {
