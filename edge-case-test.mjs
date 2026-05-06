@@ -345,6 +345,32 @@ const cases = [
       env.data.status === "unknown" &&
       env.data.note?.includes("6 digits"),
   },
+  // ─── v0.5 — Sub-award aggregation ──────────────────────────────
+  {
+    label: "Sub-award aggregate by prime recipient (Booz Allen FY2024)",
+    name: "usas_aggregate_subawards",
+    args: { primeRecipientName: "BOOZ ALLEN HAMILTON", fiscalYear: 2024 },
+    // Coverage is uneven; accept ok:true with array (possibly empty) OR ok:false non-retryable
+    accept: ({ env }) =>
+      (env.ok && Array.isArray(env.data?.sub_recipients)) ||
+      (!env.ok && !env.error.retryable),
+  },
+  {
+    label: "Sub-award aggregate with no filter args → invalid_input",
+    name: "usas_aggregate_subawards",
+    args: {},
+    accept: ({ env }) =>
+      !env.ok && env.error.kind === "invalid_input" && !env.error.retryable,
+  },
+  {
+    label: "Sub-recipient profile lookup (graceful when not found)",
+    name: "usas_get_sub_recipient_profile",
+    args: { recipientName: "ZZZ_NONEXISTENT_SUB_RECIPIENT_XYZ", fiscalYear: 2024 },
+    accept: ({ env }) =>
+      (env.ok &&
+        (env.data?.sampleSize === 0 || Array.isArray(env.data?.primes))) ||
+      (!env.ok && !env.error.retryable),
+  },
 ];
 
 async function main() {

@@ -183,6 +183,154 @@ export async function searchSubawards(args) {
         })),
     };
 }
+/**
+ * Aggregate sub-awards by sub-recipient. Returns top N sub-recipients
+ * across the filter slice, with each sub-recipient's total sub-award
+ * amount + count + distinct prime count.
+ *
+ * Use cases:
+ *   - "Top subs to Booz Allen FY2025" → pass primeRecipientName
+ *   - "Top subs in NAICS 541512 FY2025" → pass naics
+ *   - "Top subs in NAICS 541512 at VA FY2025" → pass naics + agency
+ *
+ * Implementation: fetches up to 100 line-item subawards (USAspending
+ * doesn't have a server-side aggregation endpoint for sub-awards),
+ * then aggregates client-side by `Sub-Award Recipient` name.
+ *
+ * Coverage caveat (FFATA): sub-award reporting is self-reported by
+ * primes quarterly. Top primes typically report ~80% of subs;
+ * mid-tier primes have notable gaps. Aggregates surface relative
+ * patterns, not exhaustive totals.
+ */
+export async function aggregateSubawards(args) {
+    const filters = buildFilters(args);
+    if (args.primeRecipientName) {
+        filters.recipient_search_text = [args.primeRecipientName];
+    }
+    const json = await postUsas("search/spending_by_award", {
+        filters,
+        fields: [
+            "Sub-Award Recipient",
+            "Sub-Award Amount",
+            "Sub-Award Date",
+        ],
+        limit: 100,
+        page: 1,
+        subawards: true,
+    });
+    // Aggregate client-side
+    const agg = new Map();
+    for (const r of json.results ?? []) {
+        const name = r["Sub-Award Recipient"] ?? "(name redacted)";
+        const amount = r["Sub-Award Amount"] ?? 0;
+        const primeId = r.prime_award_generated_internal_id ?? "";
+        const existing = agg.get(name);
+        if (existing) {
+            existing.totalAmount += amount;
+            existing.subAwardCount += 1;
+            if (primeId)
+                existing.primeAwardIds.add(primeId);
+        }
+        else {
+            agg.set(name, {
+                name,
+                totalAmount: amount,
+                subAwardCount: 1,
+                primeAwardIds: new Set(primeId ? [primeId] : []),
+            });
+        }
+    }
+    const sorted = Array.from(agg.values())
+        .map((x) => ({
+        subRecipient: x.name,
+        totalAmount: x.totalAmount,
+        subAwardCount: x.subAwardCount,
+        distinctPrimeAwards: x.primeAwardIds.size,
+    }))
+        .sort((a, b) => b.totalAmount - a.totalAmount)
+        .slice(0, args.limit ?? 20);
+    return {
+        aggregateBy: "sub_recipient",
+        coverageWindow: "first 100 sub-awards matching filter; aggregates relative ranking, not exhaustive totals",
+        sampleSize: (json.results ?? []).length,
+        sub_recipients: sorted,
+    };
+}
+/**
+ * Sub-recipient profile: given a firm name, return their federal
+ * sub-contracting footprint — distinct primes that used them,
+ * total sub-revenue, NAICS distribution, FY context.
+ *
+ * Use case: "What's IBM's federal sub-tier presence in FY2025?"
+ *
+ * Implementation: searches sub-awards where Sub-Award Recipient
+ * matches, aggregates client-side by prime.
+ */
+export async function getSubRecipientProfile(args) {
+    const filters = buildFilters({
+        agency: args.agency,
+        fiscalYear: args.fiscalYear,
+    });
+    // We can't filter by sub-recipient name server-side; pull a wider
+    // sample then filter client-side.
+    filters.recipient_search_text = [args.subRecipientName];
+    const json = await postUsas("search/spending_by_award", {
+        filters,
+        fields: [
+            "Sub-Award Recipient",
+            "Sub-Award Amount",
+            "Sub-Award Date",
+            "Recipient Name",
+            "Awarding Agency",
+        ],
+        limit: 100,
+        page: 1,
+        subawards: true,
+    });
+    const target = args.subRecipientName.toLowerCase();
+    const matched = (json.results ?? []).filter((r) => (r["Sub-Award Recipient"] ?? "").toLowerCase().includes(target));
+    const primesAgg = new Map();
+    let totalSubAmount = 0;
+    for (const r of matched) {
+        const primeName = r["Recipient Name"] ?? "(unknown prime)";
+        const amount = r["Sub-Award Amount"] ?? 0;
+        const primeId = r.prime_award_generated_internal_id ?? "";
+        totalSubAmount += amount;
+        const existing = primesAgg.get(primeName);
+        if (existing) {
+            existing.totalSubAmount += amount;
+            existing.subAwardCount += 1;
+            if (primeId)
+                existing.primeAwardIds.add(primeId);
+        }
+        else {
+            primesAgg.set(primeName, {
+                primeName,
+                totalSubAmount: amount,
+                subAwardCount: 1,
+                primeAwardIds: new Set(primeId ? [primeId] : []),
+            });
+        }
+    }
+    const primesSorted = Array.from(primesAgg.values())
+        .map((x) => ({
+        primeName: x.primeName,
+        totalSubAmount: x.totalSubAmount,
+        subAwardCount: x.subAwardCount,
+        distinctPrimeAwards: x.primeAwardIds.size,
+    }))
+        .sort((a, b) => b.totalSubAmount - a.totalSubAmount)
+        .slice(0, args.limit ?? 15);
+    return {
+        subRecipient: args.subRecipientName,
+        fiscalYear: args.fiscalYear,
+        sampleSize: matched.length,
+        coverageCaveat: "Based on first 100 sub-awards matching the recipient search text. FFATA reporting is self-reported quarterly by primes; coverage is uneven (top primes ~80%, mid-tier ~40%).",
+        totalSubAmount,
+        distinctPrimes: primesAgg.size,
+        primes: primesSorted,
+    };
+}
 // ─── Per-award detail ─────────────────────────────────────────────
 export async function getAwardDetail(generatedInternalId) {
     try {

@@ -316,6 +316,24 @@ const NaicsRevisionCheckInput = z.object({
     ),
 });
 
+// Sub-award aggregation + sub-recipient profile
+const UsasAggregateSubawardsInput = z.object({
+  primeRecipientName: z.string().optional(),
+  agency: z.string().optional(),
+  naics: z.string().optional(),
+  fiscalYear: z.number().int().min(2007).optional(),
+  limit: z.number().min(1).max(50).optional(),
+});
+
+const UsasGetSubRecipientProfileInput = z.object({
+  subRecipientName: z
+    .string()
+    .describe("Sub-recipient firm name (full or partial — matches via search text)"),
+  agency: z.string().optional(),
+  fiscalYear: z.number().int().min(2007).optional(),
+  limit: z.number().min(1).max(50).optional(),
+});
+
 // Workflow primitives (composite tools)
 const WorkflowCaptureBriefInput = z.object({
   agency: z
@@ -571,6 +589,20 @@ const TOOLS: ToolDef[] = [
     description:
       "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
     inputSchema: EcfrListTitlesInput,
+  },
+
+  // ━━━ Sub-award aggregation (2) ━━━
+  {
+    name: "usas_aggregate_subawards",
+    description:
+      "AGGREGATE sub-awards by sub-recipient name across a filter slice. Use for 'top subs to Booz Allen FY2025' (pass primeRecipientName), 'top sub-recipients in NAICS 541512' (pass naics), or 'top subs at VA in NAICS 541512' (pass agency + naics). Returns each sub-recipient's total sub-award amount + count + distinct prime count, sorted descending. Differs from usas_search_subawards: that tool returns LINE ITEMS; this tool aggregates by sub-recipient. Coverage: aggregates from first 100 matching FFATA filings (primes self-report quarterly; coverage uneven).",
+    inputSchema: UsasAggregateSubawardsInput,
+  },
+  {
+    name: "usas_get_sub_recipient_profile",
+    description:
+      "Given a SUB-RECIPIENT firm name, return their federal sub-contracting footprint: distinct primes that used them, total sub-revenue, count of distinct prime awards. Use for 'how does IBM appear as a sub in federal data?' or 'what's our competitor's sub-tier exposure?'. For PRIME profile (firm as prime contractor), use workflow_vendor_profile or usas_get_recipient_profile instead. FFATA coverage caveat applies.",
+    inputSchema: UsasGetSubRecipientProfileInput,
   },
 
   // ━━━ NAICS revision crosswalk (1) ━━━
@@ -906,6 +938,12 @@ async function runTool(
       return await grants.searchGrants(GrantsSearchInput.parse(args));
     case "grants_get_opportunity":
       return await grants.getGrant(GrantsGetInput.parse(args));
+
+    // Sub-award aggregation + sub-recipient profile
+    case "usas_aggregate_subawards":
+      return await usas.aggregateSubawards(UsasAggregateSubawardsInput.parse(args));
+    case "usas_get_sub_recipient_profile":
+      return await usas.getSubRecipientProfile(UsasGetSubRecipientProfileInput.parse(args));
 
     // NAICS revision crosswalk
     case "naics_revision_check": {
