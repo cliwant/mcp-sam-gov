@@ -287,6 +287,64 @@ const cases = [
     accept: ({ env }) =>
       env.ok && env.data.qualifies === "indeterminate",
   },
+  // ─── v0.5 — NAICS revision crosswalk ───────────────────────────
+  {
+    label: "NAICS 541512 stable in 2022",
+    name: "naics_revision_check",
+    args: { naicsCode: "541512" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.valid_in_2022 === true &&
+      env.data.status === "stable",
+  },
+  {
+    label: "NAICS 511210 renumbered to 513210 in 2022",
+    name: "naics_revision_check",
+    args: { naicsCode: "511210" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.valid_in_2022 === false &&
+      env.data.status === "renumbered" &&
+      env.data.canonical2022 === "513210",
+  },
+  {
+    label: "NAICS 519130 split in 2022 → multiple successors",
+    name: "naics_revision_check",
+    args: { naicsCode: "519130" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.valid_in_2022 === false &&
+      env.data.status === "split" &&
+      Array.isArray(env.data.splitInto) &&
+      env.data.splitInto.length >= 2,
+  },
+  {
+    label: "NAICS 541510 retired in 2007",
+    name: "naics_revision_check",
+    args: { naicsCode: "541510" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.valid_in_2022 === false &&
+      env.data.status === "retired",
+  },
+  {
+    label: "NAICS not in curation set returns unknown + Census fallback hint",
+    name: "naics_revision_check",
+    args: { naicsCode: "999999" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.status === "unknown" &&
+      env.data.note?.includes("Census"),
+  },
+  {
+    label: "NAICS revision check rejects malformed input",
+    name: "naics_revision_check",
+    args: { naicsCode: "abc" },
+    accept: ({ env }) =>
+      env.ok &&
+      env.data.status === "unknown" &&
+      env.data.note?.includes("6 digits"),
+  },
 ];
 
 async function main() {

@@ -26,6 +26,7 @@ import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
 import * as sba from "./sba.js";
+import * as naicsXwalk from "./naics-crosswalk.js";
 import * as workflows from "./workflows.js";
 import { toToolError } from "./errors.js";
 const SERVER_NAME = "mcp-sam-gov";
@@ -246,6 +247,12 @@ const SbaCheckQualificationInput = z.object({
         .optional()
         .describe("Firm's 12-month average employee count. Required if the NAICS uses employee-based size standard."),
 });
+// NAICS revision crosswalk
+const NaicsRevisionCheckInput = z.object({
+    naicsCode: z
+        .string()
+        .describe("6-digit NAICS code to verify. Returns validity in NAICS 2022 + any historical change (renumbered / split / retired)."),
+});
 // Workflow primitives (composite tools)
 const WorkflowCaptureBriefInput = z.object({
     agency: z
@@ -449,6 +456,12 @@ const TOOLS = [
         name: "ecfr_list_titles",
         description: "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
         inputSchema: EcfrListTitlesInput,
+    },
+    // ━━━ NAICS revision crosswalk (1) ━━━
+    {
+        name: "naics_revision_check",
+        description: "Check whether a NAICS code is valid in NAICS 2022 and surface any historical change (2002 → 2007 → 2012 → 2017 → 2022 revisions). Returns validity flag + status (stable / renumbered / split / retired) + canonical 2022 successor if changed. Catches old codes still cited in legacy SOWs (e.g. 541510 retired in 2007, 511210 renumbered to 513210 in 2022, 519130 split in 2022). Use BEFORE running USAspending or SAM.gov searches with any code from a pre-2022 contract document. Coverage v0.5: ~60 federal-contracting-relevant codes; falls back to Census concordance hint for unknown codes. For free-text → code resolution, use usas_autocomplete_naics instead.",
+        inputSchema: NaicsRevisionCheckInput,
     },
     // ━━━ Workflow primitives — composite tools (3) ━━━
     {
@@ -701,6 +714,11 @@ async function runTool(name, args, sam) {
             return await grants.searchGrants(GrantsSearchInput.parse(args));
         case "grants_get_opportunity":
             return await grants.getGrant(GrantsGetInput.parse(args));
+        // NAICS revision crosswalk
+        case "naics_revision_check": {
+            const { naicsCode } = NaicsRevisionCheckInput.parse(args);
+            return naicsXwalk.checkNaicsRevision(naicsCode);
+        }
         // Workflow primitives (composite tools)
         case "workflow_capture_brief": {
             const input = WorkflowCaptureBriefInput.parse(args);
