@@ -30,8 +30,8 @@ import * as naicsXwalk from "./naics-crosswalk.js";
 import * as workflows from "./workflows.js";
 import * as fedRegClassifier from "./fedreg-classifier.js";
 import { toToolError } from "./errors.js";
-const SERVER_NAME = "mcp-sam-gov";
-const SERVER_VERSION = "0.4.0";
+export const SERVER_NAME = "mcp-sam-gov";
+export const SERVER_VERSION = "0.4.0";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
     query: z.string().optional().describe("Free-text title query"),
@@ -341,7 +341,7 @@ const WorkflowVendorProfileInput = z.object({
         .describe("Vendor name or partial — e.g. 'Booz Allen', 'Accenture Federal'"),
     fiscalYear: z.number().int().min(2007).optional(),
 });
-const TOOLS = [
+export const TOOLS = [
     // ━━━ SAM.gov (5) ━━━
     {
         name: "sam_search_opportunities",
@@ -636,7 +636,7 @@ async function main() {
     await server.connect(transport);
     console.error(`[mcp-sam-gov] v${SERVER_VERSION} listening on stdio (${TOOLS.length} tools).`);
 }
-async function runTool(name, args, sam) {
+export async function runTool(name, args, sam) {
     switch (name) {
         // SAM.gov
         case "sam_search_opportunities": {
@@ -890,7 +890,7 @@ async function runTool(name, args, sam) {
 /**
  * Hand-rolled Zod → JSON Schema converter (subset we use).
  */
-function zodToJsonSchema(schema) {
+export function zodToJsonSchema(schema) {
     const def = schema._def;
     const tn = def.typeName;
     const description = schema.description;

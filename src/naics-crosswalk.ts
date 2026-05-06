@@ -65,6 +65,14 @@ type CrosswalkFile = {
 
 let cached: CrosswalkFile | undefined;
 
+/**
+ * Inject data directly (used by the Cloudflare Worker build, which has no filesystem).
+ * Call once at startup before any lookup; subsequent calls are no-ops if cache is set.
+ */
+export function _injectData(data: CrosswalkFile): void {
+  cached = data;
+}
+
 function load(): CrosswalkFile {
   if (cached) return cached;
   const here = dirname(fileURLToPath(import.meta.url));

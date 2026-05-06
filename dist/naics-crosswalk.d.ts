@@ -34,6 +34,32 @@ export type NaicsRevisionCheck = {
     /** Source citation URL (Census concordance). */
     citation: string;
 };
+type ChangeEntry = {
+    from?: string;
+    to?: string;
+    newCode?: string | null;
+    newTitle?: string;
+    oldCode?: string;
+    oldTitle?: string;
+    changeType: "renumbered" | "split" | "retired" | "renumbered_from" | "split_origin" | "stable";
+    note: string;
+    splitInto?: string[];
+};
+type CrosswalkFile = {
+    $source: string;
+    $citationUrl: string;
+    $officialDocs: Record<string, string>;
+    $lastUpdatedAt: string;
+    $coverage: string;
+    $notes: string[];
+    stable2022Codes: string[];
+    changes: Record<string, ChangeEntry>;
+};
+/**
+ * Inject data directly (used by the Cloudflare Worker build, which has no filesystem).
+ * Call once at startup before any lookup; subsequent calls are no-ops if cache is set.
+ */
+export declare function _injectData(data: CrosswalkFile): void;
 /**
  * Check whether a NAICS code is valid in NAICS 2022, and surface
  * any historical change.
@@ -62,4 +88,5 @@ export declare function listKnownChanges(): Array<{
     changeType: string;
     note: string;
 }>;
+export {};
 //# sourceMappingURL=naics-crosswalk.d.ts.map

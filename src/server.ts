@@ -35,8 +35,8 @@ import * as workflows from "./workflows.js";
 import * as fedRegClassifier from "./fedreg-classifier.js";
 import { toToolError } from "./errors.js";
 
-const SERVER_NAME = "mcp-sam-gov";
-const SERVER_VERSION = "0.4.0";
+export const SERVER_NAME = "mcp-sam-gov";
+export const SERVER_VERSION = "0.4.0";
 
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 
@@ -423,7 +423,7 @@ type ToolDef = {
   inputSchema: z.ZodTypeAny;
 };
 
-const TOOLS: ToolDef[] = [
+export const TOOLS: ToolDef[] = [
   // ━━━ SAM.gov (5) ━━━
   {
     name: "sam_search_opportunities",
@@ -787,7 +787,7 @@ async function main() {
   );
 }
 
-async function runTool(
+export async function runTool(
   name: string,
   args: Record<string, unknown>,
   sam: SamGovClient,
@@ -1101,7 +1101,7 @@ async function runTool(
 /**
  * Hand-rolled Zod → JSON Schema converter (subset we use).
  */
-function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
+export function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
   const def = (schema as unknown as { _def: { typeName: string } })._def;
   const tn = def.typeName;
   const description = (schema as unknown as { description?: string }).description;

@@ -16,5 +16,20 @@
  * var to unlock higher SAM.gov rate limits + archives older than
  * ~12 months — optional).
  */
+import { z } from "zod";
+import { SamGovClient } from "./sam-gov/index.js";
+export declare const SERVER_NAME = "mcp-sam-gov";
+export declare const SERVER_VERSION = "0.4.0";
+type ToolDef = {
+    name: string;
+    description: string;
+    inputSchema: z.ZodTypeAny;
+};
+export declare const TOOLS: ToolDef[];
+export declare function runTool(name: string, args: Record<string, unknown>, sam: SamGovClient): Promise<unknown>;
+/**
+ * Hand-rolled Zod → JSON Schema converter (subset we use).
+ */
+export declare function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown>;
 export {};
 //# sourceMappingURL=server.d.ts.map

@@ -44,6 +44,20 @@ export type SizeStandardLookup = {
     hint: string;
     citation: string;
 };
+type StandardsFile = {
+    $source: string;
+    $effectiveDate: string;
+    $citationUrl: string;
+    $officialTableUrl: string;
+    $coverage: string;
+    $notes: string;
+    standards: Record<string, SizeStandardEntry[]>;
+};
+/**
+ * Inject data directly (used by the Cloudflare Worker build, which has no filesystem).
+ * Call once at startup before any lookup; subsequent calls are no-ops if cache is set.
+ */
+export declare function _injectData(data: StandardsFile): void;
 /**
  * Look up the SBA size standard for a given 6-digit NAICS code.
  *
@@ -87,4 +101,5 @@ export declare function checkQualification(args: {
     reason: string;
     citation: string;
 };
+export {};
 //# sourceMappingURL=sba.d.ts.map

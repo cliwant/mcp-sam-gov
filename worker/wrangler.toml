@@ -1,0 +1,15 @@
+name = "mcp-sam-gov-demo"
+main = "index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Worker-side defaults. Override via the Cloudflare dashboard or `wrangler deploy --var KEY:VALUE`.
+# No secrets are required — the demo only exposes keyless upstreams.
+
+[observability]
+enabled = true
+
+# CPU budget tuning: most tool calls are 1-2 upstream fetches with ~500ms p50.
+# 30s ceiling avoids edge cases where USAspending is slow.
+[limits]
+cpu_ms = 30000

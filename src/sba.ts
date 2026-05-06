@@ -63,6 +63,14 @@ type StandardsFile = {
 
 let cached: StandardsFile | undefined;
 
+/**
+ * Inject data directly (used by the Cloudflare Worker build, which has no filesystem).
+ * Call once at startup before any lookup; subsequent calls are no-ops if cache is set.
+ */
+export function _injectData(data: StandardsFile): void {
+  cached = data;
+}
+
 function load(): StandardsFile {
   if (cached) return cached;
   // src/sba.ts -> src/data/sba-size-standards.json

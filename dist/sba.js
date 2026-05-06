@@ -25,6 +25,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 let cached;
+/**
+ * Inject data directly (used by the Cloudflare Worker build, which has no filesystem).
+ * Call once at startup before any lookup; subsequent calls are no-ops if cache is set.
+ */
+export function _injectData(data) {
+    cached = data;
+}
 function load() {
     if (cached)
         return cached;
