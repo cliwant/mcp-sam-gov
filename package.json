@@ -1,8 +1,8 @@
 {
   "name": "@cliwant/mcp-sam-gov",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "mcpName": "io.github.cliwant/mcp-sam-gov",
-  "description": "Most comprehensive keyless MCP server for US federal contracting + spending + regulation: SAM.gov, USAspending, Federal Register, eCFR, Grants.gov. 41 tools incl. SBA size standards + composite workflow primitives, no API key, plug into Claude Desktop / Claude Code / Codex CLI / Cursor / Continue / Gemini CLI.",
+  "description": "Most comprehensive keyless MCP server for US federal contracting + spending + regulation: SAM.gov, USAspending, Federal Register, eCFR, Grants.gov. 46 tools incl. SBA size standards + NAICS 2022 crosswalk + FedReg 5-class classifier + sub-award FFATA aggregation + composite workflow primitives, no API key, plug into Claude Desktop / Claude Code / Codex CLI / Cursor / Continue / Gemini CLI.",
   "keywords": [
     "mcp",
     "model-context-protocol",

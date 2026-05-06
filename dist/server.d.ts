@@ -19,7 +19,7 @@
 import { z } from "zod";
 import { SamGovClient } from "./sam-gov/index.js";
 export declare const SERVER_NAME = "mcp-sam-gov";
-export declare const SERVER_VERSION = "0.4.0";
+export declare const SERVER_VERSION = "0.5.0";
 type ToolDef = {
     name: string;
     description: string;

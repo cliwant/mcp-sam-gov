@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-06 (NAICS crosswalk + sub-award FFATA + FedReg classifier + hosted demo)
+
+### Added — 5 new tools (41 → 46 total)
+
+**NAICS revision crosswalk (1)** — catch retired / renumbered codes before they tank a search.
+- `naics_revision_check` — given a 6-digit NAICS, returns validity in NAICS 2022 + status
+  (`stable` / `renumbered` / `split` / `retired`) + canonical 2022 successor when changed.
+  Catches the 2022 Information-sector reorg (`511210` → `513210`, `519130` split into 3,
+  the `511xxx` publishers → `513xxx` renumbering) plus the historic `541510` retirement.
+  Coverage v0.5: ~60 federal-contracting-relevant codes; falls back to Census concordance
+  hint for unknown codes.
+
+**Sub-award aggregation (2)** — turn raw FFATA line items into actionable answers.
+- `usas_aggregate_subawards` — aggregate sub-awards by sub-recipient name across any
+  filter slice (prime, NAICS, agency, fiscal year). Returns sub-recipients sorted by
+  total sub-award amount + count + distinct prime count.
+- `usas_get_sub_recipient_profile` — pivot on a sub-recipient firm name; returns the
+  primes that used them + their total sub-revenue exposure. Useful for "how does Acme
+  Tech appear as a sub in federal data?" Coverage caveat surfaced in response (FFATA
+  primes self-report quarterly; coverage uneven).
+
+**Federal Register classifier (2)** — heuristic, deterministic, citeable.
+- `fed_register_classify` — map any FedReg notice to one of 5 federal-contracting-
+  relevant classes: `far_amendment` / `set_aside_policy` / `system_retirement` /
+  `rule_change` / `admin_paperwork`. Pass `documentNumber` for one-shot (auto-fetches)
+  or raw `{title, abstract, type, agencies, cfrReferences}` for in-batch use. Returns
+  primaryClass + confidence + matched signals + per-class scores.
+- `fed_register_classify_batch` — search Federal Register AND classify each result in
+  one call. Returns documents[] + a class histogram so callers can immediately answer
+  "of the last 50 SBA notices, how many were paperwork vs. real rules?"
+
+### Added — hosted demo
+
+**Cloudflare Worker** at `worker/` — HTTP-JSON facade exposing a 9-tool keyless
+subset (USAspending lookups + Federal Register + SBA + NAICS) so external evaluators
+can curl the surface without installing the npm package. Deploy via `cd worker && npm
+run deploy`. Documented in `docs/HOSTED-DEMO.md`. Plain HTTP, not Streamable-HTTP MCP
+yet — that's a deliberate next step.
+
+### Added — cookbook recipes 6-10
+
+Five more end-to-end recipes in `cookbook/`:
+- `06-federal-ai-landscape.md` — multi-agency AI/ML spending pull
+- `07-set-aside-pipeline.md` — small-business set-aside discovery flow
+- `08-multi-agency-comparison.md` — cross-agency NAICS comparison
+- `09-far-clause-research.md` — clause lookup via eCFR + FedReg
+- `10-daily-snapshot.md` — daily diff routine for active opportunities
+
+### Changed
+
+- `sba.ts` and `naics-crosswalk.ts` grow an `_injectData()` escape hatch so the
+  Cloudflare Worker build can populate the loader cache without `node:fs`. Node path
+  unchanged.
+- `server.ts` exports `TOOLS`, `runTool`, `zodToJsonSchema`, `SERVER_NAME`,
+  `SERVER_VERSION` for downstream reuse.
+- 21 tool descriptions tuned with sibling-tool routing hints (continued from v0.4).
+- Edge tests: 35 → 44.
+- README.ko.md / README.ja.md tool counts updated 36 → 46.
+
 ## [0.4.0] — 2026-04-30 (foundation hardening + composite tools)
 
 ### Added — 5 new tools (36 → 41 total)

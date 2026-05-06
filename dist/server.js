@@ -31,7 +31,7 @@ import * as workflows from "./workflows.js";
 import * as fedRegClassifier from "./fedreg-classifier.js";
 import { toToolError } from "./errors.js";
 export const SERVER_NAME = "mcp-sam-gov";
-export const SERVER_VERSION = "0.4.0";
+export const SERVER_VERSION = "0.5.0";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
     query: z.string().optional().describe("Free-text title query"),

@@ -1,7 +1,7 @@
 # @cliwant/mcp-sam-gov
 
 > **가장 포괄적인 keyless 연방 데이터 MCP 서버.**
-> SAM.gov + USAspending + Federal Register + eCFR + Grants.gov 36개 도구.
+> SAM.gov + USAspending + Federal Register + eCFR + Grants.gov 46개 도구.
 > API 키 / 등록 / 가입 불필요. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
 
 [English README](./README.md) · [日本語 README](./README.ja.md)
@@ -22,7 +22,7 @@
 | ⚖️ **규정 (FAR/CFR)** | "SDVOSB 가산점 관련 FAR 조항 찾아줘" | eCFR 2개 |
 | 🎓 **연방 보조금** | "최근 30일 사이버보안 grant" | Grants.gov 2개 |
 
-**총 36개 도구. API 키 0개. p50 257ms, p95 766ms** (실제 federal API 벤치마크).
+**총 46개 도구. API 키 0개. p50 257ms, p95 766ms** (실제 federal API 벤치마크).
 
 ---
 
@@ -49,7 +49,7 @@ PowerShell, npm 등 필요 없음.
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP 서버 + Claude 가 36개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
+MCP 서버 + Claude 가 46개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
 
 ### 🔵 경로 3 — Codex / Cursor / Continue / Gemini 등 수동 설치
 
@@ -157,9 +157,9 @@ npm install --omit=dev
 
 ---
 
-## 36개 도구 카탈로그
+## 46개 도구 카탈로그
 
-전체 도구 목록 + 입력 schema 는 영문 README 의 collapsible 섹션 참조: https://github.com/cliwant/mcp-sam-gov#tool-catalog-36-tools
+전체 도구 목록 + 입력 schema 는 영문 README 의 collapsible 섹션 참조: https://github.com/cliwant/mcp-sam-gov#tool-catalog-46-tools
 
 ---
 
