@@ -286,6 +286,19 @@ export class SamGovClient {
                 url.searchParams.append("set_aside", sa);
         if (filters.state)
             url.searchParams.set("pop_state", filters.state.toUpperCase());
+        // Notice-type facet — VERIFIED LIVE (2026-07): the keyless list endpoint
+        // filters SERVER-SIDE on `notice_type` (comma-joined multi-value). Codes:
+        // r=Sources Sought, p=Presolicitation, s=Special Notice, k=Combined
+        // Synopsis/Solicitation, i=Intent to Bundle, u=Justification(J&A),
+        // o=Solicitation, a=Award. (e.g. notice_type=r → 3,641; r,p,s → 10,603;
+        // p&naics=541512 → 8 — counts drop correctly and every row matches.) The
+        // keyless param is `notice_type` — NOT `ptype` (the AUTHENTICATED endpoint's
+        // name, sent by buildAuthSearchUrl). ADDITIVE: existing callers that don't
+        // set `ptype` (e.g. sam_search_opportunities) send nothing here, so their
+        // behavior is UNCHANGED. Powers the pre-solicitation shaping radar
+        // (sam_search_shaping).
+        if (filters.ptype?.length)
+            url.searchParams.set("notice_type", filters.ptype.join(","));
         const r = await this.fetchImpl(url.toString(), {
             headers: this.publicHeaders(),
         });
@@ -405,6 +418,57 @@ export class SamGovClient {
         if (this.logger.warn)
             this.logger.warn(`[mcp-sam-gov/sam-gov] ${msg}`, err);
     }
+}
+// ─── Shaping-radar pure helpers (exported for offline unit testing) ──────────
+/**
+ * Whole days from `now` to an ISO `responseDeadline`. Returns null when the
+ * deadline is missing/unparseable (a null day count is COUNTED, never hidden —
+ * the shaping radar surfaces deadline-less notices rather than dropping them).
+ * Uses UTC-midnight flooring on both ends so the count is a stable whole number
+ * regardless of intraday time-of-day. Negative when the deadline is in the past.
+ */
+export function daysUntilResponse(deadline, now = new Date()) {
+    if (!deadline)
+        return null;
+    const then = new Date(deadline);
+    const t = then.getTime();
+    if (Number.isNaN(t))
+        return null;
+    const dayMs = 86_400_000;
+    const nowUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const thenUtc = Date.UTC(then.getUTCFullYear(), then.getUTCMonth(), then.getUTCDate());
+    return Math.round((thenUtc - nowUtc) / dayMs);
+}
+/**
+ * Client-side response-deadline WINDOW filter for the shaping radar.
+ *
+ * The keyless SGS feed IGNORES rdlfrom/rdlto (VERIFIED LIVE 2026-07: a
+ * notice_type=r query with rdlfrom/rdlto returns the same total and deadlines
+ * outside the requested window), so a response-deadline window MUST be applied
+ * over the already-fetched page and DISCLOSED (the server flags
+ * `_meta.filtersDropped:["responseDeadline"]`). Bounds are inclusive ISO dates.
+ *
+ * A notice with NO deadline is EXCLUDED from a windowed query (it cannot be
+ * proven inside the window) — the caller discloses this. When neither bound is
+ * given, the page is returned unchanged (no window requested).
+ */
+export function applyResponseDeadlineWindow(notices, from, to) {
+    if (!from && !to)
+        return notices;
+    const fromMs = from ? Date.parse(from) : null;
+    const toMs = to ? Date.parse(to) : null;
+    return notices.filter((n) => {
+        if (!n.responseDeadline)
+            return false; // no deadline ⇒ not provably in-window
+        const ms = Date.parse(n.responseDeadline);
+        if (Number.isNaN(ms))
+            return false;
+        if (fromMs !== null && !Number.isNaN(fromMs) && ms < fromMs)
+            return false;
+        if (toMs !== null && !Number.isNaN(toMs) && ms > toMs)
+            return false;
+        return true;
+    });
 }
 // ─── Helpers ────────────────────────────────────────────────────
 function formatSamDate(date) {

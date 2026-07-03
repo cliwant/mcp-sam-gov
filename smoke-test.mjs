@@ -116,6 +116,30 @@ const tests = [
     verify: (r) => r.totalRecords >= 0 && Array.isArray(r.opportunities),
   },
   {
+    // Pre-solicitation shaping radar happy path. Default noticeType ['r','p','s']
+    // returns notices, each carrying noticeTypeCode (r/p/s/…) + daysUntilResponse
+    // (number OR null, never fabricated), and totalRecords is the true
+    // server-side count for the type+naics filter.
+    name: "sam_search_shaping",
+    args: { ncode: "541512", limit: 5 },
+    verify: (r) =>
+      r.totalRecords >= 0 &&
+      Array.isArray(r.notices) &&
+      Array.isArray(r.noticeTypesRequested) &&
+      r.noticeTypesRequested.join(",") === "r,p,s" &&
+      // Every returned notice is inside the requested shaping window and carries
+      // the shaped keys the tool promises.
+      r.notices.every(
+        (n) =>
+          typeof n.noticeId === "string" &&
+          ["r", "p", "s"].includes(n.noticeTypeCode) &&
+          (n.daysUntilResponse === null ||
+            typeof n.daysUntilResponse === "number") &&
+          n.naics === null && // keyless list nulls it (honest)
+          typeof n.uiLink === "string",
+      ),
+  },
+  {
     name: "sam_get_opportunity",
     args: { noticeId: "FETCH_FROM_PRIOR" },
     chain: { from: "sam_search_opportunities", path: "opportunities[0].noticeId" },
