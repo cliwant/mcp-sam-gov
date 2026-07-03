@@ -174,7 +174,9 @@ export async function sizeStandard(args) {
     }
     else if (assetLimitUSD !== null) {
         // Asset-only standard (financial institutions — e.g. Commercial Banking).
-        standardType = "receipts+assets";
+        // Labeled "assets" (NOT "receipts+assets") — these rows carry NO receipts
+        // component, so the label must not imply one.
+        standardType = "assets";
         threshold = assetLimitUSD;
         unit = "USD assets";
     }

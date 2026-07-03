@@ -44,7 +44,7 @@ export type SizeStandardResult = {
     description: string | null;
     sector: string | null;
     subsector: string | null;
-    standardType: "receipts" | "employees" | "receipts+assets" | "unknown";
+    standardType: "receipts" | "employees" | "assets" | "receipts+assets" | "unknown";
     /** Receipts/assets → DOLLARS (revenueLimit*1e6); employees → the count. */
     threshold: number | null;
     unit: "USD annual receipts" | "employees" | "USD assets" | null;

@@ -40,6 +40,7 @@ import { buildMeta } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail } from "./dist/usaspending.js";
 import { checkExclusions } from "./dist/integrity.js";
+import { sizeStandard } from "./dist/sba.js";
 
 // ─── Tiny assertion kit (mirrors edge-case-test.mjs conventions) ──────────
 let PASS = 0;
@@ -780,6 +781,46 @@ async function selfCheck() {
     `expected exactly 1 intentional failure, saw ${sawExpectedFailure ? 1 : "≠1"}`);
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 6. sba_size_standard classification + not-found (fetch-mock; one cached fetch)
+// ══════════════════════════════════════════════════════════════════════════
+async function testSbaSizeStandard() {
+  section("6. sba_size_standard classification + not-found (fetch-mock)");
+  // One crafted naics.json covering all three standard types + an absent id.
+  // sizeStandard caches the array (5-min reference cache), so a SINGLE fetch
+  // serves every lookup below — deterministic, no cross-case cache interference.
+  const NAICS = [
+    { id: "541512", description: "Computer Systems Design Services", sectorDescription: "P", subsectorDescription: "P", revenueLimit: 34, assetLimit: null, employeeCountLimit: null, footnote: null },
+    { id: "336411", description: "Aircraft Manufacturing", sectorDescription: "M", subsectorDescription: "M", revenueLimit: null, assetLimit: null, employeeCountLimit: 1500, footnote: null },
+    { id: "522110", description: "Commercial Banking", sectorDescription: "F", subsectorDescription: "F", revenueLimit: null, assetLimit: 850, employeeCountLimit: null, footnote: null },
+  ];
+  await withFetch(
+    (u) => (u.includes("naics.json") ? mockResponse({ status: 200, json: NAICS }) : failClosed()()),
+    async () => {
+      const receipts = (await sizeStandard({ naics: "541512" })).data;
+      ok("receipts NAICS ⇒ type receipts, threshold $34M (×1e6), unit receipts",
+        receipts.standardType === "receipts" && receipts.threshold === 34_000_000 &&
+        receipts.unit === "USD annual receipts" && receipts.revenueLimitUSD === 34_000_000,
+        JSON.stringify(receipts));
+      const emp = (await sizeStandard({ naics: "336411" })).data;
+      ok("employee NAICS ⇒ type employees, threshold 1500 (NOT ×1e6), unit employees",
+        emp.standardType === "employees" && emp.threshold === 1500 && emp.unit === "employees",
+        JSON.stringify(emp));
+      // The assets-only fix: MUST be "assets", never "receipts+assets" (there is
+      // no receipts prong on a financial asset standard).
+      const assets = (await sizeStandard({ naics: "522110" })).data;
+      ok("assets-only NAICS ⇒ type 'assets' (never 'receipts+assets'), unit USD assets, revenueLimitUSD null",
+        assets.standardType === "assets" && assets.unit === "USD assets" &&
+        assets.revenueLimitUSD === null && assets.assetLimitUSD === 850_000_000,
+        JSON.stringify(assets));
+      const missing = (await sizeStandard({ naics: "999999" })).data;
+      ok("unknown NAICS ⇒ found:false, no fabricated standard",
+        missing.found === false && missing.threshold === null && missing.standardType === "unknown",
+        JSON.stringify(missing));
+    },
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
@@ -794,6 +835,7 @@ async function main() {
   await testGetAwardDetail();
   await testAnalyzeIncumbent();
   await testCheckExclusions();
+  await testSbaSizeStandard();
 
   // Prove the harness bites.
   await selfCheck();

@@ -119,7 +119,7 @@ export type SizeStandardResult = {
   description: string | null;
   sector: string | null;
   subsector: string | null;
-  standardType: "receipts" | "employees" | "receipts+assets" | "unknown";
+  standardType: "receipts" | "employees" | "assets" | "receipts+assets" | "unknown";
   /** Receipts/assets → DOLLARS (revenueLimit*1e6); employees → the count. */
   threshold: number | null;
   unit: "USD annual receipts" | "employees" | "USD assets" | null;
@@ -234,7 +234,9 @@ export async function sizeStandard(args: { naics: string }) {
     unit = "employees";
   } else if (assetLimitUSD !== null) {
     // Asset-only standard (financial institutions — e.g. Commercial Banking).
-    standardType = "receipts+assets";
+    // Labeled "assets" (NOT "receipts+assets") — these rows carry NO receipts
+    // component, so the label must not imply one.
+    standardType = "assets";
     threshold = assetLimitUSD;
     unit = "USD assets";
   } else {
