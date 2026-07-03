@@ -70,16 +70,42 @@ async function callTool(name, args) {
   } catch {
     envelope = { ok: false, raw: text };
   }
-  // Unwrap structured envelope: tools now return { ok: true, data }
-  // or { ok: false, error }. Pass through .data for the verify fns.
+  // Unwrap structured envelope: tools now return { ok: true, data, _meta }
+  // or { ok: false, error }. Pass through .data for the verify fns; expose
+  // _meta separately so we can assert the completeness/provenance contract.
   const parsed =
     envelope && typeof envelope === "object" && "ok" in envelope
       ? envelope.ok
         ? envelope.data
         : envelope
       : envelope;
+  const meta =
+    envelope && typeof envelope === "object" && envelope.ok
+      ? envelope._meta
+      : undefined;
   const isError = envelope && envelope.ok === false;
-  return { ms, isError: !!r.result?.isError || isError, parsed, raw: r };
+  return { ms, isError: !!r.result?.isError || isError, parsed, meta, raw: r };
+}
+
+// Assert a success response carries a well-formed `_meta` (spec §2.1).
+// Returns null on success, or a short reason string on failure.
+function checkMeta(meta) {
+  if (meta == null || typeof meta !== "object") return "_meta missing";
+  if (typeof meta.source !== "string" || meta.source.length === 0)
+    return "_meta.source not a non-empty string";
+  if (typeof meta.keylessMode !== "boolean") return "_meta.keylessMode not boolean";
+  if (typeof meta.complete !== "boolean") return "_meta.complete not boolean";
+  if (typeof meta.truncated !== "boolean") return "_meta.truncated not boolean";
+  if (typeof meta.returned !== "number") return "_meta.returned not number";
+  if (!(meta.totalAvailable === null || typeof meta.totalAvailable === "number"))
+    return "_meta.totalAvailable not number|null";
+  for (const k of ["filtersApplied", "filtersDropped", "fieldsUnavailable", "notes"]) {
+    if (!Array.isArray(meta[k])) return `_meta.${k} not an array`;
+  }
+  // Core §2.1 invariant: complete ⟺ not truncated AND no dropped filters.
+  if (meta.complete && (meta.truncated || meta.filtersDropped.length > 0))
+    return "_meta.complete violates invariant (truncated or filtersDropped non-empty)";
+  return null;
 }
 
 const tests = [
@@ -359,6 +385,14 @@ async function run() {
     }
     if (!ok) {
       console.log(`✗ ${test.name} — verify failed (${result.ms}ms); payload preview: ${JSON.stringify(result.parsed).slice(0, 200)}`);
+      fail++;
+      continue;
+    }
+
+    // Every success response must now carry a well-formed `_meta` (§2.1).
+    const metaProblem = checkMeta(result.meta);
+    if (metaProblem) {
+      console.log(`✗ ${test.name} — ${metaProblem}; _meta: ${JSON.stringify(result.meta).slice(0, 200)}`);
       fail++;
       continue;
     }
