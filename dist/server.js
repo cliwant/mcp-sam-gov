@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 44 keyless tools wrapping every public federal-contracting data
+ * 45 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -28,6 +28,7 @@ import * as grants from "./grants.js";
 import * as pricing from "./pricing.js";
 import * as integrity from "./integrity.js";
 import * as gao from "./gao.js";
+import * as gsaCsv from "./gsa-csv.js";
 import { toToolError } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 const SERVER_NAME = "mcp-sam-gov";
@@ -488,8 +489,16 @@ const GaoProtestInput = z.object({
         .optional()
         .describe("Fetch each decision's page to fill agency/outcome/solicitation/PDF (default true). Set false for a fast feed-only list (those fields will be null)."),
 });
+// GSA daily-CSV keyless backbone — batch page-completing enrichment
+const SamLookupNoticeFieldsInput = z.object({
+    noticeIds: z
+        .array(z.string())
+        .min(1)
+        .max(100)
+        .describe("1..100 32-char hex noticeIds (the ids returned by sam_search_opportunities) to enrich in ONE batch. Completes a whole search page's null naics/setAside/place-of-performance/deadline/type from the cached GSA daily CSV. OFF BY DEFAULT — enable by setting SAM_GOV_CSV_CACHE (a cache dir) or SAM_GOV_ENABLE_CSV=1."),
+});
 const TOOLS = [
-    // ━━━ SAM.gov (5) ━━━
+    // ━━━ SAM.gov (6) ━━━
     {
         name: "sam_search_opportunities",
         description: "Search SAM.gov federal contracting opportunities (keyless HAL). Returns up to 50 active notices with title, agency, NAICS, noticeId. Use for discovery — narrow with NAICS / agency / set-aside / state.",
@@ -514,6 +523,11 @@ const TOOLS = [
         name: "sam_lookup_organization",
         description: "Resolve a SAM.gov federal-organization id to its canonical fullParentPathName (e.g. 'VETERANS AFFAIRS, DEPARTMENT OF.VETERANS AFFAIRS, DEPARTMENT OF.245-NETWORK CONTRACT OFFICE 5'). Use when sam_get_opportunity returned only an organizationId.",
         inputSchema: SamLookupOrgInput,
+    },
+    {
+        name: "sam_lookup_notice_fields",
+        description: "BATCH-complete a sam_search_opportunities page in ONE call from the GSA daily bulk CSV (keyless). The keyless HAL list endpoint NULLS each result's naics/setAside/place-of-performance/responseDeadline/type; this tool returns those fields for 1..100 noticeIds at once (naicsCode, setAside + setAsideCode, popState/popCity/popZip/popCountry, responseDeadline, type, active, title) from a cached on-disk CSV index, instead of one sam_get_opportunity detail call per notice. OFF BY DEFAULT (no forced 226 MB download): enable by setting SAM_GOV_CSV_CACHE (a cache dir) or SAM_GOV_ENABLE_CSV=1 — when disabled the tool returns data.enabled:false + a structured 'how to enable' note (never fake data, no network). HONEST: _meta carries the CSV last-modified + index build time (freshness), a noticeId absent from the current snapshot returns found:false + nulls with an explicit 'not in current CSV snapshot' disclosure (never faked), a cold first call discloses 'index warming', and a download/parse failure is a structured retryable error (never a silent empty). setAsideCode (e.g. 'SBA') matches sam_get_opportunity's setAside; the snapshot can lag live by up to ~24h — confirm real-time-critical fields with sam_get_opportunity.",
+        inputSchema: SamLookupNoticeFieldsInput,
     },
     // ━━━ USAspending — Awards & Recipients (10) ━━━
     {
@@ -807,11 +821,17 @@ function synthesizeDefaultMeta(toolName, sam) {
     // subsystems (never the keyed opportunities API), so they are always keyless.
     const isWage = toolName === "sam_search_wage_determinations" ||
         toolName === "sam_get_wage_rates";
-    const isSam = toolName.startsWith("sam_") && !isWage;
+    // sam_lookup_notice_fields also carries a `sam_` prefix but is served from the
+    // keyless GSA daily CSV (never the keyed opportunities API) — always keyless.
+    const isGsaCsv = toolName === "sam_lookup_notice_fields";
+    const isSam = toolName.startsWith("sam_") && !isWage && !isGsaCsv;
     const keylessMode = isSam ? sam.isKeyless : true;
     let source;
     if (isWage) {
         source = "sam.gov wage-determinations (keyless)";
+    }
+    else if (isGsaCsv) {
+        source = "gsa.gov daily bulk CSV (keyless)";
     }
     else if (toolName.startsWith("gsa_")) {
         source = "api.gsa.gov CALC v3 (keyless)";
@@ -996,6 +1016,8 @@ async function runTool(name, args, sam) {
                 level: org?.level,
             };
         }
+        case "sam_lookup_notice_fields":
+            return await gsaCsv.lookupNoticeFields(SamLookupNoticeFieldsInput.parse(args));
         // USAspending — Awards & Recipients
         case "usas_search_awards":
             return await usas.searchAwards(UsasFiltersBase.parse(args));
