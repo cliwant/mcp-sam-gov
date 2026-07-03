@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 49 keyless tools wrapping every public federal-contracting data
+ * 50 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -424,6 +424,44 @@ const FarClauseLookupInput = z.object({
     .optional()
     .describe(
       "Point-in-time codification date (YYYY-MM-DD). Defaults to Title 48's current up_to_date_as_of.",
+    ),
+});
+
+// FAR compliance matrix (composes far_clause_lookup over a cited-clause list)
+const FarComplianceMatrixInput = z.object({
+  clauses: z
+    .array(
+      z
+        .string()
+        .regex(
+          // Same clause grammar as FarClauseLookupInput (optional FAR/DFARS prefix).
+          /^\s*(?:d?far[s]?\b[\s.:#-]*)?\d{1,3}\.\d{3,4}-\d{1,4}\s*$/i,
+          "each clause must be a FAR/DFARS clause like '52.212-4', '252.204-7012', or '52.204-25' (an optional 'FAR '/'DFARS ' prefix is allowed).",
+        ),
+    )
+    .min(1)
+    .max(25)
+    .describe(
+      "The FAR/DFARS clause numbers a solicitation cites (e.g. from its 52.252-2 'Clauses Incorporated by Reference' list), 1–25. Deduped case-insensitively. e.g. ['52.212-4','52.204-25','252.204-7012'].",
+    ),
+  asOfDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "asOfDate must be YYYY-MM-DD.")
+    .optional()
+    .describe(
+      "Point-in-time codification date (YYYY-MM-DD) — typically the solicitation issue date. Defaults to Title 48's current up_to_date_as_of.",
+    ),
+  includePrescription: z
+    .boolean()
+    .optional()
+    .describe(
+      "Also fetch each clause's prescribing section (the 'As prescribed in …' rule for WHEN it applies). Default true.",
+    ),
+  flagGates: z
+    .boolean()
+    .optional()
+    .describe(
+      "Tag resolved rows that are pass/fail award-eligibility gates (Section 889, CMMC, limitations on subcontracting) with a gate label; others get gate:null. Default true. false ⇒ all gate:null.",
     ),
 });
 
@@ -970,6 +1008,12 @@ const TOOLS: ToolDef[] = [
     description:
       "Authoritative FAR/DFARS clause text + its PRESCRIPTION (the 'As prescribed in …' rule for when the clause applies), from the eCFR versioner-full endpoint (Title 48). Use this — NOT ecfr_search — for an EXACT clause number: full-text search mis-ranks '52.212-4' (returns GSAM 552.212-4 above the real FAR clause). Returns heading, revision date, clause/provision kind, regulation (FAR/DFARS/GSAM), full text, the prescribing section, and ecfrUrl. Every response carries farOverhaulRisk — a structural currency caveat that eCFR reflects only the CODIFIED FAR, so a clause may be superseded by a Revolutionary-FAR-Overhaul agency class deviation not shown here. A genuinely-absent clause returns a not_found error (never a fake empty clause). Keyless.",
     inputSchema: FarClauseLookupInput,
+  },
+  {
+    name: "far_compliance_matrix",
+    description:
+      "Turn a solicitation's cited FAR/DFARS clause list into a proposal-ready compliance matrix (for a Section L/M response). COMPOSES far_clause_lookup over 1–25 clauses (deduped case-insensitively): each resolved row carries the clause text + prescription + regulation + a gate flag marking pass/fail award-eligibility GATES (Section 889 52.204-24/25/26, limitations on subcontracting 52.219-14, DFARS cyber 252.204-7012/7020/7021 incl. CMMC) + the farOverhaulRisk currency caveat. TRUTHFUL by construction: a clause that genuinely isn't in Title 48 (HTTP 404) goes to `unresolved`, while a clause that couldn't be fetched (eCFR down/5xx/rate-limited) goes to a SEPARATE `errored` bucket — a DOWN service is never reported as 'clause doesn't exist'; `summary.total` proves no clause is dropped. Does NOT parse the PDF solicitation to extract the clause list, and gives NO legal advice or compliance verdict. Keyless.",
+    inputSchema: FarComplianceMatrixInput,
   },
 
   // ━━━ SBA — Size Standards (1) ━━━
@@ -1731,6 +1775,10 @@ async function runTool(
       return await ecfr.listTitles();
     case "far_clause_lookup":
       return await far.farClauseLookup(FarClauseLookupInput.parse(args));
+    case "far_compliance_matrix":
+      return await far.farComplianceMatrix(
+        FarComplianceMatrixInput.parse(args),
+      );
 
     // SBA — Size Standards
     case "sba_size_standard":
