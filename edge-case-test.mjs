@@ -1072,6 +1072,109 @@ const cases = [
       return shaped && ranked && proxyNote && screenNote && fieldsOk && sourceOk;
     },
   },
+  {
+    // (integrity a) NOT-EXCLUDED entity → integrityFlag "review_fapiis" (NEVER
+    // "clear"), fapiisRecords null (key-gated, never faked),
+    // _meta.fieldsUnavailable includes "fapiisRecords", and the "not a full
+    // integrity clearance" note is present. Uses a clearly-not-excluded firm.
+    label: "integrity_lookup: not-excluded → review_fapiis + fapiisRecords null + fieldsUnavailable + not-a-clearance note",
+    name: "sam_integrity_lookup",
+    args: { name: "Boeing" },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      const m = env._meta;
+      const flagOk = d.integrityFlag === "review_fapiis";
+      const exclOk =
+        d.exclusions &&
+        d.exclusions.excluded === false &&
+        d.exclusions.activeCount === 0 &&
+        Array.isArray(d.exclusions.records) &&
+        d.exclusions.records.length === 0;
+      // fapiisRecords is ALWAYS null (never faked) and declared unavailable.
+      const fapiisNull = d.fapiisRecords === null;
+      const fieldGone = (m.fieldsUnavailable ?? []).includes("fapiisRecords");
+      const urlOk = typeof d.fapiisUrl === "string" && /sam\.gov/i.test(d.fapiisUrl);
+      // The "not a full integrity clearance" disclosure must be present.
+      const notes = m.notes ?? [];
+      const clearanceNote = notes.some(
+        (n) => /not a full integrity clearance/i.test(n) && /no keyless machine API/i.test(n),
+      );
+      // Carry-through of the exclusion tool's own honesty (not-proof).
+      const notProof = notes.some(
+        (n) => /not\s+proof/i.test(n) && /responsibility/i.test(n),
+      );
+      const keyless = m.keylessMode === true;
+      // Source names the keyless exclusions + FAPIIS deep-link composition.
+      const sourceOk = typeof m.source === "string" && /fapiis/i.test(m.source);
+      return flagOk && exclOk && fapiisNull && fieldGone && urlOk && clearanceNote && notProof && keyless && sourceOk;
+    },
+  },
+  {
+    // (integrity b) EXCLUDED entity → integrityFlag "excluded", exclusions.excluded
+    // true, with at least one ACTIVE matching record. "Construction Associates"
+    // is an active-excluded firm (DOL, verified live via the SGS index=ex list);
+    // if SAM ever terminates it, this soft-passes on the still-correct shape.
+    label: "integrity_lookup: excluded entity → integrityFlag 'excluded' + exclusions.excluded true",
+    name: "sam_integrity_lookup",
+    args: { name: "Construction Associates" },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      // Shape must always hold; the flag mirrors exclusions.excluded exactly.
+      const consistent =
+        (d.integrityFlag === "excluded") === (d.exclusions?.excluded === true);
+      const neverClear = d.integrityFlag !== "clear";
+      const fapiisNull = d.fapiisRecords === null;
+      if (d.exclusions?.excluded === true) {
+        // The live-verified hit path: flag excluded + an active record present.
+        const hit =
+          d.integrityFlag === "excluded" &&
+          d.exclusions.activeCount >= 1 &&
+          Array.isArray(d.exclusions.records) &&
+          d.exclusions.records.some((r) => r.isActive === true);
+        return hit && neverClear && fapiisNull;
+      }
+      // Soft path (record terminated since verification): still consistent + never clear.
+      return consistent && neverClear && fapiisNull;
+    },
+  },
+  {
+    // (integrity c) No identifier (no uei/cage/name) → structured invalid_input,
+    // never a silent unbounded/empty verdict.
+    label: "integrity_lookup: no identifier → structured invalid_input",
+    name: "sam_integrity_lookup",
+    args: {},
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "invalid_input" &&
+      env.error?.retryable === false,
+  },
+  {
+    // (integrity d) integrityFlag is NEVER "clear" keylessly — across both an
+    // excluded and a not-excluded query the flag is one of the two honest values
+    // and is only "excluded" when exclusions.excluded is true.
+    label: "integrity_lookup: integrityFlag is never 'clear' (both excluded and not-excluded queries)",
+    name: "sam_integrity_lookup",
+    args: { name: "zzzznotarealentityxyzzz" },
+    accept: async ({ env }) => {
+      if (!env.ok) return false;
+      const d = env.data;
+      // The empty query yields review_fapiis (no exclusion) — never "clear".
+      const emptyOk =
+        d.integrityFlag === "review_fapiis" &&
+        d.integrityFlag !== "clear" &&
+        d.exclusions?.excluded === false;
+      // And an excluded query yields "excluded" (still not "clear").
+      const excl = await call("sam_integrity_lookup", { name: "Construction Associates" });
+      const e = excl.env;
+      if (!e.ok) return false;
+      const exclFlagOk =
+        e.data.integrityFlag !== "clear" &&
+        (e.data.integrityFlag === "excluded") === (e.data.exclusions?.excluded === true);
+      return emptyOk && exclFlagOk;
+    },
+  },
   // ━━━ GAO — Bid Protests ━━━
   {
     // (a) The honesty contract: _meta is ALWAYS complete:false + truncated:true

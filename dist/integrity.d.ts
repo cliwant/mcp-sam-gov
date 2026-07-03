@@ -75,6 +75,64 @@ export declare function checkExclusions(args: {
     size: number;
 }>>;
 /**
+ * Keyless one-call integrity screen — "any integrity red flags on this entity?"
+ *
+ * Composes the KEYLESS exclusion verdict (via {@link checkExclusions}, REUSED —
+ * exclusion fetching is not re-implemented here) with an HONEST pointer to the
+ * FAPIIS / Responsibility-Qualification record, which has NO keyless machine
+ * API. Requires at least one of `uei`/`cage`/`name` (uei preferred); `name`
+ * maps to the exclusion tool's `query`.
+ *
+ * TRUTHFULNESS (doc 07 §2.2):
+ *   - `integrityFlag` is `"excluded"` when ≥1 ACTIVE matching exclusion is found,
+ *     else `"review_fapiis"`. It NEVER emits `"clear"` keylessly — terminations
+ *     for default/cause, non-responsibility determinations, and self-reported
+ *     criminal/civil/administrative proceedings live in FAPIIS, which is not
+ *     machine-readable without a key, so the absence of an exclusion does NOT
+ *     prove integrity.
+ *   - `fapiisRecords` is ALWAYS `null` (never faked), with
+ *     `_meta.fieldsUnavailable: ["fapiisRecords"]` + INTEGRITY_FAPIIS_NOTE.
+ *   - An upstream `checkExclusions` failure PROPAGATES as the classified error
+ *     (the ToolErrorCarrier bubbles) — it is never masked as a "clear"/empty.
+ */
+export declare function integrityLookup(args: {
+    uei?: string;
+    cage?: string;
+    name?: string;
+}): Promise<import("./meta.js").MetaBundle<{
+    entity: {
+        name: string | null;
+        uei: string | null;
+        cage: string | null;
+    };
+    exclusions: {
+        excluded: boolean;
+        activeCount: number;
+        records: {
+            name: string;
+            classification: string | null;
+            uei: string | null;
+            cage: string | null;
+            samNumber: string | null;
+            excludingAgency: string | null;
+            excludingAgencyDesc: string | null;
+            exclusionType: string | null;
+            exclusionProgram: string | null;
+            ctCode: string | null;
+            ctCodeDesc: string | null;
+            isActive: boolean | null;
+            activationDate: string | null;
+            terminationDate: string | null;
+            address: Record<string, unknown> | null;
+            samFapiisUrl: string;
+        }[];
+    };
+    fapiisRecords: null;
+    fapiisContentUrl: string;
+    fapiisUrl: string;
+    integrityFlag: "excluded" | "review_fapiis";
+}>>;
+/**
  * The `recipient_type_names` vocabulary CONFIRMED live (2026-07-03) to narrow a
  * known-populated NAICS (541512, 2023+) to a plausible non-zero, non-baseline
  * count — the server SILENTLY accepts a bogus value and returns 0 with HTTP

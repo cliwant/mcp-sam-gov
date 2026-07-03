@@ -28,6 +28,7 @@
  *   2. GSA-CSV RFC-4180 parser + enrichment merge (dist/gsa-csv.js, pure)
  *   3. analyzeIncumbent degradation — D1/D2/D3 (dist/usaspending.js, fetch-mock)
  *   4. checkExclusions name-gate (dist/integrity.js, fetch-mock)
+ *   4b. integrityLookup composition — flag/fapiisRecords (dist/integrity.js, fetch-mock)
  *   5. getAwardDetail error classification (dist/usaspending.js, fetch-mock)
  *
  * Fetch is read at CALL TIME by the modules (bare `fetch(...)` / the
@@ -39,7 +40,7 @@
 import { buildMeta } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail } from "./dist/usaspending.js";
-import { checkExclusions } from "./dist/integrity.js";
+import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { sizeStandard } from "./dist/sba.js";
 
 // ─── Tiny assertion kit (mirrors edge-case-test.mjs conventions) ──────────
@@ -743,6 +744,124 @@ async function testCheckExclusions() {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 4b. integrityLookup composition — flag + fapiisRecords honesty (fetch-mock)
+//   integrityLookup REUSES checkExclusions, so the SAME crafted SGS page drives
+//   both. We assert the composed verdict: an active NAME-matching exclusion ⇒
+//   "excluded"; ZERO matches ⇒ "review_fapiis" (NEVER "clear") + fapiisRecords
+//   null + fieldsUnavailable:["fapiisRecords"]; and that an upstream failure
+//   PROPAGATES (never a fake clearance).
+// ══════════════════════════════════════════════════════════════════════════
+async function testIntegrityLookup() {
+  section("4b. integrityLookup composition (fetch-mock)");
+
+  const sgs = (results, totalElements = results.length) =>
+    mockResponse({ status: 200, json: { _embedded: { results }, page: { totalElements } } });
+
+  // ── (i) An ACTIVE, normalized-name-matching exclusion ⇒ integrityFlag
+  // "excluded", exclusions.excluded true, and the matched record carried through.
+  await withFetch(
+    (u) => (isSgs(u)
+      ? sgs([
+          { title: "ACME DEFENSE, LLC", isActive: true, ueiSam: "UEIA", cageCode: "CG1",
+            classification: { code: "F" }, exclusionType: "Ineligible" },
+          // A shared-token but NON-matching firm — must NOT flip the flag.
+          { title: "Globex Defense Inc", isActive: true, ueiSam: "U9", cageCode: "C9" },
+        ])
+      : failClosed()()),
+    async () => {
+      const res = await integrityLookup({ name: "Acme Defense" });
+      ok("active name-match ⇒ integrityFlag 'excluded'",
+        res.data.integrityFlag === "excluded", JSON.stringify(res.data.integrityFlag));
+      ok("active name-match ⇒ exclusions.excluded true + activeCount 1 (token hit dropped)",
+        res.data.exclusions.excluded === true && res.data.exclusions.activeCount === 1,
+        JSON.stringify({ excluded: res.data.exclusions.excluded, activeCount: res.data.exclusions.activeCount }));
+      ok("the carried record is the right firm (uei UEIA)",
+        res.data.exclusions.records.length === 1 && res.data.exclusions.records[0].uei === "UEIA",
+        JSON.stringify(res.data.exclusions.records.map((r) => r.uei)));
+      // Even on a HIT, fapiisRecords stays null (record-level is key-gated).
+      ok("hit ⇒ fapiisRecords still null (never faked)",
+        res.data.fapiisRecords === null, JSON.stringify(res.data.fapiisRecords));
+      ok("integrityFlag is NEVER 'clear' (hit path)",
+        res.data.integrityFlag !== "clear");
+    },
+  );
+
+  // ── (ii) ZERO name matches ⇒ integrityFlag "review_fapiis" (NOT "clear"),
+  // fapiisRecords null, and _meta.fieldsUnavailable includes "fapiisRecords".
+  await withFetch(
+    (u) => (isSgs(u)
+      ? sgs([
+          // Only shared-token noise — nothing normalizes to "ACME DEFENSE".
+          { title: "Unrelated Vendor Inc", isActive: true, ueiSam: "U1" },
+          { title: "Another Firm LLC", isActive: true, ueiSam: "U2" },
+        ])
+      : failClosed()()),
+    async () => {
+      const res = await integrityLookup({ name: "Acme Defense" });
+      ok("zero matches ⇒ integrityFlag 'review_fapiis' (NOT 'clear')",
+        res.data.integrityFlag === "review_fapiis", JSON.stringify(res.data.integrityFlag));
+      ok("zero matches ⇒ integrityFlag is NEVER 'clear'",
+        res.data.integrityFlag !== "clear");
+      ok("zero matches ⇒ exclusions.excluded false + activeCount 0 + no records",
+        res.data.exclusions.excluded === false && res.data.exclusions.activeCount === 0 &&
+        res.data.exclusions.records.length === 0,
+        JSON.stringify(res.data.exclusions));
+      ok("zero matches ⇒ fapiisRecords null (key-gated, never faked)",
+        res.data.fapiisRecords === null, JSON.stringify(res.data.fapiisRecords));
+      ok("zero matches ⇒ _meta.fieldsUnavailable includes 'fapiisRecords'",
+        (res.meta.fieldsUnavailable ?? []).includes("fapiisRecords"),
+        JSON.stringify(res.meta.fieldsUnavailable));
+      ok("zero matches ⇒ 'not a full integrity clearance' note present",
+        res.meta.notes.some((n) => /not a full integrity clearance/i.test(n)),
+        JSON.stringify(res.meta.notes));
+      // Carry-through of checkExclusions' own honesty.
+      ok("zero matches ⇒ 'not proof of responsibility' carried through",
+        res.meta.notes.some((n) => /NOT proof of general responsibility/i.test(n)));
+    },
+  );
+
+  // ── (iii) A uei-specific deep-link is emitted when a UEI is supplied (and the
+  // exclusion still resolves via the mocked page).
+  await withFetch(
+    (u) => (isSgs(u)
+      ? sgs([{ title: "ACME DEFENSE LLC", isActive: true, ueiSam: "UEIA" }])
+      : failClosed()()),
+    async () => {
+      const res = await integrityLookup({ uei: "UEIA", name: "Acme Defense" });
+      ok("uei supplied ⇒ fapiisUrl is the entity-workspace responsibility deep-link",
+        /workspace\/profile\/UEIA\/responsibilityInformation$/.test(res.data.fapiisUrl),
+        JSON.stringify(res.data.fapiisUrl));
+      // uei post-filter is applied inside checkExclusions ⇒ the record matches.
+      ok("uei supplied ⇒ integrityFlag 'excluded' (uei+name both matched)",
+        res.data.integrityFlag === "excluded", JSON.stringify(res.data.integrityFlag));
+    },
+  );
+
+  // ── (iv) An upstream SGS 503 ⇒ integrityLookup THROWS the classified error
+  // (upstream_unavailable, retryable) — NEVER a fake "clear"/empty verdict.
+  await withFetch(
+    (u) => (isSgs(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => integrityLookup({ name: "Acme Defense" }));
+      ok("upstream 503 ⇒ throws (never a fake 'clear'/empty verdict)", threw);
+      ok("upstream 503 ⇒ kind upstream_unavailable, retryable:true (classified, propagated)",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (v) No identifier ⇒ structured invalid_input (no network reached).
+  {
+    const { threw, error } = await expectThrow(() => integrityLookup({}));
+    ok("no identifier ⇒ throws invalid_input, retryable:false",
+      threw && error?.toolError?.kind === "invalid_input" &&
+      error?.toolError?.retryable === false,
+      JSON.stringify(error?.toolError));
+  }
+}
+
 // ─── Meta-test: the harness FAILS LOUDLY when a guarded behavior breaks ────
 // Proves the assertions are real (not vacuously green). We re-run the D2
 // invariant against a DELIBERATELY-WRONG expectation and confirm it would fail;
@@ -835,6 +954,7 @@ async function main() {
   await testGetAwardDetail();
   await testAnalyzeIncumbent();
   await testCheckExclusions();
+  await testIntegrityLookup();
   await testSbaSizeStandard();
 
   // Prove the harness bites.

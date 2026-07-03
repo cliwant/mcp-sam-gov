@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 46 keyless tools wrapping every public federal-contracting data
+ * 47 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -409,6 +409,20 @@ const CheckExclusionsInput = z.object({
     page: z.number().min(0).optional().describe("0-based page index (default 0)."),
     size: z.number().min(1).max(100).optional().describe("Page size (default 25, max 100)."),
 });
+const IntegrityLookupInput = z.object({
+    uei: z
+        .string()
+        .optional()
+        .describe("SAM UEI of the entity to screen (PREFERRED — most precise). Provide at least one of uei/cage/name."),
+    cage: z
+        .string()
+        .optional()
+        .describe("CAGE code of the entity to screen."),
+    name: z
+        .string()
+        .optional()
+        .describe("Legal entity name to screen (drives the keyless exclusions text search; normalized-name gated). Provide at least one of uei/cage/name."),
+});
 const TeamingPartnersInput = z.object({
     // ENUM-VALIDATED: a bogus recipient_type_names value is SILENTLY accepted by
     // USAspending (HTTP 200, 0 results), so this enum is the guardrail — only the
@@ -732,11 +746,16 @@ const TOOLS = [
         description: "GSA CALC awarded ceiling-rate market band for a labor category (keyless). Returns a DISTRIBUTION (currentRate min/median/max + escalated medians) over a fetched sample, NOT a single price. CALC rates are CEILING/catalog and FULLY BURDENED (do not re-add wrap); the match count SATURATES at 10000 for broad queries (totalAvailable null then). Filter by businessSize/educationLevel(code)/experience/sin/priceRange to narrow.",
         inputSchema: BenchmarkLaborInput,
     },
-    // ━━━ Integrity / Teaming (2) ━━━
+    // ━━━ Integrity / Teaming (3) ━━━
     {
         name: "sam_check_exclusions",
         description: "Keyless SAM debarment/exclusion screening. Screen a firm or individual by name (query) and/or UEI/CAGE against the SAM exclusions index (FAPIIS). Returns excluded (true iff ≥1 ACTIVE matching record), matchCount, and per-record { name, classification, uei, cage, excludingAgency, exclusionType, exclusionProgram, isActive, activation/terminationDate, samFapiisUrl }. CRITICAL: an EMPTY result means 'no matching exclusion under these terms' — it is NOT proof of general responsibility (stated in _meta.notes). A name match is not identity-proof; verify the UEI/CAGE + dates against the FAPIIS record. Requires at least one of query/uei/cage.",
         inputSchema: CheckExclusionsInput,
+    },
+    {
+        name: "sam_integrity_lookup",
+        description: "Keyless ONE-CALL integrity screen — 'any integrity red flags on this entity?'. Composes the keyless government-wide EXCLUSION verdict (via sam_check_exclusions) with an honest pointer to the FAPIIS / Responsibility-Qualification record. Requires at least one of uei/cage/name (uei preferred; name maps to the exclusions text search). Returns { entity, exclusions:{excluded,activeCount,records}, fapiisRecords, fapiisUrl, integrityFlag }. integrityFlag is 'excluded' when ≥1 ACTIVE matching exclusion is found, else 'review_fapiis' — it NEVER returns 'clear' keylessly, because FAPIIS records (terminations for default/cause, non-responsibility determinations, self-reported criminal/civil/administrative proceedings) have NO keyless machine API, so absence of an exclusion is NOT proof of integrity. fapiisRecords is ALWAYS null (never faked; record-level retrieval needs an optional SAM Entity key) with _meta.fieldsUnavailable:['fapiisRecords']; fapiisUrl deep-links the viewable SAM page. An upstream exclusions failure surfaces as the classified error, never a fake clearance.",
+        inputSchema: IntegrityLookupInput,
     },
     {
         name: "usas_search_teaming_partners",
@@ -1184,6 +1203,8 @@ async function runTool(name, args, sam) {
         // Integrity / Teaming
         case "sam_check_exclusions":
             return await integrity.checkExclusions(CheckExclusionsInput.parse(args));
+        case "sam_integrity_lookup":
+            return await integrity.integrityLookup(IntegrityLookupInput.parse(args));
         case "usas_search_teaming_partners":
             return await integrity.searchTeamingPartners(TeamingPartnersInput.parse(args));
         // GAO — Bid Protests

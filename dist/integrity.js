@@ -251,6 +251,124 @@ export async function checkExclusions(args) {
         notes,
     });
 }
+// ─── 1b. sam_integrity_lookup (keyless composition) ──────────────
+const INTEGRITY_SOURCE = "sam.gov exclusions (keyless) + FAPIIS/Responsibility-Qualification deep-link (record-level key-gated)";
+/** The canonical, currently-resolving FAPIIS landing page (fapiis.gov 301s here). */
+const FAPIIS_CONTENT_URL = "https://sam.gov/content/fapiis";
+/**
+ * The mandatory disclosure attached to EVERY integrity-lookup response. Kept as
+ * a constant so smoke/edge/fault tests can assert it verbatim. It states, in
+ * order: (1) what keyless data this covers, (2) that FAPIIS
+ * Responsibility/Qualification records have NO keyless machine API, and (3) that
+ * `review_fapiis` is therefore NOT a clean bill of health.
+ */
+const INTEGRITY_FAPIIS_NOTE = "FAPIIS / Responsibility-Qualification records are publicly VIEWABLE at the linked SAM page but have no keyless machine API — record-level retrieval requires an optional SAM Entity key. This lookup covers the keyless government-wide EXCLUSION list only; it is not a full integrity clearance.";
+/**
+ * Keyless one-call integrity screen — "any integrity red flags on this entity?"
+ *
+ * Composes the KEYLESS exclusion verdict (via {@link checkExclusions}, REUSED —
+ * exclusion fetching is not re-implemented here) with an HONEST pointer to the
+ * FAPIIS / Responsibility-Qualification record, which has NO keyless machine
+ * API. Requires at least one of `uei`/`cage`/`name` (uei preferred); `name`
+ * maps to the exclusion tool's `query`.
+ *
+ * TRUTHFULNESS (doc 07 §2.2):
+ *   - `integrityFlag` is `"excluded"` when ≥1 ACTIVE matching exclusion is found,
+ *     else `"review_fapiis"`. It NEVER emits `"clear"` keylessly — terminations
+ *     for default/cause, non-responsibility determinations, and self-reported
+ *     criminal/civil/administrative proceedings live in FAPIIS, which is not
+ *     machine-readable without a key, so the absence of an exclusion does NOT
+ *     prove integrity.
+ *   - `fapiisRecords` is ALWAYS `null` (never faked), with
+ *     `_meta.fieldsUnavailable: ["fapiisRecords"]` + INTEGRITY_FAPIIS_NOTE.
+ *   - An upstream `checkExclusions` failure PROPAGATES as the classified error
+ *     (the ToolErrorCarrier bubbles) — it is never masked as a "clear"/empty.
+ */
+export async function integrityLookup(args) {
+    const uei = args.uei?.trim() || undefined;
+    const cage = args.cage?.trim() || undefined;
+    const name = args.name?.trim() || undefined;
+    // At least one identifier is required — an identity-less integrity screen is
+    // meaningless. Mirror checkExclusions' structured invalid_input.
+    if (!uei && !cage && !name) {
+        throw new ToolErrorCarrier({
+            kind: "invalid_input",
+            message: "sam_integrity_lookup requires at least one of uei, cage, or name (uei preferred). Pass the entity's UEI/CAGE and/or legal name to screen.",
+            retryable: false,
+            upstreamEndpoint: "sgs/v1/search?index=ex",
+        });
+    }
+    // REUSE checkExclusions for the keyless exclusion verdict (map name→query).
+    // A failure here throws a classified ToolErrorCarrier that bubbles to the
+    // dispatcher — we never swallow it into a fake "clear".
+    const exclusionsRes = await checkExclusions({
+        query: name,
+        uei,
+        cage,
+        activeOnly: true,
+    });
+    const ex = exclusionsRes.data;
+    const excluded = ex.excluded === true;
+    // integrityFlag: "excluded" iff an ACTIVE matching exclusion was found; else
+    // "review_fapiis". NEVER "clear" — absence of an exclusion is not proof of
+    // integrity (the FAPIIS responsibility record is key-gated below).
+    const integrityFlag = excluded
+        ? "excluded"
+        : "review_fapiis";
+    // Human deep-links: the always-valid FAPIIS content page, plus an
+    // entity-workspace Responsibility/Qualification deep-link when a UEI is known.
+    // These are NOT fetched by the tool — they are pointers for a human/agent.
+    const fapiisUrl = uei
+        ? `https://sam.gov/workspace/profile/${encodeURIComponent(uei)}/responsibilityInformation`
+        : FAPIIS_CONTENT_URL;
+    const data = {
+        entity: {
+            name: name ?? null,
+            uei: uei ?? null,
+            cage: cage ?? null,
+        },
+        exclusions: {
+            excluded,
+            activeCount: ex.matchCount,
+            records: ex.records,
+        },
+        // KEY-GATED — never faked. Record-level FAPIIS retrieval needs a SAM Entity
+        // key; keyless we can only point at the viewable page.
+        fapiisRecords: null,
+        fapiisContentUrl: FAPIIS_CONTENT_URL,
+        fapiisUrl,
+        integrityFlag,
+    };
+    const notes = [];
+    // Carry through the exclusion tool's own honesty first.
+    notes.push(NOT_PROOF_NOTE);
+    // Then the FAPIIS key-gating disclosure.
+    notes.push(INTEGRITY_FAPIIS_NOTE);
+    if (integrityFlag === "review_fapiis") {
+        notes.push("integrityFlag is 'review_fapiis' (NEVER 'clear' in keyless mode): no ACTIVE government-wide exclusion matched these identifiers, but that does NOT establish responsibility — review the FAPIIS / Responsibility-Qualification record at fapiisUrl (terminations for default/cause, non-responsibility determinations, and self-reported proceedings are not machine-readable keylessly).");
+    }
+    else {
+        notes.push("integrityFlag is 'excluded' — at least one ACTIVE government-wide exclusion matched these identifiers (see exclusions.records). Confirm the UEI/CAGE, exclusion type, and dates against the FAPIIS record before acting; a name match is not identity-proof.");
+    }
+    if (!uei) {
+        notes.push("No UEI was supplied, so fapiisUrl points at the general FAPIIS page rather than the entity's Responsibility/Qualification profile — pass the UEI for an entity-specific deep-link and a keyed exclusion match.");
+    }
+    return withMeta(data, {
+        source: INTEGRITY_SOURCE,
+        keylessMode: true,
+        // A single composite verdict record — not a paged list.
+        returned: 1,
+        totalAvailable: 1,
+        // The exclusion verdict itself is complete for these terms; the FAPIIS
+        // record dimension is declared unavailable (not truncated).
+        truncated: false,
+        filtersApplied: [],
+        filtersDropped: [],
+        // FAPIIS record-level content is unavailable keylessly — declared, not faked.
+        fieldsUnavailable: ["fapiisRecords"],
+        notes,
+    });
+}
 // ─── 2. usas_search_teaming_partners ─────────────────────────────
 const TEAMING_SOURCE = "usaspending (award-derived socioeconomic proxy, keyless)";
 /**
