@@ -38,10 +38,8 @@ import {
 } from "./meta.js";
 
 const SERVER_NAME = "mcp-sam-gov";
-// NOTE: kept at 0.3.0 to match package.json/manifest.json/server.json. The
-// version bump to 0.4.0 (this is the first v0.4 "truthful outputs" PR) is a
-// release step the orchestrator performs across all manifests together.
-const SERVER_VERSION = "0.3.0";
+// Kept in lockstep with package.json / manifest.json / server.json.
+const SERVER_VERSION = "0.4.0";
 
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 

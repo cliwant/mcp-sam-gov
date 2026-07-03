@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-03 (truthful outputs)
+
+The theme of this release is **never silently mislead an AI consumer.** Every
+tool now reports how complete and trustworthy its result is, and a
+long-standing keyless-filter bug that returned unfiltered results is fixed.
+
+### Added
+- **`_meta` on every tool response.** The success envelope is now
+  `{ ok, data, _meta }`. `_meta` lets an AI branch on completeness and
+  provenance deterministically instead of guessing from null fields:
+  - `complete` / `truncated` — is this the entire result set, or a capped slice?
+  - `returned` / `totalAvailable` — rows returned vs. the upstream's true match
+    total. `null` when the endpoint reports no total — **never** faked from the
+    page length.
+  - `filtersApplied` / `filtersDropped` — which requested filters the upstream
+    verifiably honored vs. silently ignored.
+  - `fieldsUnavailable` — fields that are null by API limitation (keyless /
+    endpoint shape), not because the underlying data is empty.
+  - `pagination`, `degraded`, `source`, `keylessMode`, `notes` — provenance and
+    short, AI-actionable caveats.
+
+### Fixed
+- **Keyless SAM search now actually filters by NAICS and place-of-performance.**
+  The keyless path sent query-parameter names (`naics_code` /
+  `place_of_performance_state`) that the sam.gov endpoint silently ignores — so
+  a NAICS- or state-filtered search quietly returned unfiltered results.
+  Corrected to `naics` / `pop_state` (place-of-performance now upper-cased);
+  verified live end-to-end (search → fetch detail → NAICS matches). Set-aside
+  and keyword filters were already correct. The tool's `_meta.filtersApplied`
+  now reflects reality; organization-name (which has no keyless filter) is
+  reported in `filtersDropped`.
+- **USAspending award tools no longer present a missing total as `0` or the
+  page length.** Endpoints that paginate without a grand total return
+  `totalAvailable: null` and flag truncation from `hasNext`; those with a real
+  companion count (`spending_by_award_count`, recipient/agency page metadata,
+  glossary) report the true total.
+- **`usas_search_individual_awards` returns `naicsCode`**, at parity with the
+  other award tools (the field was requestable from the endpoint all along).
+- **Grants.gov `cfdaList` is typed and normalized as `string[]`** (it is an
+  array of CFDA numbers, not a delimited string).
+
+### Changed
+- Bumped `package.json` + `manifest.json` + `server.json` to `0.4.0`.
+
+### Backward compatibility
+- **Non-breaking.** `data` payload keys are unchanged; `_meta` is a new sibling
+  object. Consumers reading `ok` / `data.*` are unaffected. Tool **input**
+  schemas are unchanged — all 36 tools accept the same params.
+
 ## [0.3.0] — 2026-04-29 (hardening release)
 
 ### Added
@@ -80,7 +129,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stdio JSON-RPC transport.
 - Claude Code plugin scaffold.
 
-[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cliwant/mcp-sam-gov/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.3.0
 [0.2.1]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.2.1
 [0.2.0]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.2.0
