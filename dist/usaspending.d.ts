@@ -35,45 +35,28 @@
  * Total: 22 endpoints across the USAspending surface, all keyless.
  */
 export type UsasFilters = Record<string, unknown>;
+import { type MetaBundle } from "./meta.js";
 export declare function searchAwards(args: {
     agency?: string;
     naics?: string;
     fiscalYear?: number;
     setAside?: string;
-}): Promise<{
-    totalAwards: number;
+}): Promise<MetaBundle<{
+    totalAwards: number | null;
     totalValue: number;
     topRecipients: {
         name: string;
         value: number;
-        awards: number;
+        awards: number | null;
     }[];
-}>;
+}>>;
 export declare function searchIndividualAwards(args: {
     agency?: string;
     naics?: string;
     fiscalYear?: number;
     setAside?: string;
     limit?: number;
-}): Promise<{
-    awards: {
-        awardId: string;
-        recipient: string;
-        amount: number;
-        awardingAgency: string;
-        awardingSubAgency: string | undefined;
-        placeOfPerformanceState: string | undefined;
-        description: string | undefined;
-        generatedInternalId: string;
-    }[];
-}>;
-export declare function searchAwardsByRecipient(args: {
-    recipientName: string;
-    agency?: string;
-    naics?: string;
-    fiscalYear?: number;
-    limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     awards: {
         awardId: string;
         recipient: string;
@@ -82,26 +65,55 @@ export declare function searchAwardsByRecipient(args: {
         awardingSubAgency: string | undefined;
         naicsCode: string | undefined;
         naicsDescription: string | undefined;
+        placeOfPerformanceState: string | undefined;
+        placeOfPerformanceCity: string | undefined;
+        placeOfPerformanceCountry: string | undefined;
+        placeOfPerformanceZip: string | undefined;
         description: string | undefined;
         generatedInternalId: string;
     }[];
-    totalRecords: number;
-}>;
+}>>;
+export declare function searchAwardsByRecipient(args: {
+    recipientName: string;
+    agency?: string;
+    naics?: string;
+    fiscalYear?: number;
+    limit?: number;
+}): Promise<MetaBundle<{
+    awards: {
+        awardId: string;
+        recipient: string;
+        amount: number;
+        awardingAgency: string;
+        awardingSubAgency: string | undefined;
+        naicsCode: string | undefined;
+        naicsDescription: string | undefined;
+        placeOfPerformanceState: string | undefined;
+        placeOfPerformanceCity: string | undefined;
+        placeOfPerformanceCountry: string | undefined;
+        placeOfPerformanceZip: string | undefined;
+        description: string | undefined;
+        generatedInternalId: string;
+    }[];
+    totalRecords: number | null;
+}>>;
 export declare function searchSubawards(args: {
     primeRecipientName?: string;
     agency?: string;
     naics?: string;
     fiscalYear?: number;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     subawards: {
         subAwardId: string;
         subRecipient: string;
         amount: number;
         actionDate: string;
+        naicsCode: string | undefined;
+        naicsDescription: string | undefined;
         primeAwardId: string;
     }[];
-}>;
+}>>;
 export declare function getAwardDetail(generatedInternalId: string): Promise<{
     awardId: string;
     recipient: string;
