@@ -19,3 +19,6 @@ node_modules/
 marketing/
 .local-marketing/
 LAUNCH-COPY.md
+
+# Internal strategy/research materials — LOCAL ONLY, never publish
+docs/research/
