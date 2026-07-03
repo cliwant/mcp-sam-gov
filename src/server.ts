@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov.
  *
- * 37 keyless tools wrapping every public federal-contracting data
+ * 38 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -198,6 +198,27 @@ const UsasAwardDetailInput = z.object({
     .describe("From spending_by_award results — e.g. CONT_AWD_*"),
 });
 
+const UsasAnalyzeIncumbentInput = z.object({
+  generatedInternalId: z
+    .string()
+    .describe(
+      "The ONE award to analyze — generatedInternalId from usas_search_individual_awards / usas_search_awards_by_recipient / usas_search_recompetes (e.g. CONT_AWD_*).",
+    ),
+  includeOtherAwards: z
+    .boolean()
+    .optional()
+    .describe(
+      "Also return the incumbent's other awards in the same agency×NAICS via one bounded recipient search (default true).",
+    ),
+  otherAwardsLimit: z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .optional()
+    .describe("Cap on incumbentOtherAwards (default 15, max 50)."),
+});
+
 const UsasSpendingOverTimeInput = z.object({
   group: z.enum(["fiscal_year", "quarter", "month"]).optional(),
   agency: z.string().optional(),
@@ -389,7 +410,7 @@ const TOOLS: ToolDef[] = [
     inputSchema: SamLookupOrgInput,
   },
 
-  // ━━━ USAspending — Awards & Recipients (9) ━━━
+  // ━━━ USAspending — Awards & Recipients (10) ━━━
   {
     name: "usas_search_awards",
     description:
@@ -443,6 +464,12 @@ const TOOLS: ToolDef[] = [
     description:
       "Fetch full detail for a single award by generatedInternalId (from usas_search_individual_awards). Returns period_of_performance (start/end/potential_end), base_and_all_options, set-aside type, competition extent, number_of_offers — the per-award fields the search endpoint omits.",
     inputSchema: UsasAwardDetailInput,
+  },
+  {
+    name: "usas_analyze_incumbent",
+    description:
+      "Per-award incumbent + PUBLIC recompete-pressure analysis for ONE award (generatedInternalId). Assembles the incumbent identity, the vehicle/IDV linkage, and individual PUBLIC pressure SIGNALS — obligated-vs-ceiling consumption (pctConsumed), modification count (lower-bounded), competition extent + number of offers, set-aside, days to the current PoP end, and option-extendable days — plus, optionally, the incumbent's other awards in the same agency×NAICS. Bounded & keyless: at most 3 upstream calls (detail + 1 transactions page + 1 recipient search), no per-record fan-out. Emits pressureHints ('single_offer', 'ceiling_nearly_exhausted', 'hard_stop_no_options') as HINTS, NEVER a composite vulnerability score — CPARS/past-performance, protest history, and option-exercise intent are not public (declared in _meta.fieldsUnavailable).",
+    inputSchema: UsasAnalyzeIncumbentInput,
   },
 
   // ━━━ USAspending — Aggregate Analysis (6) ━━━
@@ -900,6 +927,10 @@ async function runTool(
     case "usas_get_award_detail":
       return await usas.getAwardDetail(
         UsasAwardDetailInput.parse(args).generatedInternalId,
+      );
+    case "usas_analyze_incumbent":
+      return await usas.analyzeIncumbent(
+        UsasAnalyzeIncumbentInput.parse(args),
       );
 
     // USAspending — Aggregate
