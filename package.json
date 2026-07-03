@@ -70,6 +70,9 @@
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
     "smoke": "node smoke-test.mjs",
+    "test:edge": "node edge-case-test.mjs",
+    "test:fault": "node fault-injection-test.mjs",
+    "gate": "npm run build && npm run test:fault && npm run test:edge",
     "prepublishOnly": "npm run build"
   },
   "engines": {
