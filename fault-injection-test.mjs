@@ -42,6 +42,10 @@ import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js"
 import { analyzeIncumbent, getAwardDetail } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { sizeStandard } from "./dist/sba.js";
+import {
+  daysUntilResponse,
+  applyResponseDeadlineWindow,
+} from "./dist/sam-gov/index.js";
 
 // ─── Tiny assertion kit (mirrors edge-case-test.mjs conventions) ──────────
 let PASS = 0;
@@ -940,6 +944,94 @@ async function testSbaSizeStandard() {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 7. Shaping radar pure helpers — daysUntilResponse + client-side deadline
+//    window (dist/sam-gov/index.js, pure). These back sam_search_shaping's two
+//    trickiest honesty guarantees: a null-safe whole-day countdown (a deadline-
+//    less notice is COUNTED as null, never hidden/zeroed) and the client-side
+//    response-deadline window (the keyless feed IGNORES rdlfrom/rdlto, so the
+//    window is applied over the fetched page and disclosed).
+// ══════════════════════════════════════════════════════════════════════════
+function testShapingHelpers() {
+  section("7. shaping radar: daysUntilResponse + client-side deadline window (pure)");
+
+  // Fixed "now" so the whole-day math is deterministic regardless of run time.
+  const NOW = new Date("2026-07-03T12:00:00Z");
+
+  // 7a. Future deadline ⇒ positive whole-day count (UTC-midnight floored on
+  // both ends, so intraday time-of-day never shifts the count).
+  eq("future deadline (2026-07-09) ⇒ 6 whole days",
+    daysUntilResponse("2026-07-09T21:00:00+00:00", NOW), 6);
+
+  // 7b. Same calendar day ⇒ 0 (not negative, not null).
+  eq("same-day deadline ⇒ 0 days",
+    daysUntilResponse("2026-07-03T23:59:00Z", NOW), 0);
+
+  // 7c. Past deadline ⇒ negative (surfaced, not clamped to 0).
+  eq("past deadline (2026-07-01) ⇒ -2 days",
+    daysUntilResponse("2026-07-01T00:00:00Z", NOW), -2);
+
+  // 7d. Missing / null / unparseable deadline ⇒ null (COUNTED as null, never a
+  // fabricated 0 — the radar surfaces deadline-less notices honestly).
+  eq("null deadline ⇒ null (not 0)", daysUntilResponse(null, NOW), null);
+  eq("undefined deadline ⇒ null", daysUntilResponse(undefined, NOW), null);
+  eq("empty-string deadline ⇒ null", daysUntilResponse("", NOW), null);
+  eq("garbage deadline ⇒ null (never NaN/0)",
+    daysUntilResponse("not-a-date", NOW), null);
+
+  // 7e. No window bounds ⇒ the page is returned UNCHANGED (identity — no window
+  // was requested, so nothing is trimmed).
+  {
+    const page = [
+      { noticeId: "A", responseDeadline: "2026-08-01T00:00:00Z" },
+      { noticeId: "B", responseDeadline: null },
+    ];
+    const out = applyResponseDeadlineWindow(page, undefined, undefined);
+    eq("no window bounds ⇒ page returned unchanged (identity)",
+      out.map((n) => n.noticeId), ["A", "B"]);
+  }
+
+  // 7f. A [from,to] window keeps ONLY in-window notices (inclusive bounds) and
+  // EXCLUDES a deadline-less notice (it cannot be proven inside the window).
+  {
+    const page = [
+      { noticeId: "BEFORE", responseDeadline: "2026-06-15T00:00:00Z" }, // < from
+      { noticeId: "IN1", responseDeadline: "2026-07-10T00:00:00Z" },    // in
+      { noticeId: "IN2", responseDeadline: "2026-07-31T23:59:59Z" },    // in (edge)
+      { noticeId: "AFTER", responseDeadline: "2026-08-05T00:00:00Z" },  // > to
+      { noticeId: "NODATE", responseDeadline: null },                   // excluded
+    ];
+    const out = applyResponseDeadlineWindow(page, "2026-07-01", "2026-07-31T23:59:59Z");
+    eq("window keeps only in-window notices; deadline-less excluded",
+      out.map((n) => n.noticeId), ["IN1", "IN2"]);
+  }
+
+  // 7g. A one-sided FROM-only window keeps everything on/after `from` and still
+  // drops the deadline-less notice.
+  {
+    const page = [
+      { noticeId: "OLD", responseDeadline: "2026-06-01T00:00:00Z" },
+      { noticeId: "NEW", responseDeadline: "2026-09-01T00:00:00Z" },
+      { noticeId: "NODATE", responseDeadline: null },
+    ];
+    const out = applyResponseDeadlineWindow(page, "2026-07-01", undefined);
+    eq("from-only window keeps on/after from, drops the deadline-less notice",
+      out.map((n) => n.noticeId), ["NEW"]);
+  }
+
+  // 7h. A one-sided TO-only window keeps everything on/before `to`.
+  {
+    const page = [
+      { noticeId: "EARLY", responseDeadline: "2026-07-05T00:00:00Z" },
+      { noticeId: "LATE", responseDeadline: "2026-12-01T00:00:00Z" },
+      { noticeId: "NODATE", responseDeadline: null },
+    ];
+    const out = applyResponseDeadlineWindow(page, undefined, "2026-07-31T23:59:59Z");
+    eq("to-only window keeps on/before to, drops the deadline-less notice",
+      out.map((n) => n.noticeId), ["EARLY"]);
+  }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
@@ -949,6 +1041,7 @@ async function main() {
   testBuildMeta();
   testGsaCsvParser();
   testGsaCsvEnrichment();
+  testShapingHelpers();
 
   // Fetch-mocked suites.
   await testGetAwardDetail();

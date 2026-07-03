@@ -251,6 +251,127 @@ const cases = [
     },
   },
   {
+    // Shaping radar (a): the DEFAULT window filters SERVER-SIDE to Sources
+    // Sought / Presolicitation / Special Notice only. Every returned notice's
+    // noticeTypeCode must be one of r/p/s (proves notice_type actually narrows,
+    // not the 46k-notice firehose), and the true server-side totalRecords for
+    // the type+naics filter is exposed. daysUntilResponse is number|null.
+    label: "shaping (a): default noticeType filters to r/p/s only + honest counts",
+    name: "sam_search_shaping",
+    args: { ncode: "541512", limit: 10 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      if (!Array.isArray(d.notices) || !Array.isArray(d.noticeTypesRequested))
+        return false;
+      const defaulted = d.noticeTypesRequested.join(",") === "r,p,s";
+      const onlyShaping = d.notices.every((n) =>
+        ["r", "p", "s"].includes(n.noticeTypeCode),
+      );
+      const shaped = d.notices.every(
+        (n) =>
+          typeof n.noticeId === "string" &&
+          (n.daysUntilResponse === null ||
+            typeof n.daysUntilResponse === "number"),
+      );
+      // totalRecords is the true server count (a number ≥ returned); _meta mirrors.
+      const total = env._meta.totalAvailable;
+      const totalOk =
+        typeof d.totalRecords === "number" &&
+        d.totalRecords === total &&
+        (total === null || total >= d.returned);
+      // noticeType is always an applied server-side facet.
+      const noticeTypeApplied = (env._meta.filtersApplied ?? []).includes("noticeType");
+      return defaulted && onlyShaping && shaped && totalOk && noticeTypeApplied;
+    },
+  },
+  {
+    // Shaping radar (b): a response-deadline WINDOW is applied CLIENT-SIDE (the
+    // keyless feed ignores rdlfrom/rdlto), so _meta.filtersDropped must contain
+    // "responseDeadline" + a note that says the window was applied client-side
+    // because the feed ignores rdlfrom/rdlto. Every returned notice must fall
+    // inside the window (a deadline-less notice is excluded from a windowed query).
+    label: "shaping (b): response-deadline window → filtersDropped + client-side note",
+    name: "sam_search_shaping",
+    args: {
+      ncode: "541512",
+      limit: 25,
+      responseDeadlineFrom: "2026-07-01",
+      responseDeadlineTo: "2026-12-31",
+    },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const dropped = m.filtersDropped ?? [];
+      const droppedOk = dropped.includes("responseDeadline");
+      const noteOk =
+        Array.isArray(m.notes) &&
+        m.notes.some((n) => /client-side/i.test(n) && /rdlfrom/i.test(n));
+      // A windowed query is never "complete" (client-side trim can hide rows).
+      const notComplete = m.complete === false && m.truncated === true;
+      // Every returned notice actually lies inside the window (inclusive).
+      const inWindow = (env.data?.notices ?? []).every(
+        (n) =>
+          typeof n.responseDeadline === "string" &&
+          n.responseDeadline >= "2026-07-01" &&
+          n.responseDeadline <= "2026-12-31T23:59:59Z",
+      );
+      return droppedOk && noteOk && notComplete && inWindow;
+    },
+  },
+  {
+    // Shaping radar (c): the keyless list rows null naics/setAside/PoP, so
+    // _meta.fieldsUnavailable MUST list all three and a note MUST steer the AI
+    // to sam_get_opportunity for those per-notice values (never fabricated).
+    label: "shaping (c): fieldsUnavailable lists naics/setAside/PoP + 'call sam_get_opportunity' note",
+    name: "sam_search_shaping",
+    args: { ncode: "541512", limit: 5 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const fieldsGone = ["naics", "setAside", "placeOfPerformance"].every((f) =>
+        (m.fieldsUnavailable ?? []).includes(f),
+      );
+      const pointerNote =
+        Array.isArray(m.notes) &&
+        m.notes.some((n) => /sam_get_opportunity/i.test(n));
+      // The list rows really do carry null naics/setAside (not a fabricated value).
+      const rowsNull = (env.data?.notices ?? []).every(
+        (n) => n.naics === null && n.setAside === null,
+      );
+      // Source names the keyless notice_type filter (provenance honesty).
+      const sourceOk =
+        typeof m.source === "string" && /notice_type/i.test(m.source);
+      return fieldsGone && pointerNote && rowsNull && sourceOk && m.keylessMode === true;
+    },
+  },
+  {
+    // Shaping radar (d) — REGRESSION: sam_search_opportunities is UNCHANGED by
+    // the notice_type addition. It must NOT send notice_type (its source stays
+    // the plain keyless HAL with no notice_type mention) and its shape is intact
+    // (opportunities[] array, not the shaping `notices[]`). Guards that the
+    // additive client edit didn't leak into the discovery tool.
+    label: "shaping (d): sam_search_opportunities unchanged (no notice_type leak)",
+    name: "sam_search_opportunities",
+    args: { ncode: "541512", limit: 3 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      if (m.keylessMode === false) return true; // keyed path out of scope
+      // Its source is the plain keyless HAL — NEVER the notice_type-filtered feed.
+      const plainSource =
+        /keyless HAL/.test(m.source) && !/notice_type/i.test(m.source);
+      // Shape intact: opportunities[] (discovery), no shaping keys.
+      const shapeIntact =
+        Array.isArray(env.data?.opportunities) &&
+        !("notices" in (env.data ?? {})) &&
+        !("noticeTypesRequested" in (env.data ?? {}));
+      // noticeType is NOT a reported filter here (the tool never sets ptype).
+      const noNoticeTypeFilter = !(m.filtersApplied ?? []).includes("noticeType");
+      return plainSource && shapeIntact && noNoticeTypeFilter;
+    },
+  },
+  {
     // D1 (spec §1.5, §3.2): usas_search_individual_awards must now return
     // naicsCode (parity with usas_search_awards_by_recipient). NAICS is a
     // valid spending_by_award field — the tool omitted it before this PR.
