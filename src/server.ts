@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
- * + USAspending + Federal Register + eCFR + Grants.gov + wage/pricing.
+ * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 43 keyless tools wrapping every public federal-contracting data
+ * 44 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -31,6 +31,7 @@ import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
 import * as pricing from "./pricing.js";
 import * as integrity from "./integrity.js";
+import * as gao from "./gao.js";
 import { toToolError } from "./errors.js";
 import {
   buildMeta,
@@ -550,6 +551,48 @@ const TeamingPartnersInput = z.object({
     .describe("Award-value-sorted pages (100 rows each) to scan before aggregating by recipient (default 4, max 10)."),
 });
 
+// GAO bid-protest lookup (keyless RSS + decision-page parse)
+const GaoProtestInput = z.object({
+  agency: z
+    .string()
+    .optional()
+    .describe(
+      "Client-side substring filter on the recent-protest feed (matched against the decision title + description). NOTE: filters the RECENT feed window only — not a historical agency search.",
+    ),
+  protester: z
+    .string()
+    .optional()
+    .describe("Client-side substring filter on the protester name (feed title/description)."),
+  solicitationNumber: z
+    .string()
+    .optional()
+    .describe("Client-side substring filter on the solicitation number (matched in the feed description)."),
+  outcome: z
+    .enum(["sustained", "denied", "dismissed", "withdrawn", "any"])
+    .optional()
+    .describe(
+      "Filter by protest disposition (default 'any'). Determined from each decision page, so it applies only when enrich is true.",
+    ),
+  bNumber: z
+    .string()
+    .optional()
+    .describe(
+      "Fetch ONE specific decision directly by GAO B-number (e.g. 'B-424377' or 'b-424249.2'), bypassing the feed. Use to pull a decision that has aged out of the recent feed window.",
+    ),
+  limit: z
+    .number()
+    .min(1)
+    .max(50)
+    .optional()
+    .describe("Max decisions to return (default 20, max 50). The feed itself carries ~25 recent legal products."),
+  enrich: z
+    .boolean()
+    .optional()
+    .describe(
+      "Fetch each decision's page to fill agency/outcome/solicitation/PDF (default true). Set false for a fast feed-only list (those fields will be null).",
+    ),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -838,6 +881,13 @@ const TOOLS: ToolDef[] = [
       "Small-business teaming-partner discovery by socioeconomic certification + NAICS + agency award history (keyless USAspending proxy), integrity-screened. Given a cert (enum-validated), optional naics/agency/subagency, and a lookback window, aggregates federal awardees by recipient and returns candidates ranked by agencyObligated with agencyAwardCount, mostRecentAwardDate, and sampleAwards; optionally screens the top candidates via sam_check_exclusions and drops active exclusions (excludeDebarred, default true). HONESTY: cert is AWARD-DERIVED (recorded on the firm's federal awards), NOT the SBA certification of record (which needs a keyed SAM Entity call) — verify active certification in SAM/SBS before teaming (stated in _meta). A bogus cert is rejected as invalid_input (the endpoint would silently return 0).",
     inputSchema: TeamingPartnersInput,
   },
+  // ━━━ GAO — Bid Protests (1) ━━━
+  {
+    name: "gao_protest_lookup",
+    description:
+      "Recent GAO (Comptroller General) bid-protest decisions from the public Legal-Products RSS feed, enriched from each decision page (protester, contracting agency, decision date, outcome sustained/denied/dismissed/withdrawn, solicitation #, decision PDF). Filter client-side by agency/protester/solicitation/outcome, or pull one decision directly by bNumber. HONEST SCOPE: keyless covers only the RECENT feed window (~25 items) — GAO's faceted historical protest search (all years, by protester/agency/outcome/date) is WAF-blocked to bots and available only via a paid third-party API, so results are ALWAYS marked complete:false and are NOT the full protest history (see the accessNote).",
+    inputSchema: GaoProtestInput,
+  },
 ];
 
 // ─── Server bootstrap ────────────────────────────────────────────
@@ -957,6 +1007,8 @@ function synthesizeDefaultMeta(
     source = "ecfr.gov/api";
   } else if (toolName.startsWith("grants_")) {
     source = "grants.gov/api";
+  } else if (toolName.startsWith("gao_")) {
+    source = "gao.gov Legal Products RSS + decision pages (keyless)";
   } else {
     source = "unknown";
   }
@@ -1267,6 +1319,10 @@ async function runTool(
       return await integrity.searchTeamingPartners(
         TeamingPartnersInput.parse(args),
       );
+
+    // GAO — Bid Protests
+    case "gao_protest_lookup":
+      return await gao.gaoProtestLookup(GaoProtestInput.parse(args));
 
     default:
       throw new Error(`Unknown tool: ${name}`);

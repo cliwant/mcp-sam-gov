@@ -404,6 +404,27 @@ const tests = [
       typeof r.candidates[0].agencyAwardCount === "number" &&
       Array.isArray(r.candidates[0].sampleAwards),
   },
+  // ━━━ GAO — Bid Protests
+  {
+    // Happy path: the recent Legal-Products feed yields ≥1 bid-protest decision,
+    // each carries a B-number + decisionUrl, and the honest accessNote is
+    // present. Live-soft: feed content changes daily, so we assert shape/scope
+    // rather than a specific protester.
+    name: "gao_protest_lookup",
+    args: { limit: 5 },
+    verify: (r) =>
+      typeof r.accessNote === "string" &&
+      /paid/i.test(r.accessNote) &&
+      Array.isArray(r.decisions) &&
+      r.decisions.length >= 1 &&
+      r.decisions.every(
+        (d) =>
+          typeof d.bNumber === "string" &&
+          d.bNumber.length > 0 &&
+          typeof d.decisionUrl === "string" &&
+          d.decisionUrl.includes("gao.gov/products"),
+      ),
+  },
 ];
 
 function pickPath(obj, path) {

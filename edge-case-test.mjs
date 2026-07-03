@@ -766,30 +766,58 @@ const cases = [
 
   // ━━━ Integrity / Teaming ━━━
   {
-    // (a1) A known-excluded name → excluded:true with matching active records,
-    // and the "not proof of responsibility" disclosure is ALWAYS present.
-    label: "check_exclusions: known name → excluded:true + 'not proof' disclosure",
+    // (a1) NAME-GATE regression guard (the adversarial BLOCK): SAM's free-text
+    // `q` tokenizes, so a query must NOT flag every record sharing a word. A
+    // generic word ("construction") returns loose hits that are DROPPED —
+    // `records`/`excluded` reflect ONLY normalized-name matches, and the
+    // "not proof of responsibility" disclosure is ALWAYS present.
+    label: "check_exclusions: name-gated (tokenized loose hits dropped, no false-positive)",
     name: "sam_check_exclusions",
     args: { query: "construction", size: 10 },
     accept: ({ env }) => {
       if (!env.ok || !env._meta) return false;
       const d = env.data;
-      // Active exclusions exist for "construction" → excluded true, records nonempty.
-      const excludedOk = d.excluded === true && d.matchCount > 0 && Array.isArray(d.records);
-      // Every returned record is active (activeOnly default) and carries the shape.
-      const recsOk = d.records.every(
-        (r) =>
-          typeof r.name === "string" &&
-          r.isActive === true &&
-          typeof r.samFapiisUrl === "string",
-      );
-      // The mandatory disclosure must be present in _meta.notes.
+      const norm = (s) =>
+        (s ?? "")
+          .toUpperCase()
+          .replace(/[.,/#!$%^&*;:{}=\-_`~()'"]/g, " ")
+          .replace(/\b(LLC|L L C|INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|LTD|LIMITED|LP|LLP|PLLC|PC)\b/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      const target = norm("construction");
+      // No tokenized "…construction…" firm may leak: every returned record's
+      // normalized name must EQUAL the query.
+      const gated = Array.isArray(d.records) && d.records.every((r) => norm(r.name) === target);
+      // excluded is consistent with the gated records (never a loose-hit true).
+      const consistent = d.excluded === d.records.some((r) => r.isActive === true);
       const notes = env._meta.notes ?? [];
-      const disclosure = notes.some(
-        (n) => /not\s+proof/i.test(n) && /responsibility/i.test(n),
-      );
-      const keylessOk = env._meta.keylessMode === true;
-      return excludedOk && recsOk && disclosure && keylessOk;
+      const disclosure = notes.some((n) => /not\s+proof/i.test(n) && /responsibility/i.test(n));
+      return gated && consistent && disclosure && env._meta.keylessMode === true;
+    },
+  },
+  {
+    // (a1b) The EXACT adversarial repro: a real firm name whose common tokens
+    // ("PARTNERS"/"CONSULTING") hit MANY unrelated exclusions must NOT be
+    // flagged excluded — the tokenized hits are dropped by the name-gate.
+    // Guards the reviewer's blind spot (the old suite only used a 0-hit token).
+    label: "check_exclusions: tokenized firm name is not a false-positive (VISIONARY CONSULTING PARTNERS)",
+    name: "sam_check_exclusions",
+    args: { query: "VISIONARY CONSULTING PARTNERS, LLC", size: 25 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      const norm = (s) =>
+        (s ?? "")
+          .toUpperCase()
+          .replace(/[.,/#!$%^&*;:{}=\-_`~()'"]/g, " ")
+          .replace(/\b(LLC|L L C|INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|LTD|LIMITED|LP|LLP|PLLC|PC)\b/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      const target = norm("VISIONARY CONSULTING PARTNERS, LLC");
+      // Every record present must actually name-match; no tokenized false-positive.
+      const gated = Array.isArray(d.records) && d.records.every((r) => norm(r.name) === target);
+      const consistent = d.excluded === d.records.some((r) => r.isActive === true);
+      return gated && consistent && env._meta.keylessMode === true;
     },
   },
   {
@@ -896,6 +924,81 @@ const cases = [
       const sourceOk = typeof m.source === "string" && /award-derived/i.test(m.source);
       return shaped && ranked && proxyNote && screenNote && fieldsOk && sourceOk;
     },
+  },
+  // ━━━ GAO — Bid Protests ━━━
+  {
+    // (a) The honesty contract: _meta is ALWAYS complete:false + truncated:true
+    // (the feed is a recent window, never the full history), totalAvailable is
+    // null (the feed is not a count of all protests), and BOTH the top-level
+    // accessNote AND a _meta note spell out the WAF-blocked / paid-API boundary.
+    label: "gao_protest_lookup: _meta always complete:false/truncated:true + paid-API caveat",
+    name: "gao_protest_lookup",
+    args: { limit: 5 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const scopeOk =
+        m.complete === false &&
+        m.truncated === true &&
+        m.totalAvailable === null &&
+        m.keylessMode === true;
+      // The top-level accessNote is present and names the paid API.
+      const accessOk =
+        typeof env.data?.accessNote === "string" &&
+        /paid/i.test(env.data.accessNote) &&
+        /waf|blocked|automated/i.test(env.data.accessNote);
+      // A _meta note must ALSO carry the caveat (WAF-blocked + paid).
+      const notes = Array.isArray(m.notes) ? m.notes : [];
+      const noteOk = notes.some(
+        (n) => /paid/i.test(n) && /(waf|blocked|automated|historical)/i.test(n),
+      );
+      // Source names the keyless GAO RSS origin.
+      const sourceOk = typeof m.source === "string" && /gao\.gov/i.test(m.source);
+      return scopeOk && accessOk && noteOk && sourceOk;
+    },
+  },
+  {
+    // (b) A client-side agency substring filter narrows the recent-protest set
+    // and is disclosed in _meta.filtersApplied. Live-soft: if the narrowed set
+    // is empty today that's still a valid (honest) narrowing — we only require
+    // that the filter is recorded and the result is a subset (never larger).
+    label: "gao_protest_lookup: agency substring filter narrows + is disclosed",
+    name: "gao_protest_lookup",
+    args: { limit: 25, enrich: false },
+    accept: async ({ env }) => {
+      if (!env.ok || !Array.isArray(env.data?.decisions)) return false;
+      const baseCount = env.data.decisions.length;
+      // Pick a term from a real returned title to guarantee a live substring.
+      const sampleTitle = env.data.decisions[0]?.title ?? "";
+      const term = (sampleTitle.split(/[\s,]+/)[0] || "LLC").slice(0, 6);
+      const narrowed = await call("gao_protest_lookup", {
+        agency: term,
+        limit: 25,
+        enrich: false,
+      });
+      const n = narrowed.env;
+      if (!n.ok || !Array.isArray(n.data?.decisions)) return false;
+      // The filter must be recorded as applied…
+      const applied = n._meta?.filtersApplied ?? [];
+      const disclosed = applied.some((f) => /agency/i.test(f));
+      // …and the narrowed set must be a subset (never MORE than the base set).
+      const isSubset = n.data.decisions.length <= baseCount;
+      // Still honest about scope on the filtered call.
+      const stillPartial = n._meta?.complete === false && n._meta?.truncated === true;
+      return disclosed && isSubset && stillPartial;
+    },
+  },
+  {
+    // (c) A well-formed-but-nonexistent B-number → STRUCTURED not_found
+    // (ok:false), never a crash and never ok:true with an empty/fabricated
+    // decision that reads as "no protest here".
+    label: "gao_protest_lookup: bogus bNumber → structured not_found (never crash/empty-as-success)",
+    name: "gao_protest_lookup",
+    args: { bNumber: "B-000000.99" },
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "not_found" &&
+      env.error?.retryable === false,
   },
 ];
 

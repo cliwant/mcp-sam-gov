@@ -67,7 +67,7 @@ export declare function benchmarkLaborRates(args: {
     maxSamplePages?: number;
 }): Promise<import("./meta.js").MetaBundle<{
     laborCategory: string;
-    matcher: "search" | "q";
+    matcher: "q" | "search";
     fuzzy: boolean;
     matchCount: number;
     matchCountSaturated: boolean;
