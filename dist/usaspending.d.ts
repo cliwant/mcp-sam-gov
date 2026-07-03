@@ -181,71 +181,71 @@ export declare function searchPscSpending(args: {
     naics?: string;
     fiscalYear?: number;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     psc: {
         pscCode: string;
         pscName: string;
         amount: number;
     }[];
-}>;
+}>>;
 export declare function searchStateSpending(args: {
     agency?: string;
     naics?: string;
     fiscalYear?: number;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     states: {
         stateCode: string;
         stateName: string;
         amount: number;
     }[];
-}>;
+}>>;
 export declare function searchCfdaSpending(args: {
     agency?: string;
     fiscalYear?: number;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     programs: {
         cfdaCode: string;
         programName: string;
         amount: number;
     }[];
-}>;
+}>>;
 export declare function searchFederalAccountSpending(args: {
     agency?: string;
     naics?: string;
     fiscalYear?: number;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     accounts: {
         tasCode: string;
         accountName: string;
         amount: number;
     }[];
-}>;
+}>>;
 export declare function searchAgencySpending(args: {
     naics?: string;
     fiscalYear?: number;
     setAside?: string;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     agencies: {
         name: string;
         code: string;
         slug: string;
         amount: number;
     }[];
-}>;
+}>>;
 export declare function searchSubAgencySpending(args: {
     agency: string;
     fiscalYear?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     subAgencies: {
         name: string;
         amount: number;
         awards: number;
     }[];
-}>;
+}>>;
 export declare function getAgencyProfile(toptierCode: string): Promise<{
     fiscalYear: number | undefined;
     toptierCode: string | undefined;
@@ -270,7 +270,7 @@ export declare function getAgencyBudgetFunction(args: {
     toptierCode: string;
     fiscalYear?: number;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     toptierCode: string | undefined;
     fiscalYear: number | undefined;
     functions: {
@@ -281,12 +281,12 @@ export declare function getAgencyBudgetFunction(args: {
             outlays: number;
         }[];
     }[];
-}>;
+}>>;
 export declare function searchRecipients(args: {
     keyword: string;
     recipientLevel?: "P" | "C" | "R";
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     totalRecords: number;
     recipients: {
         id: string;
@@ -296,7 +296,7 @@ export declare function searchRecipients(args: {
         level: string | undefined;
         totalAmount: number;
     }[];
-}>;
+}>>;
 export declare function getRecipientProfile(recipientId: string): Promise<{
     name: string;
     alternateNames: string[];
@@ -328,47 +328,47 @@ export declare function lookupAgency(searchText: string): Promise<{
 export declare function autocompleteNaics(args: {
     searchText: string;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     naics: {
         code: string;
         description: string;
         retired: boolean;
     }[];
-}>;
+}>>;
 export declare function autocompleteRecipient(args: {
     searchText: string;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     recipients: {
         name: string;
         uei: string | undefined;
         duns: string | undefined;
     }[];
-}>;
+}>>;
 export declare function naicsHierarchy(args: {
     naicsFilter?: string;
-}): Promise<{
+}): Promise<MetaBundle<{
     hierarchy: {
         code: string;
         description: string;
         count: number;
         hasChildren: boolean;
     }[];
-}>;
+}>>;
 export declare function glossary(args: {
     limit?: number;
     search?: string;
-}): Promise<{
+}): Promise<MetaBundle<{
     totalRecords: number;
     terms: {
         term: string;
         slug: string;
         definition: string;
     }[];
-}>;
+}>>;
 export declare function listToptierAgencies(args: {
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     agencies: {
         name: string;
         abbreviation: string | undefined;
@@ -377,5 +377,5 @@ export declare function listToptierAgencies(args: {
         activeFiscalYear: string | undefined;
         obligatedAmount: number;
     }[];
-}>;
+}>>;
 //# sourceMappingURL=usaspending.d.ts.map
