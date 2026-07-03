@@ -763,6 +763,82 @@ const cases = [
       return perCraftFringe && noWideHW;
     },
   },
+
+  // ━━━ GAO — Bid Protests ━━━
+  {
+    // (a) The honesty contract: _meta is ALWAYS complete:false + truncated:true
+    // (the feed is a recent window, never the full history), totalAvailable is
+    // null (the feed is not a count of all protests), and BOTH the top-level
+    // accessNote AND a _meta note spell out the WAF-blocked / paid-API boundary.
+    label: "gao_protest_lookup: _meta always complete:false/truncated:true + paid-API caveat",
+    name: "gao_protest_lookup",
+    args: { limit: 5 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const scopeOk =
+        m.complete === false &&
+        m.truncated === true &&
+        m.totalAvailable === null &&
+        m.keylessMode === true;
+      // The top-level accessNote is present and names the paid API.
+      const accessOk =
+        typeof env.data?.accessNote === "string" &&
+        /paid/i.test(env.data.accessNote) &&
+        /waf|blocked|automated/i.test(env.data.accessNote);
+      // A _meta note must ALSO carry the caveat (WAF-blocked + paid).
+      const notes = Array.isArray(m.notes) ? m.notes : [];
+      const noteOk = notes.some(
+        (n) => /paid/i.test(n) && /(waf|blocked|automated|historical)/i.test(n),
+      );
+      // Source names the keyless GAO RSS origin.
+      const sourceOk = typeof m.source === "string" && /gao\.gov/i.test(m.source);
+      return scopeOk && accessOk && noteOk && sourceOk;
+    },
+  },
+  {
+    // (b) A client-side agency substring filter narrows the recent-protest set
+    // and is disclosed in _meta.filtersApplied. Live-soft: if the narrowed set
+    // is empty today that's still a valid (honest) narrowing — we only require
+    // that the filter is recorded and the result is a subset (never larger).
+    label: "gao_protest_lookup: agency substring filter narrows + is disclosed",
+    name: "gao_protest_lookup",
+    args: { limit: 25, enrich: false },
+    accept: async ({ env }) => {
+      if (!env.ok || !Array.isArray(env.data?.decisions)) return false;
+      const baseCount = env.data.decisions.length;
+      // Pick a term from a real returned title to guarantee a live substring.
+      const sampleTitle = env.data.decisions[0]?.title ?? "";
+      const term = (sampleTitle.split(/[\s,]+/)[0] || "LLC").slice(0, 6);
+      const narrowed = await call("gao_protest_lookup", {
+        agency: term,
+        limit: 25,
+        enrich: false,
+      });
+      const n = narrowed.env;
+      if (!n.ok || !Array.isArray(n.data?.decisions)) return false;
+      // The filter must be recorded as applied…
+      const applied = n._meta?.filtersApplied ?? [];
+      const disclosed = applied.some((f) => /agency/i.test(f));
+      // …and the narrowed set must be a subset (never MORE than the base set).
+      const isSubset = n.data.decisions.length <= baseCount;
+      // Still honest about scope on the filtered call.
+      const stillPartial = n._meta?.complete === false && n._meta?.truncated === true;
+      return disclosed && isSubset && stillPartial;
+    },
+  },
+  {
+    // (c) A well-formed-but-nonexistent B-number → STRUCTURED not_found
+    // (ok:false), never a crash and never ok:true with an empty/fabricated
+    // decision that reads as "no protest here".
+    label: "gao_protest_lookup: bogus bNumber → structured not_found (never crash/empty-as-success)",
+    name: "gao_protest_lookup",
+    args: { bNumber: "B-000000.99" },
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "not_found" &&
+      env.error?.retryable === false,
+  },
 ];
 
 async function main() {
