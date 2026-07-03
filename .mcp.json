@@ -1,8 +1,10 @@
 {
   "mcpServers": {
     "sam-gov": {
-      "command": "mcp-sam-gov",
-      "args": [],
+      "command": "node",
+      "args": [
+        "dist/server.js"
+      ],
       "env": {}
     }
   }
