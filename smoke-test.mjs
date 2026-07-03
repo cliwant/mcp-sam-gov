@@ -317,6 +317,26 @@ const tests = [
     verify: (r) => Array.isArray(r.titles) && r.titles.length === 50,
   },
 
+  // ━━━ SBA — Size Standards
+  {
+    // Happy path: a known receipts-based NAICS (541512, Computer Systems Design)
+    // returns found:true with a numeric threshold in DOLLARS + a disclosed unit.
+    // Live-soft on the exact figure (SBA adjusts it) — assert shape, that the
+    // threshold is the $millions figure normalized to dollars (a large number),
+    // and that the unit is disclosed.
+    name: "sba_size_standard",
+    args: { naics: "541512" },
+    verify: (r) =>
+      r.found === true &&
+      r.naics === "541512" &&
+      r.standardType === "receipts" &&
+      typeof r.threshold === "number" &&
+      r.threshold >= 1_000_000 && // normalized to dollars, never the raw "34"
+      r.unit === "USD annual receipts" &&
+      r.revenueLimitUSD === r.threshold &&
+      typeof r.asOf === "string",
+  },
+
   // ━━━ Grants.gov
   {
     name: "grants_search",

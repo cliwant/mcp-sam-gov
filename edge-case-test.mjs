@@ -377,6 +377,110 @@ const cases = [
       return allTitlesNote && noTitleFilter;
     },
   },
+  // ━━━ SBA — Size Standards ━━━
+  {
+    // (a) RECEIPTS-based NAICS: 541512 (Computer Systems Design). The $millions
+    // figure must be normalized to DOLLARS on `threshold` + `revenueLimitUSD`
+    // (NEVER surfaced as the raw "34"), the unit disclosed, employee/asset
+    // fields null, and _meta.notes MUST carry the "adjusted periodically" caveat.
+    label: "sba_size_standard: receipts-based NAICS → dollars threshold + unit disclosed + caveat",
+    name: "sba_size_standard",
+    args: { naics: "541512" },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      const m = env._meta;
+      const shapeOk =
+        d.found === true &&
+        d.naics === "541512" &&
+        d.standardType === "receipts" &&
+        d.unit === "USD annual receipts";
+      // Normalized to dollars: a large number (millions×1e6), mirrored on the
+      // raw normalized field, and a whole-million multiple (proves ×1,000,000).
+      const dollarsOk =
+        typeof d.threshold === "number" &&
+        d.threshold >= 1_000_000 &&
+        d.threshold % 1_000_000 === 0 &&
+        d.revenueLimitUSD === d.threshold;
+      // The other standard types are null (a NAICS uses exactly ONE).
+      const othersNull = d.employeeCountLimit === null && d.assetLimitUSD === null;
+      // Retrieval timestamp present (value is "as published as of" asOf).
+      const asOfOk = typeof d.asOf === "string" && d.asOf.length > 0;
+      // The doc-07 "not a permanent constant" caveat is present.
+      const caveat = (m.notes ?? []).some(
+        (n) => /adjusted periodically/i.test(n) && /verify the current standard/i.test(n),
+      );
+      // Source names the keyless SBA dataset.
+      const sourceOk = typeof m.source === "string" && /sba\.gov naics\.json/i.test(m.source);
+      return shapeOk && dollarsOk && othersNull && asOfOk && caveat && sourceOk && m.keylessMode === true;
+    },
+  },
+  {
+    // (b) EMPLOYEE-based NAICS: 336411 (Aircraft Manufacturing). threshold is a
+    // COUNT of employees (NOT dollars) with the "employees" unit, and the
+    // receipts/asset fields are null. The caveat must still be present.
+    label: "sba_size_standard: employee-based NAICS → employee count + unit (not dollars)",
+    name: "sba_size_standard",
+    args: { naics: "336411" },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      const m = env._meta;
+      const shapeOk =
+        d.found === true &&
+        d.naics === "336411" &&
+        d.standardType === "employees" &&
+        d.unit === "employees";
+      // A plausible employee headcount (small integer, NOT a millions-scaled $).
+      const countOk =
+        typeof d.threshold === "number" &&
+        d.threshold === d.employeeCountLimit &&
+        d.threshold > 0 &&
+        d.threshold < 100_000; // employee caps are hundreds/thousands, never $millions
+      const othersNull = d.revenueLimitUSD === null && d.assetLimitUSD === null;
+      const caveat = (m.notes ?? []).some((n) => /adjusted periodically/i.test(n));
+      return shapeOk && countOk && othersNull && caveat;
+    },
+  },
+  {
+    // (c) A non-existent NAICS → found:false, every field null, and the
+    // disclosure that NO standard was fabricated (never a made-up number). The
+    // "adjusted periodically" caveat is STILL present, and _meta.complete:false.
+    label: "sba_size_standard: non-existent NAICS → found:false + disclosure (no fabricated standard)",
+    name: "sba_size_standard",
+    args: { naics: "000000" },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      const m = env._meta;
+      const notFound =
+        d.found === false &&
+        d.threshold === null &&
+        d.unit === null &&
+        d.standardType === "unknown" &&
+        d.revenueLimitUSD === null &&
+        d.employeeCountLimit === null &&
+        d.assetLimitUSD === null;
+      // A disclosure that nothing was fabricated for the missing code.
+      const disclosure = (m.notes ?? []).some(
+        (n) => /not present in the sba size-standards dataset/i.test(n) && /fabricated/i.test(n),
+      );
+      const caveat = (m.notes ?? []).some((n) => /adjusted periodically/i.test(n));
+      const completeness = m.complete === false;
+      return notFound && disclosure && caveat && completeness;
+    },
+  },
+  {
+    // (d) A malformed NAICS (not 6 digits) → STRUCTURED invalid_input at the
+    // server (Zod) boundary, never a silent found:false or a crash.
+    label: "sba_size_standard: malformed NAICS → structured invalid_input",
+    name: "sba_size_standard",
+    args: { naics: "54" },
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "invalid_input" &&
+      env.error?.retryable === false,
+  },
   {
     // E-2 (spec §1.6, §5): grants_search output cfdaList must be an ARRAY on
     // every row (the runtime shape), not the string the old type declared —
