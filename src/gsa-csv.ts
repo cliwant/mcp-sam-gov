@@ -529,6 +529,242 @@ export function _resetIndexForTests(): void {
   refreshInFlight = null;
 }
 
+// ─── Non-blocking accessor (for inline search enrichment) ────────
+//
+// `sam_search_opportunities` must stay fast: it must NEVER pay a synchronous
+// 225 MB download to enrich a page. This accessor returns the ALREADY-loaded/
+// fresh index if one is in memory, else returns null IMMEDIATELY — optionally
+// kicking off a background refresh (fire-and-forget) so a LATER search can
+// enrich once the cache warms. It never awaits I/O on the hot path.
+
+/** A read-only view of a loaded index for enrichment consumers. */
+export type ReadyIndex = {
+  get(noticeId: string): NoticeFields | undefined;
+  csvLastModified: string | null;
+  indexBuiltAt: string;
+  rowCount: number;
+};
+
+/** Wrap a LoadedIndex as the read-only ReadyIndex the enrichment path uses. */
+function toReady(idx: LoadedIndex): ReadyIndex {
+  return {
+    get: (noticeId: string) => idx.map.get((noticeId ?? "").trim().toLowerCase()),
+    csvLastModified: idx.csvLastModified,
+    indexBuiltAt: idx.builtAt,
+    rowCount: idx.rowCount,
+  };
+}
+
+/**
+ * NON-BLOCKING: return a ready CSV index if one is loaded + fresh, else null.
+ *
+ * Guarantees for the search hot-path:
+ *   - Disabled config → null (no work, no network) — caller skips enrichment.
+ *   - An in-memory index within its TTL → returned synchronously (no HEAD, no
+ *     download).
+ *   - No in-memory index (cold) → returns null IMMEDIATELY and, unless a
+ *     refresh is already in flight, kicks off a background `ensureIndex` (its
+ *     result is memoized into `loaded` for a subsequent call). The promise is
+ *     deliberately NOT awaited here and its rejection is swallowed so a failed
+ *     warm never surfaces on the search path.
+ *   - An in-memory index PAST its TTL → still returned (stale-but-usable) while
+ *     a background refresh is kicked off; the caller discloses the age via
+ *     freshness so a slightly-stale snapshot is honest, never a stall.
+ *
+ * This never throws — any misconfiguration or I/O error degrades to null.
+ */
+export function tryGetReadyIndex(
+  cfg: CsvConfig = resolveCsvConfig(),
+): ReadyIndex | null {
+  try {
+    if (!cfg.enabled) return null;
+
+    if (loaded) {
+      const ageMs = Date.now() - new Date(loaded.builtAt).getTime();
+      // Past TTL (download mode only — a fixture never expires): serve the
+      // stale index now, refresh in the background for next time.
+      if (!cfg.fixturePath && (!Number.isFinite(ageMs) || ageMs > INDEX_TTL_MS)) {
+        kickBackgroundRefresh(cfg);
+      }
+      return toReady(loaded);
+    }
+
+    // Cold: nothing loaded yet — never block the search. Warm in the
+    // background and return null so this call proceeds un-enriched.
+    kickBackgroundRefresh(cfg);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Fire-and-forget a single shared refresh; swallow errors (never block/throw). */
+function kickBackgroundRefresh(cfg: CsvConfig): void {
+  if (refreshInFlight) return;
+  // ensureIndex sets/reuses `refreshInFlight` itself; we just make sure its
+  // rejection is handled so an unhandledRejection never escapes the warm.
+  void ensureIndex(cfg).catch(() => {
+    /* a failed background warm is non-fatal — the next call retries */
+  });
+}
+
+// ─── Inline enrichment merge (used by sam_search_opportunities) ──
+//
+// Pure, testable merge: given the keyless HAL search page (whose
+// naics/setAside/PoP/deadline/type are null) and a ready CSV index, fill the
+// null fields from the CSV snapshot and report EXACTLY what changed so the
+// caller can rebuild `_meta` truthfully. Notices absent from the snapshot are
+// left untouched and counted. Never fabricates: only null→value, only for a
+// noticeId present in the index.
+
+/** One opportunity row as emitted by the keyless sam_search handler. */
+export type SearchOppRow = {
+  noticeId: string;
+  title?: string | null;
+  agency?: string | null;
+  solicitationNumber?: string | null;
+  responseDeadline?: string | null;
+  naics?: string | null;
+  setAside?: string | null;
+  uiLink?: string | null;
+  // Enrichment MAY add these (absent on the un-enriched/disabled shape):
+  type?: string | null;
+  placeOfPerformance?: SamCsvPlaceOfPerformance | null;
+  [k: string]: unknown;
+};
+
+/** Place-of-performance shape composed from the CSV Pop* columns. */
+export type SamCsvPlaceOfPerformance = {
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  country: string | null;
+};
+
+export type EnrichmentOutcome = {
+  /** The page with null fields filled from the CSV where the notice was found. */
+  opportunities: SearchOppRow[];
+  /** Notices in the page that were present in the CSV snapshot. */
+  foundCount: number;
+  /** Notices in the page absent from the CSV snapshot (left un-enriched). */
+  missingCount: number;
+  /** Union of field names filled on ≥1 row (subset of naics/setAside/… ). */
+  fieldsFilled: Set<string>;
+  /** Snapshot freshness, mirrored into data + _meta by the caller. */
+  freshness: {
+    csvLastModified: string | null;
+    indexBuiltAt: string;
+    indexAgeHours: number | null;
+    rowCount: number;
+  };
+};
+
+/** Compose a CSV place-of-performance, or null when every Pop* cell is empty. */
+function popFromFields(f: NoticeFields): SamCsvPlaceOfPerformance | null {
+  const city = nn(f.popCity);
+  const state = nn(f.popState);
+  const zip = nn(f.popZip);
+  const country = nn(f.popCountry);
+  if (city === null && state === null && zip === null && country === null) {
+    return null;
+  }
+  return { city, state, zip, country };
+}
+
+/**
+ * Fill the keyless search page's null naics/setAside/placeOfPerformance (and
+ * responseDeadline/type when currently null) from the ready CSV index.
+ *
+ * Rules (honesty):
+ *   - Only a null field is filled — a value already present (e.g. keyed mode,
+ *     or a HAL row that carried the value) is NEVER overwritten.
+ *   - A field is filled only when the CSV cell is a real non-empty value (an
+ *     empty CSV cell stays null — absence ≠ empty).
+ *   - `type`/`placeOfPerformance` keys are ADDED only when a value is actually
+ *     filled from the CSV, so a not-in-snapshot row keeps the exact original
+ *     shape (no spurious null keys).
+ *   - A noticeId absent from the snapshot is left byte-identical + counted.
+ */
+export function enrichSearchOpportunities(
+  opportunities: SearchOppRow[],
+  index: ReadyIndex,
+): EnrichmentOutcome {
+  const fieldsFilled = new Set<string>();
+  let foundCount = 0;
+  let missingCount = 0;
+
+  const enriched = opportunities.map((row) => {
+    const rec = index.get(row.noticeId);
+    if (!rec) {
+      missingCount++;
+      return row; // absent from snapshot — untouched, disclosed via counts
+    }
+    foundCount++;
+    const out: SearchOppRow = { ...row };
+
+    // naics — fill only if currently null/absent.
+    if (out.naics == null) {
+      const v = nn(rec.naicsCode);
+      if (v !== null) {
+        out.naics = v;
+        fieldsFilled.add("naics");
+      }
+    }
+    // setAside — the keyless HAL nulls typeOfSetAside; the CSV's short code
+    // (e.g. 'SBA') is the value that matches sam_get_opportunity's setAside.
+    if (out.setAside == null) {
+      const v = nn(rec.setAsideCode);
+      if (v !== null) {
+        out.setAside = v;
+        fieldsFilled.add("setAside");
+      }
+    }
+    // responseDeadline — fill only if currently null.
+    if (out.responseDeadline == null) {
+      const v = nn(rec.responseDeadline);
+      if (v !== null) {
+        out.responseDeadline = v;
+        fieldsFilled.add("responseDeadline");
+      }
+    }
+    // type — add the key only when the CSV has a real value.
+    if (out.type == null) {
+      const v = nn(rec.type);
+      if (v !== null) {
+        out.type = v;
+        fieldsFilled.add("type");
+      }
+    }
+    // placeOfPerformance — add the key only when ≥1 Pop* cell is populated.
+    if (out.placeOfPerformance == null) {
+      const pop = popFromFields(rec);
+      if (pop !== null) {
+        out.placeOfPerformance = pop;
+        fieldsFilled.add("placeOfPerformance");
+      }
+    }
+    return out;
+  });
+
+  const builtAtMs = new Date(index.indexBuiltAt).getTime();
+  const indexAgeHours = Number.isFinite(builtAtMs)
+    ? Math.round(((Date.now() - builtAtMs) / 3_600_000) * 10) / 10
+    : null;
+
+  return {
+    opportunities: enriched,
+    foundCount,
+    missingCount,
+    fieldsFilled,
+    freshness: {
+      csvLastModified: index.csvLastModified,
+      indexBuiltAt: index.indexBuiltAt,
+      indexAgeHours,
+      rowCount: index.rowCount,
+    },
+  };
+}
+
 // ─── The tool: sam_lookup_notice_fields ──────────────────────────
 
 export type LookupResult = {

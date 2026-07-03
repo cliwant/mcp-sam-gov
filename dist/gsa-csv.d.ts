@@ -115,6 +115,85 @@ export type NoticeFields = {
 };
 /** TEST-ONLY: drop the process-lifetime memo so a test can re-point the env. */
 export declare function _resetIndexForTests(): void;
+/** A read-only view of a loaded index for enrichment consumers. */
+export type ReadyIndex = {
+    get(noticeId: string): NoticeFields | undefined;
+    csvLastModified: string | null;
+    indexBuiltAt: string;
+    rowCount: number;
+};
+/**
+ * NON-BLOCKING: return a ready CSV index if one is loaded + fresh, else null.
+ *
+ * Guarantees for the search hot-path:
+ *   - Disabled config → null (no work, no network) — caller skips enrichment.
+ *   - An in-memory index within its TTL → returned synchronously (no HEAD, no
+ *     download).
+ *   - No in-memory index (cold) → returns null IMMEDIATELY and, unless a
+ *     refresh is already in flight, kicks off a background `ensureIndex` (its
+ *     result is memoized into `loaded` for a subsequent call). The promise is
+ *     deliberately NOT awaited here and its rejection is swallowed so a failed
+ *     warm never surfaces on the search path.
+ *   - An in-memory index PAST its TTL → still returned (stale-but-usable) while
+ *     a background refresh is kicked off; the caller discloses the age via
+ *     freshness so a slightly-stale snapshot is honest, never a stall.
+ *
+ * This never throws — any misconfiguration or I/O error degrades to null.
+ */
+export declare function tryGetReadyIndex(cfg?: CsvConfig): ReadyIndex | null;
+/** One opportunity row as emitted by the keyless sam_search handler. */
+export type SearchOppRow = {
+    noticeId: string;
+    title?: string | null;
+    agency?: string | null;
+    solicitationNumber?: string | null;
+    responseDeadline?: string | null;
+    naics?: string | null;
+    setAside?: string | null;
+    uiLink?: string | null;
+    type?: string | null;
+    placeOfPerformance?: SamCsvPlaceOfPerformance | null;
+    [k: string]: unknown;
+};
+/** Place-of-performance shape composed from the CSV Pop* columns. */
+export type SamCsvPlaceOfPerformance = {
+    city: string | null;
+    state: string | null;
+    zip: string | null;
+    country: string | null;
+};
+export type EnrichmentOutcome = {
+    /** The page with null fields filled from the CSV where the notice was found. */
+    opportunities: SearchOppRow[];
+    /** Notices in the page that were present in the CSV snapshot. */
+    foundCount: number;
+    /** Notices in the page absent from the CSV snapshot (left un-enriched). */
+    missingCount: number;
+    /** Union of field names filled on ≥1 row (subset of naics/setAside/… ). */
+    fieldsFilled: Set<string>;
+    /** Snapshot freshness, mirrored into data + _meta by the caller. */
+    freshness: {
+        csvLastModified: string | null;
+        indexBuiltAt: string;
+        indexAgeHours: number | null;
+        rowCount: number;
+    };
+};
+/**
+ * Fill the keyless search page's null naics/setAside/placeOfPerformance (and
+ * responseDeadline/type when currently null) from the ready CSV index.
+ *
+ * Rules (honesty):
+ *   - Only a null field is filled — a value already present (e.g. keyed mode,
+ *     or a HAL row that carried the value) is NEVER overwritten.
+ *   - A field is filled only when the CSV cell is a real non-empty value (an
+ *     empty CSV cell stays null — absence ≠ empty).
+ *   - `type`/`placeOfPerformance` keys are ADDED only when a value is actually
+ *     filled from the CSV, so a not-in-snapshot row keeps the exact original
+ *     shape (no spurious null keys).
+ *   - A noticeId absent from the snapshot is left byte-identical + counted.
+ */
+export declare function enrichSearchOpportunities(opportunities: SearchOppRow[], index: ReadyIndex): EnrichmentOutcome;
 export type LookupResult = {
     noticeId: string;
     found: boolean;

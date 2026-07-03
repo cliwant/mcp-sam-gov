@@ -913,6 +913,61 @@ async function runTool(name, args, sam) {
                 const filtersDropped = input.organizationName
                     ? ["organizationName"]
                     : [];
+                // ── GSA-CSV inline enrichment (opt-in, non-blocking) ──────────────
+                // The keyless HAL list payload nulls each row's naics/setAside/PoP/
+                // deadline/type. When the GSA-CSV backbone is ENABLED and its index is
+                // already warm, fill those nulls from today's snapshot in ONE lookup —
+                // instead of N sam_get_opportunity detail calls. HARD guarantees:
+                //   - DISABLED (default) → resolveCsvConfig().enabled is false, so we
+                //     never enter this branch: `data`, fieldsUnavailable and notes are
+                //     byte-for-byte the pre-enrichment behavior, and ZERO network hits
+                //     the CSV.
+                //   - NON-BLOCKING → tryGetReadyIndex returns the already-loaded index
+                //     or null immediately (kicking a background warm); a cold CSV NEVER
+                //     stalls the search on a 225 MB download.
+                //   - A CSV error can't fail the search: tryGetReadyIndex swallows and
+                //     returns null → we degrade to the un-enriched page + a note.
+                const csvCfg = gsaCsv.resolveCsvConfig();
+                // Widen the opportunities element type so the enriched rows (which may
+                // carry the added type/placeOfPerformance keys) are assignable; the
+                // original `data` (narrower) widens into this cleanly.
+                let enrichedData = data;
+                // The fields still null after enrichment (rebuilt truthfully below).
+                let fieldsUnavailable = ["naics", "setAside", "placeOfPerformance"];
+                const enrichmentNotes = [];
+                let source = "sam.gov/sgs/v1 (keyless HAL)";
+                let freshness = undefined;
+                if (csvCfg.enabled) {
+                    const ready = data.returned > 0 ? gsaCsv.tryGetReadyIndex(csvCfg) : null;
+                    if (ready) {
+                        const outcome = gsaCsv.enrichSearchOpportunities(enrichedData.opportunities, ready);
+                        enrichedData = { ...data, opportunities: outcome.opportunities };
+                        freshness = outcome.freshness;
+                        source = "sam.gov/sgs/v1 (keyless HAL) + gsa-csv (daily bulk CSV snapshot)";
+                        // Rebuild fieldsUnavailable: a field is only "unavailable" if it was
+                        // NOT filled on the whole page. Fields filled from the CSV drop off.
+                        // (naics/setAside/placeOfPerformance are the originally-null trio.)
+                        fieldsUnavailable = ["naics", "setAside", "placeOfPerformance"].filter((f) => !outcome.fieldsFilled.has(f));
+                        const filledList = [...outcome.fieldsFilled];
+                        if (filledList.length > 0) {
+                            enrichmentNotes.push(`naics/set-aside/place-of-performance for results present in today's GSA CSV snapshot were enriched from the GSA daily bulk CSV (source: gsa-csv) — filled fields this page: ${filledList.join(", ")}. set-aside here is the CSV short code (e.g. 'SBA') that matches sam_get_opportunity's setAside. Confirm real-time values (e.g. a just-amended deadline) with sam_get_opportunity.`);
+                        }
+                        else {
+                            enrichmentNotes.push("GSA-CSV enrichment ran but filled no fields on this page (the matched snapshot rows carried no non-empty naics/set-aside/place-of-performance) — values remain null; fetch sam_get_opportunity.");
+                        }
+                        if (outcome.missingCount > 0) {
+                            enrichmentNotes.push(`${outcome.missingCount} of ${data.returned} results were not in the current CSV snapshot (too new or archived) — their naics/set-aside/PoP remain null; fetch sam_get_opportunity for those noticeIds.`);
+                        }
+                        enrichmentNotes.push(`GSA CSV freshness — snapshot last-modified: ${outcome.freshness.csvLastModified ?? "unknown"}; index built: ${outcome.freshness.indexBuiltAt}; index age: ${outcome.freshness.indexAgeHours ?? "unknown"}h. The snapshot can lag the live HAL by up to ~24h.`);
+                    }
+                    else {
+                        // Enabled but the index isn't warm yet (cold cache / background
+                        // refresh in flight). Return the normal HAL page un-enriched and
+                        // disclose the pending warm — never block on the download.
+                        source = "sam.gov/sgs/v1 (keyless HAL) + gsa-csv (index warming)";
+                        enrichmentNotes.push("GSA-CSV enrichment pending — the CSV index is warming (a background download/build was kicked off); naics/set-aside/place-of-performance were NOT enriched this call. Retry shortly for an enriched page, or fetch sam_get_opportunity now.");
+                    }
+                }
                 const notes = [];
                 if (filtersApplied.length > 0) {
                     notes.push("Keyless SAM search filtered server-side by the applied facets (NAICS/set-aside/place-of-performance state/keyword) — the result count reflects them. But the keyless list payload OMITS each notice's naics/setAside/placeOfPerformance VALUES (null here); call sam_get_opportunity on a noticeId to read those values.");
@@ -923,15 +978,22 @@ async function runTool(name, args, sam) {
                 if (filtersDropped.length > 0) {
                     notes.push("The organization-name filter is NOT supported by the keyless endpoint and was ignored (results are unfiltered on organization). Set SAM_GOV_API_KEY to filter by organization, or filter client-side on the returned `agency` field.");
                 }
-                return withMeta(data, {
-                    source: "sam.gov/sgs/v1 (keyless HAL)",
+                notes.push(...enrichmentNotes);
+                // freshness is surfaced structurally in `data` (the ResponseMeta type
+                // has no typed freshness field, mirroring sam_lookup_notice_fields) —
+                // present only when enrichment actually ran.
+                const dataOut = freshness !== undefined
+                    ? { ...enrichedData, freshness }
+                    : enrichedData;
+                return withMeta(dataOut, {
+                    source,
                     keylessMode: true,
                     truncated: r.totalRecords > data.returned,
                     returned: data.returned,
                     totalAvailable: r.totalRecords,
                     filtersApplied,
                     filtersDropped,
-                    fieldsUnavailable: ["naics", "setAside", "placeOfPerformance"],
+                    fieldsUnavailable,
                     notes,
                 });
             }
