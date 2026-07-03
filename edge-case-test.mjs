@@ -18,6 +18,11 @@
 
 import { spawn } from "node:child_process";
 import { setTimeout as wait } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const FIXTURE_CSV = path.join(__dirname, "test-fixtures", "gsa-sample.csv");
 
 const child = spawn("node", ["dist/server.js"], {
   stdio: ["pipe", "pipe", "pipe"],
@@ -1000,7 +1005,224 @@ const cases = [
       env.error?.kind === "not_found" &&
       env.error?.retryable === false,
   },
+
+  // ━━━ GSA daily-CSV keyless backbone — DISABLED-path + input guards ━━━
+  // NOTE: this suite's server runs with NO CSV env → the backbone is DISABLED.
+  // The ENABLED fixture path is exercised separately below (a second server
+  // spawned with SAM_GOV_CSV_FIXTURE) so CI never pulls the live 226 MB CSV.
+  {
+    // DISABLED default: enabled:false + a structured "how to enable" note, every
+    // row found:false + null fields, NO network download, NOT an error. The
+    // _meta must flag every enrichment field as fieldsUnavailable and carry the
+    // enable instructions (SAM_GOV_CSV_CACHE / SAM_GOV_ENABLE_CSV).
+    label: "lookup_notice_fields: DISABLED by default → structured enable-note, no data, no download",
+    name: "sam_lookup_notice_fields",
+    args: { noticeIds: ["a4be592da0304872a252980925b9458f", "c7a871f27b5046be81549a9fdc9719c7"] },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      const enabledFalse = d.enabled === false && d.freshness === null;
+      const allEmpty =
+        Array.isArray(d.results) &&
+        d.results.length === 2 &&
+        d.results.every(
+          (x) => x.found === false && x.naicsCode === null && x.setAside === null && x.type === null,
+        );
+      const notes = env._meta.notes ?? [];
+      // The disclosure must both flag it DISABLED and name the enable env vars
+      // (across the notes — not necessarily in a single sentence).
+      const disabledNote = notes.some((n) => /disabled/i.test(n));
+      const enableVarsNote = notes.some((n) => /SAM_GOV_CSV_CACHE|SAM_GOV_ENABLE_CSV/.test(n));
+      const enableNote = disabledNote && enableVarsNote;
+      // Enrichment fields flagged unavailable (not silently dropped).
+      const fu = env._meta.fieldsUnavailable ?? [];
+      const fieldsFlagged = ["naicsCode", "setAside", "popState"].every((f) => fu.includes(f));
+      const sourceOk = typeof env._meta.source === "string" && /gsa\.gov.*csv/i.test(env._meta.source);
+      return enabledFalse && allEmpty && enableNote && fieldsFlagged && sourceOk && env._meta.keylessMode === true;
+    },
+  },
+  {
+    // Empty noticeIds array → structured invalid_input (never an empty success).
+    label: "lookup_notice_fields: empty noticeIds → structured invalid_input",
+    name: "sam_lookup_notice_fields",
+    args: { noticeIds: [] },
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "invalid_input" &&
+      env.error?.retryable === false,
+  },
+  {
+    // Over-cap (>100) noticeIds → structured invalid_input (Zod .max(100) at the
+    // server boundary surfaces as invalid_input with the field issue).
+    label: "lookup_notice_fields: >100 noticeIds → structured invalid_input",
+    name: "sam_lookup_notice_fields",
+    args: { noticeIds: Array.from({ length: 101 }, (_, i) => "a".repeat(31) + (i % 10)) },
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "invalid_input" &&
+      env.error?.retryable === false,
+  },
 ];
+
+// ── RFC-4180 parser unit tests (in-process, no server, no network) ──
+// Imports the compiled module directly and asserts the state machine handles
+// quoted / embedded-comma / ""-escape / newline-in-quote cases correctly.
+async function runParserUnitTests() {
+  console.log("\n--- RFC-4180 parser unit tests (in-process) ---");
+  let p = 0, f = 0;
+  let parseRecordFields;
+  try {
+    ({ parseRecordFields } = await import("./dist/gsa-csv.js"));
+  } catch (e) {
+    console.log(`✗ could not import dist/gsa-csv.js: ${e.message}`);
+    return { pass: 0, fail: 1 };
+  }
+  const check = (label, got, want) => {
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    console.log(`${ok ? "✓" : "✗"} parser: ${label}`);
+    if (!ok) console.log(`    got ${JSON.stringify(got)} want ${JSON.stringify(want)}`);
+    ok ? p++ : f++;
+  };
+  // plain unquoted fields
+  check("plain fields", parseRecordFields("a,b,c", 24).fields, ["a", "b", "c"]);
+  // embedded comma inside quotes stays one field
+  check("embedded comma", parseRecordFields('a,"x, y, z",c', 24).fields, ["a", "x, y, z", "c"]);
+  // ""-escape → a single literal quote
+  check('""-escape', parseRecordFields('a,"say ""hi""",c', 24).fields, ["a", 'say "hi"', "c"]);
+  // a line that ends inside an open quote reports inQuotes:true (record spans lines)
+  {
+    const r = parseRecordFields('a,"line one', 24);
+    check("open-quote inQuotes flag", r.inQuotes, true);
+  }
+  // a balanced quoted field reports inQuotes:false
+  check("balanced inQuotes flag", parseRecordFields('a,"whole",c', 24).inQuotes, false);
+  // fields are capped at maxCol but quote-scanning continues past it: a newline
+  // inside a LATER (col>maxCol) quoted field must still be detected as spanning.
+  {
+    const line = "id,t" + ",x".repeat(30) + ',"desc opens a quote then the line breaks';
+    const r = parseRecordFields(line, 24);
+    // stored fields capped (<= 26 = maxCol+1 up to and incl. col 24, plus the
+    // early cells) and inQuotes must be true (the late quote is open).
+    check("late-column newline still spans (inQuotes)", r.inQuotes, true);
+    check("stored fields capped at maxCol+1", r.fields.length <= 25, true);
+  }
+  return { pass: p, fail: f };
+}
+
+// ── ENABLED fixture path (a SECOND server spawned with SAM_GOV_CSV_FIXTURE) ──
+// Points the backbone at the small local test-fixtures/gsa-sample.csv so the
+// test does NOT pull the live 226 MB CSV. Asserts a known noticeId returns its
+// fields, an unknown one returns found:false + the "not in current CSV snapshot"
+// disclosure, and _meta.source + freshness are present.
+async function runEnabledFixtureTests() {
+  console.log("\n--- ENABLED fixture path (offline, SAM_GOV_CSV_FIXTURE) ---");
+  let p = 0, f = 0;
+
+  const fx = spawn("node", ["dist/server.js"], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, SAM_GOV_CSV_FIXTURE: FIXTURE_CSV },
+  });
+  fx.stderr.on("data", (chunk) => process.stderr.write(`[fixture-server] ${chunk}`));
+  const resp = new Map();
+  let fbuf = "";
+  fx.stdout.on("data", (chunk) => {
+    fbuf += chunk.toString();
+    let nl;
+    while ((nl = fbuf.indexOf("\n")) >= 0) {
+      const line = fbuf.slice(0, nl);
+      fbuf = fbuf.slice(nl + 1);
+      if (!line.trim()) continue;
+      try { const m = JSON.parse(line); if (m.id !== undefined) resp.set(m.id, m); } catch {}
+    }
+  });
+  let fid = 1;
+  const frpc = async (method, params) => {
+    const myId = fid++;
+    fx.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: myId, method, params }) + "\n");
+    for (let i = 0; i < 250; i++) {
+      if (resp.has(myId)) return resp.get(myId);
+      await wait(80);
+    }
+    throw new Error(`fixture timeout ${method}`);
+  };
+  const fcall = async (name, args) => {
+    const r = await frpc("tools/call", { name, arguments: args });
+    const text = r.result?.content?.[0]?.text ?? "";
+    let env; try { env = JSON.parse(text); } catch { env = { ok: false }; }
+    return env;
+  };
+  const t = (label, ok) => { console.log(`${ok ? "✓" : "✗"} fixture: ${label}`); ok ? p++ : f++; };
+
+  try {
+    await frpc("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "edge-fixture", version: "0.0.1" },
+    });
+
+    // A known noticeId + a couple of edge rows + one absent id.
+    const env = await fcall("sam_lookup_notice_fields", {
+      noticeIds: [
+        "aaaa0000aaaa0000aaaa0000aaaa0001", // clean row → SBA, VA, 541512
+        "bbbb1111bbbb1111bbbb1111bbbb0002", // embedded-comma title
+        "cccc2222cccc2222cccc2222cccc0003", // ""-escaped quote title, inactive
+        "EEEE4444EEEE4444EEEE4444EEEE0005", // uppercase id, queried as-is
+        "ffff9999ffff9999ffff9999ffff0000", // ABSENT from snapshot
+      ],
+    });
+
+    t("envelope ok:true with enabled:true", env.ok === true && env.data?.enabled === true);
+    const byId = Object.fromEntries((env.data?.results ?? []).map((r) => [r.noticeId.toLowerCase(), r]));
+
+    const a = byId["aaaa0000aaaa0000aaaa0000aaaa0001"];
+    t("known notice → found + correct fields (naics/setAsideCode/PoP/type/active/title)",
+      !!a && a.found === true && a.naicsCode === "541512" && a.setAsideCode === "SBA" &&
+      a.setAside === "Total Small Business Set-Aside (FAR 19.5)" && a.popState === "VA" &&
+      a.popCity === "Richmond" && a.popZip === "23219" && a.type === "Solicitation" &&
+      a.active === true && typeof a.title === "string" && a.title.length > 0);
+
+    const b = byId["bbbb1111bbbb1111bbbb1111bbbb0002"];
+    t("embedded-comma title parsed intact (RFC-4180)",
+      !!b && b.found === true && b.naicsCode === "236220" && b.setAsideCode === "8A" &&
+      b.title === "Design, Build, and Commission Task Order Contract (MATOC)");
+
+    const c = byId["cccc2222cccc2222cccc2222cccc0003"];
+    t('""-escaped quote title parsed + inactive + empty setAsideCode→null',
+      !!c && c.found === true && c.title === 'Notice of Intent: "Sole Source" to Acme Corp' &&
+      c.active === false && c.setAsideCode === null);
+
+    const e = byId["eeee4444eeee4444eeee4444eeee0005"];
+    t("case-insensitive noticeId match (uppercase in file)",
+      !!e && e.found === true && e.naicsCode === "561730" && e.setAsideCode === "SDVOSBC");
+
+    const miss = byId["ffff9999ffff9999ffff9999ffff0000"];
+    t("absent notice → found:false + all null fields",
+      !!miss && miss.found === false && miss.naicsCode === null && miss.setAside === null &&
+      miss.popState === null && miss.type === null && miss.active === null);
+
+    // The "not in current CSV snapshot" disclosure must be present when any id
+    // is absent — never faked.
+    const notes = env._meta?.notes ?? [];
+    t('"not in current CSV snapshot" disclosure present for the absent id',
+      notes.some((n) => /not in (the )?current csv snapshot/i.test(n)));
+
+    // _meta.source names the GSA CSV keyless origin; freshness present in data.
+    t("_meta.source names the keyless GSA CSV",
+      typeof env._meta?.source === "string" && /gsa\.gov.*csv/i.test(env._meta.source) &&
+      env._meta.keylessMode === true);
+    t("freshness present (csvLastModified + indexBuiltAt + rowCount)",
+      env.data?.freshness && typeof env.data.freshness.indexBuiltAt === "string" &&
+      typeof env.data.freshness.rowCount === "number" && env.data.freshness.rowCount === 5);
+    t("foundCount/missingCount accounting correct",
+      env.data?.foundCount === 4 && env.data?.missingCount === 1);
+  } catch (e) {
+    console.log(`✗ fixture path threw: ${e.message}`);
+    f++;
+  } finally {
+    fx.kill();
+  }
+  return { pass: p, fail: f };
+}
 
 async function main() {
   await rpc("initialize", {
@@ -1030,6 +1252,14 @@ async function main() {
       fail++;
     }
   }
+
+  // Offline GSA-CSV backbone coverage: parser unit tests + the enabled fixture
+  // path (a separate server pointed at the small local fixture — no 226 MB pull).
+  const parser = await runParserUnitTests();
+  pass += parser.pass; fail += parser.fail;
+  const fixture = await runEnabledFixtureTests();
+  pass += fixture.pass; fail += fixture.fail;
+
   console.log(`\n=== ${pass}/${pass + fail} passed ===`);
   child.kill();
   process.exit(fail === 0 ? 0 : 1);
