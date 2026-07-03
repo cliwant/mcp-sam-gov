@@ -213,6 +213,44 @@ const cases = [
     },
   },
   {
+    // GSA-CSV inline enrichment — DISABLED-path PARITY (default, no CSV env):
+    // sam_search_opportunities must behave EXACTLY as before the enrichment
+    // slice. naics/setAside stay null, _meta lists the full unavailable trio and
+    // the plain keyless-HAL source (no "+ gsa-csv"), and the payload carries NO
+    // enrichment keys (no data.freshness; no per-row type/placeOfPerformance).
+    label: "sam_search (disabled CSV): null fields + no enrichment keys/notes (byte-parity)",
+    name: "sam_search_opportunities",
+    args: { ncode: "541512", limit: 3 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      if (m.keylessMode === false) return true; // keyed path is out of scope here
+      const opps = env.data?.opportunities ?? [];
+      // Every row still has null naics/setAside (list payload omits them) and
+      // NO added enrichment keys (type/placeOfPerformance must be absent).
+      const rowsClean = opps.every(
+        (o) =>
+          o.naics === null &&
+          o.setAside === null &&
+          !("type" in o) &&
+          !("placeOfPerformance" in o),
+      );
+      // The full unavailable trio is intact (nothing was enriched away).
+      const trioUnavailable = ["naics", "setAside", "placeOfPerformance"].every(
+        (fld) => (m.fieldsUnavailable ?? []).includes(fld),
+      );
+      // Source is the plain keyless HAL (no "+ gsa-csv" composition) and there
+      // is NO freshness block (enrichment never ran).
+      const plainSource = /keyless HAL/.test(m.source) && !/gsa-csv/i.test(m.source);
+      const noFreshness = !("freshness" in (env.data ?? {}));
+      // No enrichment note leaked into _meta.notes.
+      const noEnrichNote =
+        Array.isArray(m.notes) &&
+        !m.notes.some((n) => /gsa csv|gsa-csv|enrichment/i.test(n));
+      return rowsClean && trioUnavailable && plainSource && noFreshness && noEnrichNote;
+    },
+  },
+  {
     // D1 (spec §1.5, §3.2): usas_search_individual_awards must now return
     // naicsCode (parity with usas_search_awards_by_recipient). NAICS is a
     // valid spending_by_award field — the tool omitted it before this PR.
@@ -1109,6 +1147,130 @@ async function runParserUnitTests() {
   return { pass: p, fail: f };
 }
 
+// ── Inline search-enrichment merge tests (in-process, offline) ──────
+// Live HAL noticeIds won't be in a small fixture, so we test the enrichment
+// MERGE LOGIC in isolation: warm the fixture index (the ids we control), feed a
+// SYNTHETIC HAL search page with those ids through enrichSearchOpportunities,
+// and assert null naics/setAside/PoP/deadline/type get filled + the accounting
+// (fieldsFilled / found / missing / freshness). Also exercises the NON-BLOCKING
+// accessor: cold → null (degrade), disabled → null (no network), warm → ready.
+async function runEnrichmentMergeTests() {
+  console.log("\n--- Inline search-enrichment merge tests (in-process, offline) ---");
+  let p = 0, f = 0;
+  const t = (label, ok) => { console.log(`${ok ? "✓" : "✗"} enrich: ${label}`); ok ? p++ : f++; };
+
+  let mod;
+  try {
+    mod = await import("./dist/gsa-csv.js");
+  } catch (e) {
+    console.log(`✗ could not import dist/gsa-csv.js: ${e.message}`);
+    return { pass: 0, fail: 1 };
+  }
+  const {
+    resolveCsvConfig,
+    tryGetReadyIndex,
+    enrichSearchOpportunities,
+    lookupNoticeFields,
+    _resetIndexForTests,
+  } = mod;
+
+  // (0) DISABLED → the accessor does no work and returns null (no network).
+  {
+    _resetIndexForTests();
+    const disabledCfg = resolveCsvConfig({}); // empty env → disabled
+    t("disabled config → tryGetReadyIndex returns null (no network)",
+      disabledCfg.enabled === false && tryGetReadyIndex(disabledCfg) === null);
+  }
+
+  // Point a config at the small local fixture (no live 226 MB pull).
+  const fixtureEnv = { SAM_GOV_CSV_FIXTURE: FIXTURE_CSV };
+  const cfg = resolveCsvConfig(fixtureEnv);
+  t("fixture config resolves enabled", cfg.enabled === true && cfg.fixturePath === FIXTURE_CSV);
+
+  // (1) COLD → the FIRST accessor call returns null immediately (degrade path)
+  // and kicks a background warm. Proves the search never blocks on a cold CSV.
+  _resetIndexForTests();
+  const coldFirst = tryGetReadyIndex(cfg);
+  t("cold index → tryGetReadyIndex returns null immediately (non-blocking degrade)",
+    coldFirst === null);
+
+  // Warm the index deterministically (await ensureIndex via the batch tool,
+  // which builds the fixture index) then confirm the accessor now returns it.
+  await lookupNoticeFields({ noticeIds: ["aaaa0000aaaa0000aaaa0000aaaa0001"] }, fixtureEnv);
+  const ready = tryGetReadyIndex(cfg);
+  t("after warm → tryGetReadyIndex returns a ready index",
+    !!ready && typeof ready.get === "function" && ready.rowCount === 5 &&
+    typeof ready.indexBuiltAt === "string");
+
+  // (2) MERGE: a synthetic keyless HAL page (all naics/setAside/deadline null,
+  // no type/PoP keys) whose ids match the fixture — plus one ABSENT id.
+  const halPage = [
+    { noticeId: "aaaa0000aaaa0000aaaa0000aaaa0001", title: "HAL title A", agency: "VA", solicitationNumber: "S-A", responseDeadline: null, naics: null, setAside: null, uiLink: "u-a" },
+    { noticeId: "bbbb1111bbbb1111bbbb1111bbbb0002", title: "HAL title B", agency: "GSA", solicitationNumber: "S-B", responseDeadline: null, naics: null, setAside: null, uiLink: "u-b" },
+    { noticeId: "cccc2222cccc2222cccc2222cccc0003", title: "HAL title C", agency: "DoD", solicitationNumber: "S-C", responseDeadline: null, naics: null, setAside: null, uiLink: "u-c" },
+    { noticeId: "ffff9999ffff9999ffff9999ffff0000", title: "HAL title MISSING", agency: "??", solicitationNumber: "S-M", responseDeadline: null, naics: null, setAside: null, uiLink: "u-m" },
+  ];
+  const outcome = enrichSearchOpportunities(halPage, ready);
+  const out = Object.fromEntries(outcome.opportunities.map((o) => [o.noticeId, o]));
+
+  const A = out["aaaa0000aaaa0000aaaa0000aaaa0001"];
+  t("row A: naics/setAside(code)/deadline/type/PoP filled from CSV",
+    A.naics === "541512" && A.setAside === "SBA" &&
+    A.responseDeadline === "2026-08-15T17:00:00-04:00" && A.type === "Solicitation" &&
+    A.placeOfPerformance && A.placeOfPerformance.state === "VA" &&
+    A.placeOfPerformance.city === "Richmond" && A.placeOfPerformance.zip === "23219" &&
+    A.placeOfPerformance.country === "USA");
+  t("row A: HAL-supplied fields preserved (title/agency not overwritten)",
+    A.title === "HAL title A" && A.agency === "VA" && A.uiLink === "u-a");
+
+  const B = out["bbbb1111bbbb1111bbbb1111bbbb0002"];
+  t("row B: embedded-comma-safe fill (naics 236220, setAside 8A, PoP TX)",
+    B.naics === "236220" && B.setAside === "8A" &&
+    B.type === "Combined Synopsis/Solicitation" &&
+    B.placeOfPerformance && B.placeOfPerformance.state === "TX");
+
+  const C = out["cccc2222cccc2222cccc2222cccc0003"];
+  // Fixture row C has empty SetAsideCode + no Pop* cells → those stay null and
+  // the placeOfPerformance/setAside keys are NOT added (absence ≠ empty).
+  t("row C: empty CSV cells stay null (naics filled, setAside null, no PoP key)",
+    C.naics === "339112" && C.type === "Special Notice" &&
+    C.setAside === null &&
+    !("placeOfPerformance" in C));
+
+  const M = out["ffff9999ffff9999ffff9999ffff0000"];
+  // Absent from the snapshot → left byte-identical (still all null, no new keys).
+  t("row MISSING: absent id untouched (all null, no type/PoP keys added)",
+    M.naics === null && M.setAside === null && M.responseDeadline === null &&
+    !("type" in M) && !("placeOfPerformance" in M) && M.title === "HAL title MISSING");
+
+  // (3) Accounting: 3 found / 1 missing; fieldsFilled includes the trio; the
+  // freshness block is present with the snapshot metadata.
+  t("accounting: foundCount=3, missingCount=1",
+    outcome.foundCount === 3 && outcome.missingCount === 1);
+  t("fieldsFilled includes naics + setAside + placeOfPerformance (drop from unavailable)",
+    outcome.fieldsFilled.has("naics") && outcome.fieldsFilled.has("setAside") &&
+    outcome.fieldsFilled.has("placeOfPerformance") && outcome.fieldsFilled.has("type") &&
+    outcome.fieldsFilled.has("responseDeadline"));
+  t("freshness present (csvLastModified + indexBuiltAt + rowCount)",
+    outcome.freshness && typeof outcome.freshness.indexBuiltAt === "string" &&
+    outcome.freshness.rowCount === 5);
+
+  // (4) No-overwrite guarantee: a row that ALREADY has a value (keyed-like) is
+  // never clobbered by the CSV.
+  {
+    const keyedRow = [{ noticeId: "aaaa0000aaaa0000aaaa0000aaaa0001", title: "x", naics: "999999", setAside: "PRESET", responseDeadline: "PRESET-DL", uiLink: "u" }];
+    const r2 = enrichSearchOpportunities(keyedRow, ready);
+    const k = r2.opportunities[0];
+    t("no-overwrite: pre-set naics/setAside/deadline preserved (null-only fill)",
+      k.naics === "999999" && k.setAside === "PRESET" && k.responseDeadline === "PRESET-DL" &&
+      // type/PoP were null on input, so they DO get filled from the CSV.
+      k.type === "Solicitation" && !!k.placeOfPerformance);
+  }
+
+  _resetIndexForTests();
+  return { pass: p, fail: f };
+}
+
 // ── ENABLED fixture path (a SECOND server spawned with SAM_GOV_CSV_FIXTURE) ──
 // Points the backbone at the small local test-fixtures/gsa-sample.csv so the
 // test does NOT pull the live 226 MB CSV. Asserts a known noticeId returns its
@@ -1215,6 +1377,34 @@ async function runEnabledFixtureTests() {
       typeof env.data.freshness.rowCount === "number" && env.data.freshness.rowCount === 5);
     t("foundCount/missingCount accounting correct",
       env.data?.foundCount === 4 && env.data?.missingCount === 1);
+
+    // ── End-to-end: sam_search_opportunities WIRING with the CSV enabled ──
+    // The prior lookup warmed the process-memo index, so the search's
+    // non-blocking accessor returns it synchronously and enrichment runs
+    // inline. Live HAL noticeIds won't overlap the 5-row fixture, so we assert
+    // the WIRING (never a crash; the CSV-composed source or the warming note;
+    // freshness present when enrichment ran) rather than a specific filled row —
+    // the merge FILL is proven deterministically by runEnrichmentMergeTests.
+    const se = await fcall("sam_search_opportunities", { ncode: "541512", limit: 3 });
+    const seOk = se.ok === true && se._meta && se._meta.keylessMode === true &&
+      Array.isArray(se.data?.opportunities);
+    // Either enrichment ran (source composed "+ gsa-csv", freshness present) OR
+    // the index was (unexpectedly) not ready → the honest "warming" note. Both
+    // are valid non-blocking outcomes; a hard failure/crash is not.
+    const enriched = /gsa-csv/i.test(se._meta?.source ?? "");
+    const warming = (se._meta?.notes ?? []).some((n) => /warming/i.test(n));
+    t("sam_search (enabled CSV): non-blocking enrichment wired (no crash; enriched or warming)",
+      seOk && (enriched || warming));
+    // When enriched, freshness is surfaced in data and the source is composed.
+    t("sam_search (enabled CSV): enriched → freshness in data + composed source",
+      !enriched || (se.data?.freshness && typeof se.data.freshness.indexBuiltAt === "string" &&
+        /keyless HAL.*gsa-csv/i.test(se._meta.source)));
+    // Enabled path must NEVER regress to a bare disabled shape when warm:
+    // fieldsUnavailable is still an array and the trio is only present for
+    // fields NOT filled (here live ids are absent from the fixture → all 3 stay,
+    // which is the honest "nothing enriched this page" outcome).
+    t("sam_search (enabled CSV): _meta.fieldsUnavailable is a truthful array",
+      Array.isArray(se._meta?.fieldsUnavailable));
   } catch (e) {
     console.log(`✗ fixture path threw: ${e.message}`);
     f++;
@@ -1253,10 +1443,13 @@ async function main() {
     }
   }
 
-  // Offline GSA-CSV backbone coverage: parser unit tests + the enabled fixture
-  // path (a separate server pointed at the small local fixture — no 226 MB pull).
+  // Offline GSA-CSV backbone coverage: parser unit tests, the inline
+  // search-enrichment merge tests, and the enabled fixture path (a separate
+  // server pointed at the small local fixture — no 226 MB pull).
   const parser = await runParserUnitTests();
   pass += parser.pass; fail += parser.fail;
+  const enrich = await runEnrichmentMergeTests();
+  pass += enrich.pass; fail += enrich.fail;
   const fixture = await runEnabledFixtureTests();
   pass += fixture.pass; fail += fixture.fail;
 
