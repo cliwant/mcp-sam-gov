@@ -261,17 +261,31 @@ export class SamGovClient {
         url.searchParams.set("sort", "-modifiedDate");
         url.searchParams.set("size", String(filters.limit ?? 25));
         url.searchParams.set("is_active", "true");
+        // Keyless HAL facet params — VERIFIED LIVE (2026-07). The list endpoint
+        // honors these server-side: result counts drop correctly AND every returned
+        // notice's detail matches the filter (e.g. naics=236220 → all hits carry
+        // primary NAICS 236220). The param NAMES differ from the authenticated v2
+        // API's, and a wrong name is SILENTLY IGNORED (returns the full firehose):
+        //   NAICS         → `naics`     (NOT `naics_code`/`ncode` — both ignored)
+        //   place-of-perf → `pop_state` (NOT `place_of_performance_state`; value
+        //                                must be the UPPER-CASE 2-letter code)
+        //   set-aside     → `set_aside` (repeatable; SAM codes: SBA/8A/HZS/HZC/
+        //                                SDVOSBC/WOSB/EDWOSB/VSA/VSS — all verified)
+        //   keyword       → `q`
+        // Organization-name has NO keyless filter param (organization_name and
+        // organizationName are both ignored) — sent best-effort; the tool's `_meta`
+        // flags it as dropped so the AI never treats the set as org-filtered.
         if (filters.query)
             url.searchParams.set("q", filters.query);
         if (filters.ncode)
-            url.searchParams.append("naics_code", filters.ncode);
+            url.searchParams.append("naics", filters.ncode);
         if (filters.organizationName)
             url.searchParams.set("organization_name", filters.organizationName);
         if (filters.setAside?.length)
             for (const sa of filters.setAside)
                 url.searchParams.append("set_aside", sa);
         if (filters.state)
-            url.searchParams.set("place_of_performance_state", filters.state);
+            url.searchParams.set("pop_state", filters.state.toUpperCase());
         const r = await this.fetchImpl(url.toString(), {
             headers: this.publicHeaders(),
         });

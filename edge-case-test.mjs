@@ -131,53 +131,80 @@ const cases = [
     accept: ({ env }) => env.ok && env.data.opportunities?.length <= 50,
   },
   {
-    // A1 / D4 (spec §1.2, §2.4): keyless search must NOT present unfiltered
-    // results as filtered. `_meta.filtersDropped` must name the dropped
-    // facets and `_meta.complete` must be false.
-    label: "A1: keyless search flags dropped facet filters",
+    // A1 (spec §1.2, §2.4): the keyless HAL list endpoint HONORS
+    // naics/set-aside/pop-state/keyword server-side (VERIFIED LIVE) — those
+    // belong in `_meta.filtersApplied`, NOT filtersDropped. Only
+    // organization-name has no keyless param → it is the SOLE dropped facet.
+    // The per-result naics/set-aside/PoP VALUES are still omitted by the list
+    // payload → fieldsUnavailable. (Keyed mode honors all → nothing dropped.)
+    label: "A1: keyless search reports applied vs dropped facets truthfully",
     name: "sam_search_opportunities",
     args: { ncode: "541512", setAside: ["SBA"], state: "VA", organizationName: "Department of Veterans Affairs", limit: 3 },
     accept: ({ env }) => {
       if (!env.ok || !env._meta) return false;
       const m = env._meta;
-      // In keyless mode all four requested facets are provably dropped.
-      // (If a key is configured, keylessMode:false and dropped is empty —
-      // accept that too so the gate is env-agnostic.)
       if (m.keylessMode === false) return m.complete === true && Array.isArray(m.filtersDropped);
+      const applied = m.filtersApplied ?? [];
       const dropped = m.filtersDropped ?? [];
-      const wanted = ["ncode", "setAside", "state", "organizationName"];
-      const allDropped = wanted.every((f) => dropped.includes(f));
+      // The three honored facets must be reported as applied…
+      const appliedOk = ["ncode", "setAside", "state"].every((f) => applied.includes(f));
+      // …and organization-name is the ONLY dropped facet.
+      const droppedOk =
+        dropped.includes("organizationName") &&
+        !dropped.includes("ncode") &&
+        !dropped.includes("setAside") &&
+        !dropped.includes("state");
       const fieldsGone = ["naics", "setAside", "placeOfPerformance"].every(
         (f) => (m.fieldsUnavailable ?? []).includes(f),
       );
       return (
-        allDropped &&
-        m.complete === false &&
-        m.truncated === true &&
+        appliedOk &&
+        droppedOk &&
         fieldsGone &&
+        m.complete === false && // org dropped ⇒ not complete
         Array.isArray(m.notes) &&
         m.notes.length >= 2
       );
     },
   },
   {
-    // Only facets the caller actually requested get flagged (no noise).
-    label: "A1: unrequested facets are NOT flagged as dropped",
+    // A honored facet the caller requested lands in filtersApplied (never
+    // filtersDropped), and unrequested facets stay absent from both.
+    label: "A1: requested naics is applied, not dropped; nothing else flagged",
     name: "sam_search_opportunities",
     args: { ncode: "541512", limit: 2 },
     accept: ({ env }) => {
       if (!env.ok || !env._meta) return false;
       const m = env._meta;
       if (m.keylessMode === false) return true;
+      const applied = m.filtersApplied ?? [];
       const dropped = m.filtersDropped ?? [];
-      // ncode was requested → present; state/org/setAside were not → absent.
+      // ncode honored → applied, not dropped. Nothing else requested → no drops.
       return (
-        dropped.includes("ncode") &&
-        !dropped.includes("state") &&
-        !dropped.includes("organizationName") &&
-        !dropped.includes("setAside") &&
-        m.complete === false
+        applied.includes("ncode") &&
+        !dropped.includes("ncode") &&
+        dropped.length === 0 &&
+        m.truncated === true // ~600+ matches, returned 2 ⇒ truncated
       );
+    },
+  },
+  {
+    // A1 end-to-end: prove the keyless NAICS filter is REAL, not just
+    // advertised — search by NAICS, fetch a result's detail, confirm its
+    // primary NAICS matches. Guards against a silent regression to a wrong
+    // param name (e.g. `naics_code`/`ncode`), which would return the
+    // unfiltered firehose while _meta still claims the filter applied.
+    label: "A1: keyless NAICS filter actually narrows results (end-to-end)",
+    name: "sam_search_opportunities",
+    args: { ncode: "236220", limit: 3 },
+    accept: async ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      if (env._meta.keylessMode === false) return true; // keyed path differs
+      const opps = env.data?.opportunities ?? [];
+      if (opps.length === 0) return true; // no active 236220 today — acceptable
+      const det = await call("sam_get_opportunity", { noticeId: opps[0].noticeId });
+      if (!det.env.ok || det.env.data?.found === false) return true; // detail soft
+      return det.env.data?.naics === "236220";
     },
   },
   {
@@ -425,7 +452,7 @@ async function main() {
       fail++;
       continue;
     }
-    const ok = c.accept(result);
+    const ok = await c.accept(result);
     if (ok) {
       console.log(`✓ ${c.label.padEnd(50)}  ${result.env.ok ? "ok:true" : `ok:false ${result.env.error?.kind}`}`);
       pass++;
