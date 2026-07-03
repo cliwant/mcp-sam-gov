@@ -25,7 +25,7 @@ export declare function searchDocuments(args: {
     publicationDateTo?: string;
     effectiveDateFrom?: string;
     perPage?: number;
-}): Promise<{
+}): Promise<import("./meta.js").MetaBundle<{
     totalRecords: number;
     totalPages: number;
     documents: {
@@ -43,7 +43,7 @@ export declare function searchDocuments(args: {
             slug: string;
         }[];
     }[];
-}>;
+}>>;
 export declare function getDocument(documentNumber: string): Promise<{
     documentNumber: string;
     title: string;

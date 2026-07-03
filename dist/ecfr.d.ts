@@ -26,7 +26,7 @@ export declare function search(args: {
     query: string;
     titleNumber?: number;
     perPage?: number;
-}): Promise<{
+}): Promise<import("./meta.js").MetaBundle<{
     results: {
         type: string;
         title: string;
@@ -40,5 +40,5 @@ export declare function search(args: {
         ecfrUrl: string;
         effectiveOn: string;
     }[];
-}>;
+}>>;
 //# sourceMappingURL=ecfr.d.ts.map
