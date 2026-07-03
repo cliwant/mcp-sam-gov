@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 47 keyless tools wrapping every public federal-contracting data
+ * 48 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -20,7 +20,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { SamGovClient } from "./sam-gov/index.js";
+import { SamGovClient, daysUntilResponse, applyResponseDeadlineWindow, } from "./sam-gov/index.js";
 import * as usas from "./usaspending.js";
 import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
@@ -49,6 +49,39 @@ const SamSearchInput = z.object({
         .describe("Place-of-performance state, 2-letter, e.g. 'MD'"),
     setAside: z.array(z.string()).optional().describe("Set-aside codes: SBA, 8A, HZS, SDVOSBC, WOSB, EDWOSB, VSA, VSS"),
     limit: z.number().min(1).max(50).optional(),
+});
+// Pre-solicitation shaping radar (doc 06 §3.1). Surfaces Sources Sought /
+// Presolicitation / Special Notices BEFORE the RFP exists — the free, real-time
+// analogue of paid agency-forecast feeds. Keyless via the notice_type facet.
+const SamSearchShapingInput = z.object({
+    query: z.string().optional().describe("Free-text title query"),
+    ncode: z.string().optional().describe("NAICS code, e.g. '541512'"),
+    organizationName: z
+        .string()
+        .optional()
+        .describe("Issuing agency canonical name (e.g. 'Department of Veterans Affairs'). NOTE: the keyless endpoint has NO organization-name filter — it is sent best-effort and flagged in _meta.filtersDropped; filter client-side on the returned `agency`."),
+    state: z
+        .string()
+        .optional()
+        .describe("Place-of-performance state, 2-letter, e.g. 'MD'"),
+    setAside: z.array(z.string()).optional().describe("Set-aside codes: SBA, 8A, HZS, SDVOSBC, WOSB, EDWOSB, VSA, VSS"),
+    noticeType: z
+        .array(z.enum(["r", "p", "s", "k", "i", "u"]))
+        .optional()
+        .describe("Pre-solicitation notice-type codes to include. r=Sources Sought, p=Presolicitation, s=Special Notice (the DEFAULT shaping window = ['r','p','s']); k=Combined Synopsis/Solicitation, i=Intent to Bundle, u=Justification (J&A) are opt-in adjacency/incumbent tells. Ranked r/p over s via noticeTypeCode."),
+    responseDeadlineFrom: z
+        .string()
+        .optional()
+        .describe("ISO date lower bound for responseDeadline. APPLIED CLIENT-SIDE over the fetched page (the keyless feed ignores rdlfrom/rdlto) — disclosed in _meta.filtersDropped. A notice with no deadline is excluded from a windowed query."),
+    responseDeadlineTo: z
+        .string()
+        .optional()
+        .describe("ISO date upper bound for responseDeadline. APPLIED CLIENT-SIDE over the fetched page (see responseDeadlineFrom)."),
+    activeOnly: z
+        .boolean()
+        .optional()
+        .describe("Only currently-active notices (default true)."),
+    limit: z.number().min(1).max(50).optional().describe("Page size (default 25, max 50)."),
 });
 const SamGetOpportunityInput = z.object({
     noticeId: z.string().describe("32-char hex notice id"),
@@ -520,11 +553,16 @@ const SamLookupNoticeFieldsInput = z.object({
         .describe("1..100 32-char hex noticeIds (the ids returned by sam_search_opportunities) to enrich in ONE batch. Completes a whole search page's null naics/setAside/place-of-performance/deadline/type from the cached GSA daily CSV. OFF BY DEFAULT — enable by setting SAM_GOV_CSV_CACHE (a cache dir) or SAM_GOV_ENABLE_CSV=1."),
 });
 const TOOLS = [
-    // ━━━ SAM.gov (6) ━━━
+    // ━━━ SAM.gov (7) ━━━
     {
         name: "sam_search_opportunities",
         description: "Search SAM.gov federal contracting opportunities (keyless HAL). Returns up to 50 active notices with title, agency, NAICS, noticeId. Use for discovery — narrow with NAICS / agency / set-aside / state.",
         inputSchema: SamSearchInput,
+    },
+    {
+        name: "sam_search_shaping",
+        description: "PRE-SOLICITATION shaping radar (keyless HAL). Surfaces Sources Sought / Presolicitation / Special Notices BEFORE the RFP exists — the free, real-time analogue of paid agency-forecast feeds. Closes the pre-solicitation lifecycle gap: catch a requirement while it's still shapeable (submit capabilities, influence NAICS/set-aside/PWS). Defaults to noticeType ['r','p','s']; opt into k/i/u for combined-synopsis / intent-to-bundle / J&A tells. Each notice carries noticeTypeCode (rank r/p over s), postedDate, responseDeadline + daysUntilResponse (null when no deadline — counted, not hidden), and a uiLink. HONEST KEYLESS LIMITS: naics/setAside/placeOfPerformance are null in the list rows (call sam_get_opportunity(noticeId) for those); and a responseDeadlineFrom/To window is applied CLIENT-SIDE over the fetched page (the feed ignores rdlfrom/rdlto) and disclosed in _meta. data.totalRecords is the TRUE server-side count for the type+facet filter.",
+        inputSchema: SamSearchShapingInput,
     },
     {
         name: "sam_get_opportunity",
@@ -1044,6 +1082,106 @@ async function runTool(name, args, sam) {
                 filtersApplied: [],
                 filtersDropped: [],
                 fieldsUnavailable: [],
+            });
+        }
+        case "sam_search_shaping": {
+            const input = SamSearchShapingInput.parse(args);
+            // Default shaping window = Sources Sought + Presolicitation + Special
+            // Notice. These are the notice types that exist BEFORE an RFP — the
+            // whole point of the radar.
+            const noticeType = input.noticeType ?? ["r", "p", "s"];
+            const wantWindow = input.responseDeadlineFrom !== undefined ||
+                input.responseDeadlineTo !== undefined;
+            // Map noticeType → filters.ptype so the client sends the keyless
+            // `notice_type` facet (server-side filter, VERIFIED LIVE). We deliberately
+            // do NOT pass responseDeadlineFrom/To to the client — the keyless feed
+            // IGNORES rdlfrom/rdlto, so the window is applied client-side below and
+            // disclosed. activeOnly is honored by searchPublic's is_active=true.
+            const r = await sam.searchOpportunities({
+                query: input.query,
+                ncode: input.ncode,
+                organizationName: input.organizationName,
+                state: input.state,
+                setAside: input.setAside,
+                ptype: noticeType,
+                limit: input.limit ?? 25,
+            });
+            // Shape each keyless list row. naics/setAside/PoP are NULL in the keyless
+            // list payload (fieldsUnavailable) — NOT fabricated. noticeTypeCode
+            // (type.code) lets the AI rank r/p over s; daysUntilResponse is a whole-day
+            // count (null when no deadline — counted, not hidden).
+            const now = new Date();
+            const allNotices = r.opportunitiesData.map((o) => ({
+                noticeId: o.noticeId,
+                title: o.title,
+                noticeType: o.type ?? null, // type.value (human label)
+                noticeTypeCode: o.baseType ?? null, // type.code (r/p/s/…)
+                agency: o.fullParentPathName,
+                solicitationNumber: o.solicitationNumber,
+                postedDate: o.postedDate,
+                responseDeadline: o.responseDeadLine ?? null,
+                daysUntilResponse: daysUntilResponse(o.responseDeadLine, now),
+                naics: o.naicsCode, // null in keyless list rows
+                setAside: o.typeOfSetAside, // null in keyless list rows
+                uiLink: o.uiLink,
+            }));
+            // Response-deadline WINDOW — CLIENT-SIDE over the fetched page (the feed
+            // ignores rdlfrom/rdlto). A notice with no deadline is excluded from a
+            // windowed query. Disclosed via filtersDropped + a note below.
+            const notices = wantWindow
+                ? applyResponseDeadlineWindow(allNotices, input.responseDeadlineFrom, input.responseDeadlineTo)
+                : allNotices;
+            const data = {
+                totalRecords: r.totalRecords, // TRUE server-side count for type+facets
+                returned: notices.length,
+                noticeTypesRequested: noticeType,
+                notices,
+            };
+            // _meta honesty. filtersApplied lists what the FEED honored server-side
+            // (mirror EXACTLY searchPublic's append conditions). Always: noticeType.
+            const filtersApplied = ["noticeType"];
+            if (input.query)
+                filtersApplied.push("query");
+            if (input.ncode)
+                filtersApplied.push("ncode");
+            if ((input.setAside?.length ?? 0) > 0)
+                filtersApplied.push("setAside");
+            if (input.state)
+                filtersApplied.push("state");
+            // filtersDropped: organization-name has NO keyless param (ignored), and a
+            // requested response-deadline window is applied client-side (feed ignores
+            // rdlfrom/rdlto) — both must be disclosed so the AI never treats the page
+            // as server-filtered on them.
+            const filtersDropped = [];
+            if (input.organizationName)
+                filtersDropped.push("organizationName");
+            if (wantWindow)
+                filtersDropped.push("responseDeadline");
+            const notes = [
+                "Pre-solicitation shaping radar: notice_type is filtered SERVER-SIDE by the keyless feed (r=Sources Sought, p=Presolicitation, s=Special Notice by default; k/i/u opt-in). totalRecords is the TRUE server-side count for the type+facet filter.",
+            ];
+            if (wantWindow) {
+                notes.push("response-deadline window applied client-side over the fetched page (the keyless feed ignores rdlfrom/rdlto); widen limit or narrow via NAICS/agency for completeness. Notices with no deadline are excluded from a windowed query.");
+            }
+            if (input.organizationName) {
+                notes.push("The organization-name filter is NOT supported by the keyless endpoint and was ignored (results are unfiltered on organization). Filter client-side on the returned `agency`, or set SAM_GOV_API_KEY.");
+            }
+            notes.push("naics/setAside/placeOfPerformance are null in the keyless list rows — call sam_get_opportunity(noticeId) for per-notice NAICS/set-aside/place-of-performance.");
+            // truncated when the server has more than we returned OR a client-side
+            // deadline window trimmed the page (either way the caller isn't seeing the
+            // complete in-scope set).
+            const truncated = r.totalRecords > data.returned ||
+                (wantWindow && allNotices.length !== notices.length);
+            return withMeta(data, {
+                source: "sam.gov/api/prod/sgs/v1/search (keyless HAL, notice_type filter)",
+                keylessMode: true,
+                truncated,
+                returned: data.returned,
+                totalAvailable: r.totalRecords,
+                filtersApplied,
+                filtersDropped,
+                fieldsUnavailable: ["naics", "setAside", "placeOfPerformance"],
+                notes,
             });
         }
         case "sam_get_opportunity": {

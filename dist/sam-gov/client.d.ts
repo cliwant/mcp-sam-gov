@@ -74,4 +74,28 @@ export declare class SamGovClient {
     private publicHeaders;
     private warn;
 }
+/**
+ * Whole days from `now` to an ISO `responseDeadline`. Returns null when the
+ * deadline is missing/unparseable (a null day count is COUNTED, never hidden —
+ * the shaping radar surfaces deadline-less notices rather than dropping them).
+ * Uses UTC-midnight flooring on both ends so the count is a stable whole number
+ * regardless of intraday time-of-day. Negative when the deadline is in the past.
+ */
+export declare function daysUntilResponse(deadline: string | null | undefined, now?: Date): number | null;
+/**
+ * Client-side response-deadline WINDOW filter for the shaping radar.
+ *
+ * The keyless SGS feed IGNORES rdlfrom/rdlto (VERIFIED LIVE 2026-07: a
+ * notice_type=r query with rdlfrom/rdlto returns the same total and deadlines
+ * outside the requested window), so a response-deadline window MUST be applied
+ * over the already-fetched page and DISCLOSED (the server flags
+ * `_meta.filtersDropped:["responseDeadline"]`). Bounds are inclusive ISO dates.
+ *
+ * A notice with NO deadline is EXCLUDED from a windowed query (it cannot be
+ * proven inside the window) — the caller discloses this. When neither bound is
+ * given, the page is returned unchanged (no window requested).
+ */
+export declare function applyResponseDeadlineWindow<T extends {
+    responseDeadline?: string | null;
+}>(notices: T[], from?: string, to?: string): T[];
 //# sourceMappingURL=client.d.ts.map

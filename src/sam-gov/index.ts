@@ -14,7 +14,11 @@
  *
  * Canonical home: https://github.com/cliwant/mcp-sam-gov
  */
-export { SamGovClient } from "./client.js";
+export {
+  SamGovClient,
+  daysUntilResponse,
+  applyResponseDeadlineWindow,
+} from "./client.js";
 export type {
   SamOpportunity,
   SamSearchFilters,
