@@ -340,6 +340,30 @@ const tests = [
     args: {},
     verify: (r) => Array.isArray(r.titles) && r.titles.length === 50,
   },
+  {
+    // Authoritative FAR clause 52.212-4 via the eCFR versioner-full endpoint
+    // (NOT ecfr_search, which mis-ranks the number). Live-soft on the revision
+    // token (the clause gets amended) — assert the stable invariants: the number
+    // echoes, kind/regulation are right, clean tag-free text, the prescription
+    // pointer resolves into FAR 12.301, and the always-present farOverhaulRisk
+    // caveat carries its 3 real deviation sources (no fabricated specifics).
+    name: "far_clause_lookup",
+    args: { clauseNumber: "52.212-4" },
+    verify: (r) =>
+      r.clauseNumber === "52.212-4" &&
+      r.kind === "clause" &&
+      r.regulation === "FAR" &&
+      typeof r.text === "string" &&
+      r.text.length > 100 &&
+      !/[<>]/.test(r.text) &&
+      typeof r.prescribedIn === "string" &&
+      /^12\.301/.test(r.prescribedIn) &&
+      r.farOverhaulRisk &&
+      Array.isArray(r.farOverhaulRisk.deviationSources) &&
+      r.farOverhaulRisk.deviationSources.length === 3 &&
+      r.farOverhaulRisk.appliesTo === "FAR" &&
+      r.isCurrent === true,
+  },
 
   // ━━━ SBA — Size Standards
   {
