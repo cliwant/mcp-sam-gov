@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-03 (recompete + pricing)
+
+Builds the capture and pricing lifecycle on top of the v0.4 truthful substrate.
+**36 → 41 tools.**
+
+### Added
+- **Recompete radar — `usas_search_recompetes`.** Federal contracts whose current
+  period-of-performance end date falls inside a window, soonest-first, with true
+  pagination and explicit completeness signals — **no silent drops**. Reads PoP
+  end dates directly from the award-search endpoint (no per-award enrichment),
+  narrows by an action-date lookback, windows client-side within a scan budget.
+  `_meta.totalAvailable` is the exact in-window count when the window is fully
+  scanned and `null` (an honest lower bound) when the scan budget truncates;
+  awards with a null end date are counted, never dropped.
+- **`usas_analyze_incumbent`.** Per-award incumbent + **public** recompete-pressure
+  signals: obligated-vs-ceiling consumption, modification count (lower-bounded),
+  competition extent + number of offers, set-aside, days to the current PoP end,
+  option-extendable days, and vehicle/IDV linkage — plus the incumbent's other
+  awards in the same agency. Emits `pressureHints` (labels), **never a composite
+  "vulnerability score"** — CPARS/past-performance, protest history, and
+  option-exercise intent are not public and are declared in
+  `_meta.fieldsUnavailable`. Bounded & keyless (≤ 3 upstream calls, no N+1).
+- **Keyless pricing (3 tools):**
+  - **`sam_search_wage_determinations`** — Service Contract Act / Davis-Bacon
+    wage determinations by coverage + locality (state filtered server-side,
+    county client-side, both disclosed in `_meta`).
+  - **`sam_get_wage_rates`** — prevailing wage + fringe / Health & Welfare table
+    + the Executive-Order minimum-wage floor, **parsed from the WD's plain-text
+    document** with a `parseConfidence` flag and a `format: parsed | raw | both`
+    escape hatch. It never fabricates structure the source lacks; SCA (WD-wide
+    H&W) and DBA (per-craft fringe) are kept distinct; the EO figure is read from
+    the document text, not hardcoded.
+  - **`gsa_benchmark_labor_rates`** — GSA CALC awarded ceiling-rate market band
+    (min / median / max / n over a fetched sample), **never a single price**,
+    with ceiling / fully-burdened / vendor-specific-escalation caveats and honest
+    handling of the API's saturated (`≥ 10000`) match counts.
+
+### Changed
+- **`usas_search_expiring_contracts` is now a thin deprecated alias** of
+  `usas_search_recompetes` (legacy `{ contracts, searchedCount }` keys
+  preserved). As the deliberate cost of removing per-award enrichment, its
+  `setAsideDescription` / `description` / `potentialEndDate` are now `null`.
+- Bumped `package.json` + `manifest.json` + `server.json` to `0.5.0`.
+
+### Fixed
+- **`usas_get_award_detail` error classification.** A 404 → `not_found`; a
+  429 / 5xx / network fault now surfaces as a retryable
+  `rate_limited` / `upstream_unavailable` error instead of being masked as
+  `{ ok: true, data: null }`.
+
+### Breaking (minor, pre-1.0)
+- **`usas_get_award_detail.numberOfOffers`** is now a parsed `number | null`
+  (previously the raw string the API returns) — a correctness fix. Consumers
+  that read it as a string should now read a number.
+
+### Backward compatibility
+- Additive otherwise: existing tool outputs keep their keys; the `_meta` shape is
+  unchanged; no input-schema changes to existing tools.
+
 ## [0.4.0] — 2026-07-03 (truthful outputs)
 
 The theme of this release is **never silently mislead an AI consumer.** Every
@@ -129,7 +188,8 @@ long-standing keyless-filter bug that returned unfiltered results is fixed.
 - Stdio JSON-RPC transport.
 - Claude Code plugin scaffold.
 
-[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/cliwant/mcp-sam-gov/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cliwant/mcp-sam-gov/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.3.0
 [0.2.1]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.2.1

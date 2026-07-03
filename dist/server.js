@@ -30,7 +30,7 @@ import { toToolError } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
-const SERVER_VERSION = "0.4.0";
+const SERVER_VERSION = "0.5.0";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
     query: z.string().optional().describe("Free-text title query"),
