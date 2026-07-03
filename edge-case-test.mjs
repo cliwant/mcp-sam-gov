@@ -516,6 +516,67 @@ const cases = [
     },
   },
   {
+    // usas_analyze_incumbent (a)+(b)+(d): resolve a LIVE large award id, then
+    // assert the PUBLIC-signals contract: signals present with pctConsumed a
+    // number|null (never a fabricated 0), _meta.fieldsUnavailable carries the
+    // CPARS trio, an honest no-score note is present, and pressureHints is an
+    // array that NEVER contains a numeric "score" (this tool emits HINTS only).
+    label: "analyze_incumbent: public signals + CPARS-unavailable + no score",
+    name: "usas_search_individual_awards",
+    args: { agency: "Department of Veterans Affairs", naics: "541512", fiscalYear: 2024, limit: 3 },
+    accept: async ({ env }) => {
+      if (!env.ok || !Array.isArray(env.data?.awards) || env.data.awards.length === 0)
+        return false;
+      const gid = env.data.awards.find((a) => a.generatedInternalId)?.generatedInternalId;
+      if (!gid) return false;
+      const res = await call("usas_analyze_incumbent", {
+        generatedInternalId: gid,
+        otherAwardsLimit: 5,
+      });
+      const e = res.env;
+      if (!e.ok || !e._meta) return false;
+      const d = e.data;
+      // (a) signals present + pctConsumed number|null (never a fabricated 0/undefined).
+      const sig = d?.signals;
+      if (!sig || !sig.obligatedVsCeiling) return false;
+      const pct = sig.obligatedVsCeiling.pctConsumed;
+      const pctOk = pct === null || typeof pct === "number";
+      // award identity + modCount shape present.
+      const awardOk =
+        typeof d.award?.incumbent === "string" &&
+        (sig.modCount === null || typeof sig.modCount === "number") &&
+        typeof sig.modCountAtLeast === "boolean";
+      // (b) _meta.fieldsUnavailable includes the CPARS trio + a no-score note.
+      const fu = e._meta.fieldsUnavailable ?? [];
+      const trioOk = ["past_performance_cpars", "protest_history", "option_exercise_intent"].every(
+        (f) => fu.includes(f),
+      );
+      const notes = Array.isArray(e._meta.notes) ? e._meta.notes : [];
+      const noScoreNote = notes.some(
+        (n) => /no composite vulnerability score/i.test(n) || (/public signals only/i.test(n) && /score/i.test(n)),
+      );
+      // (d) pressureHints is an array; never a numeric "score" and no entry is a bare number.
+      const hints = d.pressureHints;
+      const hintsOk =
+        Array.isArray(hints) &&
+        hints.every((h) => typeof h === "string") &&
+        !("vulnerabilityScore" in d) &&
+        !("score" in (sig ?? {}));
+      return pctOk && awardOk && trioOk && noScoreNote && hintsOk;
+    },
+  },
+  {
+    // usas_analyze_incumbent (c): a bogus generatedInternalId must yield a
+    // STRUCTURED not_found (ok:false), NOT ok:true with data:null.
+    label: "analyze_incumbent: bogus id → structured not_found (never ok:true/null)",
+    name: "usas_analyze_incumbent",
+    args: { generatedInternalId: "CONT_AWD_NOT_A_REAL_AWARD_0000_0000" },
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "not_found" &&
+      env.error?.retryable === false,
+  },
+  {
     // Recompete radar (c): the DEPRECATED alias must still return the legacy
     // { contracts, searchedCount } shape AND flag its deprecation in _meta.notes
     // so callers are steered to usas_search_recompetes.
