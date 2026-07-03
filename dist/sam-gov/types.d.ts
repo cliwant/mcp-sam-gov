@@ -75,6 +75,19 @@ export type SamSearchResult = {
     limit: number;
     offset: number;
     opportunitiesData: SamOpportunity[];
+    /**
+     * Set ONLY when the search could not run at all (every access tier threw:
+     * HAL down / network / 5xx-after-retry). It disambiguates a TOTAL OUTAGE
+     * from a GENUINE zero — both otherwise present as
+     * `{ totalRecords: 0, opportunitiesData: [] }`. Additive + optional:
+     * existing readers that ignore it are unaffected; a healthy search (incl.
+     * a real 0 or an empty page past the end) NEVER sets it. Tool wrappers use
+     * it to emit an honest `_meta` (`complete:false`, `totalAvailable:null`,
+     * a disclosing note) instead of the silent "0 notices, complete" lie.
+     */
+    degraded?: {
+        reason: string;
+    };
 };
 export type EntitySearchResult = {
     entities: Array<{
