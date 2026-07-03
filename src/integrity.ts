@@ -218,14 +218,31 @@ export async function checkExclusions(args: {
   const ueiU = norm(uei);
   const cageU = norm(cage);
   let filtered = rawResults;
-  if (uei && query) {
-    // uei alongside a name query → narrow the name results to that UEI.
-    filtered = filtered.filter((r) => norm(r.ueiSam) === ueiU);
-    filtersApplied.push("uei(post-filter)");
+  // NAME-MATCH GATE (truthfulness-critical): SAM's free-text `q` tokenizes, so a
+  // raw hit list is NOT a set of name matches — "VISIONARY CONSULTING PARTNERS"
+  // otherwise hits every unrelated "…PARTNERS…"/"…CONSULTING…" exclusion. When a
+  // name `query` is given, keep only records whose NORMALIZED name equals it
+  // (mirroring the teaming screen), so `excluded`/`records`/`matchCount` never
+  // flag someone else's exclusion. uei/cage-only selectors are gated below.
+  let looseTextHits = 0;
+  if (query) {
+    const target = normName(query);
+    if (target.length > 0) {
+      const before = filtered.length;
+      filtered = filtered.filter((r) => normName(r.title) === target);
+      looseTextHits = before - filtered.length;
+      filtersApplied.push("name(normalized exact match)");
+    }
   }
-  if (cage && (query || uei)) {
+  if (uei) {
+    // Always narrow to the exact UEI when supplied (with or without a name
+    // query) — a UEI used as free-text `q` is otherwise a loose text hit.
+    filtered = filtered.filter((r) => norm(r.ueiSam) === ueiU);
+    filtersApplied.push("uei(exact post-filter)");
+  }
+  if (cage) {
     filtered = filtered.filter((r) => norm(r.cageCode) === cageU);
-    filtersApplied.push("cage(post-filter)");
+    filtersApplied.push("cage(exact post-filter)");
   }
   if (classification !== "any") {
     filtered = filtered.filter(
@@ -270,8 +287,9 @@ export async function checkExclusions(args: {
   // when we hit the 10k deep-paging ceiling, OR when a post-filter means the
   // fetched page may not contain every match.
   const postFiltered =
-    (Boolean(uei) && Boolean(query)) ||
-    (Boolean(cage) && (Boolean(query) || Boolean(uei))) ||
+    Boolean(query) ||
+    Boolean(uei) ||
+    Boolean(cage) ||
     classification !== "any";
   const serverTruncated =
     totalElements !== null && rawResults.length < totalElements;
@@ -282,6 +300,11 @@ export async function checkExclusions(args: {
   notes.push(
     "Exclusion screening is only as precise as the name/UEI/CAGE you pass. A name match is NOT identity-proof — confirm the UEI/CAGE, exclusion type, and dates against the FAPIIS record (samFapiisUrl) before acting on a hit.",
   );
+  if (query && looseTextHits > 0) {
+    notes.push(
+      `SAM's free-text search returned ${looseTextHits} more record(s) sharing a word with "${query}" but NOT matching the normalized firm name — those are OTHER entities' exclusions and were dropped. \`excluded\` reflects ONLY records whose normalized name matches your query. Because this checked one page of text hits, a match under a name VARIANT could sit on a later page — if in doubt, raise \`size\` or verify the firm's UEI via samFapiisUrl.`,
+    );
+  }
   if (postFiltered) {
     notes.push(
       "A uei/cage/classification/activeOnly post-filter was applied over the fetched page only — the true match count for the combined filter may exceed this page. Narrow with a more specific `query` or raise `size`.",
