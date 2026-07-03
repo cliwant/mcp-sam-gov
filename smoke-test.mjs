@@ -367,6 +367,43 @@ const tests = [
       Array.isArray(r.sampleRows),
   },
 
+  // ━━━ Integrity / Teaming
+  {
+    // A known-populated name → active exclusion(s) present; excluded true and
+    // records carry the exclusion fields.
+    name: "sam_check_exclusions",
+    args: { query: "construction", size: 5 },
+    verify: (r) =>
+      typeof r.excluded === "boolean" &&
+      typeof r.matchCount === "number" &&
+      Array.isArray(r.records) &&
+      (r.records.length === 0 ||
+        (typeof r.records[0].name === "string" &&
+          typeof r.records[0].samFapiisUrl === "string")),
+  },
+  {
+    // Award-derived teaming discovery: VA × 8a × 541512, integrity-screened.
+    // Kept narrow (small limit/screenCap, few scan pages) so the bounded
+    // exclusion screen stays fast.
+    name: "usas_search_teaming_partners",
+    args: {
+      cert: "8a_program_participant",
+      naics: "541512",
+      agency: "Department of Veterans Affairs",
+      lookbackYears: 3,
+      limit: 5,
+      screenCap: 3,
+      scanPages: 2,
+    },
+    verify: (r) =>
+      r.cert === "8a_program_participant" &&
+      Array.isArray(r.candidates) &&
+      r.candidates.length > 0 &&
+      typeof r.candidates[0].recipientName === "string" &&
+      typeof r.candidates[0].agencyObligated === "number" &&
+      typeof r.candidates[0].agencyAwardCount === "number" &&
+      Array.isArray(r.candidates[0].sampleAwards),
+  },
   // ━━━ GAO — Bid Protests
   {
     // Happy path: the recent Legal-Products feed yields ≥1 bid-protest decision,
