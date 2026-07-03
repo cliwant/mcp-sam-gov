@@ -19,6 +19,7 @@
 
 import { fetchWithRetry } from "./errors.js";
 import { memoize } from "./cache.js";
+import { withMeta } from "./meta.js";
 
 const FED_REG = "https://www.federalregister.gov/api/v1";
 
@@ -103,8 +104,9 @@ export async function searchDocuments(args: {
     }[];
   };
   const json = await fetchJson<Resp>(url.toString());
-  return {
-    totalRecords: json.count ?? 0,
+  const totalRecords = json.count ?? 0;
+  const data = {
+    totalRecords,
     totalPages: json.total_pages ?? 0,
     documents: (json.results ?? []).map((d) => ({
       documentNumber: d.document_number ?? "",
@@ -122,6 +124,32 @@ export async function searchDocuments(args: {
       })),
     })),
   };
+
+  // Truthful `_meta` (spec §1.2 A5, §2.3). The Federal Register API DOES
+  // report a match total (`count`), so `totalAvailable` is real and the AI
+  // can tell a hard cap from a complete list. A5: an unknown/misspelled
+  // agency slug is silently ignored by the API and yields zero rows that
+  // look identical to "no matching rules" — call that out so the AI can
+  // re-check the slug against fed_register_list_agencies instead of
+  // concluding no such rule exists.
+  const returned = data.documents.length;
+  const notes: string[] = [];
+  if ((args.agencySlugs?.length ?? 0) > 0) {
+    notes.push(
+      `Filtered by agency slug(s): ${args.agencySlugs!.join(", ")}. An unknown or misspelled slug is silently ignored by the API and yields zero results indistinguishable from "no matching documents" — verify slugs via fed_register_list_agencies if the result is unexpectedly empty.`,
+    );
+  }
+  return withMeta(data, {
+    source: "federalregister.gov/api/v1",
+    keylessMode: true,
+    returned,
+    totalAvailable: totalRecords,
+    truncated: returned < totalRecords,
+    filtersApplied: [],
+    filtersDropped: [],
+    fieldsUnavailable: [],
+    notes,
+  });
 }
 
 export async function getDocument(documentNumber: string) {
