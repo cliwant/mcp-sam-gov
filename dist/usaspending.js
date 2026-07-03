@@ -58,7 +58,7 @@ function buildFilters(args) {
         filters.psc_codes = args.pscCodes;
     return filters;
 }
-import { fetchWithRetry } from "./errors.js";
+import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
 import { memoize } from "./cache.js";
 import { withMeta } from "./meta.js";
 const SPENDING_BY_AWARD_SOURCE = "usaspending.gov/api/v2 search/spending_by_award";
@@ -436,6 +436,22 @@ export async function searchSubawards(args) {
     });
 }
 // ─── Per-award detail ─────────────────────────────────────────────
+/**
+ * Parse USAspending's `number_of_offers_received` to a real number|null.
+ *
+ * LIVE-VERIFIED 2026-07-03: this field is a STRING on competed awards (e.g.
+ * "1", "2", "3") but is genuinely `null` on some delivery orders — so the
+ * previous typing/mapping (`number_of_offers_received?: string`, passed
+ * through raw) exposed a string where a numeric compare was expected. Coerce
+ * to a number; return null for null/empty/non-numeric so a missing value is
+ * an honest "unknown", never 0 or "".
+ */
+function parseOffers(raw) {
+    if (raw === null || raw === undefined)
+        return null;
+    const n = typeof raw === "number" ? raw : Number.parseInt(String(raw), 10);
+    return Number.isFinite(n) ? n : null;
+}
 export async function getAwardDetail(generatedInternalId) {
     try {
         const r = await fetch(`${USAS}/awards/${encodeURIComponent(generatedInternalId)}/`, { signal: AbortSignal.timeout(10_000) });
@@ -443,11 +459,32 @@ export async function getAwardDetail(generatedInternalId) {
             return null;
         const json = (await r.json());
         const ltc = json.latest_transaction_contract_data ?? {};
+        // PSC: prefer the ltc code, fall back to the psc_hierarchy base code (the
+        // ltc-level product_or_service_code is often absent while the hierarchy
+        // carries it — LIVE-VERIFIED 2026-07-03).
+        const pscCode = ltc.product_or_service_code ?? json.psc_hierarchy?.base_code?.code ?? null;
+        const pscDescription = ltc.product_or_service_description ??
+            json.psc_hierarchy?.base_code?.description ??
+            null;
+        const parent = json.parent_award ?? null;
+        const parentIdv = parent
+            ? {
+                piid: parent.piid ?? null,
+                generatedUniqueAwardId: parent.generated_unique_award_id ?? null,
+                idvTypeDescription: parent.idv_type_description ?? null,
+                multipleOrSingleAwardDescription: parent.multiple_or_single_aw_desc ?? null,
+            }
+            : null;
         return {
             awardId: json.piid ?? "",
             recipient: json.recipient?.recipient_name ?? "",
             totalObligation: json.total_obligation ?? 0,
             baseAndAllOptions: json.base_and_all_options ?? 0,
+            // base_exercised_options is present alongside the ceiling (verified).
+            baseExercisedOptions: json.base_exercised_options ?? null,
+            subawardCount: json.subaward_count ?? null,
+            // Award type + human description (e.g. "C" / "DELIVERY ORDER").
+            contractAwardType: json.type_description ?? json.type ?? null,
             periodOfPerformance: {
                 startDate: json.period_of_performance?.start_date ?? null,
                 endDate: json.period_of_performance?.end_date ?? null,
@@ -457,16 +494,223 @@ export async function getAwardDetail(generatedInternalId) {
             setAsideType: ltc.type_set_aside,
             setAsideDescription: ltc.type_set_aside_description,
             competitionExtent: ltc.extent_competed,
-            numberOfOffers: ltc.number_of_offers_received,
+            competitionExtentDescription: ltc.extent_competed_description ?? null,
+            // E-type-hygiene fix: number_of_offers_received is now a parsed
+            // number|null, not the raw string it arrives as.
+            numberOfOffers: parseOffers(ltc.number_of_offers_received),
             awardingAgency: json.awarding_agency?.toptier_agency?.name,
             awardingSubAgency: json.awarding_agency?.subtier_agency?.name,
             naicsCode: ltc.naics,
             naicsDescription: ltc.naics_description,
+            pscCode,
+            pscDescription,
+            parentIdv,
         };
     }
     catch {
         return null;
     }
+}
+// ─── Per-award transaction (modification) count ───────────────────
+/**
+ * Bounded modification-count for a single award via the keyless
+ * `POST transactions/` endpoint (`{award_id, limit:100, page:1}`).
+ *
+ * WHY bounded, not paged: this endpoint's `page_metadata` carries only
+ * `hasNext` — there is NO grand total (LIVE-VERIFIED 2026-07-03). So we read
+ * ONE 100-row page and return its length. If `hasNext` is true the true count
+ * exceeds 100, so we return `{ count: <len>, atLeast: true }` — a LOWER BOUND,
+ * never an unbounded fan-out. `modification_number` on the latest transaction
+ * is an unreliable proxy (it was `undefined` on the test award) and is not
+ * used. Returns `null` count on failure so the caller degrades honestly.
+ */
+async function transactionsCount(generatedInternalId) {
+    try {
+        const json = await postUsas("transactions/", {
+            award_id: generatedInternalId,
+            limit: 100,
+            page: 1,
+        });
+        const rows = json.results ?? [];
+        return { count: rows.length, atLeast: json.page_metadata?.hasNext === true };
+    }
+    catch {
+        return { count: null, atLeast: false };
+    }
+}
+// ─── Per-award incumbent + public recompete-pressure analysis ─────
+const ANALYZE_INCUMBENT_SOURCE = "usaspending.gov awards/{id} + transactions + spending_by_award (keyless)";
+/**
+ * The public fields that are decision-relevant for a recompete but are NOT
+ * in any keyless (or any public) source — declared in `_meta.fieldsUnavailable`
+ * so the AI hedges instead of inventing a vulnerability score.
+ */
+const ANALYZE_FIELDS_UNAVAILABLE = [
+    "past_performance_cpars",
+    "protest_history",
+    "option_exercise_intent",
+];
+/**
+ * Per-award incumbent + PUBLIC recompete-pressure analysis (design doc 04
+ * §5.2). Given ONE award (`generatedInternalId`) it assembles, from keyless
+ * data only:
+ *   - the incumbent identity + the award's agency/NAICS/PSC/vehicle,
+ *   - PUBLIC recompete-pressure SIGNALS (obligated-vs-ceiling consumption, mod
+ *     count, competition extent + number of offers, set-aside, days to the
+ *     current PoP end, and option-extendable days), and
+ *   - (optionally) the incumbent's other awards in the same agency.
+ *
+ * DESIGN — bounded & keyless, NO N+1 fan-out:
+ *   1 `awards/{id}` detail  +  1 `transactions/` page (mod count, capped at
+ *   100 → lower bound)  +  (optional) 1 `searchAwardsByRecipient` call. That is
+ *   at most 3 upstream calls regardless of award size.
+ *
+ * HONEST CEILING (mandatory): it emits INDIVIDUAL public signals + `pressureHints`
+ * (e.g. "single_offer", "ceiling_nearly_exhausted", "hard_stop_no_options") that
+ * are HINTS, never a score. It NEVER emits a composite "vulnerability score" —
+ * the most decision-relevant input (past performance / CPARS), protest history,
+ * and the incumbent's option-exercise intent are not public, and are declared
+ * in `_meta.fieldsUnavailable`. A not-found award raises a structured not_found
+ * error (never `{ok:true, data:null}`).
+ */
+export async function analyzeIncumbent(args) {
+    const includeOtherAwards = args.includeOtherAwards ?? true;
+    const otherAwardsLimit = Math.min(50, Math.max(1, Math.floor(args.otherAwardsLimit ?? 15)));
+    // --- 1. Award detail (throws not_found if the id doesn't resolve) ------
+    const detail = await getAwardDetail(args.generatedInternalId);
+    if (!detail) {
+        throw new ToolErrorCarrier({
+            kind: "not_found",
+            message: `No award found for generatedInternalId '${args.generatedInternalId}' on usaspending.gov awards/{id}. Resolve a valid id via usas_search_individual_awards or usas_search_awards_by_recipient (each result carries a generatedInternalId).`,
+            retryable: false,
+            upstreamEndpoint: `awards/${args.generatedInternalId}`,
+        });
+    }
+    const nowMs = Date.now();
+    let enrichmentCalls = 1; // the detail fetch
+    // --- 2. Bounded mod count (1 transactions page) -----------------------
+    const mods = await transactionsCount(args.generatedInternalId);
+    enrichmentCalls++;
+    // --- 3. Signals (all PUBLIC, individual — never combined into a score) -
+    const obligated = detail.totalObligation;
+    const ceiling = detail.baseAndAllOptions;
+    // pctConsumed only when the ceiling is a usable positive number; a 0/absent
+    // or data-error negative ceiling → null (never a divide-by-zero or a
+    // nonsensical negative/inflated ratio).
+    const pctConsumed = typeof ceiling === "number" && ceiling > 0
+        ? obligated / ceiling
+        : null;
+    const currentEndDate = detail.periodOfPerformance.endDate;
+    const potentialEndDate = detail.periodOfPerformance.potentialEndDate;
+    const daysUntilCurrentEnd = daysUntil(currentEndDate, nowMs);
+    const daysUntilPotentialEnd = daysUntil(potentialEndDate, nowMs);
+    // extendableDays = runway the unexercised options would add. Null when
+    // either end date is unusable.
+    const extendableDays = daysUntilPotentialEnd !== null && daysUntilCurrentEnd !== null
+        ? daysUntilPotentialEnd - daysUntilCurrentEnd
+        : null;
+    const numberOfOffers = detail.numberOfOffers; // already number|null
+    const signals = {
+        obligatedVsCeiling: {
+            obligated,
+            baseAndAllOptions: ceiling,
+            baseExercisedOptions: detail.baseExercisedOptions,
+            pctConsumed,
+        },
+        modCount: mods.count,
+        modCountAtLeast: mods.atLeast,
+        setAside: detail.setAsideType ?? null,
+        setAsideDescription: detail.setAsideDescription ?? null,
+        extentCompeted: detail.competitionExtent ?? null,
+        extentCompetedDescription: detail.competitionExtentDescription ?? null,
+        numberOfOffers,
+        currentEndDate,
+        potentialEndDate,
+        extendableDays,
+        daysUntilCurrentEnd,
+        vehicle: {
+            contractAwardType: detail.contractAwardType,
+            parentIdvPiid: detail.parentIdv?.piid ?? null,
+            idvType: detail.parentIdv?.idvTypeDescription ?? null,
+            singleOrMultiple: detail.parentIdv?.multipleOrSingleAwardDescription ?? null,
+        },
+    };
+    // --- pressureHints: individual PUBLIC flags — HINTS, never a score -----
+    const pressureHints = [];
+    if (numberOfOffers === 1)
+        pressureHints.push("single_offer");
+    if (pctConsumed !== null && pctConsumed >= 0.9)
+        pressureHints.push("ceiling_nearly_exhausted");
+    if (extendableDays !== null && extendableDays <= 0)
+        pressureHints.push("hard_stop_no_options");
+    // --- 4. Incumbent's other awards in the same agency (1 bounded call) ---
+    let incumbentOtherAwards;
+    if (includeOtherAwards && detail.recipient) {
+        try {
+            const other = await searchAwardsByRecipient({
+                recipientName: detail.recipient,
+                agency: detail.awardingAgency,
+                naics: detail.naicsCode,
+                limit: otherAwardsLimit,
+            });
+            enrichmentCalls++;
+            // Drop the award we're analyzing from its own "other awards" list.
+            incumbentOtherAwards = other.data.awards.filter((a) => a.generatedInternalId !== args.generatedInternalId);
+        }
+        catch {
+            // Non-fatal: the primary analysis still stands; note the degradation.
+            incumbentOtherAwards = [];
+        }
+    }
+    const data = {
+        award: {
+            awardId: detail.awardId,
+            incumbent: detail.recipient,
+            awardingAgency: detail.awardingAgency ?? null,
+            awardingSubAgency: detail.awardingSubAgency ?? null,
+            naicsCode: detail.naicsCode ?? null,
+            pscCode: detail.pscCode ?? null,
+            contractAwardType: detail.contractAwardType,
+            startDate: detail.periodOfPerformance.startDate,
+            currentEndDate,
+            potentialEndDate,
+        },
+        signals,
+        pressureHints,
+        ...(includeOtherAwards ? { incumbentOtherAwards: incumbentOtherAwards ?? [] } : {}),
+    };
+    // --- Truthful _meta ---------------------------------------------------
+    // The offers value being null means single_offer could not be evaluated —
+    // declare number_of_offers_received unavailable so the AI knows.
+    const fieldsUnavailable = [...ANALYZE_FIELDS_UNAVAILABLE];
+    if (numberOfOffers === null) {
+        fieldsUnavailable.push("number_of_offers_received");
+    }
+    const notes = [
+        "HONEST CEILING: PUBLIC signals only; no composite vulnerability score. Past-performance/CPARS ratings, protest history, and the incumbent's option-exercise intent are NOT public — judge the recompete with off-platform intelligence.",
+        `Bounded keyless design: ${enrichmentCalls} upstream call(s) (awards/{id} detail + 1 transactions page${includeOtherAwards ? " + 1 recipient search" : ""}); no per-record fan-out.`,
+    ];
+    if (mods.atLeast) {
+        notes.push(`modCount is a LOWER BOUND: this award has more than 100 transactions (the transactions endpoint reports no total, so only one 100-row page is read). modCountAtLeast is true.`);
+    }
+    if (pctConsumed === null) {
+        notes.push("obligatedVsCeiling.pctConsumed is null because the award's ceiling (base_and_all_options) is absent, zero, or a negative data-entry value — consumption cannot be computed.");
+    }
+    if (numberOfOffers === null) {
+        notes.push("number_of_offers_received is null on this award, so the 'single_offer' hint could not be evaluated (absence of the hint does NOT imply competition).");
+    }
+    return withMeta(data, {
+        source: ANALYZE_INCUMBENT_SOURCE,
+        keylessMode: true,
+        returned: 1,
+        totalAvailable: 1,
+        truncated: false,
+        filtersApplied: [],
+        filtersDropped: [],
+        fieldsUnavailable,
+        enrichedCount: enrichmentCalls,
+        notes,
+    });
 }
 // ─── Recompete radar ──────────────────────────────────────────────
 /**

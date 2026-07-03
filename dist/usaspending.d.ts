@@ -114,11 +114,21 @@ export declare function searchSubawards(args: {
         primeAwardId: string;
     }[];
 }>>;
+/** A parent-award / IDV linkage as returned on awards/{id} (all optional). */
+export type AwardParentIdv = {
+    piid: string | null;
+    generatedUniqueAwardId: string | null;
+    idvTypeDescription: string | null;
+    multipleOrSingleAwardDescription: string | null;
+};
 export declare function getAwardDetail(generatedInternalId: string): Promise<{
     awardId: string;
     recipient: string;
     totalObligation: number;
     baseAndAllOptions: number;
+    baseExercisedOptions: number | null;
+    subawardCount: number | null;
+    contractAwardType: string | null;
     periodOfPerformance: {
         startDate: string | null;
         endDate: string | null;
@@ -128,12 +138,98 @@ export declare function getAwardDetail(generatedInternalId: string): Promise<{
     setAsideType: string | undefined;
     setAsideDescription: string | undefined;
     competitionExtent: string | undefined;
-    numberOfOffers: string | undefined;
+    competitionExtentDescription: string | null;
+    numberOfOffers: number | null;
     awardingAgency: string | undefined;
     awardingSubAgency: string | undefined;
     naicsCode: string | undefined;
     naicsDescription: string | undefined;
+    pscCode: string | null;
+    pscDescription: string | null;
+    parentIdv: AwardParentIdv | null;
 } | null>;
+/**
+ * Per-award incumbent + PUBLIC recompete-pressure analysis (design doc 04
+ * §5.2). Given ONE award (`generatedInternalId`) it assembles, from keyless
+ * data only:
+ *   - the incumbent identity + the award's agency/NAICS/PSC/vehicle,
+ *   - PUBLIC recompete-pressure SIGNALS (obligated-vs-ceiling consumption, mod
+ *     count, competition extent + number of offers, set-aside, days to the
+ *     current PoP end, and option-extendable days), and
+ *   - (optionally) the incumbent's other awards in the same agency.
+ *
+ * DESIGN — bounded & keyless, NO N+1 fan-out:
+ *   1 `awards/{id}` detail  +  1 `transactions/` page (mod count, capped at
+ *   100 → lower bound)  +  (optional) 1 `searchAwardsByRecipient` call. That is
+ *   at most 3 upstream calls regardless of award size.
+ *
+ * HONEST CEILING (mandatory): it emits INDIVIDUAL public signals + `pressureHints`
+ * (e.g. "single_offer", "ceiling_nearly_exhausted", "hard_stop_no_options") that
+ * are HINTS, never a score. It NEVER emits a composite "vulnerability score" —
+ * the most decision-relevant input (past performance / CPARS), protest history,
+ * and the incumbent's option-exercise intent are not public, and are declared
+ * in `_meta.fieldsUnavailable`. A not-found award raises a structured not_found
+ * error (never `{ok:true, data:null}`).
+ */
+export declare function analyzeIncumbent(args: {
+    generatedInternalId: string;
+    includeOtherAwards?: boolean;
+    otherAwardsLimit?: number;
+}): Promise<MetaBundle<{
+    incumbentOtherAwards?: {
+        awardId: string;
+        recipient: string;
+        amount: number;
+        awardingAgency: string;
+        awardingSubAgency: string | undefined;
+        naicsCode: string | undefined;
+        naicsDescription: string | undefined;
+        placeOfPerformanceState: string | undefined;
+        placeOfPerformanceCity: string | undefined;
+        placeOfPerformanceCountry: string | undefined;
+        placeOfPerformanceZip: string | undefined;
+        description: string | undefined;
+        generatedInternalId: string;
+    }[] | undefined;
+    award: {
+        awardId: string;
+        incumbent: string;
+        awardingAgency: string | null;
+        awardingSubAgency: string | null;
+        naicsCode: string | null;
+        pscCode: string | null;
+        contractAwardType: string | null;
+        startDate: string | null;
+        currentEndDate: string | null;
+        potentialEndDate: string | null;
+    };
+    signals: {
+        obligatedVsCeiling: {
+            obligated: number;
+            baseAndAllOptions: number;
+            baseExercisedOptions: number | null;
+            pctConsumed: number | null;
+        };
+        modCount: number | null;
+        modCountAtLeast: boolean;
+        setAside: string | null;
+        setAsideDescription: string | null;
+        extentCompeted: string | null;
+        extentCompetedDescription: string | null;
+        numberOfOffers: number | null;
+        currentEndDate: string | null;
+        potentialEndDate: string | null;
+        extendableDays: number | null;
+        daysUntilCurrentEnd: number | null;
+        vehicle: {
+            contractAwardType: string | null;
+            parentIdvPiid: string | null;
+            idvType: string | null;
+            singleOrMultiple: string | null;
+        };
+    };
+    pressureHints: string[];
+}>>;
 /**
  * Recompete radar — federal contracts whose current period of performance
  * ends inside a window around today, so you can see what's coming up for

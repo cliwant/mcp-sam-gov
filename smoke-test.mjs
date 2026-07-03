@@ -182,6 +182,20 @@ const tests = [
     args: { agency: "Department of Veterans Affairs", naics: "541512", monthsUntilExpiry: 24, minAwardValue: 1000000, limit: 5 },
     verify: (r) => Array.isArray(r.contracts),
   },
+  {
+    // Resolve a live generatedInternalId from the individual-awards result
+    // above (not a hard-coded id) so the happy path isn't brittle.
+    name: "usas_analyze_incumbent",
+    args: { generatedInternalId: "FETCH_FROM_PRIOR", otherAwardsLimit: 5 },
+    chain: { from: "usas_search_individual_awards", path: "awards[0].generatedInternalId" },
+    verify: (r) =>
+      typeof r.award?.incumbent === "string" &&
+      r.signals &&
+      // pctConsumed is a number OR null (never undefined / a fabricated 0).
+      (r.signals.obligatedVsCeiling.pctConsumed === null ||
+        typeof r.signals.obligatedVsCeiling.pctConsumed === "number") &&
+      Array.isArray(r.pressureHints),
+  },
 
   // ━━━ USAspending — Aggregate
   {
