@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 /**
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
- * + USAspending + Federal Register + eCFR + Grants.gov + wage/pricing.
+ * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 41 keyless tools wrapping every public federal-contracting data
- * source that doesn't require an API key. Compatible with:
+ * 42 keyless tools wrapping every public federal-contracting data
+ * source that doesn't require an API key. (NOTE: a sibling PR adds 2
+ * integrity tools bumping the pre-this count 41→43; this PR adds ONLY the GAO
+ * tool 41→42. The header count MUST be reconciled at merge to 44 if both land.)
+ * Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
  *   - Codex CLI       (~/.codex/config.toml)
@@ -26,6 +29,7 @@ import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
 import * as pricing from "./pricing.js";
+import * as gao from "./gao.js";
 import { toToolError } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 const SERVER_NAME = "mcp-sam-gov";
@@ -373,6 +377,39 @@ const BenchmarkLaborInput = z.object({
         .optional()
         .describe("How many 20-row pages to sample for the distribution (default 3, max 10)."),
 });
+// GAO bid-protest lookup (keyless RSS + decision-page parse)
+const GaoProtestInput = z.object({
+    agency: z
+        .string()
+        .optional()
+        .describe("Client-side substring filter on the recent-protest feed (matched against the decision title + description). NOTE: filters the RECENT feed window only — not a historical agency search."),
+    protester: z
+        .string()
+        .optional()
+        .describe("Client-side substring filter on the protester name (feed title/description)."),
+    solicitationNumber: z
+        .string()
+        .optional()
+        .describe("Client-side substring filter on the solicitation number (matched in the feed description)."),
+    outcome: z
+        .enum(["sustained", "denied", "dismissed", "withdrawn", "any"])
+        .optional()
+        .describe("Filter by protest disposition (default 'any'). Determined from each decision page, so it applies only when enrich is true."),
+    bNumber: z
+        .string()
+        .optional()
+        .describe("Fetch ONE specific decision directly by GAO B-number (e.g. 'B-424377' or 'b-424249.2'), bypassing the feed. Use to pull a decision that has aged out of the recent feed window."),
+    limit: z
+        .number()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Max decisions to return (default 20, max 50). The feed itself carries ~25 recent legal products."),
+    enrich: z
+        .boolean()
+        .optional()
+        .describe("Fetch each decision's page to fill agency/outcome/solicitation/PDF (default true). Set false for a fast feed-only list (those fields will be null)."),
+});
 const TOOLS = [
     // ━━━ SAM.gov (5) ━━━
     {
@@ -589,6 +626,12 @@ const TOOLS = [
         description: "GSA CALC awarded ceiling-rate market band for a labor category (keyless). Returns a DISTRIBUTION (currentRate min/median/max + escalated medians) over a fetched sample, NOT a single price. CALC rates are CEILING/catalog and FULLY BURDENED (do not re-add wrap); the match count SATURATES at 10000 for broad queries (totalAvailable null then). Filter by businessSize/educationLevel(code)/experience/sin/priceRange to narrow.",
         inputSchema: BenchmarkLaborInput,
     },
+    // ━━━ GAO — Bid Protests (1) ━━━
+    {
+        name: "gao_protest_lookup",
+        description: "Recent GAO (Comptroller General) bid-protest decisions from the public Legal-Products RSS feed, enriched from each decision page (protester, contracting agency, decision date, outcome sustained/denied/dismissed/withdrawn, solicitation #, decision PDF). Filter client-side by agency/protester/solicitation/outcome, or pull one decision directly by bNumber. HONEST SCOPE: keyless covers only the RECENT feed window (~25 items) — GAO's faceted historical protest search (all years, by protester/agency/outcome/date) is WAF-blocked to bots and available only via a paid third-party API, so results are ALWAYS marked complete:false and are NOT the full protest history (see the accessNote).",
+        inputSchema: GaoProtestInput,
+    },
 ];
 // ─── Server bootstrap ────────────────────────────────────────────
 async function main() {
@@ -686,6 +729,9 @@ function synthesizeDefaultMeta(toolName, sam) {
     }
     else if (toolName.startsWith("grants_")) {
         source = "grants.gov/api";
+    }
+    else if (toolName.startsWith("gao_")) {
+        source = "gao.gov Legal Products RSS + decision pages (keyless)";
     }
     else {
         source = "unknown";
@@ -930,6 +976,9 @@ async function runTool(name, args, sam) {
             return await pricing.getWageRates(WageRatesInput.parse(args));
         case "gsa_benchmark_labor_rates":
             return await pricing.benchmarkLaborRates(BenchmarkLaborInput.parse(args));
+        // GAO — Bid Protests
+        case "gao_protest_lookup":
+            return await gao.gaoProtestLookup(GaoProtestInput.parse(args));
         default:
             throw new Error(`Unknown tool: ${name}`);
     }
