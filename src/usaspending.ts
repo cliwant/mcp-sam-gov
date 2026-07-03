@@ -640,7 +640,19 @@ export async function getAwardDetail(generatedInternalId: string) {
       `${USAS}/awards/${encodeURIComponent(generatedInternalId)}/`,
       { signal: AbortSignal.timeout(10_000) },
     );
-    if (!r.ok) return null;
+    // 404 = the id genuinely doesn't resolve → null (a real "not found").
+    // 429/5xx = a RETRYABLE upstream fault, NOT a missing award → throw a
+    // classified error so callers never mislabel an outage as not_found.
+    if (r.status === 404) return null;
+    if (!r.ok) {
+      throw new ToolErrorCarrier({
+        kind: r.status === 429 ? "rate_limited" : "upstream_unavailable",
+        message: `usaspending awards/{id} returned ${r.status}`,
+        retryable: true,
+        upstreamStatus: r.status,
+        upstreamEndpoint: `awards/${generatedInternalId}`,
+      });
+    }
     type Resp = {
       piid?: string;
       description?: string;
@@ -732,8 +744,17 @@ export async function getAwardDetail(generatedInternalId: string) {
       pscDescription,
       parentIdv,
     };
-  } catch {
-    return null;
+  } catch (e) {
+    // A classified upstream error (429/5xx) must propagate so the caller can
+    // retry and never mislabel it as not_found. A network/timeout/parse fault
+    // is likewise retryable — surface it, don't collapse it to a false null.
+    if (e instanceof ToolErrorCarrier) throw e;
+    throw new ToolErrorCarrier({
+      kind: "upstream_unavailable",
+      message: `usaspending awards/{id} fetch failed: ${e instanceof Error ? e.message : String(e)}`,
+      retryable: true,
+      upstreamEndpoint: `awards/${generatedInternalId}`,
+    });
   }
 }
 
@@ -902,7 +923,9 @@ export async function analyzeIncumbent(args: {
   let incumbentOtherAwards:
     | Awaited<ReturnType<typeof searchAwardsByRecipient>>["data"]["awards"]
     | undefined;
+  let otherAwardsFailed = false;
   if (includeOtherAwards && detail.recipient) {
+    enrichmentCalls++; // count the attempt (whether or not it succeeds)
     try {
       const other = await searchAwardsByRecipient({
         recipientName: detail.recipient,
@@ -910,14 +933,15 @@ export async function analyzeIncumbent(args: {
         naics: detail.naicsCode,
         limit: otherAwardsLimit,
       });
-      enrichmentCalls++;
       // Drop the award we're analyzing from its own "other awards" list.
       incumbentOtherAwards = other.data.awards.filter(
         (a) => a.generatedInternalId !== args.generatedInternalId,
       );
     } catch {
-      // Non-fatal: the primary analysis still stands; note the degradation.
+      // Non-fatal, but MUST be disclosed: an empty list here means "the search
+      // failed", NOT "the incumbent has no other awards". (D1)
       incumbentOtherAwards = [];
+      otherAwardsFailed = true;
     }
   }
 
@@ -947,13 +971,31 @@ export async function analyzeIncumbent(args: {
     fieldsUnavailable.push("number_of_offers_received");
   }
 
+  // List ONLY the calls actually attempted — never assert a recipient search
+  // that failed or was skipped (D1). enrichmentCalls stays in lockstep with
+  // this list: detail + transactions are always attempted; the recipient call
+  // is attempted iff includeOtherAwards && a recipient name exists.
+  const callList = ["awards/{id} detail", "1 transactions page"];
+  if (includeOtherAwards && detail.recipient) callList.push("1 recipient search");
+  const transactionsFailed = mods.count === null;
+
   const notes: string[] = [
     "HONEST CEILING: PUBLIC signals only; no composite vulnerability score. Past-performance/CPARS ratings, protest history, and the incumbent's option-exercise intent are NOT public — judge the recompete with off-platform intelligence.",
-    `Bounded keyless design: ${enrichmentCalls} upstream call(s) (awards/{id} detail + 1 transactions page${includeOtherAwards ? " + 1 recipient search" : ""}); no per-record fan-out.`,
+    `Bounded keyless design: ${enrichmentCalls} upstream call(s) (${callList.join(" + ")}); no per-record fan-out.`,
   ];
   if (mods.atLeast) {
     notes.push(
       `modCount is a LOWER BOUND: this award has more than 100 transactions (the transactions endpoint reports no total, so only one 100-row page is read). modCountAtLeast is true.`,
+    );
+  }
+  if (transactionsFailed) {
+    notes.push(
+      "modCount is null because the transactions call FAILED (not because the award has no modifications) — the modification count is unknown, not zero.",
+    );
+  }
+  if (otherAwardsFailed) {
+    notes.push(
+      "incumbentOtherAwards could not be retrieved (the recipient search FAILED) and is shown as an EMPTY list — this is NOT a confirmation that the incumbent has no other awards.",
     );
   }
   if (pctConsumed === null) {
@@ -967,9 +1009,14 @@ export async function analyzeIncumbent(args: {
     );
   }
 
+  // A failed secondary enrichment means this is NOT the complete picture →
+  // force complete:false so an AI never reads partial data as complete (D1/D2).
+  const degraded = transactionsFailed || otherAwardsFailed;
+
   return withMeta(data, {
     source: ANALYZE_INCUMBENT_SOURCE,
     keylessMode: true,
+    complete: degraded ? false : undefined,
     returned: 1,
     totalAvailable: 1,
     truncated: false,
