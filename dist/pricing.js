@@ -523,9 +523,11 @@ function median(sorted) {
 }
 export async function benchmarkLaborRates(args) {
     const laborCategory = args.laborCategory.trim();
-    // CALC caps the page at 20 rows server-side regardless of page_size
-    // (LIVE-VERIFIED). We page to build a bounded distribution sample.
-    const PAGE_ROWS = 20;
+    // Page in bounded chunks to build a representative distribution sample
+    // without unbounded fetching. CALC honors page_size up to at least 200
+    // (LIVE-VERIFIED), so 100 rows/page captures most categories' full
+    // population within the default page budget.
+    const PAGE_ROWS = 100;
     const maxSamplePages = Math.min(10, Math.max(1, Math.floor(args.maxSamplePages ?? 3)));
     const filters = [];
     const filtersApplied = ["laborCategory(exact)"];
@@ -649,7 +651,9 @@ export async function benchmarkLaborRates(args) {
         "CALC rates are awarded CEILING (catalog) rates from GSA schedule contracts — they are NOT actual task-order prices paid, and real competed prices are frequently lower.",
         "CALC rates are FULLY BURDENED (they already include the contractor's wrap: overhead, G&A, fringe, and fee) — do NOT re-apply a wrap rate on top.",
         "The escalatedRate medians (nextYear/secondYear) are each vendor's own contracted escalation, NOT a market escalation index — treat them as a distribution, not a forecast.",
-        `All distribution statistics (min/median/max) are computed over the FETCHED SAMPLE of ${rows.length} row(s) (CALC caps the page at 20 rows server-side; this fetched up to ${maxSamplePages} page(s)), not the full ${matchCount}${saturated ? "+" : ""} matches.`,
+        `Distribution statistics (min/median/max) are computed over the ${rows.length} fetched row(s) (bounded at ${PAGE_ROWS}×${maxSamplePages} pages)${rows.length >= matchCount && !saturated
+            ? " — the full match set."
+            : `, not the full ${matchCount}${saturated ? "+" : ""} matches; raise maxSamplePages or narrow with filters for a fuller sample.`}`,
     ];
     if (saturated) {
         notes.push(`matchCount is SATURATED: the API returned relation='${totalRelation}' at ${matchCount}, so the true match total is AT LEAST ${matchCount} (unknown exact). totalAvailable is null. Narrow with filters (businessSize, educationLevel code, minYearsExperience, sin, priceRange) or a more specific laborCategory for an exact count.`);
