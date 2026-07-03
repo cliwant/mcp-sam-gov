@@ -41,7 +41,7 @@ import { buildMeta } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
-import { farClauseLookup } from "./dist/far.js";
+import { farClauseLookup, farComplianceMatrix } from "./dist/far.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import {
@@ -1283,6 +1283,232 @@ async function testFarClauseLookup() {
   _clearCache(); // leave a clean cache for any later suite.
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 9. far_compliance_matrix — RFP cited-clause list → proposal-ready matrix
+//    (dist/far.js, fetch-mock). It COMPOSES far_clause_lookup, so the load-
+//    bearing guards here are the ones the composition adds: the not_found (404)
+//    vs errored (5xx/other) SPLIT into DIFFERENT buckets, per-clause isolation
+//    (one failure never sinks the matrix), the static gate map, dedupe (one
+//    fetch per unique clause), and the summary/_meta consistency invariants.
+//
+//    Caching note: far_clause_lookup memoizes currency (once) + each section XML
+//    by URL, process-global. Cases use DISTINCT clause numbers so no resolved
+//    body bleeds into a case expecting a 404/503; _clearCache() before the
+//    dedupe case makes its call-count assertion exact.
+// ══════════════════════════════════════════════════════════════════════════
+async function testFarComplianceMatrix() {
+  section("9. far_compliance_matrix matrix + not-found/errored split (fetch-mock)");
+
+  const titles = () => mockResponse({ status: 200, json: TITLES_JSON });
+  const xml = (body) => mockResponse({ status: 200, json: body });
+
+  // A resolved FAR clause fixture that is NOT a gate (52.212-4), a resolved DFARS
+  // GATE fixture (252.204-7012), and a Section-889 GATE fixture (52.204-25).
+  const CLAUSE_XML_52_204_25 = `<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="52.204-25" TYPE="SECTION">
+<HEAD>52.204-25 Prohibition on Contracting for Certain Telecommunications and Video Surveillance Services or Equipment.</HEAD>
+<P>As prescribed in 4.2105(b), insert the following clause:</P>
+<EXTRACT><HD1>Prohibition ... (NOV 2021)</HD1><P>(a) Definitions.</P></EXTRACT>
+</DIV8>`;
+
+  // ── (a) MIXED BATCH (the core): 52.212-4 + 252.204-7012 resolve (200), 52.999-99
+  // is a genuine 404 (→ unresolved), 52.777-77 is a 503 outage (→ errored). The
+  // 404 and the 503 MUST land in DIFFERENT buckets. Prescription off to keep the
+  // fetch surface to one call per clause.
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u)) {
+        const s = ecfrSection(u);
+        if (s === "52.212-4") return xml(CLAUSE_XML_52_212_4);
+        if (s === "252.204-7012") return xml(CLAUSE_XML_252_204_7012);
+        if (s === "52.999-99")
+          return mockResponse({ status: 404, json: { error: "No matching content found." } });
+        if (s === "52.777-77") return mockResponse({ status: 503 });
+      }
+      return failClosed()();
+    },
+    async () => {
+      const res = await farComplianceMatrix({
+        clauses: ["52.212-4", "252.204-7012", "52.999-99", "52.777-77"],
+        includePrescription: false,
+      });
+      const d = res.data;
+      ok("mixed: rows.length === 2 (only the two 200 clauses resolved)",
+        d.rows.length === 2, JSON.stringify(d.rows.map((r) => r.clauseNumber)));
+      ok("mixed: unresolved holds the 404 clause 52.999-99",
+        d.unresolved.length === 1 && d.unresolved[0].clauseNumber === "52.999-99",
+        JSON.stringify(d.unresolved));
+      ok("mixed: unresolved does NOT hold the 503 clause 52.777-77",
+        !d.unresolved.some((x) => x.clauseNumber === "52.777-77"),
+        JSON.stringify(d.unresolved));
+      ok("mixed: errored holds the 503 clause 52.777-77",
+        d.errored.length === 1 && d.errored[0].clauseNumber === "52.777-77",
+        JSON.stringify(d.errored));
+      ok("mixed: errored does NOT hold the 404 clause 52.999-99 (SPLIT — a DOWN service is NOT 'not found')",
+        !d.errored.some((x) => x.clauseNumber === "52.999-99"),
+        JSON.stringify(d.errored));
+      ok("mixed: _meta.complete === false (some clause didn't resolve)",
+        res.meta.complete === false, JSON.stringify(res.meta.complete));
+      // The tool returns a RAW partial (totalAvailable:null); the server finalizes
+      // via buildMeta. Prove the AI-VISIBLE result: with totalAvailable null,
+      // buildMeta cannot force truncated:true — so failed clauses never read as a
+      // cap/pagination (they're disclosed in unresolved/errored instead).
+      ok("mixed: raw partial sets totalAvailable:null (a matrix has no upstream match-count)",
+        res.meta.totalAvailable === null, JSON.stringify(res.meta.totalAvailable));
+      {
+        const fm = buildMeta(res.meta);
+        ok("mixed: FINAL _meta (buildMeta) truncated:false + complete:false (failed clauses are NOT truncation)",
+          fm.truncated === false && fm.complete === false,
+          JSON.stringify({ truncated: fm.truncated, complete: fm.complete }));
+      }
+      ok("mixed: _meta.degraded set (errored non-empty) with failed===1",
+        res.meta.degraded && res.meta.degraded.failed === 1 &&
+        res.meta.degraded.attempted === 4 && res.meta.degraded.succeeded === 2,
+        JSON.stringify(res.meta.degraded));
+      ok("mixed: a note DISCLOSES the not-found bucket",
+        res.meta.notes.some((n) => /not found in Title 48/i.test(n)),
+        JSON.stringify(res.meta.notes));
+      ok("mixed: a note DISCLOSES the errored/service bucket (retryable, NOT a confirmation of absence)",
+        res.meta.notes.some((n) => /could not be fetched due to a service issue/i.test(n) && /NOT a confirmation/i.test(n)),
+        JSON.stringify(res.meta.notes));
+      ok("mixed: summary.total === rows + unresolved + errored (no clause dropped)",
+        d.summary.total === d.rows.length + d.unresolved.length + d.errored.length &&
+        d.summary.total === 4,
+        JSON.stringify(d.summary));
+      ok("mixed: summary tallies resolved/unresolved/errored + far/dfars",
+        d.summary.resolved === 2 && d.summary.unresolved === 1 &&
+        d.summary.errored === 1 && d.summary.far === 1 && d.summary.dfars === 1,
+        JSON.stringify(d.summary));
+    },
+  );
+  _clearCache();
+
+  // ── (b) GATE TAGGING: 52.204-25 resolved with default flagGates → its row.gate
+  // is the Section-889 label; a non-mapped resolved clause (52.212-4) → gate null.
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u)) {
+        const s = ecfrSection(u);
+        if (s === "52.204-25") return xml(CLAUSE_XML_52_204_25);
+        if (s === "52.212-4") return xml(CLAUSE_XML_52_212_4);
+      }
+      return failClosed()();
+    },
+    async () => {
+      const res = await farComplianceMatrix({
+        clauses: ["52.204-25", "52.212-4"],
+        includePrescription: false,
+      });
+      const byNum = Object.fromEntries(res.data.rows.map((r) => [r.clauseNumber, r]));
+      ok("gate: 52.204-25 row.gate === the Section-889 label",
+        byNum["52.204-25"] &&
+        byNum["52.204-25"].gate === "Section 889 — covered-telecom/video-surveillance prohibition (award-eligibility gate)",
+        JSON.stringify(byNum["52.204-25"] && byNum["52.204-25"].gate));
+      ok("gate: non-mapped 52.212-4 row.gate === null (NEVER a guessed gate)",
+        byNum["52.212-4"] && byNum["52.212-4"].gate === null,
+        JSON.stringify(byNum["52.212-4"] && byNum["52.212-4"].gate));
+      ok("gate: summary.gates === 1 (one gate among the resolved rows)",
+        res.data.summary.gates === 1, JSON.stringify(res.data.summary.gates));
+    },
+  );
+  _clearCache();
+
+  // ── (b2) flagGates:false ⇒ ALL rows gate null (even a mapped gate clause).
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u)) {
+        const s = ecfrSection(u);
+        if (s === "52.204-25") return xml(CLAUSE_XML_52_204_25);
+        if (s === "52.212-4") return xml(CLAUSE_XML_52_212_4);
+      }
+      return failClosed()();
+    },
+    async () => {
+      const res = await farComplianceMatrix({
+        clauses: ["52.204-25", "52.212-4"],
+        includePrescription: false,
+        flagGates: false,
+      });
+      ok("flagGates:false ⇒ every row.gate === null (incl. the mapped 52.204-25)",
+        res.data.rows.length === 2 && res.data.rows.every((r) => r.gate === null),
+        JSON.stringify(res.data.rows.map((r) => ({ c: r.clauseNumber, gate: r.gate }))));
+      ok("flagGates:false ⇒ summary.gates === 0",
+        res.data.summary.gates === 0, JSON.stringify(res.data.summary.gates));
+    },
+  );
+  _clearCache();
+
+  // ── (c) DEDUPE: ["52.212-4","FAR 52.212-4"," 52.212-4 "] → ONE row and exactly
+  // ONE clause fetch (the three spellings normalize to the same key). Clear cache
+  // first so the `calls` array reflects only THIS case's fetches — making the
+  // "one fetch" assertion exact.
+  _clearCache();
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u) && ecfrSection(u) === "52.212-4") return xml(CLAUSE_XML_52_212_4);
+      return failClosed()();
+    },
+    async (calls) => {
+      const res = await farComplianceMatrix({
+        clauses: ["52.212-4", "FAR 52.212-4", " 52.212-4 "],
+        includePrescription: false,
+      });
+      ok("dedupe: rows.length === 1 (three spellings collapse to one clause)",
+        res.data.rows.length === 1 && res.data.rows[0].clauseNumber === "52.212-4",
+        JSON.stringify(res.data.rows.map((r) => r.clauseNumber)));
+      ok("dedupe: summary.total === 1 (deduped input count)",
+        res.data.summary.total === 1, JSON.stringify(res.data.summary.total));
+      ok("dedupe: exactly ONE clause fetch happened (versioner-full section=52.212-4)",
+        calls.filter((c) => isEcfrFull(c.url) && ecfrSection(c.url) === "52.212-4").length === 1,
+        JSON.stringify(calls.filter((c) => isEcfrFull(c.url)).map((c) => c.url)));
+    },
+  );
+  _clearCache();
+
+  // ── (d) ALL-RESOLVED HAPPY: two clauses both 200 → unresolved/errored empty,
+  // _meta.complete NOT forced false, NO false degraded, summary far/dfars right.
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u)) {
+        const s = ecfrSection(u);
+        if (s === "52.212-4") return xml(CLAUSE_XML_52_212_4);
+        if (s === "252.204-7012") return xml(CLAUSE_XML_252_204_7012);
+      }
+      return failClosed()();
+    },
+    async () => {
+      const res = await farComplianceMatrix({
+        clauses: ["52.212-4", "252.204-7012"],
+        includePrescription: false,
+      });
+      const d = res.data;
+      ok("happy: rows.length === 2, unresolved & errored both empty",
+        d.rows.length === 2 && d.unresolved.length === 0 && d.errored.length === 0,
+        JSON.stringify({ rows: d.rows.length, unresolved: d.unresolved.length, errored: d.errored.length }));
+      ok("happy: _meta.complete NOT forced false (all resolved ⇒ buildMeta derives true)",
+        res.meta.complete !== false, JSON.stringify(res.meta.complete));
+      ok("happy: _meta.degraded undefined (no outage ⇒ NOT degraded)",
+        res.meta.degraded === undefined, JSON.stringify(res.meta.degraded));
+      ok("happy: NO false 'service issue'/'not found' note",
+        !res.meta.notes.some((n) => /could not be fetched due to a service issue|not found in Title 48/i.test(n)),
+        JSON.stringify(res.meta.notes));
+      ok("happy: the RFO currency caveat IS surfaced once (resolved rows are FAR/DFARS)",
+        res.meta.notes.filter((n) => /RFO caveat/i.test(n)).length === 1,
+        JSON.stringify(res.meta.notes));
+      ok("happy: summary far===1, dfars===1, gsam===0, other===0, total===2",
+        d.summary.far === 1 && d.summary.dfars === 1 && d.summary.gsam === 0 &&
+        d.summary.other === 0 && d.summary.total === 2,
+        JSON.stringify(d.summary));
+    },
+  );
+  _clearCache(); // leave a clean cache for any later suite.
+}
+
 // ─── Meta-test: the harness FAILS LOUDLY when a guarded behavior breaks ────
 // Proves the assertions are real (not vacuously green). We re-run the D2
 // invariant against a DELIBERATELY-WRONG expectation and confirm it would fail;
@@ -1675,6 +1901,7 @@ async function main() {
   await testIntegrityLookup();
   await testSbaSizeStandard();
   await testFarClauseLookup();
+  await testFarComplianceMatrix();
   await testSearchOutageHonesty();
 
   // Prove the harness bites.

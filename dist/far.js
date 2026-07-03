@@ -349,4 +349,218 @@ export async function farClauseLookup(args) {
         notes,
     });
 }
+// ════════════════════════════════════════════════════════════════════════════
+// far_compliance_matrix — RFP cited-clause list → proposal-ready matrix.
+//
+// COMPOSES farClauseLookup: fan it out (bounded concurrency) over a deduped
+// clause list and assemble a Section-L/M-ready matrix — each clause's text +
+// prescription + whether it is a pass/fail eligibility GATE + the same currency
+// caveat farClauseLookup carries.
+//
+// TRUTHFULNESS — the load-bearing split (the C19 lesson): each clause has THREE
+// possible outcomes and "absent" is NEVER conflated with "couldn't fetch":
+//   1. resolved         → a full row in `rows[]`.
+//   2. not_found (404)  → `unresolved[]` (the clause genuinely isn't in Title 48).
+//   3. any other error  → `errored[]` (a DOWN/failing eCFR — retryable — must NOT
+//                          read as "clause doesn't exist"; invalid_input too).
+// Every input clause lands in EXACTLY one bucket; summary.total proves it. Gate
+// tags come ONLY from the verified static GATE_MAP — never guessed.
+// ════════════════════════════════════════════════════════════════════════════
+/**
+ * Eligibility-gate map (STATIC, verified live 2026-07-04 — headings confirmed).
+ * A resolved row whose clauseNumber is a key here is a pass/fail award-eligibility
+ * gate; the value is the disclosed label. Kept deliberately SMALL and defensible:
+ * NEVER invent a gate meaning for a clause not in this map.
+ */
+const GATE_MAP = {
+    "52.204-24": "Section 889 — covered-telecom/video-surveillance prohibition (award-eligibility gate)",
+    "52.204-25": "Section 889 — covered-telecom/video-surveillance prohibition (award-eligibility gate)",
+    "52.204-26": "Section 889 — covered-telecom/video-surveillance prohibition (award-eligibility gate)",
+    "52.219-14": "Limitations on Subcontracting — set-aside compliance gate",
+    "252.204-7012": "Safeguarding Covered Defense Information + cyber incident reporting (CUI cyber gate)",
+    "252.204-7020": "NIST SP 800-171 DoD Assessment (cyber gate)",
+    "252.204-7021": "CMMC compliance (cyber gate)",
+};
+/** Hard ceiling on clauses processed per call (after dedupe). Mirrors the Zod cap. */
+const MATRIX_MAX_CLAUSES = 25;
+/** Bounded fan-out width — small pool so we never fire 25 eCFR fetches at once. */
+const MATRIX_CONCURRENCY = 5;
+/**
+ * Run an async mapper over `items` with at most `width` in flight at once. A
+ * lightweight promise pool (worker-draining a shared cursor): each worker pulls
+ * the next index until the list is exhausted, so results are written back by
+ * original index. Preserves input order and never fires more than `width`
+ * concurrent fetches. Never rejects — the mapper itself must not throw (callers
+ * here wrap each unit in try/catch).
+ */
+async function mapPool(items, width, mapper) {
+    const results = new Array(items.length);
+    let cursor = 0;
+    const workerCount = Math.max(1, Math.min(width, items.length));
+    const worker = async () => {
+        for (;;) {
+            const i = cursor++;
+            if (i >= items.length)
+                return;
+            results[i] = await mapper(items[i], i);
+        }
+    };
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return results;
+}
+export async function farComplianceMatrix(args) {
+    const includePrescription = args.includePrescription ?? true;
+    const flagGates = args.flagGates !== false; // default true; only false disables
+    // ── Normalize + dedupe case-insensitively, then cap AFTER dedupe. ─────────
+    // normalizeClauseNumber already lowercases nothing (clause numbers are digits),
+    // but it strips FAR/DFARS prefixes + stray chars so "52.212-4", "FAR 52.212-4",
+    // and " 52.212-4 " collapse to one key. We keep the FIRST spelling's normalized
+    // form and preserve input order.
+    const seen = new Set();
+    const deduped = [];
+    for (const raw of args.clauses ?? []) {
+        const norm = normalizeClauseNumber(raw ?? "");
+        // Keep even a non-matching normalized token: farClauseLookup will classify it
+        // as invalid_input → errored (NOT silently dropped). Dedupe on the normalized
+        // key so a malformed value that appears twice is only reported once.
+        const key = norm.toLowerCase();
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        deduped.push(norm);
+    }
+    const clauses = deduped.slice(0, MATRIX_MAX_CLAUSES);
+    const total = clauses.length;
+    // ── Resolve currency ONCE up front (avoid resolving it 25×). ──────────────
+    // farClauseLookup would resolve this per call; we resolve it here and pass an
+    // explicit asOfDate into each call. If currency can't be resolved AND no
+    // asOfDate was supplied, refuse with a SINGLE schema_drift rather than letting
+    // 25 identical ones bubble up (and a blank-date URL must never 404 into a fake
+    // "not found"). This mirrors farClauseLookup's Defect-1 guard.
+    const currency = await title48Currency();
+    const asOfDate = args.asOfDate ?? currency.upToDateAsOf ?? "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `Could not resolve Title 48's current codification date from the eCFR titles endpoint (up_to_date_as_of unavailable) and no asOfDate was supplied. Refusing to build a matrix against a blank date — the versioner would return HTTP 404, which must NOT be reported as missing clauses. Retry shortly, or pass an explicit asOfDate (YYYY-MM-DD).`,
+            retryable: true,
+            upstreamEndpoint: "ecfr:versioner/v1/titles.json",
+        });
+    }
+    const outcomes = await mapPool(clauses, MATRIX_CONCURRENCY, async (clauseNumber) => {
+        try {
+            const res = await farClauseLookup({
+                clauseNumber,
+                asOfDate,
+                includePrescription,
+            });
+            const d = res.data;
+            const gate = flagGates ? GATE_MAP[d.clauseNumber] ?? null : null;
+            const row = {
+                clauseNumber: d.clauseNumber,
+                kind: d.kind,
+                regulation: d.regulation,
+                heading: d.heading,
+                revision: d.revision,
+                prescribedIn: d.prescribedIn,
+                prescription: d.prescription,
+                text: d.text,
+                ecfrUrl: d.ecfrUrl,
+                farOverhaulRisk: d.farOverhaulRisk,
+                gate,
+            };
+            return { status: "resolved", row };
+        }
+        catch (e) {
+            const kind = e instanceof ToolErrorCarrier ? e.toolError.kind : "unknown";
+            const reason = e instanceof ToolErrorCarrier
+                ? e.toolError.message
+                : e instanceof Error
+                    ? e.message
+                    : String(e);
+            // A genuine 404 (absent clause) → unresolved. ANY OTHER kind (a fetch/
+            // service problem: upstream_unavailable / schema_drift / rate_limited /
+            // invalid_input / unknown) → errored. A DOWN eCFR must NEVER read as
+            // "clause doesn't exist".
+            if (kind === "not_found") {
+                return {
+                    status: "unresolved",
+                    entry: { clauseNumber, reason },
+                };
+            }
+            return { status: "errored", entry: { clauseNumber, reason } };
+        }
+    });
+    const rows = [];
+    const unresolved = [];
+    const errored = [];
+    for (const o of outcomes) {
+        if (o.status === "resolved")
+            rows.push(o.row);
+        else if (o.status === "unresolved")
+            unresolved.push(o.entry);
+        else
+            errored.push(o.entry);
+    }
+    // ── Summary (must be internally consistent). ──────────────────────────────
+    const resolved = rows.length;
+    const far = rows.filter((r) => r.regulation === "FAR").length;
+    const dfars = rows.filter((r) => r.regulation === "DFARS").length;
+    const gsam = rows.filter((r) => r.regulation === "GSAM").length;
+    const other = rows.filter((r) => r.regulation === "other").length;
+    const gates = rows.filter((r) => r.gate !== null).length;
+    const summary = {
+        total, // deduped input count === resolved + unresolved.length + errored.length
+        resolved,
+        unresolved: unresolved.length,
+        errored: errored.length,
+        far,
+        dfars,
+        gsam,
+        other,
+        gates,
+    };
+    // ── Disclosing notes — one per non-empty bucket + a single currency caveat. ─
+    const notes = [];
+    // Disclose the cap if it dropped clauses (the MCP Zod schema rejects >25, so
+    // this only fires for a direct call — but a silent drop is never acceptable).
+    if (deduped.length > total) {
+        notes.push(`Input had ${deduped.length} distinct clauses; capped at ${MATRIX_MAX_CLAUSES} — the ${deduped.length - total} beyond the cap were NOT processed (they appear in NONE of rows/unresolved/errored). Split the list across calls to cover them all.`);
+    }
+    if (unresolved.length > 0) {
+        notes.push(`${unresolved.length} clause(s) not found in Title 48 as of ${asOfDate} (listed in unresolved). The clause number(s) may be wrong, reserved, or removed in this edition — this IS a real answer, not a service problem.`);
+    }
+    if (errored.length > 0) {
+        notes.push(`${errored.length} clause(s) could not be fetched due to a service issue (listed in errored) — retry. This is NOT a confirmation they don't exist; a DOWN/failing eCFR is distinct from a genuinely-absent clause.`);
+    }
+    // Surface the RFO currency caveat ONCE if any resolved row is FAR/DFARS (reuse
+    // farClauseLookup's wording — eCFR carries only the CODIFIED FAR/DFARS).
+    if (rows.some((r) => r.regulation === "FAR" || r.regulation === "DFARS")) {
+        notes.push(`RFO caveat: eCFR carries the CODIFIED FAR/DFARS only. The Revolutionary FAR Overhaul is replacing FAR parts via agency class deviations that may not appear here — verify the controlling deviation (each row's farOverhaulRisk.authoritativeList) before relying on a clause.`);
+    }
+    const data = { asOfDate, rows, unresolved, errored, summary };
+    return withMeta(data, {
+        source: "ecfr:versioner/full (matrix over far_clause_lookup)",
+        keylessMode: true,
+        returned: rows.length,
+        // A compliance matrix has NO upstream "match count" — it's a lookup over a
+        // caller-supplied clause list, and the requested count is `summary.total`.
+        // Use null (not `total`): with returned<total when clauses FAIL, buildMeta
+        // would force `truncated:true` (meta.ts:104), falsely signalling a cap when
+        // the missing clauses are actually disclosed in unresolved/errored. complete
+        // is already explicit-false in that case; truncated must stay false.
+        totalAvailable: null,
+        // Explicit false whenever ANY clause didn't resolve; undefined lets buildMeta
+        // derive true for the all-resolved case.
+        complete: unresolved.length === 0 && errored.length === 0 ? undefined : false,
+        // ONLY the errored/outage bucket counts as degradation — a genuine not_found
+        // is a real answer, not a fetch failure.
+        degraded: errored.length
+            ? { attempted: total, succeeded: resolved, failed: errored.length }
+            : undefined,
+        filtersApplied: [],
+        filtersDropped: [],
+        notes,
+    });
+}
 //# sourceMappingURL=far.js.map

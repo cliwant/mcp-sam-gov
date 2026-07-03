@@ -34,6 +34,24 @@
  */
 /** The regulation family a clause number belongs to (from its prefix). */
 type Regulation = "FAR" | "DFARS" | "GSAM" | "other";
+/**
+ * The RFO (Revolutionary FAR Overhaul) currency caveat — an ALWAYS-PRESENT
+ * structural flag, NOT a per-clause claim. eCFR reflects the CODIFIED FAR only;
+ * the RFO is replacing FAR parts via agency class deviations that may not appear
+ * in eCFR, so a clause can be current in the CFR yet operationally superseded.
+ *
+ * This is the HONEST design (doc-09 §3 baked unverified FAR-case numbers/dates
+ * as [가설] — those go stale/wrong). We ship the never-stale-wrong version: no
+ * fabricated specifics, only the fixed caveat + the real authoritative-list and
+ * deviation URLs (all VERIFIED HTTP 200, 2026-07-04). `appliesTo` scopes the
+ * caveat to the clause's own regulation family.
+ */
+declare function buildFarOverhaulRisk(regulation: Regulation): {
+    note: string;
+    authoritativeList: string;
+    deviationSources: string[];
+    appliesTo: Regulation;
+};
 export declare function farClauseLookup(args: {
     clauseNumber: string;
     includePrescription?: boolean;
@@ -61,6 +79,52 @@ export declare function farClauseLookup(args: {
         authoritativeList: string;
         deviationSources: string[];
         appliesTo: Regulation;
+    };
+}>>;
+/** One resolved matrix row: farClauseLookup's honest fields + a gate flag. */
+type MatrixRow = {
+    clauseNumber: string;
+    kind: "clause" | "provision";
+    regulation: Regulation;
+    heading: string | null;
+    revision: string | null;
+    prescribedIn: string | null;
+    prescription: {
+        section: string;
+        heading: string | null;
+        text: string;
+    } | null;
+    text: string;
+    ecfrUrl: string;
+    farOverhaulRisk: ReturnType<typeof buildFarOverhaulRisk>;
+    /** The eligibility-gate label (from GATE_MAP), or null when not a mapped gate. */
+    gate: string | null;
+};
+/** A clause that did not resolve, with a disclosed reason. */
+type UnresolvedClause = {
+    clauseNumber: string;
+    reason: string;
+};
+export declare function farComplianceMatrix(args: {
+    clauses: string[];
+    asOfDate?: string;
+    includePrescription?: boolean;
+    flagGates?: boolean;
+}): Promise<import("./meta.js").MetaBundle<{
+    asOfDate: string;
+    rows: MatrixRow[];
+    unresolved: UnresolvedClause[];
+    errored: UnresolvedClause[];
+    summary: {
+        total: number;
+        resolved: number;
+        unresolved: number;
+        errored: number;
+        far: number;
+        dfars: number;
+        gsam: number;
+        other: number;
+        gates: number;
     };
 }>>;
 export {};
