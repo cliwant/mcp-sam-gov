@@ -402,6 +402,25 @@ const tests = [
           typeof r.records[0].samFapiisUrl === "string")),
   },
   {
+    // One-call integrity composition. A clearly-not-excluded firm → the honest
+    // keyless verdict: integrityFlag "review_fapiis" (NEVER "clear"),
+    // exclusions.excluded false, fapiisRecords null (key-gated), and a fapiisUrl
+    // deep-link. Uses "Boeing" (0 exclusions in prior probes) to stay stable.
+    name: "sam_integrity_lookup",
+    args: { name: "Boeing" },
+    verify: (r) =>
+      r.integrityFlag === "review_fapiis" &&
+      r.exclusions &&
+      r.exclusions.excluded === false &&
+      typeof r.exclusions.activeCount === "number" &&
+      Array.isArray(r.exclusions.records) &&
+      r.fapiisRecords === null &&
+      typeof r.fapiisUrl === "string" &&
+      r.fapiisUrl.includes("sam.gov") &&
+      r.entity &&
+      r.entity.name === "Boeing",
+  },
+  {
     // Award-derived teaming discovery: VA × 8a × 541512, integrity-screened.
     // Kept narrow (small limit/screenCap, few scan pages) so the bounded
     // exclusion screen stays fast.
