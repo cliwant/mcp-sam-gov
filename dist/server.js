@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 48 keyless tools wrapping every public federal-contracting data
+ * 49 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -24,6 +24,7 @@ import { SamGovClient, daysUntilResponse, applyResponseDeadlineWindow, } from ".
 import * as usas from "./usaspending.js";
 import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
+import * as far from "./far.js";
 import * as grants from "./grants.js";
 import * as pricing from "./pricing.js";
 import * as integrity from "./integrity.js";
@@ -314,6 +315,24 @@ const EcfrSearchInput = z.object({
     perPage: z.number().min(1).max(20).optional(),
 });
 const EcfrListTitlesInput = z.object({});
+// FAR / DFARS clause lookup (eCFR versioner full endpoint)
+const FarClauseLookupInput = z.object({
+    clauseNumber: z
+        .string()
+        .regex(
+    // Accept an optional FAR/DFARS prefix + the NN.NNN-N / NNN.NNN-NNNN core.
+    /^\s*(?:d?far[s]?\b[\s.:#-]*)?\d{1,3}\.\d{3,4}-\d{1,4}\s*$/i, "clauseNumber must be a FAR/DFARS clause like '52.212-4', '252.204-7012', or '52.204-25' (an optional 'FAR '/'DFARS ' prefix is allowed).")
+        .describe("FAR or DFARS clause/provision number, e.g. '52.212-4', '252.204-7012', '52.204-25'. An optional 'FAR '/'DFARS ' prefix is stripped."),
+    includePrescription: z
+        .boolean()
+        .optional()
+        .describe("Also fetch the prescribing section parsed from the clause's 'As prescribed in …' opener (the rule for WHEN the clause applies). Default true."),
+    asOfDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/, "asOfDate must be YYYY-MM-DD.")
+        .optional()
+        .describe("Point-in-time codification date (YYYY-MM-DD). Defaults to Title 48's current up_to_date_as_of."),
+});
 // SBA size standards
 const SbaSizeStandardInput = z.object({
     naics: z
@@ -740,7 +759,7 @@ const TOOLS = [
         description: "List all Federal Register agencies with slugs (needed for fed_register_search_documents). Use to resolve 'what's the FedReg slug for Veterans Affairs?'",
         inputSchema: FedRegListAgenciesInput,
     },
-    // ━━━ eCFR (2) ━━━
+    // ━━━ eCFR (3) ━━━
     {
         name: "ecfr_search",
         description: "Full-text search across the entire CFR (Code of Federal Regulations). Use for compliance questions — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns excerpt + section path + ecfrUrl.",
@@ -750,6 +769,11 @@ const TOOLS = [
         name: "ecfr_list_titles",
         description: "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
         inputSchema: EcfrListTitlesInput,
+    },
+    {
+        name: "far_clause_lookup",
+        description: "Authoritative FAR/DFARS clause text + its PRESCRIPTION (the 'As prescribed in …' rule for when the clause applies), from the eCFR versioner-full endpoint (Title 48). Use this — NOT ecfr_search — for an EXACT clause number: full-text search mis-ranks '52.212-4' (returns GSAM 552.212-4 above the real FAR clause). Returns heading, revision date, clause/provision kind, regulation (FAR/DFARS/GSAM), full text, the prescribing section, and ecfrUrl. Every response carries farOverhaulRisk — a structural currency caveat that eCFR reflects only the CODIFIED FAR, so a clause may be superseded by a Revolutionary-FAR-Overhaul agency class deviation not shown here. A genuinely-absent clause returns a not_found error (never a fake empty clause). Keyless.",
+        inputSchema: FarClauseLookupInput,
     },
     // ━━━ SBA — Size Standards (1) ━━━
     {
@@ -1323,6 +1347,8 @@ async function runTool(name, args, sam) {
             return await ecfr.search(EcfrSearchInput.parse(args));
         case "ecfr_list_titles":
             return await ecfr.listTitles();
+        case "far_clause_lookup":
+            return await far.farClauseLookup(FarClauseLookupInput.parse(args));
         // SBA — Size Standards
         case "sba_size_standard":
             return await sba.sizeStandard(SbaSizeStandardInput.parse(args));

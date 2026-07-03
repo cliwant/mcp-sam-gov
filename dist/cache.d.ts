@@ -37,4 +37,6 @@ export declare function _cacheStats(): {
     size: number;
     entries: string[];
 };
+/** For tests: evict all entries (so a subsequent call re-runs its producer). */
+export declare function _clearCache(): void;
 //# sourceMappingURL=cache.d.ts.map

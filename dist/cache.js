@@ -57,4 +57,8 @@ function sweepExpired() {
 export function _cacheStats() {
     return { size: store.size, entries: [...store.keys()] };
 }
+/** For tests: evict all entries (so a subsequent call re-runs its producer). */
+export function _clearCache() {
+    store.clear();
+}
 //# sourceMappingURL=cache.js.map

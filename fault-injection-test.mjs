@@ -41,6 +41,8 @@ import { buildMeta } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
+import { farClauseLookup } from "./dist/far.js";
+import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import {
   daysUntilResponse,
@@ -144,6 +146,63 @@ const isTransactions = (u) => /\/api\/v2\/transactions\/?$/.test(u);
 const isSpendingByAward = (u) => /\/search\/spending_by_award\/?$/.test(u);
 const isSpendingByAwardCount = (u) => /\/search\/spending_by_award_count\/?$/.test(u);
 const isSgs = (u) => /sam\.gov\/api\/prod\/sgs\/v1\/search/.test(u);
+
+// URL classifiers for the FAR surface (farClauseLookup → eCFR versioner).
+const isEcfrTitles = (u) => /\/versioner\/v1\/titles\.json/.test(u);
+const isEcfrFull = (u) => /\/versioner\/v1\/full\//.test(u);
+/** The `section=` query param off a versioner-full URL (the clause/section id). */
+const ecfrSection = (u) => {
+  const m = /[?&]section=([^&]+)/.exec(u);
+  return m ? decodeURIComponent(m[1]) : null;
+};
+
+// A minimal but REALISTIC titles.json (only Title 48's fields farClauseLookup
+// reads: number + up_to_date_as_of + latest_amended_on).
+const TITLES_JSON = {
+  titles: [
+    {
+      number: 48,
+      name: "Federal Acquisition Regulations System",
+      latest_amended_on: "2026-05-07",
+      latest_issue_date: "2026-06-02",
+      up_to_date_as_of: "2026-07-01",
+      reserved: false,
+    },
+  ],
+};
+
+// A trimmed FAR clause fixture: a <HEAD> that DUPLICATES the clause number, a
+// `(NOV 2023)` revision token (plus a decoy `(NOV 2021)` LATER — the parser must
+// take the FIRST), an `As prescribed in 12.301(b)(3)` opener, and "insert the
+// following clause". Mirrors the live 52.212-4 structure.
+const CLAUSE_XML_52_212_4 = `<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="52.212-4" TYPE="SECTION">
+<HEAD>52.212-4 Contract Terms and Conditions&#8212;Commercial Products and Commercial Services.</HEAD>
+<P>As prescribed in 12.301(b)(3), insert the following clause:</P>
+<EXTRACT>
+<HD1>Contract Terms and Conditions&#8212;Commercial Products and Commercial Services (NOV 2023)</HD1>
+<P>(a) <I>Inspection/Acceptance.</I> The Contractor shall only tender for acceptance those items that conform to the requirements of this contract.</P>
+<P>(c) <I>Changes.</I> Changes in the terms and conditions of this contract may be made only by written agreement of the parties (NOV 2021).</P>
+</EXTRACT>
+</DIV8>`;
+
+// A trimmed DFARS clause fixture (252. prefix → regulation DFARS).
+const CLAUSE_XML_252_204_7012 = `<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="252.204-7012" TYPE="SECTION">
+<HEAD>252.204-7012 Safeguarding Covered Defense Information and Cyber Incident Reporting.</HEAD>
+<P>As prescribed in 204.7304(c), insert the following clause:</P>
+<EXTRACT>
+<HD1>Safeguarding Covered Defense Information and Cyber Incident Reporting (JAN 2023)</HD1>
+<P>(a) <I>Definitions.</I> As used in this clause&#8212;</P>
+</EXTRACT>
+</DIV8>`;
+
+// A trimmed prescribing section fixture (12.301) — its <HEAD> + body text.
+const SECTION_XML_12_301 = `<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="12.301" TYPE="SECTION">
+<HEAD>12.301 Solicitation provisions and contract clauses for the acquisition of commercial products and commercial services.</HEAD>
+<P>(b)(3) Insert the clause at 52.212-4, Contract Terms and Conditions&#8212;Commercial Products and Commercial Services.</P>
+</DIV8>`;
 
 // A well-formed awards/{id} detail body (only the fields analyzeIncumbent reads).
 function awardDetailBody(overrides = {}) {
@@ -866,6 +925,363 @@ async function testIntegrityLookup() {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 8. far_clause_lookup — authoritative clause parse + graceful degradation
+//    (dist/far.js, fetch-mock). Guards: the clause/prescription XML parse, the
+//    always-present farOverhaulRisk caveat, the non-fatal prescription failure,
+//    the 404 → not_found (never a fake empty clause), point-in-time currency,
+//    and the DFARS regulation/appliesTo mapping.
+//
+//    NOTE on caching: farClauseLookup memoizes titles-currency (once) and each
+//    section XML by URL, and the cache is process-global. Each case below uses a
+//    DISTINCT clause number (and the override case a distinct asOfDate), so no
+//    cached clause/section bleeds across cases. Title 48 currency is identical
+//    across cases, so the shared cached value is correct for all of them.
+// ══════════════════════════════════════════════════════════════════════════
+async function testFarClauseLookup() {
+  section("8. far_clause_lookup clause parse + degradation (fetch-mock)");
+
+  const titles = () => mockResponse({ status: 200, json: TITLES_JSON });
+  const xml = (body) => mockResponse({ status: 200, json: body });
+
+  // ── (a) HAPPY PATH: heading (dup clause-number stripped), revision (FIRST
+  // token), prescription (section fetched + parsed), kind, regulation FAR;
+  // farOverhaulRisk present with the 3 deviationSources + appliesTo "FAR";
+  // isCurrent true (asOfDate defaulted to upToDateAsOf).
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u)) {
+        const s = ecfrSection(u);
+        if (s === "52.212-4") return xml(CLAUSE_XML_52_212_4);
+        if (s === "12.301") return xml(SECTION_XML_12_301);
+      }
+      return failClosed()();
+    },
+    async () => {
+      const res = await farClauseLookup({ clauseNumber: "52.212-4" });
+      const d = res.data;
+      ok("happy: heading has the duplicated leading clause number stripped",
+        d.heading === "Contract Terms and Conditions—Commercial Products and Commercial Services.",
+        JSON.stringify(d.heading));
+      ok("happy: revision is the FIRST token 'NOV 2023' (decoy 'NOV 2021' ignored)",
+        d.revision === "NOV 2023", JSON.stringify(d.revision));
+      ok("happy: prescribedIn parsed = '12.301(b)(3)'",
+        d.prescribedIn === "12.301(b)(3)", JSON.stringify(d.prescribedIn));
+      ok("happy: kind = 'clause'", d.kind === "clause", JSON.stringify(d.kind));
+      ok("happy: regulation = 'FAR' (52. prefix)",
+        d.regulation === "FAR", JSON.stringify(d.regulation));
+      ok("happy: prescription fetched (base section 12.301, subparagraph trimmed)",
+        d.prescription && d.prescription.section === "12.301" &&
+        /Solicitation provisions/i.test(d.prescription.heading ?? ""),
+        JSON.stringify(d.prescription && { section: d.prescription.section, heading: d.prescription.heading }));
+      ok("happy: prescription text carries the section body (stripped)",
+        d.prescription && /Insert the clause at 52\.212-4/i.test(d.prescription.text),
+        JSON.stringify(d.prescription && d.prescription.text));
+      ok("happy: clause text is stripped prose (no XML tags, entity decoded)",
+        typeof d.text === "string" && !/[<>]/.test(d.text) &&
+        /Contract Terms and Conditions—Commercial/i.test(d.text),
+        JSON.stringify(d.text.slice(0, 80)));
+      ok("happy: farOverhaulRisk present with all 3 deviationSources",
+        d.farOverhaulRisk && Array.isArray(d.farOverhaulRisk.deviationSources) &&
+        d.farOverhaulRisk.deviationSources.length === 3 &&
+        d.farOverhaulRisk.deviationSources.includes("https://www.acquisition.gov/far-overhaul") &&
+        d.farOverhaulRisk.deviationSources.includes("https://www.acquisition.gov/dfars") &&
+        d.farOverhaulRisk.deviationSources.includes("https://www.acq.osd.mil/dpap/dars/"),
+        JSON.stringify(d.farOverhaulRisk && d.farOverhaulRisk.deviationSources));
+      ok("happy: farOverhaulRisk.appliesTo = 'FAR' (scoped to regulation)",
+        d.farOverhaulRisk && d.farOverhaulRisk.appliesTo === "FAR",
+        JSON.stringify(d.farOverhaulRisk && d.farOverhaulRisk.appliesTo));
+      ok("happy: farOverhaulRisk carries NO fabricated case number/date (only the fixed note + URLs)",
+        d.farOverhaulRisk && !/case\s*\d{4}|\d{4}-\d{2,3}|comments?\s+close/i.test(d.farOverhaulRisk.note),
+        JSON.stringify(d.farOverhaulRisk && d.farOverhaulRisk.note));
+      ok("happy: asOfDate defaulted to Title 48 upToDateAsOf (2026-07-01)",
+        d.asOfDate === "2026-07-01" && d.titleUpToDateAsOf === "2026-07-01",
+        JSON.stringify({ asOfDate: d.asOfDate, up: d.titleUpToDateAsOf }));
+      ok("happy: isCurrent true (asOfDate === upToDateAsOf)",
+        d.isCurrent === true, JSON.stringify(d.isCurrent));
+      ok("happy: _meta not degraded (prescription present ⇒ complete not forced false)",
+        res.meta.complete !== false &&
+        !(res.meta.fieldsUnavailable ?? []).includes("prescription"),
+        JSON.stringify({ complete: res.meta.complete, fu: res.meta.fieldsUnavailable }));
+    },
+  );
+
+  // ── (b) PRESCRIPTION FETCH FAILS (500 on the section call) ⇒ prescription
+  // null, clause STILL returned, _meta discloses it (fieldsUnavailable +
+  // complete:false + a disclosing note). A different clause number (52.204-25)
+  // → its own cache key; its prescription section (4.2105) 500s.
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u)) {
+        const s = ecfrSection(u);
+        if (s === "52.204-25") {
+          return xml(`<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="52.204-25" TYPE="SECTION">
+<HEAD>52.204-25 Prohibition on Contracting for Certain Telecommunications and Video Surveillance Services or Equipment.</HEAD>
+<P>As prescribed in 4.2105(b), insert the following clause:</P>
+<EXTRACT><HD1>Prohibition ... (NOV 2021)</HD1><P>(a) Definitions.</P></EXTRACT>
+</DIV8>`);
+        }
+        if (s === "4.2105") return mockResponse({ status: 500 }); // section fails
+      }
+      return failClosed()();
+    },
+    async () => {
+      const res = await farClauseLookup({ clauseNumber: "52.204-25" });
+      const d = res.data;
+      ok("presc-fail: clause STILL returned (heading parsed despite section failure)",
+        /Prohibition on Contracting/i.test(d.heading ?? ""), JSON.stringify(d.heading));
+      ok("presc-fail: prescribedIn still parsed = '4.2105(b)'",
+        d.prescribedIn === "4.2105(b)", JSON.stringify(d.prescribedIn));
+      ok("presc-fail: prescription === null (non-fatal, never crashed the clause)",
+        d.prescription === null, JSON.stringify(d.prescription));
+      ok("presc-fail: _meta.fieldsUnavailable includes 'prescription'",
+        (res.meta.fieldsUnavailable ?? []).includes("prescription"),
+        JSON.stringify(res.meta.fieldsUnavailable));
+      ok("presc-fail: _meta.complete === false (partial result disclosed)",
+        res.meta.complete === false, JSON.stringify(res.meta.complete));
+      ok("presc-fail: a note DISCLOSES the prescribing section could not be fetched",
+        res.meta.notes.some((n) => /prescribing section 4\.2105 .*could NOT be fetched/i.test(n)),
+        JSON.stringify(res.meta.notes));
+    },
+  );
+
+  // ── (c) CLAUSE 404 ⇒ throws not_found (retryable:false) NAMING the clause —
+  // NEVER null/empty. Use a clause that does not exist (52.999-99); titles ok.
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u) && ecfrSection(u) === "52.999-99") {
+        return mockResponse({ status: 404, json: { error: "No matching content found." } });
+      }
+      return failClosed()();
+    },
+    async () => {
+      const { threw, error, value } = await expectThrow(() =>
+        farClauseLookup({ clauseNumber: "52.999-99" }));
+      ok("404: THROWS (never returns a null/empty clause)",
+        threw && value === undefined, JSON.stringify({ threw, value }));
+      ok("404: kind not_found, retryable:false",
+        threw && error?.toolError?.kind === "not_found" &&
+        error?.toolError?.retryable === false,
+        JSON.stringify(error?.toolError));
+      ok("404: message NAMES the clause (52.999-99)",
+        threw && /52\.999-99/.test(error?.toolError?.message ?? ""),
+        JSON.stringify(error?.toolError?.message));
+    },
+  );
+
+  // ── (c2) TRUTHFULNESS: a DOWN service (500 on the CLAUSE) must NOT read as
+  // "clause not found" — it PROPAGATES as upstream_unavailable (retryable),
+  // NEVER a fake not_found/empty. (52.777-77 → its own cache key.)
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u) && ecfrSection(u) === "52.777-77") {
+        return mockResponse({ status: 503 });
+      }
+      return failClosed()();
+    },
+    async () => {
+      const { threw, error } = await expectThrow(() =>
+        farClauseLookup({ clauseNumber: "52.777-77" }));
+      ok("clause 503 ⇒ throws upstream_unavailable retryable (NOT a fake not_found)",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (d) asOfDate OVERRIDE != upToDateAsOf ⇒ isCurrent:false AND the override
+  // appears in the fetched clause URL. Use clause 52.203-99 + date 2025-01-01,
+  // no prescription (includePrescription:false) to keep it to one clause call.
+  await withFetch(
+    (u, _i, calls) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u) && ecfrSection(u) === "52.203-99") {
+        // Record that the override date is in the URL for the assertion below.
+        calls._overrideDateInUrl = /\/full\/2025-01-01\/title-48\.xml/.test(u);
+        return xml(`<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="52.203-99" TYPE="SECTION">
+<HEAD>52.203-99 Prohibition on a Test Clause.</HEAD>
+<P>As prescribed in 3.9999, insert the following clause:</P>
+<EXTRACT><HD1>Prohibition ... (JAN 2025)</HD1><P>(a) Text.</P></EXTRACT>
+</DIV8>`);
+      }
+      return failClosed()();
+    },
+    async (calls) => {
+      const res = await farClauseLookup({
+        clauseNumber: "52.203-99",
+        asOfDate: "2025-01-01",
+        includePrescription: false,
+      });
+      const d = res.data;
+      ok("override: asOfDate echoed = '2025-01-01'",
+        d.asOfDate === "2025-01-01", JSON.stringify(d.asOfDate));
+      ok("override: isCurrent false (2025-01-01 != upToDateAsOf 2026-07-01)",
+        d.isCurrent === false, JSON.stringify(d.isCurrent));
+      ok("override: the override date appears in the fetched clause URL",
+        calls._overrideDateInUrl === true, JSON.stringify(calls._overrideDateInUrl));
+      ok("override: a note discloses the point-in-time (non-current) read",
+        res.meta.notes.some((n) => /NOT Title 48's current codification date/i.test(n)),
+        JSON.stringify(res.meta.notes));
+      ok("override: includePrescription:false ⇒ prescription null, NOT degraded",
+        d.prescription === null && res.meta.complete !== false &&
+        !(res.meta.fieldsUnavailable ?? []).includes("prescription"),
+        JSON.stringify({ presc: d.prescription, complete: res.meta.complete }));
+    },
+  );
+
+  // ── (e) DFARS prefix 252.204-7012 ⇒ regulation "DFARS", farOverhaulRisk
+  // .appliesTo "DFARS". Its prescription section (204.7304) is mocked ok.
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u)) {
+        const s = ecfrSection(u);
+        if (s === "252.204-7012") return xml(CLAUSE_XML_252_204_7012);
+        if (s === "204.7304") {
+          return xml(`<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="204.7304" TYPE="SECTION"><HEAD>204.7304 Solicitation provisions and contract clauses.</HEAD>
+<P>(c) Use the clause at 252.204-7012.</P></DIV8>`);
+        }
+      }
+      return failClosed()();
+    },
+    async () => {
+      const res = await farClauseLookup({ clauseNumber: "252.204-7012" });
+      const d = res.data;
+      ok("dfars: regulation = 'DFARS' (252. prefix)",
+        d.regulation === "DFARS", JSON.stringify(d.regulation));
+      ok("dfars: farOverhaulRisk.appliesTo = 'DFARS'",
+        d.farOverhaulRisk && d.farOverhaulRisk.appliesTo === "DFARS",
+        JSON.stringify(d.farOverhaulRisk && d.farOverhaulRisk.appliesTo));
+      ok("dfars: prescribedIn = '204.7304(c)', base section 204.7304 fetched",
+        d.prescribedIn === "204.7304(c)" && d.prescription &&
+        d.prescription.section === "204.7304",
+        JSON.stringify({ prescribedIn: d.prescribedIn, section: d.prescription && d.prescription.section }));
+    },
+  );
+
+  // ── (f) INPUT GUARD: a non-clause string ⇒ invalid_input (defense-in-depth;
+  // the server Zod schema also rejects, but far.ts guards too), NO network.
+  {
+    const { threw, error } = await expectThrow(() =>
+      farClauseLookup({ clauseNumber: "hello world" }));
+    ok("bad input ⇒ throws invalid_input, retryable:false (no fetch)",
+      threw && error?.toolError?.kind === "invalid_input" &&
+      error?.toolError?.retryable === false,
+      JSON.stringify(error?.toolError));
+  }
+
+  // ── (g) DEFECT-2 GUARD: a 200 with a HOLLOW body (empty / CDN-WAF HTML
+  // interstitial / truncated XML) must NOT become a fake `complete:true` clause
+  // with empty text — it must be REFUSED as upstream_unavailable. Three hollow
+  // shapes, each on its own clause number (distinct cache key), prescription off.
+  for (const [label, clause, body] of [
+    ["empty body", "52.900-01", ""],
+    ["WAF/Cloudflare HTML interstitial (lowercase <head>)", "52.900-02",
+      "<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head><body>Please wait while we verify your browser…</body></html>"],
+    ["truncated XML (cut before any HEAD)", "52.900-03",
+      '<?xml version="1.0" encoding="UTF-8"?>\n<DIV8 N="52.900-03" TYPE="SECTION">'],
+  ]) {
+    await withFetch(
+      (u) => {
+        if (isEcfrTitles(u)) return titles();
+        if (isEcfrFull(u) && ecfrSection(u) === clause)
+          return mockResponse({ status: 200, json: body });
+        return failClosed()();
+      },
+      async () => {
+        const { threw, error } = await expectThrow(() =>
+          farClauseLookup({ clauseNumber: clause, includePrescription: false }));
+        ok(`hollow-200 (${label}) ⇒ throws upstream_unavailable, NOT a hollow complete:true clause`,
+          threw && error?.toolError?.kind === "upstream_unavailable" &&
+          error?.toolError?.retryable === true,
+          JSON.stringify(error?.toolError));
+      },
+    );
+  }
+
+  // ── (h) DEFECT-3: kind detection covers BOTH "insert the following …" and
+  // "use the following …" (DFARS provisions use "use the following provision").
+  // And when NEITHER verb is present, kind defaults to "clause" but a note
+  // DISCLOSES it as inferred rather than asserting it.
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u) && ecfrSection(u) === "252.204-7008")
+        return xml(`<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="252.204-7008" TYPE="SECTION">
+<HEAD>252.204-7008 Compliance with Safeguarding Covered Defense Information Controls.</HEAD>
+<P>As prescribed in 204.7304(a), use the following provision:</P>
+<EXTRACT><HD1>Compliance … (OCT 2016)</HD1><P>(a) Definitions.</P></EXTRACT>
+</DIV8>`);
+      return failClosed()();
+    },
+    async () => {
+      const res = await farClauseLookup({ clauseNumber: "252.204-7008", includePrescription: false });
+      ok('dfars provision: "use the following provision" ⇒ kind = "provision" (NOT mislabeled "clause")',
+        res.data.kind === "provision", JSON.stringify(res.data.kind));
+    },
+  );
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u) && ecfrSection(u) === "52.800-99")
+        return xml(`<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="52.800-99" TYPE="SECTION">
+<HEAD>52.800-99 A Section With No Prescribing Verb.</HEAD>
+<P>(a) This section states requirements directly and carries no prescribing verb.</P>
+</DIV8>`);
+      return failClosed()();
+    },
+    async () => {
+      const res = await farClauseLookup({ clauseNumber: "52.800-99", includePrescription: false });
+      ok('no-verb: kind defaults to "clause" AND a note DISCLOSES it was inferred (not asserted)',
+        res.data.kind === "clause" &&
+        res.meta.notes.some((n) => /kind .*could NOT be determined|defaults to "clause"/i.test(n)),
+        JSON.stringify({ kind: res.data.kind, notes: res.meta.notes }));
+    },
+  );
+
+  // ── (i) DEFECT-1 GUARD: a currency-resolution failure must NOT masquerade as
+  // "clause not found". If titles.json returns 200 but Title 48 lacks
+  // up_to_date_as_of (schema drift) AND no asOfDate is supplied, refuse with
+  // schema_drift — NEVER query a blank-date URL, NEVER map its 404 to not_found.
+  // _clearCache first (earlier cases cached the GOOD currency); runs LAST so its
+  // null-currency cannot poison other cases.
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u))
+        // Title 48 present but up_to_date_as_of MISSING (renamed/dropped).
+        return mockResponse({ status: 200, json: {
+          titles: [{ number: 48, name: "Federal Acquisition Regulations System", latest_amended_on: "2026-05-07" }],
+        } });
+      // If the guard FAILED, a blank-date clause fetch would land here and 404 —
+      // the OLD bug mapped that to not_found. Return 404 to make the regression sharp.
+      if (isEcfrFull(u)) return mockResponse({ status: 404, json: { error: "Not Found" } });
+      return failClosed()();
+    },
+    async (calls) => {
+      _clearCache();
+      const { threw, error } = await expectThrow(() =>
+        farClauseLookup({ clauseNumber: "52.212-4" }));
+      ok("currency-null ⇒ throws schema_drift retryable (NOT a fake not_found on a real clause)",
+        threw && error?.toolError?.kind === "schema_drift" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+      ok("currency-null ⇒ NO blank-date clause fetch attempted (guard fired before the versioner)",
+        calls.every((c) => !isEcfrFull(c.url)),
+        JSON.stringify(calls.map((c) => c.url)));
+    },
+  );
+  _clearCache(); // leave a clean cache for any later suite.
+}
+
 // ─── Meta-test: the harness FAILS LOUDLY when a guarded behavior breaks ────
 // Proves the assertions are real (not vacuously green). We re-run the D2
 // invariant against a DELIBERATELY-WRONG expectation and confirm it would fail;
@@ -1049,6 +1465,7 @@ async function main() {
   await testCheckExclusions();
   await testIntegrityLookup();
   await testSbaSizeStandard();
+  await testFarClauseLookup();
 
   // Prove the harness bites.
   await selfCheck();
