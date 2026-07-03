@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov + wage/pricing.
  *
- * 41 keyless tools wrapping every public federal-contracting data
+ * 43 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -26,6 +26,7 @@ import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
 import * as pricing from "./pricing.js";
+import * as integrity from "./integrity.js";
 import { toToolError } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 const SERVER_NAME = "mcp-sam-gov";
@@ -373,6 +374,86 @@ const BenchmarkLaborInput = z.object({
         .optional()
         .describe("How many 20-row pages to sample for the distribution (default 3, max 10)."),
 });
+// Integrity / teaming
+const CheckExclusionsInput = z.object({
+    query: z
+        .string()
+        .optional()
+        .describe("Firm or individual name to screen (drives the server-side exclusions text search). Provide at least one of query/uei/cage."),
+    uei: z
+        .string()
+        .optional()
+        .describe("SAM UEI to match. Used as the text query when it is the sole selector; post-filtered against results when combined with a name query."),
+    cage: z
+        .string()
+        .optional()
+        .describe("CAGE code to match (post-filtered against results, or used as the text query when sole)."),
+    activeOnly: z
+        .boolean()
+        .optional()
+        .describe("Only currently-active exclusions (default true). false includes terminated exclusions."),
+    classification: z
+        .enum(["Firm", "Individual", "Special Entity Designation", "any"])
+        .optional()
+        .describe("Filter by excluded-party classification (default 'any')."),
+    page: z.number().min(0).optional().describe("0-based page index (default 0)."),
+    size: z.number().min(1).max(100).optional().describe("Page size (default 25, max 100)."),
+});
+const TeamingPartnersInput = z.object({
+    // ENUM-VALIDATED: a bogus recipient_type_names value is SILENTLY accepted by
+    // USAspending (HTTP 200, 0 results), so this enum is the guardrail — only the
+    // spellings LIVE-VERIFIED to narrow a populated NAICS are accepted.
+    cert: z
+        .enum([
+        "small_business",
+        "8a_program_participant",
+        "woman_owned_business",
+        "women_owned_small_business",
+        "economically_disadvantaged_women_owned_small_business",
+        "service_disabled_veteran_owned_business",
+        "veteran_owned_business",
+        "historically_underutilized_business_firm",
+    ])
+        .describe("Socioeconomic certification (award-derived, NOT the SBA registry of record). One of: small_business, 8a_program_participant, woman_owned_business, women_owned_small_business, economically_disadvantaged_women_owned_small_business, service_disabled_veteran_owned_business, veteran_owned_business, historically_underutilized_business_firm (HUBZone)."),
+    naics: z.string().optional().describe("NAICS code to scope the search (e.g. '541512')."),
+    agency: z
+        .string()
+        .optional()
+        .describe("Awarding agency canonical toptier name (e.g. 'Department of Veterans Affairs'). Use usas_lookup_agency to resolve abbreviations."),
+    subagency: z
+        .string()
+        .optional()
+        .describe("Awarding sub-agency name. Requires `agency` to also be set (a subagency alone is dropped)."),
+    lookbackYears: z
+        .number()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("Action-date lookback window in years (default 3)."),
+    excludeDebarred: z
+        .boolean()
+        .optional()
+        .describe("Screen the top-ranked candidates via sam_check_exclusions and drop active exclusions (default true; bounded + disclosed in _meta)."),
+    minAwards: z
+        .number()
+        .min(1)
+        .optional()
+        .describe("Minimum scanned award count for a firm to be listed (default 1)."),
+    limit: z.number().min(1).max(50).optional().describe("Candidates per page (default 25, max 50)."),
+    page: z.number().min(1).optional().describe("1-based page index (default 1)."),
+    screenCap: z
+        .number()
+        .min(1)
+        .max(25)
+        .optional()
+        .describe("Max candidates to exclusion-screen per page (default 10, max 25)."),
+    scanPages: z
+        .number()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("Award-value-sorted pages (100 rows each) to scan before aggregating by recipient (default 4, max 10)."),
+});
 const TOOLS = [
     // ━━━ SAM.gov (5) ━━━
     {
@@ -589,6 +670,17 @@ const TOOLS = [
         description: "GSA CALC awarded ceiling-rate market band for a labor category (keyless). Returns a DISTRIBUTION (currentRate min/median/max + escalated medians) over a fetched sample, NOT a single price. CALC rates are CEILING/catalog and FULLY BURDENED (do not re-add wrap); the match count SATURATES at 10000 for broad queries (totalAvailable null then). Filter by businessSize/educationLevel(code)/experience/sin/priceRange to narrow.",
         inputSchema: BenchmarkLaborInput,
     },
+    // ━━━ Integrity / Teaming (2) ━━━
+    {
+        name: "sam_check_exclusions",
+        description: "Keyless SAM debarment/exclusion screening. Screen a firm or individual by name (query) and/or UEI/CAGE against the SAM exclusions index (FAPIIS). Returns excluded (true iff ≥1 ACTIVE matching record), matchCount, and per-record { name, classification, uei, cage, excludingAgency, exclusionType, exclusionProgram, isActive, activation/terminationDate, samFapiisUrl }. CRITICAL: an EMPTY result means 'no matching exclusion under these terms' — it is NOT proof of general responsibility (stated in _meta.notes). A name match is not identity-proof; verify the UEI/CAGE + dates against the FAPIIS record. Requires at least one of query/uei/cage.",
+        inputSchema: CheckExclusionsInput,
+    },
+    {
+        name: "usas_search_teaming_partners",
+        description: "Small-business teaming-partner discovery by socioeconomic certification + NAICS + agency award history (keyless USAspending proxy), integrity-screened. Given a cert (enum-validated), optional naics/agency/subagency, and a lookback window, aggregates federal awardees by recipient and returns candidates ranked by agencyObligated with agencyAwardCount, mostRecentAwardDate, and sampleAwards; optionally screens the top candidates via sam_check_exclusions and drops active exclusions (excludeDebarred, default true). HONESTY: cert is AWARD-DERIVED (recorded on the firm's federal awards), NOT the SBA certification of record (which needs a keyed SAM Entity call) — verify active certification in SAM/SBS before teaming (stated in _meta). A bogus cert is rejected as invalid_input (the endpoint would silently return 0).",
+        inputSchema: TeamingPartnersInput,
+    },
 ];
 // ─── Server bootstrap ────────────────────────────────────────────
 async function main() {
@@ -633,8 +725,20 @@ async function main() {
         }
         catch (err) {
             // Structured error envelope. The agent can read `error.kind`
-            // and `error.retryable` to decide what to do next.
-            const error = toToolError(err, name);
+            // and `error.retryable` to decide what to do next. A Zod input-validation
+            // failure (e.g. a value outside an enum like an unrecognized socioeconomic
+            // cert) is a caller error → surface it as a NON-retryable `invalid_input`
+            // with the field-level issues, never a generic `unknown`.
+            const error = err instanceof z.ZodError
+                ? {
+                    kind: "invalid_input",
+                    message: `Invalid input for ${name}: ${err.issues
+                        .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+                        .join("; ")}`,
+                    retryable: false,
+                    upstreamEndpoint: name,
+                }
+                : toToolError(err, name);
             const envelope = { ok: false, error };
             return {
                 content: [
@@ -930,6 +1034,11 @@ async function runTool(name, args, sam) {
             return await pricing.getWageRates(WageRatesInput.parse(args));
         case "gsa_benchmark_labor_rates":
             return await pricing.benchmarkLaborRates(BenchmarkLaborInput.parse(args));
+        // Integrity / Teaming
+        case "sam_check_exclusions":
+            return await integrity.checkExclusions(CheckExclusionsInput.parse(args));
+        case "usas_search_teaming_partners":
+            return await integrity.searchTeamingPartners(TeamingPartnersInput.parse(args));
         default:
             throw new Error(`Unknown tool: ${name}`);
     }

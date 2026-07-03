@@ -763,6 +763,140 @@ const cases = [
       return perCraftFringe && noWideHW;
     },
   },
+
+  // ━━━ Integrity / Teaming ━━━
+  {
+    // (a1) A known-excluded name → excluded:true with matching active records,
+    // and the "not proof of responsibility" disclosure is ALWAYS present.
+    label: "check_exclusions: known name → excluded:true + 'not proof' disclosure",
+    name: "sam_check_exclusions",
+    args: { query: "construction", size: 10 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      // Active exclusions exist for "construction" → excluded true, records nonempty.
+      const excludedOk = d.excluded === true && d.matchCount > 0 && Array.isArray(d.records);
+      // Every returned record is active (activeOnly default) and carries the shape.
+      const recsOk = d.records.every(
+        (r) =>
+          typeof r.name === "string" &&
+          r.isActive === true &&
+          typeof r.samFapiisUrl === "string",
+      );
+      // The mandatory disclosure must be present in _meta.notes.
+      const notes = env._meta.notes ?? [];
+      const disclosure = notes.some(
+        (n) => /not\s+proof/i.test(n) && /responsibility/i.test(n),
+      );
+      const keylessOk = env._meta.keylessMode === true;
+      return excludedOk && recsOk && disclosure && keylessOk;
+    },
+  },
+  {
+    // (a2) An empty result is a NARROW true-negative — excluded:false, zero
+    // records, and the "not proof of responsibility" disclosure STILL present
+    // (an empty screen must never read as a clean bill of health).
+    label: "check_exclusions: empty result → excluded:false + 'not proof' disclosure still present",
+    name: "sam_check_exclusions",
+    args: { query: "zzzznotarealexcludedentityxyzzz" },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      const emptyOk = d.excluded === false && d.matchCount === 0 && d.records.length === 0;
+      const notes = env._meta.notes ?? [];
+      const disclosure = notes.some(
+        (n) => /not\s+proof/i.test(n) && /responsibility/i.test(n),
+      );
+      // A true-negative is COMPLETE (nothing truncated/dropped) yet still hedged.
+      return emptyOk && disclosure;
+    },
+  },
+  {
+    // (a3) No selector (no query/uei/cage) → structured invalid_input, never a
+    // silent unbounded dump.
+    label: "check_exclusions: no selector → structured invalid_input",
+    name: "sam_check_exclusions",
+    args: {},
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "invalid_input" &&
+      env.error?.retryable === false,
+  },
+  {
+    // (b1) A BOGUS cert must yield a STRUCTURED invalid_input (ok:false) — NOT a
+    // silent ok:true with an empty candidate list. This is THE guardrail: the
+    // endpoint silently accepts a bad recipient_type_names and returns 0.
+    label: "teaming_partners: bogus cert → structured invalid_input (never silent-empty ok:true)",
+    name: "usas_search_teaming_partners",
+    args: { cert: "totally_bogus_cert_value", naics: "541512" },
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "invalid_input" &&
+      env.error?.retryable === false &&
+      // The rejection must name the offending `cert` field (the enum guard is
+      // what stops the endpoint's silent-accept-and-return-0 behavior); the
+      // message also surfaces the valid options.
+      /cert/i.test(env.error?.message ?? "") &&
+      /8a_program_participant/i.test(env.error?.message ?? ""),
+  },
+  {
+    // (b2)+(c) A VALID cert returns ranked candidates, the AWARD-DERIVED proxy
+    // caveat is in _meta, and the excludeDebarred screen is reflected in _meta
+    // (how many screened/removed). Narrow slice + small caps to stay fast.
+    label: "teaming_partners: valid cert → ranked candidates + proxy caveat + screen reflected in _meta",
+    name: "usas_search_teaming_partners",
+    args: {
+      cert: "8a_program_participant",
+      naics: "541512",
+      agency: "Department of Veterans Affairs",
+      lookbackYears: 3,
+      limit: 5,
+      screenCap: 3,
+      scanPages: 2,
+    },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      const m = env._meta;
+      // Ranked candidates present, each with the promised shape; ranking is by
+      // agencyObligated desc (non-increasing).
+      const cands = d.candidates ?? [];
+      if (cands.length === 0) return false;
+      const shaped = cands.every(
+        (c) =>
+          typeof c.recipientName === "string" &&
+          c.cert === "8a_program_participant" &&
+          typeof c.agencyObligated === "number" &&
+          typeof c.agencyAwardCount === "number" &&
+          Array.isArray(c.sampleAwards) &&
+          Array.isArray(c.naicsMatched),
+      );
+      let ranked = true;
+      for (let i = 1; i < cands.length; i++) {
+        if (cands[i].agencyObligated > cands[i - 1].agencyObligated) {
+          ranked = false;
+          break;
+        }
+      }
+      // The award-derived proxy caveat (proxy ≠ SBA registry of record) MUST be present.
+      const notes = m.notes ?? [];
+      const proxyNote = notes.some(
+        (n) => /award/i.test(n) && /sba certification of record/i.test(n),
+      );
+      // The exclusion screen must be reflected in _meta (screened/removed counts).
+      const screenNote = notes.some(
+        (n) => /screen/i.test(n) && /exclusion/i.test(n),
+      );
+      // Proxy honesty: SBA cert of record + UEI are declared unavailable.
+      const fu = m.fieldsUnavailable ?? [];
+      const fieldsOk =
+        fu.some((f) => /sbaCertificationOfRecord/i.test(f)) &&
+        fu.some((f) => /uei/i.test(f));
+      // Source names the award-derived keyless proxy.
+      const sourceOk = typeof m.source === "string" && /award-derived/i.test(m.source);
+      return shaped && ranked && proxyNote && screenNote && fieldsOk && sourceOk;
+    },
+  },
 ];
 
 async function main() {
