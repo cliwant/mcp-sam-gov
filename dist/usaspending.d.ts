@@ -134,6 +134,80 @@ export declare function getAwardDetail(generatedInternalId: string): Promise<{
     naicsCode: string | undefined;
     naicsDescription: string | undefined;
 } | null>;
+/**
+ * Recompete radar — federal contracts whose current period of performance
+ * ends inside a window around today, so you can see what's coming up for
+ * recompete. Replaces the broken `searchExpiringContracts` internals.
+ *
+ * MECHANISM (LIVE-VERIFIED 2026-07-03 across VA×541512 and DoD×541330):
+ * `spending_by_award` returns the current PoP end date directly under the
+ * field ALIAS `"End Date"` (the canonical string
+ * "Period of Performance Current End Date" is NOT a recognized field — it
+ * comes back always null, and is not in the sort mappings → HTTP 400 if you
+ * sort by it). Gold-standard confirmed: search `"End Date"` ===
+ * `awards/{generated_internal_id}`.period_of_performance.end_date.
+ *
+ * We CANNOT filter by PoP end date server-side (`time_period.date_type` only
+ * supports action_date/date_signed/last_modified_date/new_awards_only). So:
+ *   1. server-side SORT by `"End Date"` DESC (the alias — the only PoP-end
+ *      value in the sort mappings),
+ *   2. an action_date `time_period` lower bound (LOAD-BEARING: prunes inactive
+ *      records and much of the far-future data-entry garbage so DESC reaches
+ *      the window sooner),
+ *   3. a CLIENT-SIDE window filter with pagination + a safe early-stop (DESC ⇒
+ *      once a row is earlier than the window start, every later row is earlier
+ *      too), bounded by `scanBudgetPages`.
+ *
+ * TRUTHFULNESS: rows with a null `"End Date"` are COUNTED (`missingEndDate`),
+ * never silently dropped. If the scan budget is exhausted before the early-stop
+ * fires, `scanTruncated` is set and `totalAvailable` becomes null (the returned
+ * set is a lower bound, not the complete window). This tool emits PUBLIC
+ * signals only — it never fabricates a composite "vulnerability" score;
+ * past-performance/CPARS, protest history, and option-exercise intent are not
+ * public and are declared in `_meta.fieldsUnavailable`.
+ */
+export declare function searchRecompetes(args: {
+    agency?: string;
+    naics?: string;
+    pscCodes?: string[];
+    setAside?: string;
+    windowStartDays?: number;
+    windowEndDays?: number;
+    minAwardValue?: number;
+    includePotentialEnd?: boolean;
+    actionDateLookbackYears?: number;
+    page?: number;
+    pageSize?: number;
+    scanBudgetPages?: number;
+}): Promise<MetaBundle<{
+    recompetes: {
+        awardId: string;
+        generatedInternalId: string;
+        incumbent: string;
+        amount: number;
+        currentEndDate: string;
+        daysUntilCurrentEnd: number;
+        potentialEndDate?: string | null;
+        extendableDays?: number | null;
+        awardingAgency: string;
+        awardingSubAgency: string | null;
+        naicsCode: string | null;
+        pscCode: string | null;
+        contractAwardType: string | null;
+        setAsideDescription: string | null;
+        startDate: string | null;
+        description: string | null;
+    }[];
+    page: number;
+    pageSize: number;
+}>>;
+/**
+ * DEPRECATED alias — kept working so existing callers of
+ * `usas_search_expiring_contracts` don't break. Maps the old params onto
+ * `searchRecompetes` and re-shapes the output to the legacy `{ contracts,
+ * searchedCount }` keys the smoke/edge tests assert on. Prefer
+ * `usas_search_recompetes`.
+ */
 export declare function searchExpiringContracts(args: {
     agency?: string;
     naics?: string;
@@ -141,7 +215,7 @@ export declare function searchExpiringContracts(args: {
     monthsUntilExpiry?: number;
     minAwardValue?: number;
     limit?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     contracts: {
         awardId: string;
         recipient: string;
@@ -152,11 +226,12 @@ export declare function searchExpiringContracts(args: {
         awardingSubAgency: string | undefined;
         naicsCode: string | undefined;
         setAsideDescription: string | undefined;
-        description: string;
+        description: string | undefined;
         daysUntilExpiry: number;
+        generatedInternalId: string;
     }[];
     searchedCount: number;
-}>;
+}>>;
 export declare function spendingOverTime(args: {
     group?: "fiscal_year" | "quarter" | "month";
     agency?: string;

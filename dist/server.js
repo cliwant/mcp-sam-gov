@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov.
  *
- * 34 keyless tools wrapping every public federal-contracting data
+ * 37 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -96,6 +96,63 @@ const UsasExpiringInput = z.object({
     monthsUntilExpiry: z.number().min(1).max(36).optional(),
     minAwardValue: z.number().optional(),
     limit: z.number().min(1).max(20).optional(),
+});
+const UsasRecompetesInput = z.object({
+    agency: z
+        .string()
+        .optional()
+        .describe("Canonical awarding toptier agency name (use usas_lookup_agency)"),
+    naics: z.string().optional().describe("6-digit NAICS code, e.g. '541512'"),
+    pscCodes: z
+        .array(z.string())
+        .optional()
+        .describe("Product/Service Codes to filter on, e.g. ['DA01','R425']"),
+    setAside: z
+        .enum(["SBA", "8A", "HZS", "SDVOSBC", "WOSB", "EDWOSB", "VSA", "VSS"])
+        .optional()
+        .describe("USAspending set_aside_type_code (honored server-side)"),
+    windowStartDays: z
+        .number()
+        .int()
+        .optional()
+        .describe("Lower edge of the recompete window in days from today (default -90 = include contracts that ended up to 90 days ago)."),
+    windowEndDays: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Upper edge of the window in days from today (default 548 ≈ 18 months)."),
+    minAwardValue: z
+        .number()
+        .min(0)
+        .optional()
+        .describe("Minimum Award Amount ($) to include (default 0)."),
+    includePotentialEnd: z
+        .boolean()
+        .optional()
+        .describe("Also return the potential (option-inclusive) PoP end date + extendableDays (default false)."),
+    actionDateLookbackYears: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("action_date lower bound in years (default 3). Contracts with no recorded action in this span are excluded — this bound makes the End-Date sort reach the window."),
+    page: z.number().int().min(1).optional().describe("1-based page (default 1)."),
+    pageSize: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Rows per page (default 25, max 100)."),
+    scanBudgetPages: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("Max 100-row pages to scan before giving up (default 8). If exhausted before the window ends, results are a lower bound and totalAvailable is null."),
 });
 const UsasAwardDetailInput = z.object({
     generatedInternalId: z
@@ -252,7 +309,7 @@ const TOOLS = [
         description: "Resolve a SAM.gov federal-organization id to its canonical fullParentPathName (e.g. 'VETERANS AFFAIRS, DEPARTMENT OF.VETERANS AFFAIRS, DEPARTMENT OF.245-NETWORK CONTRACT OFFICE 5'). Use when sam_get_opportunity returned only an organizationId.",
         inputSchema: SamLookupOrgInput,
     },
-    // ━━━ USAspending — Awards & Recipients (8) ━━━
+    // ━━━ USAspending — Awards & Recipients (9) ━━━
     {
         name: "usas_search_awards",
         description: "Aggregate share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns top recipients by total $ + count. Use for competitive landscape ('who wins at VA in 541512?').",
@@ -284,8 +341,13 @@ const TOOLS = [
         inputSchema: UsasSubawardsInput,
     },
     {
+        name: "usas_search_recompetes",
+        description: "Recompete radar — federal contracts whose CURRENT period of performance ends inside a window around today (default -90d .. +18mo), sorted soonest-first. Use for 'what VA 541512 contracts are up for recompete in the next 18 months'. Reads the current PoP end date directly from spending_by_award (no per-award enrichment), counts (never drops) rows with missing end dates, and flags in _meta when the scan budget truncates the window (totalAvailable becomes null). Filter by agency/naics/pscCodes/setAside/minAwardValue; set includePotentialEnd for option-inclusive end dates. Public signals only — no CPARS/protest/option-intent, no composite vulnerability score.",
+        inputSchema: UsasRecompetesInput,
+    },
+    {
         name: "usas_search_expiring_contracts",
-        description: "Find federal contracts at agency × NAICS that expire within N months. Recompete radar — end-date sorted, top 10 by value. Use for 'what VA cloud contracts are up for recompete' or 'show 541512 contracts expiring in 6 months'.",
+        description: "DEPRECATED — use usas_search_recompetes. Thin backward-compatible alias: finds contracts at agency × NAICS expiring within N months and returns the legacy { contracts, searchedCount } shape. New callers should use usas_search_recompetes for the full window/pagination controls and truthful completeness metadata.",
         inputSchema: UsasExpiringInput,
     },
     {
@@ -678,6 +740,8 @@ async function runTool(name, args, sam) {
             return await usas.searchAwardsByRecipient(UsasRecipientAwardsInput.parse(args));
         case "usas_search_subawards":
             return await usas.searchSubawards(UsasSubawardsInput.parse(args));
+        case "usas_search_recompetes":
+            return await usas.searchRecompetes(UsasRecompetesInput.parse(args));
         case "usas_search_expiring_contracts":
             return await usas.searchExpiringContracts(UsasExpiringInput.parse(args));
         case "usas_get_award_detail":
