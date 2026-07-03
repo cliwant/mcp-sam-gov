@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 45 keyless tools wrapping every public federal-contracting data
+ * 46 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -33,6 +33,7 @@ import * as pricing from "./pricing.js";
 import * as integrity from "./integrity.js";
 import * as gao from "./gao.js";
 import * as gsaCsv from "./gsa-csv.js";
+import * as sba from "./sba.js";
 import { toToolError } from "./errors.js";
 import {
   buildMeta,
@@ -347,6 +348,16 @@ const EcfrSearchInput = z.object({
 });
 
 const EcfrListTitlesInput = z.object({});
+
+// SBA size standards
+const SbaSizeStandardInput = z.object({
+  naics: z
+    .string()
+    .regex(/^\d{6}$/, "naics must be a 6-digit NAICS code (e.g. '541512').")
+    .describe(
+      "6-digit NAICS code to look up the SBA small-business size standard for (e.g. '541512').",
+    ),
+});
 
 // Grants.gov
 const GrantsSearchInput = z.object({
@@ -852,6 +863,14 @@ const TOOLS: ToolDef[] = [
     inputSchema: EcfrListTitlesInput,
   },
 
+  // ━━━ SBA — Size Standards (1) ━━━
+  {
+    name: "sba_size_standard",
+    description:
+      "SBA small-business size standard for a 6-digit NAICS (keyless sba.gov naics.json). Answers 'is a firm SMALL for this NAICS?' — the gate for set-aside eligibility and for vetting a usas_search_teaming_partners candidate. Returns standardType (receipts | employees | receipts+assets), a normalized threshold (receipts/assets in DOLLARS — the dataset's $millions figure ×1,000,000; employees as a count), the unit, and any SBA footnote. HONESTY: the dataset carries no effective-date field, so the value is 'as published as of retrieval' (asOf) and _meta.notes flags that SBA adjusts standards periodically — re-verify at sba.gov for high-stakes eligibility. An unknown NAICS returns found:false (never a fabricated standard).",
+    inputSchema: SbaSizeStandardInput,
+  },
+
   // ━━━ Grants.gov (2) ━━━
   {
     name: "grants_search",
@@ -1030,6 +1049,8 @@ function synthesizeDefaultMeta(
     source = "ecfr.gov/api";
   } else if (toolName.startsWith("grants_")) {
     source = "grants.gov/api";
+  } else if (toolName.startsWith("sba_")) {
+    source = "sba.gov naics.json (keyless)";
   } else if (toolName.startsWith("gao_")) {
     source = "gao.gov Legal Products RSS + decision pages (keyless)";
   } else {
@@ -1411,6 +1432,10 @@ async function runTool(
       return await ecfr.search(EcfrSearchInput.parse(args));
     case "ecfr_list_titles":
       return await ecfr.listTitles();
+
+    // SBA — Size Standards
+    case "sba_size_standard":
+      return await sba.sizeStandard(SbaSizeStandardInput.parse(args));
 
     // Grants.gov
     case "grants_search":
