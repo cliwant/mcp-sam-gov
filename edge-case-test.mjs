@@ -324,6 +324,87 @@ const cases = [
       return allArrays && totalOk;
     },
   },
+  {
+    // C4 (spec §1.4, §2.3): a capped spending_by_category aggregate must flag
+    // truncation. The psc endpoint reports NO grand total, so totalAvailable
+    // MUST be null (never the page length, spec §3.3) while truncated is true
+    // (a small limit against a broad agency filter always overflows).
+    label: "C4: capped psc_spending aggregate flags truncated + null total",
+    name: "usas_search_psc_spending",
+    args: { agency: "Department of Veterans Affairs", fiscalYear: 2024, limit: 3 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const returned = env.data?.psc?.length ?? 0;
+      // No-total endpoint: totalAvailable must be null (NOT the page size).
+      const totalNull = m.totalAvailable === null;
+      // With limit 3 against a broad filter the endpoint has more → truncated.
+      const truncatedOk = m.truncated === true && m.complete === false;
+      // Pagination must advertise more and a truthful nextOffset.
+      const pg = m.pagination ?? {};
+      const pagOk = pg.hasMore === true && pg.limit === 3 && pg.nextOffset === returned;
+      // A truncation note must be present (AI-actionable caveat).
+      const noted = Array.isArray(m.notes) && m.notes.length >= 1;
+      return totalNull && truncatedOk && pagOk && noted && returned <= 3;
+    },
+  },
+  {
+    // usas_search_recipients: recipient/ DOES report a real grand total in
+    // page_metadata.total → _meta.totalAvailable must be a real number (not
+    // null, not the page size) and data.totalRecords must mirror it.
+    label: "search_recipients _meta.totalAvailable is a real number",
+    name: "usas_search_recipients",
+    args: { keyword: "tech", limit: 5 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const returned = env.data?.recipients?.length ?? 0;
+      // "tech" matches thousands of recipients → a real number well above 5.
+      const total = m.totalAvailable;
+      const realNumber = typeof total === "number" && total >= returned;
+      // data.totalRecords mirrors the real _meta total.
+      const mirrored = env.data.totalRecords === total;
+      // A full page with a much larger total ⇒ truncated + hasMore.
+      const truncatedOk = returned < total ? (m.truncated === true && m.pagination?.hasMore === true) : true;
+      return realNumber && mirrored && truncatedOk;
+    },
+  },
+  {
+    // usas_glossary: references/glossary reports a real total in
+    // page_metadata.count (151). A small limit ⇒ real totalAvailable + truncated.
+    label: "glossary _meta.totalAvailable is the real 151-term total",
+    name: "usas_glossary",
+    args: { limit: 3 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const total = m.totalAvailable;
+      // Real total (the full glossary is ~151 terms) — must exceed the page.
+      const realNumber = typeof total === "number" && total > 3;
+      const mirrored = env.data.totalRecords === total;
+      const truncatedOk = m.truncated === true && m.complete === false;
+      return realNumber && mirrored && truncatedOk;
+    },
+  },
+  {
+    // usas_list_toptier_agencies: the endpoint IGNORES `limit` and returns the
+    // COMPLETE ~111-agency set. So a small limit must NOT be reported as
+    // truncated (false positive) — complete:true, and totalAvailable == returned.
+    label: "toptier_agencies is complete despite small limit (limit ignored upstream)",
+    name: "usas_list_toptier_agencies",
+    args: { limit: 5 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const returned = env.data?.agencies?.length ?? 0;
+      // Endpoint returns all agencies (~111) regardless of limit:5.
+      const fullSet = returned > 50;
+      const completeOk = m.complete === true && m.truncated === false;
+      const totalMatches = m.totalAvailable === returned;
+      const pagOk = (m.pagination?.hasMore ?? true) === false;
+      return fullSet && completeOk && totalMatches && pagOk;
+    },
+  },
 ];
 
 async function main() {
