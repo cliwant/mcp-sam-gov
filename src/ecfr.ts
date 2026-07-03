@@ -15,6 +15,7 @@
 
 import { fetchWithRetry } from "./errors.js";
 import { memoize } from "./cache.js";
+import { withMeta } from "./meta.js";
 
 const ECFR = "https://www.ecfr.gov/api";
 
@@ -89,9 +90,16 @@ export async function search(args: {
       full_text_excerpt?: string;
       score?: number;
     }[];
+    meta?: {
+      current_page?: number;
+      total_pages?: number;
+      total_count?: number;
+      max_score?: number;
+      description?: string;
+    };
   };
   const json = await fetchJson<Resp>(url.toString());
-  return {
+  const data = {
     results: (json.results ?? []).map((r) => ({
       type: r.type ?? "",
       title: r.hierarchy?.title ?? "",
@@ -111,6 +119,34 @@ export async function search(args: {
       effectiveOn: r.starts_on ?? "",
     })),
   };
+
+  // Truthful `_meta` (spec §1.2 A6, §2.3). eCFR returns a hit count in
+  // `meta.total_count`, so `totalAvailable` is real (the AI can tell a
+  // top-N slice from the full match set). A6: echo the applied title scope
+  // so the AI can VERIFY it searched the intended corpus — Title 48 (FAR)
+  // vs every CFR title — rather than silently trusting a filter that could
+  // return cross-title results if the eCFR param contract ever changes.
+  const returned = data.results.length;
+  const totalAvailable =
+    typeof json.meta?.total_count === "number" ? json.meta.total_count : null;
+  const scopeNote =
+    args.titleNumber !== undefined
+      ? `searched CFR Title ${args.titleNumber}${
+          args.titleNumber === 48 ? " (FAR — Federal Acquisition Regulation)" : ""
+        } only`
+      : "searched all CFR titles (no title filter applied)";
+  return withMeta(data, {
+    source: "ecfr.gov/api (search/v1)",
+    keylessMode: true,
+    returned,
+    totalAvailable,
+    truncated:
+      totalAvailable !== null ? returned < totalAvailable : undefined,
+    filtersApplied: args.titleNumber !== undefined ? ["titleNumber"] : [],
+    filtersDropped: [],
+    fieldsUnavailable: [],
+    notes: [scopeNote],
+  });
 }
 
 function stripHtml(s: string): string {

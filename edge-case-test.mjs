@@ -245,6 +245,85 @@ const cases = [
       return typeOk && notPageSize && mirrored;
     },
   },
+  {
+    // A5 (spec §1.2, §2.3): Federal Register reports a real match total
+    // (`count`), so _meta.totalAvailable must be a NUMBER (never null) — the
+    // AI can tell a top-N slice from the complete set. When agencySlugs are
+    // passed, _meta.notes must warn that an unknown slug is silently ignored.
+    label: "A5: fed_register_search _meta.totalAvailable is a number",
+    name: "fed_register_search_documents",
+    args: { agencySlugs: ["veterans-affairs-department"], perPage: 3 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const returned = env.data?.documents?.length ?? 0;
+      // Real total: a number, and (since a slug was given) a note mentioning it.
+      const totalIsNumber = typeof m.totalAvailable === "number";
+      const returnedOk = m.returned === returned;
+      const slugNote =
+        Array.isArray(m.notes) &&
+        m.notes.some((n) => n.toLowerCase().includes("slug"));
+      // truncated must agree with returned<totalAvailable.
+      const truncOk = m.truncated === returned < m.totalAvailable;
+      return totalIsNumber && returnedOk && slugNote && truncOk;
+    },
+  },
+  {
+    // A6 (spec §1.2, §2.3): eCFR must echo the applied title scope in
+    // _meta.notes so the AI can verify it searched Title 48 (FAR) vs every
+    // title. totalAvailable comes from meta.total_count (a number).
+    label: "A6: ecfr_search _meta.notes echoes the title scope",
+    name: "ecfr_search",
+    args: { query: "federal acquisition regulation", titleNumber: 48, perPage: 3 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      // The scope note must name Title 48 (the filter we applied).
+      const scopeNote =
+        Array.isArray(m.notes) &&
+        m.notes.some((n) => /title\s*48/i.test(n));
+      // eCFR returns meta.total_count → totalAvailable is a number (or null
+      // only if upstream omitted it, which it does not for this query).
+      const totalOk = m.totalAvailable === null || typeof m.totalAvailable === "number";
+      // titleNumber went in → filtersApplied should record it.
+      const filterEchoed = (m.filtersApplied ?? []).includes("titleNumber");
+      return scopeNote && totalOk && filterEchoed;
+    },
+  },
+  {
+    // A6 (all-titles branch): with NO titleNumber the note must say it
+    // searched ALL titles — so the AI never assumes a FAR-only scope.
+    label: "A6: ecfr_search notes 'all titles' when no titleNumber",
+    name: "ecfr_search",
+    args: { query: "small business set-aside", perPage: 2 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const allTitlesNote =
+        Array.isArray(m.notes) &&
+        m.notes.some((n) => /all\s+cfr\s+titles/i.test(n));
+      // No title filter applied.
+      const noTitleFilter = !(m.filtersApplied ?? []).includes("titleNumber");
+      return allTitlesNote && noTitleFilter;
+    },
+  },
+  {
+    // E-2 (spec §1.6, §5): grants_search output cfdaList must be an ARRAY on
+    // every row (the runtime shape), not the string the old type declared —
+    // and [] when absent, never undefined.
+    label: "E-2: grants_search output cfdaList is an array",
+    name: "grants_search",
+    args: { keyword: "cybersecurity", rows: 3 },
+    accept: ({ env }) => {
+      if (!env.ok || !Array.isArray(env.data?.grants)) return false;
+      if (env.data.grants.length === 0) return true; // empty page is acceptable
+      // EVERY row must expose cfdaList as an array (never string/undefined).
+      const allArrays = env.data.grants.every((g) => Array.isArray(g.cfdaList));
+      // _meta.totalAvailable must be the real hitCount (a number).
+      const totalOk = typeof env._meta?.totalAvailable === "number";
+      return allArrays && totalOk;
+    },
+  },
 ];
 
 async function main() {

@@ -19,7 +19,7 @@ export declare function searchGrants(args: {
     oppNum?: string;
     oppStatuses?: GrantStatus[];
     rows?: number;
-}): Promise<{
+}): Promise<import("./meta.js").MetaBundle<{
     totalRecords: number;
     grants: {
         id: string;
@@ -31,9 +31,9 @@ export declare function searchGrants(args: {
         closeDate: string | undefined;
         status: string | undefined;
         docType: string | undefined;
-        cfdaList: string | undefined;
+        cfdaList: string[];
     }[];
-}>;
+}>>;
 export declare function getGrant(args: {
     opportunityId: string;
 }): Promise<{
