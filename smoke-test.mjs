@@ -404,6 +404,33 @@ const tests = [
       typeof r.candidates[0].agencyAwardCount === "number" &&
       Array.isArray(r.candidates[0].sampleAwards),
   },
+  // ━━━ GSA daily-CSV keyless backbone (DEFAULT = disabled)
+  {
+    // The smoke suite runs with NO CSV env set, so the backbone is DISABLED by
+    // default. The tool must return a STRUCTURED "how to enable" response —
+    // enabled:false, every row found:false + null fields, and NO network
+    // download — never fake data and never an error. (The ENABLED fixture path
+    // is exercised offline in edge-case-test.mjs.)
+    name: "sam_lookup_notice_fields",
+    args: {
+      noticeIds: [
+        "c7a871f27b5046be81549a9fdc9719c7",
+        "a4be592da0304872a252980925b9458f",
+      ],
+    },
+    verify: (r) =>
+      r.enabled === false &&
+      r.freshness === null &&
+      Array.isArray(r.results) &&
+      r.results.length === 2 &&
+      r.results.every(
+        (x) =>
+          x.found === false &&
+          x.naicsCode === null &&
+          x.setAside === null &&
+          x.popState === null,
+      ),
+  },
   // ━━━ GAO — Bid Protests
   {
     // Happy path: the recent Legal-Products feed yields ≥1 bid-protest decision,
