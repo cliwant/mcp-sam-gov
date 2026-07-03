@@ -670,6 +670,363 @@ export async function getAwardDetail(generatedInternalId: string) {
 
 // ─── Recompete radar ──────────────────────────────────────────────
 
+/**
+ * Set-aside → USAspending `set_aside_type_codes` filter code. The
+ * `spending_by_award` endpoint DOES honor `set_aside_type_codes` server-side
+ * (LIVE-VERIFIED 2026-07-03: VA×541512 base 696 → SDVOSBC 182, SBA 19, WOSB 1
+ * — genuine reductions; the wrong keys `type_set_aside`/`set_aside` are
+ * silently IGNORED, returning the unfiltered 696). Set-aside is a FILTER only,
+ * never a requestable output field (verified: it comes back absent). So we
+ * filter by it but cannot read a per-row set-aside VALUE from search — that
+ * lives in usas_get_award_detail.
+ */
+const SET_ASIDE_CODES = new Set([
+  "SBA",
+  "8A",
+  "HZS",
+  "SDVOSBC",
+  "WOSB",
+  "EDWOSB",
+  "VSA",
+  "VSS",
+]);
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * A `spending_by_award` row as returned when we request the recompete field
+ * set. Every value is optional/nullable — USAspending echoes unknown fields
+ * back as `null`, and PoP end dates are legitimately null on some rows.
+ */
+type RecompeteRow = {
+  "Award ID"?: string | null;
+  "Recipient Name"?: string | null;
+  "Award Amount"?: number | null;
+  "Awarding Agency"?: string | null;
+  "Awarding Sub Agency"?: string | null;
+  "Start Date"?: string | null;
+  "End Date"?: string | null;
+  NAICS?: { code?: string; description?: string } | null;
+  PSC?: { code?: string; description?: string } | null;
+  "Contract Award Type"?: string | null;
+  "Last Modified Date"?: string | null;
+  "Period of Performance Potential End Date"?: string | null;
+  generated_internal_id?: string | null;
+};
+
+/**
+ * Parse a PoP end date to "whole days from today" (UTC midnight). Returns
+ * `null` for null/empty/unparseable/absurd values so the caller can COUNT the
+ * row (never silently drop it) and treat it as out-of-window. Guards against
+ * the far-future data-entry errors USAspending carries (e.g. year 2108).
+ */
+function daysUntil(dateStr: string | null | undefined, nowMs: number): number | null {
+  if (!dateStr) return null;
+  const t = new Date(dateStr).getTime();
+  if (Number.isNaN(t)) return null;
+  const year = new Date(t).getUTCFullYear();
+  // Sanity clamp: PoP end dates outside [1990, 2200] are data errors.
+  if (year < 1990 || year > 2200) return null;
+  return Math.ceil((t - nowMs) / MS_PER_DAY);
+}
+
+/** UTC "today minus N years" as YYYY-MM-DD, for the action_date lower bound. */
+function isoYearsAgo(nowMs: number, years: number): string {
+  const d = new Date(nowMs);
+  d.setUTCFullYear(d.getUTCFullYear() - years);
+  return d.toISOString().slice(0, 10);
+}
+
+const RECOMPETE_SOURCE =
+  "usaspending.gov spending_by_award (keyless)";
+
+const RECOMPETE_FIELDS_UNAVAILABLE = [
+  "past_performance_cpars",
+  "protest_history",
+  "option_exercise_intent",
+];
+
+/**
+ * Recompete radar — federal contracts whose current period of performance
+ * ends inside a window around today, so you can see what's coming up for
+ * recompete. Replaces the broken `searchExpiringContracts` internals.
+ *
+ * MECHANISM (LIVE-VERIFIED 2026-07-03 across VA×541512 and DoD×541330):
+ * `spending_by_award` returns the current PoP end date directly under the
+ * field ALIAS `"End Date"` (the canonical string
+ * "Period of Performance Current End Date" is NOT a recognized field — it
+ * comes back always null, and is not in the sort mappings → HTTP 400 if you
+ * sort by it). Gold-standard confirmed: search `"End Date"` ===
+ * `awards/{generated_internal_id}`.period_of_performance.end_date.
+ *
+ * We CANNOT filter by PoP end date server-side (`time_period.date_type` only
+ * supports action_date/date_signed/last_modified_date/new_awards_only). So:
+ *   1. server-side SORT by `"End Date"` DESC (the alias — the only PoP-end
+ *      value in the sort mappings),
+ *   2. an action_date `time_period` lower bound (LOAD-BEARING: prunes inactive
+ *      records and much of the far-future data-entry garbage so DESC reaches
+ *      the window sooner),
+ *   3. a CLIENT-SIDE window filter with pagination + a safe early-stop (DESC ⇒
+ *      once a row is earlier than the window start, every later row is earlier
+ *      too), bounded by `scanBudgetPages`.
+ *
+ * TRUTHFULNESS: rows with a null `"End Date"` are COUNTED (`missingEndDate`),
+ * never silently dropped. If the scan budget is exhausted before the early-stop
+ * fires, `scanTruncated` is set and `totalAvailable` becomes null (the returned
+ * set is a lower bound, not the complete window). This tool emits PUBLIC
+ * signals only — it never fabricates a composite "vulnerability" score;
+ * past-performance/CPARS, protest history, and option-exercise intent are not
+ * public and are declared in `_meta.fieldsUnavailable`.
+ */
+export async function searchRecompetes(args: {
+  agency?: string;
+  naics?: string;
+  pscCodes?: string[];
+  setAside?: string;
+  windowStartDays?: number;
+  windowEndDays?: number;
+  minAwardValue?: number;
+  includePotentialEnd?: boolean;
+  actionDateLookbackYears?: number;
+  page?: number;
+  pageSize?: number;
+  scanBudgetPages?: number;
+}) {
+  const nowMs = Date.now();
+  const windowStartDays = args.windowStartDays ?? -90;
+  const windowEndDays = args.windowEndDays ?? 548; // ~18 months
+  const minAwardValue = args.minAwardValue ?? 0;
+  const includePotentialEnd = args.includePotentialEnd ?? false;
+  const actionDateLookbackYears = args.actionDateLookbackYears ?? 3;
+  const page = Math.max(1, Math.floor(args.page ?? 1));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(args.pageSize ?? 25)));
+  const scanBudgetPages = Math.min(20, Math.max(1, Math.floor(args.scanBudgetPages ?? 8)));
+
+  // --- Build filters (only what we can send truthfully) -----------------
+  const filters: UsasFilters = { award_type_codes: ["A", "B", "C", "D"] };
+  const filtersApplied: string[] = ["awardType(contracts A/B/C/D)"];
+  const filtersDropped: string[] = [];
+  if (args.agency) {
+    filters.agencies = [{ type: "awarding", tier: "toptier", name: args.agency }];
+    filtersApplied.push("agency");
+  }
+  if (args.naics) {
+    filters.naics_codes = [args.naics];
+    filtersApplied.push("naics");
+  }
+  if (args.pscCodes?.length) {
+    filters.psc_codes = args.pscCodes;
+    filtersApplied.push("pscCodes");
+  }
+  // Set-aside: `set_aside_type_codes` is honored server-side (verified). Only
+  // send a code we know the endpoint recognizes; otherwise record it dropped.
+  if (args.setAside) {
+    if (SET_ASIDE_CODES.has(args.setAside)) {
+      filters.set_aside_type_codes = [args.setAside];
+      filtersApplied.push("setAside");
+    } else {
+      filtersDropped.push("setAside");
+    }
+  }
+  // action_date lower bound — the default date_type is action_date, so no
+  // explicit date_type is needed (and passing one is optional).
+  const lookbackStart = isoYearsAgo(nowMs, actionDateLookbackYears);
+  const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+  filters.time_period = [{ start_date: lookbackStart, end_date: todayIso }];
+  filtersApplied.push(`actionDateLookback(${actionDateLookbackYears}y)`);
+
+  const fields = [
+    "Award ID",
+    "Recipient Name",
+    "Award Amount",
+    "Awarding Agency",
+    "Awarding Sub Agency",
+    "Start Date",
+    "End Date",
+    "NAICS",
+    "PSC",
+    "Contract Award Type",
+    "Last Modified Date",
+    "generated_internal_id",
+  ];
+  if (includePotentialEnd) {
+    fields.push("Period of Performance Potential End Date");
+  }
+
+  type SearchResp = {
+    results?: RecompeteRow[];
+    page_metadata?: { hasNext?: boolean; page?: number };
+  };
+
+  // --- Scan pages (DESC by End Date) with early-stop + budget ----------
+  type Shaped = {
+    awardId: string;
+    generatedInternalId: string;
+    incumbent: string;
+    amount: number;
+    currentEndDate: string;
+    daysUntilCurrentEnd: number;
+    potentialEndDate?: string | null;
+    extendableDays?: number | null;
+    awardingAgency: string;
+    awardingSubAgency: string | null;
+    naicsCode: string | null;
+    pscCode: string | null;
+    contractAwardType: string | null;
+    setAsideDescription: string | null;
+    startDate: string | null;
+    description: string | null;
+  };
+
+  const results: Shaped[] = [];
+  let scanned = 0;
+  let missingEndDate = 0;
+  let pastWindow = false;
+  let scanTruncated = false;
+
+  for (let p = 1; p <= scanBudgetPages; p++) {
+    const resp = await postUsas<SearchResp>("search/spending_by_award", {
+      filters,
+      fields,
+      sort: "End Date",
+      order: "desc",
+      limit: 100,
+      page: p,
+      subawards: false,
+    });
+    const rows = resp.results ?? [];
+    for (const row of rows) {
+      scanned++;
+      const end = row["End Date"] ?? null;
+      const d = daysUntil(end, nowMs);
+      if (d === null) {
+        // Null/unparseable/absurd end date — COUNT it, never silently drop.
+        missingEndDate++;
+        continue;
+      }
+      if (d > windowEndDays) continue; // far future (incl. data errors) → skip
+      if (d < windowStartDays) {
+        // DESC ⇒ everything after this row is earlier ⇒ safe to stop.
+        pastWindow = true;
+        break;
+      }
+      const amount = row["Award Amount"] ?? 0;
+      if (amount < minAwardValue) continue;
+      const potentialEnd = includePotentialEnd
+        ? row["Period of Performance Potential End Date"] ?? null
+        : undefined;
+      let extendableDays: number | null | undefined;
+      if (includePotentialEnd) {
+        const pd = daysUntil(potentialEnd ?? null, nowMs);
+        extendableDays = pd === null ? null : pd - d;
+      }
+      results.push({
+        awardId: row["Award ID"] ?? "",
+        generatedInternalId: row.generated_internal_id ?? "",
+        incumbent: row["Recipient Name"] ?? "",
+        amount,
+        currentEndDate: end as string,
+        daysUntilCurrentEnd: d,
+        ...(includePotentialEnd
+          ? { potentialEndDate: potentialEnd ?? null, extendableDays }
+          : {}),
+        awardingAgency: row["Awarding Agency"] ?? "",
+        awardingSubAgency: row["Awarding Sub Agency"] ?? null,
+        naicsCode: row.NAICS?.code ?? null,
+        pscCode: row.PSC?.code ?? null,
+        contractAwardType: row["Contract Award Type"] ?? null,
+        // Set-aside VALUE is not a search output field (filter-only) → null
+        // here; the caller reads it per-award via usas_get_award_detail.
+        setAsideDescription: null,
+        startDate: row["Start Date"] ?? null,
+        description: null,
+      });
+    }
+    if (pastWindow) break;
+    if (!resp.page_metadata?.hasNext) break;
+    if (p === scanBudgetPages && !pastWindow) scanTruncated = true;
+  }
+
+  // Deterministic order: current end date ascending (soonest recompete first),
+  // tiebreak by descending amount then awardId so paging is stable.
+  results.sort((a, b) => {
+    if (a.daysUntilCurrentEnd !== b.daysUntilCurrentEnd)
+      return a.daysUntilCurrentEnd - b.daysUntilCurrentEnd;
+    if (b.amount !== a.amount) return b.amount - a.amount;
+    return a.awardId.localeCompare(b.awardId);
+  });
+
+  const totalInWindow = results.length; // EXACT iff not scanTruncated
+  const startIdx = (page - 1) * pageSize;
+  const pageSlice = results.slice(startIdx, startIdx + pageSize);
+
+  // --- Truthful _meta ---------------------------------------------------
+  // totalAvailable is a REAL count only when we scanned the whole window
+  // (early-stop fired). If the scan budget truncated, it is unknown → null,
+  // and the returned set is a lower bound.
+  const totalAvailable = scanTruncated ? null : totalInWindow;
+  const nextOffset = startIdx + pageSize;
+  const hasMore = scanTruncated
+    ? true // more may exist beyond the scanned pages
+    : nextOffset < totalInWindow;
+  const truncated = hasMore || scanTruncated;
+
+  const notes: string[] = [
+    `Completeness boundary: only contracts with a recorded action in the last ${actionDateLookbackYears} year(s) are included (an action_date lower bound is required to make the End-Date sort reach the window; contracts with no action in that span are not returned).`,
+    "Recompete window is applied client-side on the current period-of-performance END date; the API cannot filter by PoP end date server-side, so results are sorted by End Date (desc) and windowed here.",
+    "HONEST CEILING: this tool emits PUBLIC signals only. Past-performance/CPARS ratings, protest history, and the incumbent's option-exercise intent are NOT public — it never emits a composite 'recompete vulnerability' score. Judge each row with off-platform intelligence.",
+  ];
+  if (missingEndDate > 0) {
+    notes.push(
+      `${missingEndDate} scanned award(s) had no usable current PoP end date and were counted but excluded from the window (never silently dropped).`,
+    );
+  }
+  if (scanTruncated) {
+    notes.push(
+      `Scan budget of ${scanBudgetPages} page(s) (${scanned} awards) was exhausted before reaching the end of the window, so totalAvailable is unknown (null) and the returned recompetes are a LOWER BOUND. This agency×NAICS slice has a very large tail of long-duration/far-future contracts — narrow it (add pscCodes, a higher minAwardValue, a set-aside, or a tighter agency/sub-agency) or raise scanBudgetPages to get an exact window count.`,
+    );
+  }
+  if (filtersDropped.includes("setAside")) {
+    notes.push(
+      `The requested set-aside code is not a recognized USAspending set_aside_type_code and was NOT applied (results are unfiltered on set-aside). Valid codes: ${[...SET_ASIDE_CODES].join(", ")}.`,
+    );
+  }
+
+  const data = {
+    recompetes: pageSlice,
+    page,
+    pageSize,
+  };
+
+  return withMeta(data, {
+    source: RECOMPETE_SOURCE,
+    keylessMode: true,
+    returned: pageSlice.length,
+    totalAvailable,
+    truncated,
+    pagination: {
+      offset: startIdx,
+      limit: pageSize,
+      nextOffset: hasMore ? nextOffset : null,
+      hasMore,
+    },
+    filtersApplied,
+    filtersDropped,
+    fieldsUnavailable: [
+      ...RECOMPETE_FIELDS_UNAVAILABLE,
+      "setAsideDescription(search-omits; use usas_get_award_detail)",
+    ],
+    notes,
+  });
+}
+
+/**
+ * DEPRECATED alias — kept working so existing callers of
+ * `usas_search_expiring_contracts` don't break. Maps the old params onto
+ * `searchRecompetes` and re-shapes the output to the legacy `{ contracts,
+ * searchedCount }` keys the smoke/edge tests assert on. Prefer
+ * `usas_search_recompetes`.
+ */
 export async function searchExpiringContracts(args: {
   agency?: string;
   naics?: string;
@@ -678,66 +1035,52 @@ export async function searchExpiringContracts(args: {
   minAwardValue?: number;
   limit?: number;
 }) {
-  const filters = buildFilters(args);
-  type SearchResp = {
-    results?: {
-      "Award ID"?: string;
-      "Recipient Name"?: string;
-      "Award Amount"?: number;
-      generated_internal_id?: string;
-    }[];
-  };
-  const search = await postUsas<SearchResp>("search/spending_by_award", {
-    filters,
-    fields: ["Award ID", "Recipient Name", "Award Amount"],
-    limit: 50,
+  const windowEndDays = Math.round((args.monthsUntilExpiry ?? 12) * 30.44);
+  const pageSize = args.limit ?? 10;
+  const bundle = await searchRecompetes({
+    agency: args.agency,
+    naics: args.naics,
+    windowStartDays: -30, // legacy tool dropped rows expired > 30d ago
+    windowEndDays,
+    minAwardValue: args.minAwardValue ?? 100_000,
+    pageSize,
     page: 1,
-    subawards: false,
-    sort: "Award Amount",
-    order: "desc",
   });
 
-  const candidates = (search.results ?? []).filter(
-    (r) =>
-      (r["Award Amount"] ?? 0) >= (args.minAwardValue ?? 100_000) &&
-      r.generated_internal_id,
-  );
+  // Re-shape to the legacy contract row + keep the truthful _meta, appending a
+  // deprecation note.
+  type Recompete = (typeof bundle.data.recompetes)[number];
+  const contracts = bundle.data.recompetes.map((r: Recompete) => ({
+    awardId: r.awardId,
+    recipient: r.incumbent,
+    amount: r.amount,
+    endDate: r.currentEndDate,
+    potentialEndDate: r.potentialEndDate ?? null,
+    awardingAgency: r.awardingAgency,
+    awardingSubAgency: r.awardingSubAgency ?? undefined,
+    naicsCode: r.naicsCode ?? undefined,
+    setAsideDescription: r.setAsideDescription ?? undefined,
+    description: r.description ?? undefined,
+    daysUntilExpiry: r.daysUntilCurrentEnd,
+    generatedInternalId: r.generatedInternalId,
+  }));
 
-  // Enrich up to 8 in parallel — be polite to USAspending.
-  const enrich = candidates.slice(0, 8);
-  const details = await Promise.all(
-    enrich.map((r) => getAwardDetail(r.generated_internal_id!)),
-  );
+  const data = {
+    contracts,
+    // Legacy field: previously the count of value-filtered candidates. Now the
+    // number of in-window recompetes returned on this page (honest, non-zero
+    // where data exists).
+    searchedCount: contracts.length,
+  };
 
-  const now = Date.now();
-  const cutoffDays = (args.monthsUntilExpiry ?? 12) * 30;
-  const contracts = details
-    .map((d, idx) => {
-      if (!d || !d.periodOfPerformance.endDate) return null;
-      const end = new Date(d.periodOfPerformance.endDate).getTime();
-      if (Number.isNaN(end)) return null;
-      const days = Math.ceil((end - now) / (24 * 60 * 60 * 1000));
-      if (days < -30 || days > cutoffDays) return null;
-      const orig = enrich[idx] ?? {};
-      return {
-        awardId: d.awardId || orig["Award ID"] || "",
-        recipient: d.recipient || orig["Recipient Name"] || "",
-        amount: d.totalObligation || orig["Award Amount"] || 0,
-        endDate: d.periodOfPerformance.endDate,
-        potentialEndDate: d.periodOfPerformance.potentialEndDate,
-        awardingAgency: d.awardingAgency ?? "",
-        awardingSubAgency: d.awardingSubAgency,
-        naicsCode: d.naicsCode,
-        setAsideDescription: d.setAsideDescription,
-        description: d.description,
-        daysUntilExpiry: days,
-      };
-    })
-    .filter((x): x is NonNullable<typeof x> => x !== null)
-    .slice(0, args.limit ?? 10)
-    .sort((a, b) => a.daysUntilExpiry - b.daysUntilExpiry);
-
-  return { contracts, searchedCount: candidates.length };
+  const meta: Partial<ResponseMeta> = {
+    ...bundle.meta,
+    notes: [
+      "deprecated: use usas_search_recompetes — this alias re-shapes the corrected recompete-radar output onto the legacy { contracts, searchedCount } keys.",
+      ...(bundle.meta.notes ?? []),
+    ],
+  };
+  return withMeta(data, meta);
 }
 
 // ─── Aggregate analysis: time series ──────────────────────────────
