@@ -3,7 +3,7 @@
  * Comprehensive smoke test — every tool against the live API.
  *
  * Spawns the MCP server, speaks JSON-RPC over stdio, exercises all
- * 34 tools, and reports pass/fail + p50/p95 latency per tool.
+ * tools, and reports pass/fail + p50/p95 latency per tool.
  *
  * Run: node smoke-test.mjs
  *
@@ -328,6 +328,43 @@ const tests = [
     args: { opportunityId: "FETCH_FROM_PRIOR" },
     chain: { from: "grants_search", path: "grants[0].id" },
     verify: (r) => typeof r.opportunityNumber === "string",
+  },
+
+  // ━━━ Pricing / Wage
+  {
+    name: "sam_search_wage_determinations",
+    args: { coverage: "sca", state: "VA", limit: 5 },
+    verify: (r) =>
+      Array.isArray(r.determinations) &&
+      r.determinations.length > 0 &&
+      typeof r.determinations[0].fullReferenceNumber === "string" &&
+      r.determinations[0].coverage === "SCA",
+  },
+  {
+    // Resolve a LIVE WD reference from the search above (never a hard-coded,
+    // possibly-stale one). Revision is omitted → resolved via /history.
+    name: "sam_get_wage_rates",
+    args: { reference: "FETCH_FROM_PRIOR", coverage: "sca" },
+    chain: {
+      from: "sam_search_wage_determinations",
+      path: "determinations[0].fullReferenceNumber",
+    },
+    verify: (r) =>
+      r.coverage === "SCA" &&
+      (r.parseConfidence === "high" || r.parseConfidence === "low") &&
+      Array.isArray(r.rates) &&
+      typeof r.sourceUrl === "string",
+  },
+  {
+    name: "gsa_benchmark_labor_rates",
+    args: { laborCategory: "Engineer" },
+    verify: (r) =>
+      r.laborCategory === "Engineer" &&
+      typeof r.matchCount === "number" &&
+      r.currentRate &&
+      (r.currentRate.median === null || typeof r.currentRate.median === "number") &&
+      typeof r.currentRate.n === "number" &&
+      Array.isArray(r.sampleRows),
   },
 ];
 

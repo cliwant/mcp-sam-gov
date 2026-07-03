@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
- * + USAspending + Federal Register + eCFR + Grants.gov.
+ * + USAspending + Federal Register + eCFR + Grants.gov + wage/pricing.
  *
- * 38 keyless tools wrapping every public federal-contracting data
+ * 41 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -29,6 +29,7 @@ import * as usas from "./usaspending.js";
 import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
+import * as pricing from "./pricing.js";
 import { toToolError } from "./errors.js";
 import {
   buildMeta,
@@ -369,6 +370,97 @@ const SamLookupOrgInput = z.object({
   organizationId: z.string().describe("SAM.gov federal-organization id (numeric)"),
 });
 
+// Pricing tier — wage determinations + GSA CALC labor-rate benchmarks
+const WageSearchInput = z.object({
+  coverage: z
+    .enum(["sca", "dba"])
+    .describe(
+      "Which wage-determination law: 'sca' (Service Contract Act — services) or 'dba' (Davis-Bacon Act — construction). 'dba' is normalized to the API's 'dbra' index.",
+    ),
+  state: z
+    .string()
+    .optional()
+    .describe(
+      "2-letter USPS state code (e.g. 'VA'), applied SERVER-SIDE. A full name is applied client-side instead.",
+    ),
+  county: z
+    .string()
+    .optional()
+    .describe(
+      "County name (substring match), applied CLIENT-SIDE over the fetched page only (the API has no county filter).",
+    ),
+  query: z
+    .string()
+    .optional()
+    .describe(
+      "Matches the WD NUMBER/TITLE only — NOT occupation/job title (q=guard returns 0).",
+    ),
+  activeOnly: z.boolean().optional().describe("Only currently-active WDs (default true)."),
+  standardOnly: z
+    .boolean()
+    .optional()
+    .describe("Only standard (non-non-standard) WDs (default true)."),
+  limit: z.number().min(1).max(50).optional().describe("Page size (default 20, max 50)."),
+  page: z.number().min(0).optional().describe("0-based page index (default 0)."),
+});
+
+const WageRatesInput = z.object({
+  reference: z
+    .string()
+    .describe(
+      "fullReferenceNumber of the wage determination (e.g. '2015-4093' for SCA, 'IA20260028' for DBA) from sam_search_wage_determinations.",
+    ),
+  revision: z
+    .number()
+    .optional()
+    .describe("Revision number. Omit to resolve the latest ACTIVE revision via /history."),
+  coverage: z
+    .enum(["sca", "dba"])
+    .optional()
+    .describe("Optional hint (sca|dba) to disambiguate the parser; inferred otherwise."),
+  format: z
+    .enum(["parsed", "raw", "both"])
+    .optional()
+    .describe(
+      "'parsed' (structured rates, default), 'raw' (the full document text), or 'both'. Use 'raw'/'both' when parseConfidence is low.",
+    ),
+});
+
+const BenchmarkLaborInput = z.object({
+  laborCategory: z
+    .string()
+    .describe("Labor category to benchmark (e.g. 'Program Manager', 'Software Engineer'). Matched exactly against CALC's labor_category."),
+  businessSize: z
+    .enum(["S", "O"])
+    .optional()
+    .describe("Business size filter: 'S' (small) or 'O' (other-than-small)."),
+  educationLevel: z
+    .string()
+    .optional()
+    .describe(
+      "Education filter — use CALC's SHORT CODES (e.g. 'HS','AA','BA','MA','PHD'); the displayed education_level field may show full words.",
+    ),
+  minYearsExperience: z
+    .number()
+    .optional()
+    .describe("Minimum years of experience filter."),
+  experienceRange: z
+    .string()
+    .optional()
+    .describe("Experience range as 'min,max' (e.g. '5,10')."),
+  sin: z.string().optional().describe("Schedule SIN filter (e.g. '54151S')."),
+  priceRange: z
+    .string()
+    .optional()
+    .describe("Ceiling-price range as 'min,max' (e.g. '50,150')."),
+  maxSamplePages: z
+    .number()
+    .min(1)
+    .max(10)
+    .optional()
+    .describe("How many 20-row pages to sample for the distribution (default 3, max 10)."),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -623,6 +715,26 @@ const TOOLS: ToolDef[] = [
       "Fetch full detail for a single grant opportunity by id. Returns description, agency, posting/response/archive dates, award_ceiling, award_floor, estimated_funding, expected_number_of_awards, applicant_types, funding_instruments, CFDA programs.",
     inputSchema: GrantsGetInput,
   },
+
+  // ━━━ Pricing / Wage (3) ━━━
+  {
+    name: "sam_search_wage_determinations",
+    description:
+      "Find the Service Contract Act (SCA) or Davis-Bacon (DBA) wage determination(s) governing a locality (keyless SAM SGS). Filter by coverage (sca|dba), state (2-letter, server-side), county (client-side), or WD number/title. Returns the structured WD list; follow with sam_get_wage_rates to read the rate table. NOTE: `query` matches WD number/title only, NOT occupation.",
+    inputSchema: WageSearchInput,
+  },
+  {
+    name: "sam_get_wage_rates",
+    description:
+      "Return the prevailing-wage + fringe/H&W rate table for a specific wage determination, PARSED from its plain-text document (SAM exposes no structured rate JSON), plus the Executive-Order minimum-wage floor. Distinguishes SCA (WD-wide Health & Welfare) vs DBA (per-craft fringe). Always returns parseConfidence and supports format:'parsed'|'raw'|'both' so you can read the raw text when parsing is low-confidence. Resolves the latest active revision via /history when `revision` is omitted.",
+    inputSchema: WageRatesInput,
+  },
+  {
+    name: "gsa_benchmark_labor_rates",
+    description:
+      "GSA CALC awarded ceiling-rate market band for a labor category (keyless). Returns a DISTRIBUTION (currentRate min/median/max + escalated medians) over a fetched sample, NOT a single price. CALC rates are CEILING/catalog and FULLY BURDENED (do not re-add wrap); the match count SATURATES at 10000 for broad queries (totalAvailable null then). Filter by businessSize/educationLevel(code)/experience/sin/priceRange to narrow.",
+    inputSchema: BenchmarkLaborInput,
+  },
 ];
 
 // ─── Server bootstrap ────────────────────────────────────────────
@@ -707,10 +819,19 @@ function synthesizeDefaultMeta(
   toolName: string,
   sam: SamGovClient,
 ): ResponseMeta {
-  const isSam = toolName.startsWith("sam_");
+  // The wage tools carry a `sam_` prefix but hit the keyless SGS/WDOL
+  // subsystems (never the keyed opportunities API), so they are always keyless.
+  const isWage =
+    toolName === "sam_search_wage_determinations" ||
+    toolName === "sam_get_wage_rates";
+  const isSam = toolName.startsWith("sam_") && !isWage;
   const keylessMode = isSam ? sam.isKeyless : true;
   let source: string;
-  if (isSam) {
+  if (isWage) {
+    source = "sam.gov wage-determinations (keyless)";
+  } else if (toolName.startsWith("gsa_")) {
+    source = "api.gsa.gov CALC v3 (keyless)";
+  } else if (isSam) {
     source = sam.isKeyless ? "sam.gov (keyless)" : "api.sam.gov (keyed)";
   } else if (toolName.startsWith("usas_")) {
     source = "usaspending.gov/api/v2";
@@ -1014,6 +1135,14 @@ async function runTool(
       return await grants.searchGrants(GrantsSearchInput.parse(args));
     case "grants_get_opportunity":
       return await grants.getGrant(GrantsGetInput.parse(args));
+
+    // Pricing / Wage
+    case "sam_search_wage_determinations":
+      return await pricing.searchWageDeterminations(WageSearchInput.parse(args));
+    case "sam_get_wage_rates":
+      return await pricing.getWageRates(WageRatesInput.parse(args));
+    case "gsa_benchmark_labor_rates":
+      return await pricing.benchmarkLaborRates(BenchmarkLaborInput.parse(args));
 
     default:
       throw new Error(`Unknown tool: ${name}`);

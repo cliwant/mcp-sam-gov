@@ -613,6 +613,156 @@ const cases = [
       return rowsOk && deprecated;
     },
   },
+
+  // ━━━ Pricing / Wage ━━━
+  {
+    // (a) WD search locality filter honesty. A 2-letter `state` is applied
+    // SERVER-SIDE (verified: index=sca&state=VA narrows to ~30 and every
+    // returned WD's location contains VA), while `county` is CLIENT-SIDE over
+    // the fetched page — _meta must disclose both, with the page-bound caveat.
+    label: "wage_determinations: state server-side + county client-side disclosed in _meta",
+    name: "sam_search_wage_determinations",
+    args: { coverage: "sca", state: "VA", county: "Fairfax", limit: 20 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      const applied = m.filtersApplied ?? [];
+      const notes = m.notes ?? [];
+      // state applied server-side; county applied client-side.
+      const stateServer = applied.some((f) => /state/i.test(f) && /server/i.test(f));
+      const countyClient = applied.some((f) => /county/i.test(f) && /client/i.test(f));
+      // A client-side pagination caveat must be present.
+      const caveat = notes.some((n) => /client-?side/i.test(n) && /page/i.test(n));
+      // Every returned WD (if any) must actually be in VA (proves the filter).
+      const rows = env.data?.determinations ?? [];
+      const allVA = rows.every((d) => (d.states ?? []).includes("VA"));
+      // County client-filter ⇒ totalAvailable null (can't prove completeness).
+      const totalNull = m.totalAvailable === null;
+      return stateServer && countyClient && caveat && allVA && totalNull;
+    },
+  },
+  {
+    // (b) sam_get_wage_rates: SCA WD returns parseConfidence, a WD-wide H&W, an
+    // EO minimum, AND supports format:"raw". Resolve a LIVE SCA ref first.
+    label: "get_wage_rates: SCA has parseConfidence + WD-wide H&W + EO min + raw format",
+    name: "sam_search_wage_determinations",
+    args: { coverage: "sca", state: "VA", limit: 3 },
+    accept: async ({ env }) => {
+      if (!env.ok) return false;
+      const ref = env.data?.determinations?.[0]?.fullReferenceNumber;
+      if (!ref) return false;
+
+      // Parsed mode.
+      const parsed = await call("sam_get_wage_rates", { reference: ref, coverage: "sca" });
+      const p = parsed.env;
+      if (!p.ok) return false;
+      const confOk = p.data.parseConfidence === "high" || p.data.parseConfidence === "low";
+      // SCA carries a WD-WIDE Health & Welfare (a number OR null if unparsed).
+      const hwKey = Object.prototype.hasOwnProperty.call(p.data, "healthAndWelfarePerHour");
+      const hwOk =
+        p.data.healthAndWelfarePerHour === null ||
+        typeof p.data.healthAndWelfarePerHour === "number";
+      // An EO minimum-wage floor is surfaced (object {executiveOrder,minimumWage}
+      // when parsed; null only if genuinely absent — but active SCA WDs cite one).
+      const eo = p.data.executiveOrderMinimumWage;
+      const eoOk =
+        eo === null ||
+        (eo && typeof eo.minimumWage === "number" && typeof eo.executiveOrder === "string");
+      const eoSurfaced = eo && typeof eo.minimumWage === "number";
+      const ratesArr = Array.isArray(p.data.rates);
+      const srcOk = typeof p.data.sourceUrl === "string";
+
+      // Raw mode: the full document text, no fabricated parsed structure.
+      const raw = await call("sam_get_wage_rates", { reference: ref, coverage: "sca", format: "raw" });
+      const rawOk =
+        raw.env.ok &&
+        typeof raw.env.data.document === "string" &&
+        raw.env.data.document.length > 100 &&
+        raw.env.data.rates === undefined;
+
+      return confOk && hwKey && hwOk && eoOk && eoSurfaced && ratesArr && srcOk && rawOk;
+    },
+  },
+  {
+    // (c) gsa_benchmark_labor_rates returns a DISTRIBUTION (min/median/max/n) +
+    // the ceiling/burdened caveats in _meta, and handles a SATURATED count
+    // honestly (totalAvailable null when relation != "eq"). Use a broad category.
+    label: "benchmark_labor_rates: distribution + ceiling/burdened caveats + saturation honesty",
+    name: "gsa_benchmark_labor_rates",
+    args: { laborCategory: "Analyst" },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const d = env.data;
+      const m = env._meta;
+      // Distribution shape: currentRate has min/median/max/n (numbers or null).
+      const cr = d.currentRate;
+      const distOk =
+        cr &&
+        (cr.min === null || typeof cr.min === "number") &&
+        (cr.median === null || typeof cr.median === "number") &&
+        (cr.max === null || typeof cr.max === "number") &&
+        typeof cr.n === "number";
+      const escOk =
+        d.escalatedRate &&
+        (d.escalatedRate.nextYearMedian === null || typeof d.escalatedRate.nextYearMedian === "number");
+      // Ceiling + fully-burdened caveats must be present in notes.
+      const notes = m.notes ?? [];
+      const ceilingNote = notes.some((n) => /ceiling|catalog/i.test(n));
+      const burdenedNote = notes.some((n) => /burdened/i.test(n) && /wrap/i.test(n));
+      // Saturation honesty: "Analyst" saturates at 10000/gte → totalAvailable
+      // null + matchCountSaturated true + a saturation note. If (rarely) it were
+      // exact, totalAvailable would be a number — accept either but require the
+      // saturated case to null the total.
+      let satOk;
+      if (d.matchCountSaturated) {
+        satOk =
+          m.totalAvailable === null &&
+          notes.some((n) => /saturat/i.test(n));
+      } else {
+        satOk = typeof m.totalAvailable === "number";
+      }
+      return distOk && escOk && ceilingNote && burdenedNote && satOk;
+    },
+  },
+  {
+    // (d) A bogus WD reference → STRUCTURED not_found (never ok:true with an
+    // empty/fabricated table). Uses a well-formed-but-nonexistent SCA ref.
+    label: "get_wage_rates: bogus WD reference → structured not_found",
+    name: "sam_get_wage_rates",
+    args: { reference: "2015-0000", revision: 99 },
+    accept: ({ env }) =>
+      env.ok === false &&
+      env.error?.kind === "not_found" &&
+      env.error?.retryable === false,
+  },
+  {
+    // dba→dbra normalization + DBA per-craft fringe shape (distinct from SCA's
+    // WD-wide H&W). A literal index=dba is an HTTP 400 upstream; the tool must
+    // normalize it and return DBA rows whose fringe is per-craft.
+    label: "wage_determinations: dba coverage normalizes + DBA rows carry per-craft fringe",
+    name: "sam_search_wage_determinations",
+    args: { coverage: "dba", state: "IA", limit: 3 },
+    accept: async ({ env }) => {
+      if (!env.ok) return false;
+      const first = env.data?.determinations?.[0];
+      if (!first || first.coverage !== "DBA") return false;
+      const rates = await call("sam_get_wage_rates", {
+        reference: first.fullReferenceNumber,
+        revision: first.revisionNumber,
+        coverage: "dba",
+      });
+      const r = rates.env;
+      if (!r.ok || r.data.coverage !== "DBA" || !Array.isArray(r.data.rates)) return false;
+      if (r.data.rates.length === 0) return true; // empty is acceptable
+      // DBA fringe is PER-CRAFT: each row carries its OWN fringePerHour key, and
+      // there is NO WD-wide healthAndWelfarePerHour on a DBA determination.
+      const perCraftFringe = r.data.rates.every((row) =>
+        Object.prototype.hasOwnProperty.call(row, "fringePerHour"),
+      );
+      const noWideHW = r.data.healthAndWelfarePerHour === undefined;
+      return perCraftFringe && noWideHW;
+    },
+  },
 ];
 
 async function main() {
