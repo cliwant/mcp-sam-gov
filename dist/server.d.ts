@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
- * + USAspending + Federal Register + eCFR + Grants.gov.
+ * + USAspending + Federal Register + eCFR + Grants.gov + wage/pricing.
  *
- * 38 keyless tools wrapping every public federal-contracting data
+ * 41 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
