@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-03 (integrity, teaming & protests)
+
+Closes the capture lifecycle's integrity / teaming / protest gap — the last two
+benchmark losses. **41 → 44 tools.** Against a 10-scenario competitor benchmark,
+the keyless win-rate reaches **10 / 10 with zero remaining losses** (only
+paid-tier depth — full protest history, SLED — still leads).
+
+### Added
+- **`sam_check_exclusions`** — keyless SAM debarment / exclusion screening
+  (frontend SGS `index=ex`). Screen a firm or individual by name and/or UEI/CAGE.
+  `excluded` / `records` / `matchCount` are **normalized-name gated** — SAM's
+  free-text search tokenizes, so a shared word must never flag an unrelated firm
+  (e.g. "Visionary Consulting Partners" no longer matches every "…Partners…"
+  exclusion); UEI/CAGE selectors exact-match. An empty result is disclosed as a
+  narrow true-negative ("not currently excluded under these terms"), **never
+  proof of general responsibility**.
+- **`usas_search_teaming_partners`** — keyless small-business teaming discovery
+  by socioeconomic certification + NAICS + agency award history (USAspending
+  `recipient_type_names` proxy), ranked by obligated $ and integrity-screened via
+  `sam_check_exclusions`. The `cert` is **Zod-enum-validated**: USAspending
+  silently accepts an unknown category as `0` results, so a typo is rejected as
+  `invalid_input` rather than returning a confident-empty list. Labeled
+  **award-derived, NOT the SBA certification of record** (verify in SAM/SBS).
+- **`gao_protest_lookup`** — recent GAO bid-protest decisions from the public
+  Legal-Products RSS feed + per-decision page parse (protester, contracting
+  agency, decision date, outcome, solicitation #, decision PDF). **Honestly
+  scoped:** `_meta` is always `complete:false` / `truncated:true` with an
+  `accessNote` — keyless covers only the recent feed window; GAO's faceted
+  historical protest search is WAF-blocked and a paid-API capability, so results
+  are never presented as the full protest history.
+
+### Changed
+- **Zod input-validation failures now return `invalid_input`** (was `unknown`)
+  across all tools — a non-retryable, actionable error naming the field and its
+  valid options.
+- Bumped `package.json` + `manifest.json` + `server.json` to `0.6.0`
+  (manifest descriptions now read 44 tools).
+
+### Backward compatibility
+- Additive: existing tool outputs and the `_meta` shape are unchanged; no
+  input-schema changes to existing tools.
+
 ## [0.5.0] — 2026-07-03 (recompete + pricing)
 
 Builds the capture and pricing lifecycle on top of the v0.4 truthful substrate.
@@ -188,7 +230,8 @@ long-standing keyless-filter bug that returned unfiltered results is fixed.
 - Stdio JSON-RPC transport.
 - Claude Code plugin scaffold.
 
-[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cliwant/mcp-sam-gov/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cliwant/mcp-sam-gov/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cliwant/mcp-sam-gov/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cliwant/mcp-sam-gov/releases/tag/v0.3.0
