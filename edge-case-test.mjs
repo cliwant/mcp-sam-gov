@@ -130,6 +130,56 @@ const cases = [
     args: { ncode: "541512", limit: 50 },
     accept: ({ env }) => env.ok && env.data.opportunities?.length <= 50,
   },
+  {
+    // A1 / D4 (spec §1.2, §2.4): keyless search must NOT present unfiltered
+    // results as filtered. `_meta.filtersDropped` must name the dropped
+    // facets and `_meta.complete` must be false.
+    label: "A1: keyless search flags dropped facet filters",
+    name: "sam_search_opportunities",
+    args: { ncode: "541512", setAside: ["SBA"], state: "VA", organizationName: "Department of Veterans Affairs", limit: 3 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      // In keyless mode all four requested facets are provably dropped.
+      // (If a key is configured, keylessMode:false and dropped is empty —
+      // accept that too so the gate is env-agnostic.)
+      if (m.keylessMode === false) return m.complete === true && Array.isArray(m.filtersDropped);
+      const dropped = m.filtersDropped ?? [];
+      const wanted = ["ncode", "setAside", "state", "organizationName"];
+      const allDropped = wanted.every((f) => dropped.includes(f));
+      const fieldsGone = ["naics", "setAside", "placeOfPerformance"].every(
+        (f) => (m.fieldsUnavailable ?? []).includes(f),
+      );
+      return (
+        allDropped &&
+        m.complete === false &&
+        m.truncated === true &&
+        fieldsGone &&
+        Array.isArray(m.notes) &&
+        m.notes.length >= 2
+      );
+    },
+  },
+  {
+    // Only facets the caller actually requested get flagged (no noise).
+    label: "A1: unrequested facets are NOT flagged as dropped",
+    name: "sam_search_opportunities",
+    args: { ncode: "541512", limit: 2 },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      if (m.keylessMode === false) return true;
+      const dropped = m.filtersDropped ?? [];
+      // ncode was requested → present; state/org/setAside were not → absent.
+      return (
+        dropped.includes("ncode") &&
+        !dropped.includes("state") &&
+        !dropped.includes("organizationName") &&
+        !dropped.includes("setAside") &&
+        m.complete === false
+      );
+    },
+  },
 ];
 
 async function main() {

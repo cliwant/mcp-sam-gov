@@ -42,6 +42,17 @@ export class SamGovClient {
   }
 
   /**
+   * True when no SAM API key is configured, i.e. requests fall back to the
+   * keyless HAL layer. The keyless list endpoint ignores the structured
+   * facet filters (NAICS / set-aside / state / org) and nulls those fields,
+   * so tools use this to populate an honest `_meta` (filtersDropped /
+   * fieldsUnavailable). See docs/research/02-truthful-outputs-spec.md §1.2.
+   */
+  get isKeyless(): boolean {
+    return !this.apiKey;
+  }
+
+  /**
    * Search SAM.gov opportunities.
    *
    * Three-tier fallback:

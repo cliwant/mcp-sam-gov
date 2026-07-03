@@ -26,7 +26,11 @@ import * as fedreg from "./federal-register.js";
 import * as ecfr from "./ecfr.js";
 import * as grants from "./grants.js";
 import { toToolError } from "./errors.js";
+import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 const SERVER_NAME = "mcp-sam-gov";
+// NOTE: kept at 0.3.0 to match package.json/manifest.json/server.json. The
+// version bump to 0.4.0 (this is the first v0.4 "truthful outputs" PR) is a
+// release step the orchestrator performs across all manifests together.
 const SERVER_VERSION = "0.3.0";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
@@ -437,10 +441,18 @@ async function main() {
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const { name, arguments: args } = req.params;
         try {
-            const data = await runTool(name, args ?? {}, sam);
+            const raw = await runTool(name, args ?? {}, sam);
+            // A handler may return either its raw domain object OR a MetaBundle
+            // (via withMeta) carrying a partial `_meta`. Unwrap to `data` + finalize
+            // the `_meta` sibling. `data` is byte-identical either way.
+            const data = isMetaBundle(raw) ? raw.data : raw;
+            const _meta = isMetaBundle(raw)
+                ? buildMeta(raw.meta)
+                : synthesizeDefaultMeta(name, sam);
             // Structured success envelope. Calling agent can rely on
-            // `ok: true` to know the payload is in `data`.
-            const envelope = { ok: true, data };
+            // `ok: true` to know the payload is in `data`, and read `_meta`
+            // for completeness / provenance (see meta.ts).
+            const envelope = { ok: true, data, _meta };
             return {
                 content: [
                     { type: "text", text: JSON.stringify(envelope, null, 2) },
@@ -464,6 +476,40 @@ async function main() {
     await server.connect(transport);
     console.error(`[mcp-sam-gov] v${SERVER_VERSION} listening on stdio (${TOOLS.length} tools).`);
 }
+/**
+ * Minimal truthful `_meta` for handlers that don't attach their own.
+ *
+ * Defaults to `complete:true, truncated:false` — correct for the single-record
+ * and known-complete tools (detail lookups, reference tables). List/search and
+ * two-phase tools that can be capped or drop filters should instead return
+ * `withMeta(...)` with the real completeness signals; those are migrated
+ * incrementally (A1 landed first). The source label is keyless-aware for SAM
+ * tools so provenance is honest from day one.
+ */
+function synthesizeDefaultMeta(toolName, sam) {
+    const isSam = toolName.startsWith("sam_");
+    const keylessMode = isSam ? sam.isKeyless : true;
+    let source;
+    if (isSam) {
+        source = sam.isKeyless ? "sam.gov (keyless)" : "api.sam.gov (keyed)";
+    }
+    else if (toolName.startsWith("usas_")) {
+        source = "usaspending.gov/api/v2";
+    }
+    else if (toolName.startsWith("fed_register_")) {
+        source = "federalregister.gov/api/v1";
+    }
+    else if (toolName.startsWith("ecfr_")) {
+        source = "ecfr.gov/api";
+    }
+    else if (toolName.startsWith("grants_")) {
+        source = "grants.gov/api";
+    }
+    else {
+        source = "unknown";
+    }
+    return buildMeta({ source, keylessMode, complete: true, truncated: false });
+}
 async function runTool(name, args, sam) {
     switch (name) {
         // SAM.gov
@@ -473,7 +519,7 @@ async function runTool(name, args, sam) {
                 ...input,
                 setAside: input.setAside,
             });
-            return {
+            const data = {
                 totalRecords: r.totalRecords,
                 returned: r.opportunitiesData.length,
                 opportunities: r.opportunitiesData.map((o) => ({
@@ -487,6 +533,60 @@ async function runTool(name, args, sam) {
                     uiLink: o.uiLink,
                 })),
             };
+            // A1 / D4 — filter honesty. The keyless HAL list endpoint provably
+            // IGNORES the structured facet filters (ncode/setAside/state/org): it
+            // returns newest-active notices regardless (ncode:99999999 → 46546
+            // records) and hard-nulls naics/setAside/placeOfPerformance. Emit a
+            // truthful `_meta` so the AI cannot present unfiltered results as
+            // filtered matches. See spec §1.2 A1, §2.4, §4.
+            if (sam.isKeyless) {
+                // Only flag filters the caller actually requested (avoid noise about
+                // facets they never asked for). These four are provably dropped (§4).
+                const droppable = [
+                    ["ncode", input.ncode !== undefined],
+                    ["setAside", (input.setAside?.length ?? 0) > 0],
+                    ["state", input.state !== undefined],
+                    ["organizationName", input.organizationName !== undefined],
+                ];
+                const filtersDropped = droppable
+                    .filter(([, requested]) => requested)
+                    .map(([name]) => name);
+                // `query` (`q`): [가설] likely honored (partial) but not proven — per
+                // spec §4 we place it in NEITHER filtersApplied nor filtersDropped and
+                // add a caveat, rather than assert a filter status we haven't verified.
+                const queryUnverified = input.query !== undefined;
+                const notes = [
+                    "Keyless SAM search does NOT filter by NAICS, set-aside, state, or organization; these results are the newest active notices only. To filter, set SAM_GOV_API_KEY, or post-filter client-side, or call sam_get_opportunity on each id for its true NAICS/set-aside.",
+                    "naics/setAside/placeOfPerformance are null because the keyless list endpoint omits them — call sam_get_opportunity for a notice to obtain them.",
+                ];
+                if (queryUnverified) {
+                    notes.push("The free-text `query` filter is not verified in keyless mode — it may only partially constrain results; do not assume every notice matches the query.");
+                }
+                return withMeta(data, {
+                    source: "sam.gov/sgs/v1 (keyless HAL)",
+                    keylessMode: true,
+                    complete: false,
+                    truncated: true,
+                    returned: data.returned,
+                    totalAvailable: r.totalRecords,
+                    filtersApplied: [],
+                    filtersDropped,
+                    fieldsUnavailable: ["naics", "setAside", "placeOfPerformance"],
+                    notes,
+                });
+            }
+            // Keyed path: api.sam.gov honors the structured filters and populates
+            // the fields, so nothing is dropped or unavailable.
+            return withMeta(data, {
+                source: "api.sam.gov/opportunities/v2 (keyed)",
+                keylessMode: false,
+                truncated: r.totalRecords > data.returned,
+                returned: data.returned,
+                totalAvailable: r.totalRecords,
+                filtersApplied: [],
+                filtersDropped: [],
+                fieldsUnavailable: [],
+            });
         }
         case "sam_get_opportunity": {
             const { noticeId } = SamGetOpportunityInput.parse(args);
