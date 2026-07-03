@@ -533,43 +533,54 @@ async function runTool(name, args, sam) {
                     uiLink: o.uiLink,
                 })),
             };
-            // A1 / D4 — filter honesty. The keyless HAL list endpoint provably
-            // IGNORES the structured facet filters (ncode/setAside/state/org): it
-            // returns newest-active notices regardless (ncode:99999999 → 46546
-            // records) and hard-nulls naics/setAside/placeOfPerformance. Emit a
-            // truthful `_meta` so the AI cannot present unfiltered results as
-            // filtered matches. See spec §1.2 A1, §2.4, §4.
+            // A1 — filter honesty. Contrary to the earlier assumption, the keyless
+            // HAL list endpoint DOES honor the structured facets server-side —
+            // VERIFIED LIVE (2026-07): `naics`, `set_aside`, `pop_state` and `q` each
+            // narrow the result set AND every returned notice's detail matches the
+            // filter (the earlier "ignores facets" reading tested the WRONG param
+            // name `ncode`, which is silently dropped; the real param is `naics`).
+            // The one facet with no keyless param is organization-name (ignored).
+            // Separately, the list PAYLOAD still omits each notice's
+            // naics/set-aside/place-of-performance VALUES (null even when the filter
+            // applied), so filtering is real but reading those field values needs
+            // sam_get_opportunity. See spec §1.2 A1, §2.4.
             if (sam.isKeyless) {
-                // Only flag filters the caller actually requested (avoid noise about
-                // facets they never asked for). These four are provably dropped (§4).
-                const droppable = [
-                    ["ncode", input.ncode !== undefined],
-                    ["setAside", (input.setAside?.length ?? 0) > 0],
-                    ["state", input.state !== undefined],
-                    ["organizationName", input.organizationName !== undefined],
-                ];
-                const filtersDropped = droppable
-                    .filter(([, requested]) => requested)
-                    .map(([name]) => name);
-                // `query` (`q`): [가설] likely honored (partial) but not proven — per
-                // spec §4 we place it in NEITHER filtersApplied nor filtersDropped and
-                // add a caveat, rather than assert a filter status we haven't verified.
-                const queryUnverified = input.query !== undefined;
-                const notes = [
-                    "Keyless SAM search does NOT filter by NAICS, set-aside, state, or organization; these results are the newest active notices only. To filter, set SAM_GOV_API_KEY, or post-filter client-side, or call sam_get_opportunity on each id for its true NAICS/set-aside.",
-                    "naics/setAside/placeOfPerformance are null because the keyless list endpoint omits them — call sam_get_opportunity for a notice to obtain them.",
-                ];
-                if (queryUnverified) {
-                    notes.push("The free-text `query` filter is not verified in keyless mode — it may only partially constrain results; do not assume every notice matches the query.");
+                // NOTE: these truthiness checks must mirror EXACTLY the conditions under
+                // which client.searchPublic() actually appends each param (it uses
+                // `if (filters.x)` / `filters.setAside?.length`). Using `!== undefined`
+                // here would over-report: an empty-string facet is not sent by the
+                // client, so it must not appear in filtersApplied.
+                const filtersApplied = [];
+                if (input.query)
+                    filtersApplied.push("query");
+                if (input.ncode)
+                    filtersApplied.push("ncode");
+                if ((input.setAside?.length ?? 0) > 0)
+                    filtersApplied.push("setAside");
+                if (input.state)
+                    filtersApplied.push("state");
+                // organization-name is the only requested facet the keyless endpoint
+                // cannot honor — flag it dropped so results aren't read as org-filtered.
+                const filtersDropped = input.organizationName
+                    ? ["organizationName"]
+                    : [];
+                const notes = [];
+                if (filtersApplied.length > 0) {
+                    notes.push("Keyless SAM search filtered server-side by the applied facets (NAICS/set-aside/place-of-performance state/keyword) — the result count reflects them. But the keyless list payload OMITS each notice's naics/setAside/placeOfPerformance VALUES (null here); call sam_get_opportunity on a noticeId to read those values.");
+                }
+                else {
+                    notes.push("naics/setAside/placeOfPerformance are null because the keyless list endpoint omits those values — call sam_get_opportunity for a notice to obtain them.");
+                }
+                if (filtersDropped.length > 0) {
+                    notes.push("The organization-name filter is NOT supported by the keyless endpoint and was ignored (results are unfiltered on organization). Set SAM_GOV_API_KEY to filter by organization, or filter client-side on the returned `agency` field.");
                 }
                 return withMeta(data, {
                     source: "sam.gov/sgs/v1 (keyless HAL)",
                     keylessMode: true,
-                    complete: false,
-                    truncated: true,
+                    truncated: r.totalRecords > data.returned,
                     returned: data.returned,
                     totalAvailable: r.totalRecords,
-                    filtersApplied: [],
+                    filtersApplied,
                     filtersDropped,
                     fieldsUnavailable: ["naics", "setAside", "placeOfPerformance"],
                     notes,
