@@ -32,8 +32,10 @@ export declare class SamGovClient {
      *
      * Three-tier fallback:
      *   1. Authenticated v2 search (if `apiKey` configured)
-     *   2. Keyless HAL search
-     *   3. Empty result (caller can decide how to surface "no data")
+     *   2. Keyless HAL search — returned AS-IS (a genuine 0 or an empty page
+     *      past the end is an honest result, not a fallback trigger)
+     *   3. Only if EVERY tier throws (total outage): an empty result carrying
+     *      `degraded` so the caller surfaces an outage, NOT a confirmed zero.
      */
     searchOpportunities(filters: SamSearchFilters): Promise<SamSearchResult>;
     /**

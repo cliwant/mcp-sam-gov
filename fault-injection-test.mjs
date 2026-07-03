@@ -45,6 +45,7 @@ import { farClauseLookup } from "./dist/far.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import {
+  SamGovClient,
   daysUntilResponse,
   applyResponseDeadlineWindow,
 } from "./dist/sam-gov/index.js";
@@ -1448,6 +1449,214 @@ function testShapingHelpers() {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 9. searchOpportunities OUTAGE-vs-GENUINE-ZERO honesty (C19) — the core
+//    SAM discovery path (dist/sam-gov/index.js SamGovClient, fetch-mock).
+//
+//    The defect: the old three-tier fallback conflated a TOTAL OUTAGE
+//    (searchPublic THREW — HAL down / 5xx-after-retry) with a GENUINE zero
+//    (query matched nothing) — BOTH returned { totalRecords:0,
+//    opportunitiesData:[] }, so the tool `_meta` derived `complete:true,
+//    totalAvailable:0` and an AI read "0 matching notices, complete" when SAM
+//    was DOWN. The fix marks a real outage with `.degraded` so the two exits
+//    are distinguishable at the source; a genuine 0 (and a real totalRecords>0
+//    empty page) is returned AS-IS with NO `.degraded`.
+//
+//    We drive the REAL SamGovClient (keyless — no apiKey → only the public
+//    tier runs) over the mocked SGS HAL URL. The mock body mirrors what
+//    searchPublic actually reads: `page.totalElements` + `_embedded.results[]`
+//    (each { _id, title, type, publishDate, responseDate, isActive, … }).
+//    server.ts's runTool is not exported (importing it spawns an MCP server on
+//    stdio), so the tool `_meta` honesty is verified by running the wrapper's
+//    EXACT degraded-vs-healthy mapping through the REAL buildMeta from
+//    dist/meta.js — proving both that `.degraded` is the branch signal and that
+//    the resulting `_meta` is honest (outage ⇒ complete:false/totalAvailable
+//    null + note; genuine zero ⇒ complete:true/totalAvailable:0, no false note).
+// ══════════════════════════════════════════════════════════════════════════
+async function testSearchOutageHonesty() {
+  section("9. searchOpportunities outage-vs-genuine-zero honesty (fetch-mock)");
+
+  // A keyless client: no apiKey ⇒ the auth tier is skipped and ONLY the public
+  // (SGS HAL) tier runs, so the mocked SGS URL drives the whole search.
+  const client = () => new SamGovClient({ fetch: globalThis.fetch });
+
+  // An SGS HAL page in searchPublic's read shape: page.totalElements +
+  // _embedded.results[]. Each result carries the exact keys searchPublic maps.
+  const sgsPage = (results, totalElements = results.length) =>
+    mockResponse({
+      status: 200,
+      json: { page: { totalElements }, _embedded: { results } },
+    });
+  const oppRow = (id, title = "A Notice") => ({
+    _id: id,
+    title,
+    solicitationNumber: "SOL-1",
+    organizationHierarchy: [{ name: "DoD", level: 1 }],
+    type: { code: "o", value: "Solicitation" },
+    publishDate: "2026-07-01",
+    responseDate: "2026-08-01T17:00:00-04:00",
+    isActive: true,
+  });
+
+  // The EXACT mapping sam_search_opportunities / sam_search_shaping apply to a
+  // SamSearchResult (mirrors server.ts): on r.degraded → an honest incomplete
+  // partial; else the normal partial. Fed through the REAL buildMeta so the
+  // assertions exercise the shipped invariant logic, not a copy of it.
+  const metaForSearch = (r) =>
+    r.degraded
+      ? buildMeta({
+          source:
+            "sam.gov/sgs/v1 (keyless HAL) (DEGRADED — search backend unavailable)",
+          keylessMode: true,
+          complete: false,
+          totalAvailable: null,
+          returned: 0,
+          notes: [
+            r.degraded.reason +
+              " This is a service outage, not a confirmed zero — retry.",
+          ],
+        })
+      : buildMeta({
+          source: "sam.gov/sgs/v1 (keyless HAL)",
+          keylessMode: true,
+          truncated: r.totalRecords > r.opportunitiesData.length,
+          returned: r.opportunitiesData.length,
+          totalAvailable: r.totalRecords,
+        });
+
+  // ── (a) TOTAL OUTAGE: the SGS search URL 503s on every attempt ⇒ the result
+  // carries `.degraded` and is an empty 0 — but a DISTINGUISHABLE one.
+  await withFetch(
+    (u) => (isSgs(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const r = await client().searchOpportunities({ query: "widgets" });
+      ok("outage (SGS 503) ⇒ result.degraded set with a reason",
+        r.degraded && typeof r.degraded.reason === "string" &&
+        r.degraded.reason.length > 0,
+        JSON.stringify(r.degraded));
+      ok("outage ⇒ totalRecords 0 AND opportunitiesData empty (the empty shape…)",
+        r.totalRecords === 0 && r.opportunitiesData.length === 0,
+        JSON.stringify({ t: r.totalRecords, n: r.opportunitiesData.length }));
+      // …but the tool `_meta` must NOT read as a confirmed zero.
+      const m = metaForSearch(r);
+      ok("outage ⇒ _meta.complete === false (NOT 'complete' over an outage)",
+        m.complete === false, JSON.stringify(m.complete));
+      ok("outage ⇒ _meta.totalAvailable === null (we do NOT know the count — never 0)",
+        m.totalAvailable === null, JSON.stringify(m.totalAvailable));
+      ok("outage ⇒ a note DISCLOSES it is a service outage, not a confirmed zero",
+        m.notes.some((n) => /service outage, not a confirmed zero/i.test(n)),
+        JSON.stringify(m.notes));
+    },
+  );
+
+  // ── (b) NETWORK FAULT (fetch itself rejects) on the SGS URL ⇒ same degraded
+  // outage marker (a thrown transport error is an outage, not a zero).
+  await withFetch(
+    (u) => {
+      if (isSgs(u)) throw new Error("ECONNRESET");
+      return failClosed()();
+    },
+    async () => {
+      const r = await client().searchOpportunities({ query: "widgets" });
+      ok("network fault ⇒ result.degraded set (transport throw is an outage)",
+        !!r.degraded && r.opportunitiesData.length === 0 && r.totalRecords === 0,
+        JSON.stringify(r.degraded));
+    },
+  );
+
+  // ── (c) GENUINE ZERO: the source is HEALTHY (200) and honestly reports zero
+  // matches (page.totalElements === 0, empty embedded list) ⇒ NO `.degraded`,
+  // totalRecords 0, and the `_meta` STILL reads complete:true/totalAvailable:0
+  // with NO false degradation note (no crying wolf).
+  await withFetch(
+    (u) => (isSgs(u) ? sgsPage([], 0) : failClosed()()),
+    async () => {
+      const r = await client().searchOpportunities({ query: "nomatchxyz" });
+      ok("genuine zero ⇒ NO .degraded marker (healthy source, real 0)",
+        r.degraded === undefined, JSON.stringify(r.degraded));
+      ok("genuine zero ⇒ totalRecords === 0, opportunitiesData empty",
+        r.totalRecords === 0 && r.opportunitiesData.length === 0,
+        JSON.stringify({ t: r.totalRecords, n: r.opportunitiesData.length }));
+      const m = metaForSearch(r);
+      ok("genuine zero ⇒ _meta.complete === true (a real, complete zero)",
+        m.complete === true, JSON.stringify(m.complete));
+      ok("genuine zero ⇒ _meta.totalAvailable === 0 (the true count, asserted)",
+        m.totalAvailable === 0, JSON.stringify(m.totalAvailable));
+      ok("genuine zero ⇒ NO false 'service outage' note (no crying wolf)",
+        !m.notes.some((n) => /service outage/i.test(n)),
+        JSON.stringify(m.notes));
+    },
+  );
+
+  // ── (d) PARTIAL PAGE: a healthy 200 reports totalElements=5 but THIS page is
+  // empty (paging past the end / a lagging embed) ⇒ the result KEEPS
+  // totalRecords 5 (NOT replaced by a hardcoded 0), and NO `.degraded`. The old
+  // `if (opportunitiesData.length > 0)` gate would have discarded this and
+  // mislabeled it totalRecords:0.
+  await withFetch(
+    (u) => (isSgs(u) ? sgsPage([], 5) : failClosed()()),
+    async () => {
+      const r = await client().searchOpportunities({ query: "widgets", offset: 100 });
+      ok("partial page ⇒ totalRecords stays 5 (NOT replaced by 0)",
+        r.totalRecords === 5, JSON.stringify(r.totalRecords));
+      ok("partial page ⇒ this page is empty (0 rows) but that is honest, not degraded",
+        r.opportunitiesData.length === 0 && r.degraded === undefined,
+        JSON.stringify({ n: r.opportunitiesData.length, d: r.degraded }));
+      const m = metaForSearch(r);
+      ok("partial page ⇒ _meta.totalAvailable === 5 AND truncated (5 > 0 returned)",
+        m.totalAvailable === 5 && m.truncated === true && m.complete === false,
+        JSON.stringify({ ta: m.totalAvailable, tr: m.truncated, c: m.complete }));
+    },
+  );
+
+  // ── (e) HEALTHY NON-EMPTY: a normal page with rows ⇒ returned AS-IS, NO
+  // `.degraded`, totalRecords honored, rows mapped (sanity: the happy path is
+  // byte-unchanged by the fix).
+  await withFetch(
+    (u) => (isSgs(u) ? sgsPage([oppRow("N1"), oppRow("N2")], 2) : failClosed()()),
+    async () => {
+      const r = await client().searchOpportunities({ query: "widgets" });
+      ok("healthy non-empty ⇒ NO .degraded, totalRecords 2, 2 rows mapped",
+        r.degraded === undefined && r.totalRecords === 2 &&
+        r.opportunitiesData.length === 2 && r.opportunitiesData[0].noticeId === "N1",
+        JSON.stringify({ d: r.degraded, t: r.totalRecords, n: r.opportunitiesData.length }));
+      const m = metaForSearch(r);
+      ok("healthy non-empty ⇒ _meta.complete true, totalAvailable 2 (no false degrade)",
+        m.complete === true && m.totalAvailable === 2 &&
+        !m.notes.some((n) => /service outage/i.test(n)),
+        JSON.stringify({ c: m.complete, ta: m.totalAvailable }));
+    },
+  );
+
+  // ── (f) HOLLOW 200 (the CloudFront→istio-envoy residual the review caught):
+  // a 200 with VALID JSON but NO usable page.totalElements is NOT a genuine
+  // zero — it's a cached/degraded error envelope. searchPublic now THROWS on a
+  // non-finite totalElements, so each of these yields `.degraded` (outage), not
+  // a fake "0 notices, complete". Contrast: a genuine {page:{totalElements:0}}
+  // (case c) has a finite 0 and stays non-degraded — the discriminator.
+  for (const [label, body] of [
+    ['{"message":"Access Denied"} (no page block)', { message: "Access Denied", ref: "x" }],
+    ["{} (empty object)", {}],
+    ["page dropped by proxy", { _embedded: { results: [] } }],
+    ["page present but totalElements dropped", { page: {}, _embedded: { results: [] } }],
+  ]) {
+    await withFetch(
+      (u) => (isSgs(u) ? mockResponse({ status: 200, json: body }) : failClosed()()),
+      async () => {
+        const r = await client().searchOpportunities({ query: "widgets" });
+        ok(`hollow-200 (${label}) ⇒ result.degraded set (NOT a fake genuine-zero)`,
+          !!r.degraded && r.totalRecords === 0 && r.opportunitiesData.length === 0,
+          JSON.stringify({ degraded: r.degraded }));
+        const m = metaForSearch(r);
+        ok(`hollow-200 (${label}) ⇒ _meta complete:false + totalAvailable:null + outage note`,
+          m.complete === false && m.totalAvailable === null &&
+          m.notes.some((n) => /service outage, not a confirmed zero/i.test(n)),
+          JSON.stringify({ c: m.complete, ta: m.totalAvailable }));
+      },
+    );
+  }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
@@ -1466,6 +1675,7 @@ async function main() {
   await testIntegrityLookup();
   await testSbaSizeStandard();
   await testFarClauseLookup();
+  await testSearchOutageHonesty();
 
   // Prove the harness bites.
   await selfCheck();

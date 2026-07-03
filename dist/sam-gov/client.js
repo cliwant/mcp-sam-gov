@@ -42,8 +42,10 @@ export class SamGovClient {
      *
      * Three-tier fallback:
      *   1. Authenticated v2 search (if `apiKey` configured)
-     *   2. Keyless HAL search
-     *   3. Empty result (caller can decide how to surface "no data")
+     *   2. Keyless HAL search — returned AS-IS (a genuine 0 or an empty page
+     *      past the end is an honest result, not a fallback trigger)
+     *   3. Only if EVERY tier throws (total outage): an empty result carrying
+     *      `degraded` so the caller surfaces an outage, NOT a confirmed zero.
      */
     async searchOpportunities(filters) {
         if (this.apiKey) {
@@ -61,19 +63,26 @@ export class SamGovClient {
             }
         }
         try {
-            const r = await this.searchPublic(filters);
-            if (r.opportunitiesData.length > 0)
-                return r;
+            // Return the public result AS-IS — even 0 rows. A genuine zero
+            // (source healthy, query matched nothing) and a real `totalRecords>0`
+            // but empty page (paging past the end) are both HONEST outcomes and
+            // must not be replaced by a hardcoded 0. Only a THROW below (all tiers
+            // failed) is an outage, which we mark `degraded` so callers can tell it
+            // apart from a genuine zero instead of silently reporting "0, complete".
+            return await this.searchPublic(filters);
         }
         catch (err) {
             this.warn("public search failed", err);
+            return {
+                totalRecords: 0,
+                limit: filters.limit ?? 25,
+                offset: filters.offset ?? 0,
+                opportunitiesData: [],
+                degraded: {
+                    reason: "SAM opportunity search is unavailable (all access tiers failed).",
+                },
+            };
         }
-        return {
-            totalRecords: 0,
-            limit: filters.limit ?? 25,
-            offset: filters.offset ?? 0,
-            opportunitiesData: [],
-        };
     }
     /**
      * Resolve a single opportunity by `noticeId` (32-char hex).
@@ -305,7 +314,19 @@ export class SamGovClient {
         if (!r.ok)
             throw new Error(`SAM.gov public search ${r.status}`);
         const json = (await r.json());
-        const totalRecords = json.page?.totalElements ?? 0;
+        // A 200 whose body lacks a well-formed HAL `page` block is NOT a genuine
+        // zero — it's a hollow/degraded response (a CloudFront/Envoy cached error
+        // envelope, a `{"message":"Access Denied"}` 200, or a dropped-`page` proxy
+        // body; the endpoint sits behind CloudFront→istio-envoy). A GENUINE empty
+        // result always carries `page.totalElements` (0); a healthy hit carries a
+        // positive one. So treat a non-finite `totalElements` as an OUTAGE (throw)
+        // — searchOpportunities' catch then marks it `degraded` instead of emitting
+        // the "0 notices, complete" lie. Mirrors far.ts's hollow-200 guard.
+        const totalElements = json.page?.totalElements;
+        if (!Number.isFinite(totalElements)) {
+            throw new Error("SAM.gov public search returned HTTP 200 without a valid page.totalElements — hollow/degraded body, not a genuine zero.");
+        }
+        const totalRecords = totalElements;
         const results = json._embedded?.results ?? [];
         const data = results.map((r) => {
             const hierarchy = (r.organizationHierarchy ?? [])

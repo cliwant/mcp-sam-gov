@@ -966,6 +966,34 @@ async function runTool(name, args, sam) {
                 ...input,
                 setAside: input.setAside,
             });
+            // OUTAGE HONESTY (C19). r.degraded is set ONLY when EVERY access tier
+            // threw (HAL down / network / 5xx-after-retry) — a total outage, NOT a
+            // confirmed zero. searchOpportunities otherwise returns the real result
+            // (incl. a genuine 0). Emit an explicitly-incomplete `_meta`: we do NOT
+            // know the count (totalAvailable:null, NEVER 0), the source is flagged
+            // degraded, the data count is null (not a fake 0 that reads as a real
+            // count), and a note tells the AI to retry rather than conclude "no
+            // matching notices". The genuine-zero + healthy paths below are UNCHANGED.
+            if (r.degraded) {
+                return withMeta({
+                    totalRecords: null,
+                    returned: 0,
+                    opportunities: [],
+                }, {
+                    source: "sam.gov/sgs/v1 (keyless HAL) (DEGRADED — search backend unavailable)",
+                    keylessMode: sam.isKeyless,
+                    complete: false,
+                    totalAvailable: null,
+                    returned: 0,
+                    filtersApplied: [],
+                    filtersDropped: [],
+                    fieldsUnavailable: [],
+                    notes: [
+                        r.degraded.reason +
+                            " This is a service outage, not a confirmed zero — retry.",
+                    ],
+                });
+            }
             const data = {
                 totalRecords: r.totalRecords,
                 returned: r.opportunitiesData.length,
@@ -1130,6 +1158,35 @@ async function runTool(name, args, sam) {
                 ptype: noticeType,
                 limit: input.limit ?? 25,
             });
+            // OUTAGE HONESTY (C19). r.degraded ⇒ the keyless feed was totally down
+            // (all tiers threw), NOT a genuine "no shaping notices". Emit an
+            // explicitly-incomplete `_meta` (complete:false, totalAvailable:null,
+            // degraded source, retry note) and a null data count instead of the
+            // silent "0 pre-solicitation notices, complete" lie. noticeTypesRequested
+            // is still echoed so the caller knows what was attempted. The genuine-zero
+            // path + the client-side response-deadline window disclosure below are
+            // UNCHANGED.
+            if (r.degraded) {
+                return withMeta({
+                    totalRecords: null,
+                    returned: 0,
+                    noticeTypesRequested: noticeType,
+                    notices: [],
+                }, {
+                    source: "sam.gov/api/prod/sgs/v1/search (keyless HAL, notice_type filter) (DEGRADED — search backend unavailable)",
+                    keylessMode: true,
+                    complete: false,
+                    totalAvailable: null,
+                    returned: 0,
+                    filtersApplied: [],
+                    filtersDropped: [],
+                    fieldsUnavailable: [],
+                    notes: [
+                        r.degraded.reason +
+                            " This is a service outage, not a confirmed zero — retry.",
+                    ],
+                });
+            }
             // Shape each keyless list row. naics/setAside/PoP are NULL in the keyless
             // list payload (fieldsUnavailable) — NOT fabricated. noticeTypeCode
             // (type.code) lets the AI rank r/p over s; daysUntilResponse is a whole-day
