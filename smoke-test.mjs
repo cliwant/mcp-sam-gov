@@ -173,6 +173,11 @@ const tests = [
     verify: (r) => Array.isArray(r.subawards),
   },
   {
+    name: "usas_search_recompetes",
+    args: { agency: "Department of Veterans Affairs", naics: "541512", minAwardValue: 1000000, pageSize: 5 },
+    verify: (r) => Array.isArray(r.recompetes) && r.page === 1 && r.pageSize === 5,
+  },
+  {
     name: "usas_search_expiring_contracts",
     args: { agency: "Department of Veterans Affairs", naics: "541512", monthsUntilExpiry: 24, minAwardValue: 1000000, limit: 5 },
     verify: (r) => Array.isArray(r.contracts),

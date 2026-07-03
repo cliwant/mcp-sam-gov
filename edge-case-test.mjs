@@ -432,6 +432,126 @@ const cases = [
       return fullSet && completeOk && totalMatches && pagOk;
     },
   },
+  {
+    // Recompete radar (a): every returned row's currentEndDate must be INSIDE
+    // the requested window, and the rows must be sorted soonest-first
+    // (daysUntilCurrentEnd non-decreasing). Uses the corrected "End Date"
+    // alias + client-side window — proves the window+sort actually apply.
+    label: "recompetes: rows are within the window and sorted soonest-first",
+    name: "usas_search_recompetes",
+    args: {
+      agency: "Department of Veterans Affairs",
+      naics: "541512",
+      windowStartDays: -90,
+      windowEndDays: 548,
+      minAwardValue: 1000000,
+      pageSize: 15,
+    },
+    accept: ({ env }) => {
+      if (!env.ok || !Array.isArray(env.data?.recompetes)) return false;
+      const rows = env.data.recompetes;
+      if (rows.length === 0) return true; // no in-window data today is acceptable
+      // Live-soft: bounds are checked with a small slack (±2 days) so a
+      // same-day boundary rounding never flakes the test.
+      const inWindow = rows.every(
+        (r) => r.daysUntilCurrentEnd >= -92 && r.daysUntilCurrentEnd <= 550,
+      );
+      // Sorted ascending by daysUntilCurrentEnd (soonest recompete first).
+      let sorted = true;
+      for (let i = 1; i < rows.length; i++) {
+        if (rows[i].daysUntilCurrentEnd < rows[i - 1].daysUntilCurrentEnd) {
+          sorted = false;
+          break;
+        }
+      }
+      // Each row must carry the shaped keys the tool promises.
+      const shaped = rows.every(
+        (r) =>
+          typeof r.awardId === "string" &&
+          typeof r.incumbent === "string" &&
+          typeof r.currentEndDate === "string" &&
+          typeof r.amount === "number" &&
+          r.amount >= 1000000,
+      );
+      return inWindow && sorted && shaped;
+    },
+  },
+  {
+    // Recompete radar (b): _meta must carry the honest completeness contract —
+    // a numeric-or-null totalAvailable (the in-window count when the scan was
+    // complete, null when the scan budget truncated), a boolean truncated, and
+    // notes that INCLUDE the CPARS / public-signals-only honest-ceiling caveat
+    // and the action_date lookback completeness boundary.
+    label: "recompetes: _meta carries totalInWindow/truncated + CPARS caveat note",
+    name: "usas_search_recompetes",
+    args: {
+      agency: "Department of Veterans Affairs",
+      naics: "541512",
+      minAwardValue: 1000000,
+      pageSize: 10,
+    },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      const m = env._meta;
+      // totalAvailable: a real in-window count (number) OR null when truncated.
+      const total = m.totalAvailable;
+      const totalOk = total === null || typeof total === "number";
+      // When we DID get a full scan (total is a number), truncated must agree
+      // with returned<total; when null (scan truncated) truncated must be true.
+      const returned = env.data?.recompetes?.length ?? 0;
+      const truncOk =
+        total === null
+          ? m.truncated === true
+          : m.truncated === (returned < total);
+      const notes = Array.isArray(m.notes) ? m.notes : [];
+      const cparsNote = notes.some((n) => /cpars|protest|public signals/i.test(n));
+      const lookbackNote = notes.some((n) => /action/i.test(n) && /year/i.test(n));
+      // The unavailable public fields must be declared.
+      const fieldsGone = ["past_performance_cpars", "protest_history", "option_exercise_intent"].every(
+        (f) => (m.fieldsUnavailable ?? []).includes(f),
+      );
+      // Source must name the keyless spending_by_award origin.
+      const sourceOk = typeof m.source === "string" && /spending_by_award/i.test(m.source);
+      return totalOk && truncOk && cparsNote && lookbackNote && fieldsGone && sourceOk;
+    },
+  },
+  {
+    // Recompete radar (c): the DEPRECATED alias must still return the legacy
+    // { contracts, searchedCount } shape AND flag its deprecation in _meta.notes
+    // so callers are steered to usas_search_recompetes.
+    label: "expiring_contracts (deprecated alias) still returns + flags deprecation",
+    name: "usas_search_expiring_contracts",
+    args: {
+      agency: "Department of Veterans Affairs",
+      naics: "541512",
+      monthsUntilExpiry: 18,
+      minAwardValue: 1000000,
+      limit: 5,
+    },
+    accept: ({ env }) => {
+      if (!env.ok || !env._meta) return false;
+      // Legacy output shape preserved.
+      const shapeOk =
+        Array.isArray(env.data?.contracts) &&
+        typeof env.data?.searchedCount === "number";
+      if (!shapeOk) return false;
+      // Each legacy contract row keeps its historical keys.
+      const rows = env.data.contracts;
+      const rowsOk =
+        rows.length === 0 ||
+        rows.every(
+          (c) =>
+            typeof c.awardId === "string" &&
+            typeof c.recipient === "string" &&
+            typeof c.endDate === "string" &&
+            typeof c.daysUntilExpiry === "number",
+        );
+      // Deprecation must be surfaced in _meta.notes.
+      const notes = Array.isArray(env._meta.notes) ? env._meta.notes : [];
+      const deprecated = notes.some((n) => /deprecated/i.test(n) && /recompetes/i.test(n));
+      return rowsOk && deprecated;
+    },
+  },
 ];
 
 async function main() {
