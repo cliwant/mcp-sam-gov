@@ -50,6 +50,7 @@ import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
+import { searchGrants, getGrant } from "./dist/grants.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -3852,6 +3853,75 @@ async function testSearchEnrichmentGating() {
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────
+// Grants.gov (grants_search / grants_get_opportunity) — honest-by-construction
+// via fetchWithRetry, now PERMANENTLY guarded (was grep-verified only). Locks:
+// an HTTP outage → throws upstream_unavailable (never a silent empty "no grants"
+// that an AI reads as "this program has no opportunities"); an application-level
+// errorcode → throws; a GENUINE zero (hitCount 0) → honest empty + totalAvailable:0.
+async function testGrantsHonesty() {
+  section("14. grants.gov search/fetch outage-vs-genuine-zero honesty (fetch-mock)");
+  const isSearch = (u) => /api\.grants\.gov\/.*search2/.test(u);
+  const isFetch = (u) => /api\.grants\.gov\/.*fetchOpportunity/.test(u);
+
+  // 1. HTTP 503 ⇒ throws upstream_unavailable (NOT a fabricated empty result)
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => searchGrants({ keyword: "flood" }));
+      ok("grants search 503 ⇒ throws upstream_unavailable (NOT a fake empty 'no grants')",
+        threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // 2. 200 body carrying an application errorcode ⇒ throws (app failure, not empty)
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { errorcode: 1, msg: "bad request" } }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => searchGrants({ keyword: "x" }));
+      ok("grants search 200+errorcode ⇒ throws (app error surfaced, not silent empty)",
+        threw && /Grants\.gov error/i.test(error?.message ?? ""), JSON.stringify(error?.message));
+    },
+  );
+
+  // 3. GENUINE zero (hitCount 0) ⇒ honest empty + totalAvailable:0, truncated:false
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { errorcode: 0, data: { hitCount: 0, oppHits: [] } } }) : failClosed()()),
+    async () => {
+      const res = await searchGrants({ keyword: "zzznotarealprogram" });
+      ok("grants search genuine-zero ⇒ honest empty grants[] (a real no-match)",
+        Array.isArray(res.data.grants) && res.data.grants.length === 0, JSON.stringify(res.data.grants));
+      ok("grants search genuine-zero ⇒ _meta.totalAvailable 0 + truncated false (distinct from an outage)",
+        res.meta.totalAvailable === 0 && res.meta.truncated === false, JSON.stringify(res.meta));
+    },
+  );
+
+  // 4. 200 with results ⇒ maps + totalAvailable = hitCount, truncated when returned < total
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { errorcode: 0, data: { hitCount: 42, oppHits: [
+      { id: "GR1", number: "DHS-24-001", title: "Flood Mitigation", agencyCode: "DHS-FEMA", agencyName: "FEMA", oppStatus: "posted", cfdaList: ["97.039"] },
+    ] } } }) : failClosed()()),
+    async () => {
+      const res = await searchGrants({ keyword: "flood", rows: 1 });
+      ok("grants search results ⇒ maps grant (id/number/title/cfdaList)",
+        res.data.grants.length === 1 && res.data.grants[0].id === "GR1" &&
+        res.data.grants[0].opportunityNumber === "DHS-24-001" && res.data.grants[0].cfdaList[0] === "97.039",
+        JSON.stringify(res.data.grants[0]));
+      ok("grants search results ⇒ totalAvailable=42 (real total) + truncated true (1<42)",
+        res.meta.totalAvailable === 42 && res.meta.truncated === true, JSON.stringify(res.meta));
+    },
+  );
+
+  // 5. getGrant detail 503 ⇒ throws upstream_unavailable (never a hollow record)
+  await withFetch(
+    (u) => (isFetch(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => getGrant({ opportunityId: "123456" }));
+      ok("grants getGrant 503 ⇒ throws upstream_unavailable (detail outage, not a fabricated record)",
+        threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError));
+    },
+  );
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -3876,6 +3946,7 @@ async function main() {
   await testGetOpportunityDetailHonesty();
   await testGetOpportunityEnrichmentHonesty();
   await testFetchAttachmentText();
+  await testGrantsHonesty();
 
   // Prove the harness bites.
   await selfCheck();
