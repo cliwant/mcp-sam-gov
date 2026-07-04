@@ -840,6 +840,49 @@ async function testAnalyzeIncumbent() {
         res.data.signals.modCount === 2, JSON.stringify(res.data.signals.modCount));
     },
   );
+
+  // ── Null money fields (total_obligation / base_and_all_options absent) ⇒
+  // UNKNOWN, not $0. A null ceiling is common+legitimate (IDVs/BPAs/grants);
+  // rendering 0 would read as "a $0 ceiling" (data-absence-as-present). Both
+  // getAwardDetail and analyzeIncumbent must surface null + disclose, and
+  // pctConsumed must be null (never null/N coerced to 0 = "0% consumed").
+  await withFetch(
+    (u) => {
+      if (isAwardsDetail(u)) return mockResponse({ status: 200, json: awardDetailBody({ total_obligation: null, base_and_all_options: null }) });
+      if (isTransactions(u)) return mockResponse({ status: 200, json: { results: [{}], page_metadata: { hasNext: false } } });
+      if (isSpendingByAward(u)) return mockResponse({ status: 200, json: { results: [], page_metadata: { hasNext: false } } });
+      if (isSpendingByAwardCount(u)) return mockResponse({ status: 200, json: { results: { contracts: 0 } } });
+      return failClosed()();
+    },
+    async () => {
+      const d = await getAwardDetail(GEN);
+      ok("null money ⇒ getAwardDetail.baseAndAllOptions === null (UNKNOWN, not 0)",
+        d.baseAndAllOptions === null, JSON.stringify(d.baseAndAllOptions));
+      ok("null money ⇒ getAwardDetail.totalObligation === null (UNKNOWN, not 0)",
+        d.totalObligation === null, JSON.stringify(d.totalObligation));
+
+      const res = await analyzeIncumbent({ generatedInternalId: GEN });
+      ok("null money ⇒ signals.obligatedVsCeiling.baseAndAllOptions === null (not 0)",
+        res.data.signals.obligatedVsCeiling.baseAndAllOptions === null,
+        JSON.stringify(res.data.signals.obligatedVsCeiling.baseAndAllOptions));
+      ok("null money ⇒ signals.obligatedVsCeiling.obligated === null (not 0)",
+        res.data.signals.obligatedVsCeiling.obligated === null,
+        JSON.stringify(res.data.signals.obligatedVsCeiling.obligated));
+      ok("null money ⇒ pctConsumed === null (never null/N coerced to 0% consumed)",
+        res.data.signals.obligatedVsCeiling.pctConsumed === null,
+        JSON.stringify(res.data.signals.obligatedVsCeiling.pctConsumed));
+      ok("null money ⇒ fieldsUnavailable discloses base_and_all_options + total_obligation",
+        res.meta.fieldsUnavailable.includes("base_and_all_options") && res.meta.fieldsUnavailable.includes("total_obligation"),
+        JSON.stringify(res.meta.fieldsUnavailable));
+      ok("null money ⇒ NO fabricated 'ceiling_nearly_exhausted' hint (pctConsumed null)",
+        !res.data.pressureHints.includes("ceiling_nearly_exhausted"),
+        JSON.stringify(res.data.pressureHints));
+      // A null ceiling is a property of the award (IDV), not a fetch failure →
+      // NOT forced-degraded (disclosed via fieldsUnavailable, analysis still valid).
+      ok("null money ⇒ _meta.complete !== false (disclosed, not a failure/degradation)",
+        res.meta.complete !== false, JSON.stringify(res.meta.complete));
+    },
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
