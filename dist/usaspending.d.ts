@@ -193,7 +193,7 @@ export declare function analyzeIncumbent(args: {
     }[] | undefined;
     award: {
         awardId: string;
-        incumbent: string;
+        incumbent: string | null;
         awardingAgency: string | null;
         awardingSubAgency: string | null;
         naicsCode: string | null;
