@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-04 (FAR compliance, document reading, keyless backbone & a truthfulness sweep)
+
+The biggest tier yet. **44 → 52 tools.** Adds a FAR/DFARS compliance layer, the
+ability to READ the actual solicitation documents (PDF + DOCX), a legitimate
+keyless data backbone, and a codebase-wide truthfulness sweep that guarantees a
+DOWN federal service is never reported as "no results" / "not found" / "no
+attachments". Still keyless; still no API key required.
+
+### Added
+- **FAR/DFARS compliance layer** (composes the eCFR versioner, keyless):
+  - **`far_clause_lookup`** — authoritative FAR/DFARS clause text **+ its
+    prescription** ("As prescribed in …") for an exact clause number. Use this,
+    not `ecfr_search`, which mis-ranks bare numbers (returns GSAM 552.212-4 above
+    FAR 52.212-4). Every response carries a `farOverhaulRisk` currency caveat
+    (eCFR reflects only the codified FAR; a Revolutionary-FAR-Overhaul class
+    deviation may supersede it). An absent clause → `not_found`, never a fake.
+  - **`far_search`** — FAR/DFARS-scoped search (Title-48 chapter filter) that
+    keeps GSAM/agency supplements out of FAR results and collapses the
+    5×-per-section historical versions to the current one (`isCurrent` per row).
+  - **`far_compliance_matrix`** — an RFP's cited-clause list → a proposal-ready
+    matrix (per-clause text + prescription + eligibility-gate flags for Section
+    889 / CMMC / NIST 800-171 / limitations on subcontracting). Splits absent
+    clauses (`unresolved`) from unfetchable ones (`errored`) — a DOWN eCFR never
+    reads as "clause doesn't exist".
+- **Document reading** — **`sam_fetch_attachment_text`**: extract the TEXT of a
+  SAM notice attachment (the real RFP / SOW / Q&A), so an agent can analyze the
+  requirements, not just the metadata. **PDF** via `unpdf` (a single
+  self-contained dependency) and **DOCX** dependency-free (built-in `zlib` + a
+  hand-rolled ZIP parse). A scanned/image-only PDF or a non-extractable format →
+  `text:null` + a disclosed reason, never a fabricated empty document. SSRF
+  allow-list + redirect-host re-validation + a size cap + a zip-bomb guard.
+- **GSA daily-CSV keyless backbone** — **`sam_lookup_notice_fields`** batch-fills
+  the naics/set-aside/place-of-performance/deadline the keyless HAL list nulls
+  (opt-in, env-gated, streaming RFC-4180 parser, bounded RAM); plus optional
+  inline enrichment of `sam_search_opportunities`. Off by default; honest
+  `_meta` freshness / not-in-snapshot / degraded disclosure.
+- **`sam_search_shaping`** — pre-solicitation radar (Sources Sought /
+  Presolicitation / Special Notices) with a client-side response-deadline window.
+- **`sam_integrity_lookup`** — composed exclusions + honest FAPIIS deep-link
+  (`integrityFlag` is never "clear" keylessly — a type-level guarantee).
+- **`sba_size_standard`** — SBA small-business size standard for a NAICS
+  (receipts / employees / assets), normalized to dollars, with an as-of caveat.
+- An offline **fault-injection test harness** (`npm run gate`) that permanently
+  CI-guards the truthfulness/degradation invariants (now 338 assertions).
+
+### Changed
+- One new runtime dependency: **`unpdf`** (self-contained PDF text extraction —
+  bundles pdfjs, no transitive deps). DOCX and everything else stays dependency-free.
+
+### Fixed — truthfulness (a DOWN service is never reported as absent)
+- **`sam_search_opportunities` / `sam_search_shaping`**: a total HAL outage (all
+  access tiers failed) is no longer reported as "0 notices, complete" — it now
+  surfaces `_meta.degraded` + `totalAvailable:null` + a note. A genuine zero is
+  unchanged. Also a 200 lacking a valid `page.totalElements` (CDN/WAF interstitial)
+  is treated as an outage, not a fake zero.
+- **`sam_get_opportunity` / `sam_fetch_description`**: a DOWN detail endpoint
+  (5xx / network / timeout / hollow 200) now throws `upstream_unavailable`
+  instead of reading as "notice not found"; only a genuinely-absent id (4xx) →
+  `found:false`. A failed attachment-list / org enrichment is disclosed via
+  `_meta.degraded` ("MAY have attachments — retry"), never a silent "no attachments".
+- Keyless SAM search `notice_type` filter and other `_meta` completeness signals
+  refined across the board (see the fault-injection harness for the guarded invariants).
+
+### Note
+Version + changelog are in-repo. **Not published to npm** — awaiting maintainer sign-off.
+
 ## [0.6.0] — 2026-07-03 (integrity, teaming & protests)
 
 Closes the capture lifecycle's integrity / teaming / protest gap — the last two
