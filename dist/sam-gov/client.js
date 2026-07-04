@@ -12,6 +12,7 @@
  * The client picks layer 1 if an API key is available, falling back
  * to layer 2 transparently. Callers don't have to care.
  */
+import { ToolErrorCarrier } from "../errors.js";
 const PROD_BASE = "https://api.sam.gov/opportunities/v2/search";
 const ENTITY_BASE = "https://api.sam.gov/entity-information/v3/entities";
 const PUBLIC_BASE = "https://sam.gov/api/prod";
@@ -122,12 +123,27 @@ export class SamGovClient {
                 this.warn("auth getOpportunity failed, trying public", err);
             }
         }
+        // getOpportunityPublic returns null ONLY for a genuine not-found (401/404);
+        // an outage (5xx/network/timeout/hollow-200) THROWS a classified
+        // ToolErrorCarrier. That throw MUST propagate — collapsing it to null would
+        // make the wrapper render a DOWN service as found:false (a fabricated
+        // absence). A genuine null still passes through unchanged.
         try {
             return await this.getOpportunityPublic(noticeId);
         }
         catch (err) {
             this.warn("public getOpportunity failed", err);
-            return null;
+            if (err instanceof ToolErrorCarrier)
+                throw err;
+            // A raw/unclassified error must not become a silent null either —
+            // classify it as a retryable outage so the caller learns the truth.
+            throw new ToolErrorCarrier({
+                kind: "upstream_unavailable",
+                message: `SAM detail lookup for ${noticeId} failed: ${err.message}. This is an outage, not a confirmed absence. Retry.`,
+                retryable: true,
+                retryAfterSeconds: 30,
+                upstreamEndpoint: "sam:opps/v2/opportunities",
+            });
         }
     }
     /**
@@ -160,8 +176,19 @@ export class SamGovClient {
         }
         try {
             const r = await this.fetchImpl(finalUrl, { headers });
-            if (!r.ok)
-                return "Description not available.";
+            // A DOWN description fetch must ERROR, never fabricate a "not available"
+            // placeholder that reads as "this description doesn't exist". THROW a
+            // classified retryable outage; the wrapper propagates it to a tool error.
+            if (!r.ok) {
+                throw new ToolErrorCarrier({
+                    kind: "upstream_unavailable",
+                    message: `SAM description fetch returned HTTP ${r.status} for ${finalUrl} — the service is unavailable, NOT an absent description. Retry.`,
+                    retryable: true,
+                    retryAfterSeconds: 60,
+                    upstreamStatus: r.status,
+                    upstreamEndpoint: "sam:description",
+                });
+            }
             const ct = r.headers.get("content-type") ?? "";
             if (ct.includes("application/json") || ct.includes("application/hal+json")) {
                 const json = (await r.json());
@@ -184,7 +211,19 @@ export class SamGovClient {
         }
         catch (err) {
             this.warn("fetchOpportunityDescription failed", err);
-            return "Description not available.";
+            // A classified outage (from the !r.ok throw above) propagates as-is. A raw
+            // network/parse fault must ALSO error (not fabricate "not available") —
+            // classify it as a retryable outage so a DOWN fetch is never read as an
+            // absent description.
+            if (err instanceof ToolErrorCarrier)
+                throw err;
+            throw new ToolErrorCarrier({
+                kind: "upstream_unavailable",
+                message: `SAM description fetch for ${finalUrl} failed: ${err.message}. This is an outage, not an absent description. Retry.`,
+                retryable: true,
+                retryAfterSeconds: 30,
+                upstreamEndpoint: "sam:description",
+            });
         }
     }
     /**
@@ -361,13 +400,92 @@ export class SamGovClient {
     }
     async getOpportunityPublic(noticeId) {
         const url = `${PUBLIC_BASE}/opps/v2/opportunities/${encodeURIComponent(noticeId)}`;
-        const r = await this.fetchImpl(url, { headers: this.publicHeaders() });
-        if (!r.ok)
+        // A network-level fault (DNS/socket/timeout) must surface as a classified
+        // retryable outage, NOT collapse to null (which the wrapper renders as
+        // "notice not found"). Mirrors far.ts/fetchWithRetry's network branch.
+        let r;
+        try {
+            r = await this.fetchImpl(url, { headers: this.publicHeaders() });
+        }
+        catch (err) {
+            throw new ToolErrorCarrier({
+                kind: "upstream_unavailable",
+                message: `Network error reaching the SAM detail endpoint for ${noticeId}: ${err.message}. This is an outage, not a confirmed absence. Retry.`,
+                retryable: true,
+                retryAfterSeconds: 30,
+                upstreamEndpoint: "sam:opps/v2/opportunities",
+            });
+        }
+        // LIVE-GROUNDED mapping (re-verified 2026-07-04): a real 32-hex id → 200 +
+        // data2.title, STABLE; the endpoint's ABSENT vocabulary (across ~20 bogus/
+        // malformed/hostile ids, incl. SQLi/XSS/traversal) is STRICTLY:
+        //   • 401 UNAUTHORIZED "Error occured while get..." (most bogus/malformed ids)
+        //   • 400 BAD_REQUEST  "Record not found / Invalid request data"
+        //   • 404 (documented not-found)
+        // and its OUTAGE vocabulary is 5xx (a hostile payload live-returned a 502).
+        // 403 was NEVER emitted; a 403 here would be a CDN/WAF block = an OUTAGE, not
+        // an absence. So ONLY the three CONFIRMED absent statuses {400,401,404} → null
+        // (→ wrapper found:false); 429 → rate_limited (a retryable throttle, not an
+        // absence); and EVERY OTHER non-2xx — 403, other 4xx (410/422/451/…), all 5xx,
+        // network, timeout, hollow-200 — THROWS upstream_unavailable. This honors the
+        // invariant "a DOWN service must NEVER read as absent" and errs toward
+        // retryable-outage for any ambiguous status (the safe direction: a spurious
+        // "retry" is far less harmful than a fabricated "does not exist").
+        if (r.status === 429) {
+            throw new ToolErrorCarrier({
+                kind: "rate_limited",
+                message: `SAM detail endpoint rate-limited (HTTP 429) for ${noticeId}. Retry after a short back-off.`,
+                retryable: true,
+                retryAfterSeconds: 30,
+                upstreamStatus: 429,
+                upstreamEndpoint: "sam:opps/v2/opportunities",
+            });
+        }
+        if (r.status === 400 || r.status === 401 || r.status === 404)
             return null;
-        const detail = (await r.json());
+        if (!r.ok) {
+            throw new ToolErrorCarrier({
+                kind: "upstream_unavailable",
+                message: `SAM detail endpoint returned HTTP ${r.status} for ${noticeId} — the service is unavailable, NOT a confirmed absence. Retry.`,
+                retryable: true,
+                retryAfterSeconds: 60,
+                upstreamStatus: r.status,
+                upstreamEndpoint: "sam:opps/v2/opportunities",
+            });
+        }
+        let detail;
+        try {
+            detail = (await r.json());
+        }
+        catch (err) {
+            // A 200 whose body won't parse is a hollow/degraded response (CDN/proxy),
+            // NOT a genuine absence — classify as a retryable outage.
+            throw new ToolErrorCarrier({
+                kind: "upstream_unavailable",
+                message: `SAM detail endpoint returned HTTP 200 for ${noticeId} but the body could not be parsed as JSON (${err.message}) — hollow/degraded response, NOT a confirmed absence. Retry.`,
+                retryable: true,
+                retryAfterSeconds: 60,
+                upstreamStatus: 200,
+                upstreamEndpoint: "sam:opps/v2/opportunities",
+            });
+        }
         const d = detail.data2 ?? {};
-        if (!d.title)
-            return null;
+        // A 200 WITHOUT a usable notice body (no data2.title) is a hollow/degraded
+        // response — a CDN/proxy cached error envelope or dropped body — NOT a real
+        // "this notice does not exist". Real notices are stably 200+title; absent
+        // ids 401. So THROW (retryable), mirroring the searchPublic/far hollow-200
+        // guards, instead of returning null (which the wrapper would render as
+        // found:false — a fabricated absence over an outage).
+        if (!d.title) {
+            throw new ToolErrorCarrier({
+                kind: "upstream_unavailable",
+                message: `SAM detail returned HTTP 200 without a usable notice body (no data2.title) for ${noticeId} — hollow/degraded response, NOT a confirmed absence. Retry.`,
+                retryable: true,
+                retryAfterSeconds: 60,
+                upstreamStatus: 200,
+                upstreamEndpoint: "sam:opps/v2/opportunities",
+            });
+        }
         const [resourceLinks, fullParentPathName] = await Promise.all([
             this.getPublicResourceLinks(noticeId),
             d.organizationId
