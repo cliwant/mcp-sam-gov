@@ -41,7 +41,8 @@ import { buildMeta } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
-import { farClauseLookup, farComplianceMatrix } from "./dist/far.js";
+import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
+import { search as ecfrSearch } from "./dist/ecfr.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import {
@@ -151,6 +152,13 @@ const isSgs = (u) => /sam\.gov\/api\/prod\/sgs\/v1\/search/.test(u);
 // URL classifiers for the FAR surface (farClauseLookup → eCFR versioner).
 const isEcfrTitles = (u) => /\/versioner\/v1\/titles\.json/.test(u);
 const isEcfrFull = (u) => /\/versioner\/v1\/full\//.test(u);
+// eCFR full-text search endpoint (far_search → ecfr.search → /search/v1/results).
+const isEcfrSearchResults = (u) => /\/search\/v1\/results/.test(u);
+/** The `hierarchy[chapter]=N` query param off a search URL (the scoped chapter). */
+const ecfrSearchChapter = (u) => {
+  const m = /[?&]hierarchy(?:%5B|\[)chapter(?:%5D|\])=([^&]+)/.exec(u);
+  return m ? Number(decodeURIComponent(m[1])) : null;
+};
 /** The `section=` query param off a versioner-full URL (the clause/section id). */
 const ecfrSection = (u) => {
   const m = /[?&]section=([^&]+)/.exec(u);
@@ -1509,6 +1517,344 @@ async function testFarComplianceMatrix() {
   _clearCache(); // leave a clean cache for any later suite.
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 10. far_search — FAR/DFARS-scoped search over ecfr.search (dist/far.js,
+//     fetch-mock). Guards the composition's load-bearing behaviors: the chapter
+//     scope keeps GSAM/agency supplements OUT (no 552-over-52 leakage); historical
+//     versions collapse to the CURRENT one with the raw→distinct count disclosed;
+//     a section with only historical rows keeps its latest marked isCurrent:false;
+//     partsOnly filters by part; a search-endpoint 503 THROWS (never a fake 0);
+//     and the additive ecfr.search change is truly additive (chapterless call
+//     still returns the same shape + the new endsOn field).
+//
+//     eCFR search RAW response shape (what ecfr.search parses):
+//       { results: [ { type, hierarchy:{title,chapter,part,section},
+//         hierarchy_headings, full_text_excerpt, score, starts_on, ends_on } ],
+//         meta: { total_count } }
+//     The chapter filter is SERVER-SIDE (a URL param), so a realistic mock
+//     returns ONLY the rows for the queried chapter. One case additionally injects
+//     a stray chapter-5 row into a chapter-1 response to prove far_search does not
+//     itself re-admit a non-FAR section even if the upstream ever leaked one.
+// ══════════════════════════════════════════════════════════════════════════
+async function testFarSearch() {
+  section("10. far_search FAR/DFARS scope + historical dedupe (fetch-mock)");
+
+  const titles = () => mockResponse({ status: 200, json: TITLES_JSON });
+
+  /** Build one raw eCFR search result row. */
+  const row = (o = {}) => ({
+    type: "SECTION",
+    hierarchy: {
+      title: "48",
+      chapter: String(o.chapter ?? 1),
+      part: String(o.part ?? 52),
+      section: o.section ?? "52.219-14",
+    },
+    hierarchy_headings: {
+      title: "Federal Acquisition Regulations System",
+      section: o.heading ?? "Limitations on Subcontracting",
+    },
+    full_text_excerpt: o.excerpt ?? "…limitations on subcontracting…",
+    score: o.score ?? 1,
+    starts_on: o.starts_on ?? "2022-10-28",
+    ends_on: o.ends_on ?? null,
+  });
+  /** A raw search response body (results + a total_count meta). */
+  const searchBody = (results, total_count = results.length) =>
+    mockResponse({ status: 200, json: { results, meta: { total_count } } });
+
+  // ── (a) SCOPE:FAR — a chapter-1 response that also carries a STRAY chapter-5
+  // (GSAM 552.x) row. far_search must return ONLY FAR rows: the chapter filter is
+  // in the URL, and far_search itself must not re-admit the GSAM section. (We also
+  // assert the URL carried hierarchy[chapter]=1.)
+  await withFetch(
+    (u, _i, calls) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrSearchResults(u)) {
+        calls._chapterParam = ecfrSearchChapter(u);
+        return searchBody([
+          row({ chapter: 1, part: 52, section: "52.219-14", ends_on: null }),
+          row({ chapter: 1, part: 19, section: "19.809-2", ends_on: null,
+                heading: "Set-aside procedures", excerpt: "…set-aside…" }),
+          // A GSAM leak the filter SHOULD have excluded — far_search must drop it.
+          row({ chapter: 5, part: 552, section: "552.219-14", ends_on: null,
+                heading: "GSAM subcontracting", excerpt: "…gsam…" }),
+        ], 380);
+      }
+      return failClosed()();
+    },
+    async (calls) => {
+      const res = await farSearch({ query: "limitations on subcontracting", scope: "far" });
+      const d = res.data;
+      ok("scope:far ⇒ far_search queried hierarchy[chapter]=1 (server-side FAR filter)",
+        calls._chapterParam === 1, JSON.stringify(calls._chapterParam));
+      ok("scope:far ⇒ EVERY returned row is regulation 'FAR' (no GSAM/agency leakage)",
+        d.rows.length > 0 && d.rows.every((r) => r.regulation === "FAR"),
+        JSON.stringify(d.rows.map((r) => ({ s: r.section, reg: r.regulation }))));
+      ok("scope:far ⇒ the GSAM 552.219-14 row is NOT present (dropped by the scope guard)",
+        !d.rows.some((r) => r.section === "552.219-14"),
+        JSON.stringify(d.rows.map((r) => r.section)));
+      ok("scope:far ⇒ a note DISCLOSES the off-scope drop (defense-in-depth, no leakage)",
+        res.meta.notes.some((n) => /outside the requested scope.*dropped by a defense-in-depth chapter check.*ONLY FAR/i.test(n)),
+        JSON.stringify(res.meta.notes));
+      ok("scope:far ⇒ the two FAR sections ARE present",
+        d.rows.some((r) => r.section === "52.219-14") &&
+        d.rows.some((r) => r.section === "19.809-2"),
+        JSON.stringify(d.rows.map((r) => r.section)));
+      ok("scope:far ⇒ data.scope echoed 'far'", d.scope === "far", JSON.stringify(d.scope));
+      ok("scope:far ⇒ farOverhaulRisk present, appliesTo 'FAR' (in data, survives buildMeta)",
+        d.farOverhaulRisk && d.farOverhaulRisk.appliesTo === "FAR",
+        JSON.stringify(d.farOverhaulRisk && d.farOverhaulRisk.appliesTo));
+      ok("scope:far ⇒ titleUpToDateAsOf carried in data (2026-07-01)",
+        d.titleUpToDateAsOf === "2026-07-01", JSON.stringify(d.titleUpToDateAsOf));
+    },
+  );
+
+  // ── (b) DEDUPE: one section (52.219-14) appears 3× (ends_on date, date, null) →
+  // ONE row, isCurrent:true; distinctSections===1; the collapse note is present.
+  // dedupeVersions:false → all 3 rows, no collapse.
+  const threeVersions = () => [
+    row({ section: "52.219-14", ends_on: "2022-09-22", starts_on: "2021-09-10" }),
+    row({ section: "52.219-14", ends_on: "2022-10-27", starts_on: "2022-09-23" }),
+    row({ section: "52.219-14", ends_on: null, starts_on: "2022-10-28" }),
+  ];
+  await withFetch(
+    (u) => (isEcfrTitles(u) ? titles() : isEcfrSearchResults(u) ? searchBody(threeVersions(), 3) : failClosed()()),
+    async () => {
+      const res = await farSearch({ query: "limitations on subcontracting", scope: "far" });
+      const d = res.data;
+      ok("dedupe(default) ⇒ 3 same-section versions collapse to ONE row",
+        d.rows.length === 1 && d.rows[0].section === "52.219-14",
+        JSON.stringify(d.rows.map((r) => ({ s: r.section, ends: r.endsOn }))));
+      ok("dedupe(default) ⇒ the kept row is the CURRENT one (endsOn null, isCurrent true)",
+        d.rows[0].endsOn === null && d.rows[0].isCurrent === true,
+        JSON.stringify({ ends: d.rows[0].endsOn, cur: d.rows[0].isCurrent }));
+      ok("dedupe(default) ⇒ distinctSections === 1",
+        d.distinctSections === 1, JSON.stringify(d.distinctSections));
+      ok("dedupe(default) ⇒ a note DISCLOSES the raw→distinct collapse (historical collapsed)",
+        res.meta.notes.some((n) => /raw result\(s\).*distinct current section\(s\).*historical versions collapsed/i.test(n)),
+        JSON.stringify(res.meta.notes));
+      ok("dedupe(default) ⇒ filtersApplied includes 'dedupeVersions'",
+        (res.meta.filtersApplied ?? []).includes("dedupeVersions"),
+        JSON.stringify(res.meta.filtersApplied));
+    },
+  );
+  await withFetch(
+    (u) => (isEcfrTitles(u) ? titles() : isEcfrSearchResults(u) ? searchBody(threeVersions(), 3) : failClosed()()),
+    async () => {
+      const res = await farSearch({
+        query: "limitations on subcontracting",
+        scope: "far",
+        dedupeVersions: false,
+        perPage: 20,
+      });
+      const d = res.data;
+      ok("dedupeVersions:false ⇒ all 3 raw rows returned (no collapse)",
+        d.rows.length === 3 && d.rows.every((r) => r.section === "52.219-14"),
+        JSON.stringify(d.rows.map((r) => r.endsOn)));
+      ok("dedupeVersions:false ⇒ isCurrent honest per row (2 historical false, 1 current true)",
+        d.rows.filter((r) => r.isCurrent).length === 1 &&
+        d.rows.filter((r) => !r.isCurrent).length === 2,
+        JSON.stringify(d.rows.map((r) => ({ ends: r.endsOn, cur: r.isCurrent }))));
+      ok("dedupeVersions:false ⇒ NO 'historical versions collapsed' note (nothing collapsed)",
+        !res.meta.notes.some((n) => /historical versions collapsed/i.test(n)),
+        JSON.stringify(res.meta.notes));
+      ok("dedupeVersions:false ⇒ filtersApplied does NOT include 'dedupeVersions'",
+        !(res.meta.filtersApplied ?? []).includes("dedupeVersions"),
+        JSON.stringify(res.meta.filtersApplied));
+    },
+  );
+
+  // ── (c) A section with ONLY historical rows (all ends_on != null) → dedupe keeps
+  // the LATEST (max starts_on), marked isCurrent:false, and DISCLOSES it.
+  await withFetch(
+    (u) => (isEcfrTitles(u) ? titles() : isEcfrSearchResults(u) ? searchBody([
+      row({ section: "52.222-99", ends_on: "2020-01-01", starts_on: "2019-01-01",
+            heading: "Old A", part: 52 }),
+      row({ section: "52.222-99", ends_on: "2021-06-30", starts_on: "2020-01-02",
+            heading: "Old B (latest historical)", part: 52 }),
+    ], 2) : failClosed()()),
+    async () => {
+      const res = await farSearch({ query: "old clause", scope: "far" });
+      const d = res.data;
+      ok("hist-only ⇒ ONE row kept for the section (collapsed)",
+        d.rows.length === 1 && d.rows[0].section === "52.222-99",
+        JSON.stringify(d.rows.map((r) => ({ s: r.section, ends: r.endsOn }))));
+      ok("hist-only ⇒ the kept row is the LATEST historical (starts_on 2020-01-02, ends 2021-06-30)",
+        d.rows[0].effectiveOn === "2020-01-02" && d.rows[0].endsOn === "2021-06-30",
+        JSON.stringify({ eff: d.rows[0].effectiveOn, ends: d.rows[0].endsOn }));
+      ok("hist-only ⇒ isCurrent:false (no in-force version in the window)",
+        d.rows[0].isCurrent === false, JSON.stringify(d.rows[0].isCurrent));
+      ok("hist-only ⇒ a note DISCLOSES the kept-historical row (no current version)",
+        res.meta.notes.some((n) => /NO current \(in-force\) version.*isCurrent:false.*52\.222-99/i.test(n)),
+        JSON.stringify(res.meta.notes));
+    },
+  );
+
+  // ── (d) partsOnly:[52] → only part-52 rows survive (a part-19 FAR row is dropped
+  // by the client-side part filter, even though it is a legit FAR chapter-1 row).
+  await withFetch(
+    (u) => (isEcfrTitles(u) ? titles() : isEcfrSearchResults(u) ? searchBody([
+      row({ chapter: 1, part: 52, section: "52.219-14", ends_on: null }),
+      row({ chapter: 1, part: 19, section: "19.809-2", ends_on: null,
+            heading: "Set-aside procedures" }),
+      row({ chapter: 1, part: 52, section: "52.219-8", ends_on: null,
+            heading: "Utilization of SB concerns" }),
+    ], 3) : failClosed()()),
+    async () => {
+      const res = await farSearch({
+        query: "subcontracting",
+        scope: "far",
+        partsOnly: [52],
+      });
+      const d = res.data;
+      ok("partsOnly:[52] ⇒ EVERY returned row is part 52",
+        d.rows.length > 0 && d.rows.every((r) => r.part === 52),
+        JSON.stringify(d.rows.map((r) => ({ s: r.section, p: r.part }))));
+      ok("partsOnly:[52] ⇒ the part-19 row (19.809-2) is dropped",
+        !d.rows.some((r) => r.section === "19.809-2"),
+        JSON.stringify(d.rows.map((r) => r.section)));
+      ok("partsOnly:[52] ⇒ both part-52 rows present (52.219-14, 52.219-8)",
+        d.rows.some((r) => r.section === "52.219-14") &&
+        d.rows.some((r) => r.section === "52.219-8"),
+        JSON.stringify(d.rows.map((r) => r.section)));
+      ok("partsOnly:[52] ⇒ filtersApplied includes 'partsOnly'",
+        (res.meta.filtersApplied ?? []).includes("partsOnly"),
+        JSON.stringify(res.meta.filtersApplied));
+    },
+  );
+
+  // ── (e) SEARCH FETCH 503 ⇒ far_search THROWS (upstream_unavailable, retryable) —
+  // a DOWN search endpoint must NEVER read as "0 results"/degraded-silent.
+  await withFetch(
+    (u) => (isEcfrSearchResults(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error, value } = await expectThrow(() =>
+        farSearch({ query: "limitations on subcontracting", scope: "far" }));
+      ok("search 503 ⇒ THROWS (never a silent empty/0-results view)",
+        threw && value === undefined, JSON.stringify({ threw, value }));
+      ok("search 503 ⇒ kind upstream_unavailable, retryable:true (classified, propagated)",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (f) scope:both → TWO searches (chapter 1 AND chapter 2), rows merged and
+  // tagged FAR/DFARS by the chapter each came from.
+  await withFetch(
+    (u, _i, calls) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrSearchResults(u)) {
+        const ch = ecfrSearchChapter(u);
+        (calls._chapters ??= []).push(ch);
+        if (ch === 1) return searchBody([
+          row({ chapter: 1, part: 52, section: "52.204-25", ends_on: null,
+                heading: "Prohibition (FAR)" }),
+        ], 5);
+        if (ch === 2) return searchBody([
+          row({ chapter: 2, part: 252, section: "252.204-7012", ends_on: null,
+                heading: "Safeguarding CDI (DFARS)" }),
+        ], 3);
+      }
+      return failClosed()();
+    },
+    async (calls) => {
+      const res = await farSearch({ query: "covered defense information", scope: "both", perPage: 10 });
+      const d = res.data;
+      ok("scope:both ⇒ queried BOTH chapter 1 and chapter 2",
+        (calls._chapters ?? []).includes(1) && (calls._chapters ?? []).includes(2),
+        JSON.stringify(calls._chapters));
+      ok("scope:both ⇒ the FAR row is tagged regulation 'FAR'",
+        d.rows.some((r) => r.section === "52.204-25" && r.regulation === "FAR"),
+        JSON.stringify(d.rows.map((r) => ({ s: r.section, reg: r.regulation }))));
+      ok("scope:both ⇒ the DFARS row is tagged regulation 'DFARS'",
+        d.rows.some((r) => r.section === "252.204-7012" && r.regulation === "DFARS"),
+        JSON.stringify(d.rows.map((r) => ({ s: r.section, reg: r.regulation }))));
+    },
+  );
+
+  // ── (g) ADDITIVE-ecfr.search PROOF: a DIRECT ecfr.search({query,titleNumber:48})
+  // with NO chapter still returns the same shape AND now carries the new endsOn
+  // field (additive). The chapterless call must NOT put hierarchy[chapter] in the URL.
+  await withFetch(
+    (u, _i, calls) => {
+      if (isEcfrSearchResults(u)) {
+        calls._hadChapterParam = /hierarchy(?:%5B|\[)chapter/.test(u);
+        return searchBody([
+          row({ chapter: 1, part: 52, section: "52.212-4", ends_on: null, starts_on: "2023-11-01" }),
+        ], 42);
+      }
+      return failClosed()();
+    },
+    async (calls) => {
+      const res = await ecfrSearch({ query: "commercial items", titleNumber: 48 });
+      const r0 = res.data.results[0];
+      ok("ecfr.search(no chapter) ⇒ URL carries NO hierarchy[chapter] (unchanged behavior)",
+        calls._hadChapterParam === false, JSON.stringify(calls._hadChapterParam));
+      ok("ecfr.search(no chapter) ⇒ same mapped shape (section/effectiveOn/score present)",
+        r0 && r0.section === "52.212-4" && r0.effectiveOn === "2023-11-01" &&
+        typeof r0.score === "number",
+        JSON.stringify(r0 && { section: r0.section, eff: r0.effectiveOn }));
+      ok("ecfr.search(no chapter) ⇒ NEW additive field endsOn present (null = current)",
+        r0 && "endsOn" in r0 && r0.endsOn === null,
+        JSON.stringify(r0 && { endsOn: r0.endsOn }));
+      ok("ecfr.search(no chapter) ⇒ _meta.totalAvailable is the real upstream count (42, unchanged)",
+        res.meta.totalAvailable === 42, JSON.stringify(res.meta.totalAvailable));
+    },
+  );
+  // ── (g) SECTION-LESS APPENDIX dedup (the review-caught BLOCK): eCFR returns
+  // chapter/part-level APPENDIX hits with NO hierarchy.section. Keyed on `section`
+  // alone they'd all collide on "" → distinct appendices SILENTLY dropped +
+  // distinctSections corrupted. far_search must key a section-less row on its
+  // (distinct) headingPath, so every DISTINCT appendix survives while the SAME
+  // appendix's own historical+current versions still collapse.
+  const appx = (heading, o = {}) => ({
+    type: "APPENDIX",
+    hierarchy: { title: "48", chapter: "2" }, // NO section, NO part (chapter-level)
+    hierarchy_headings: { title: "DFARS", appendix: heading },
+    full_text_excerpt: "…appendix text…",
+    score: o.score ?? 1,
+    starts_on: o.starts_on ?? "2020-01-01",
+    ends_on: o.ends_on ?? null,
+  });
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrSearchResults(u))
+        return searchBody([
+          appx("Appendix A to Chapter 2", { ends_on: "2019-12-31" }), // historical only
+          appx("Appendix G to Chapter 2", { ends_on: "2018-01-01", starts_on: "2015-01-01" }), // G historical
+          appx("Appendix G to Chapter 2", { ends_on: null, starts_on: "2020-01-01" }), // G current
+          appx("Appendix H to Chapter 2", { ends_on: null }), // current
+          appx("Appendix I to Chapter 2", { ends_on: null }), // current
+        ]);
+      return failClosed()();
+    },
+    async () => {
+      const res = await farSearch({ query: "appendix", scope: "dfars", perPage: 20 });
+      const d = res.data;
+      const heads = d.rows.map((r) => r.headingPath);
+      ok("appendix: 4 DISTINCT section-less appendices survive (no '' collision, none dropped)",
+        d.rows.length === 4 &&
+          ["Appendix A", "Appendix G", "Appendix H", "Appendix I"].every((a) =>
+            heads.some((h) => h.includes(a))),
+        JSON.stringify(heads));
+      ok("appendix: distinctSections === 4 (counted on the fallback key, not the empty section)",
+        d.distinctSections === 4, JSON.stringify(d.distinctSections));
+      ok("appendix: Appendix G's two versions collapsed to its CURRENT one (isCurrent true, endsOn null)",
+        (() => { const g = d.rows.find((r) => r.headingPath.includes("Appendix G")); return !!g && g.isCurrent === true && g.endsOn === null; })(),
+        JSON.stringify(d.rows.find((r) => r.headingPath.includes("Appendix G"))));
+      ok("appendix: Appendix A (historical-only) kept isCurrent:false AND disclosed in a note",
+        (() => { const a = d.rows.find((r) => r.headingPath.includes("Appendix A")); return !!a && a.isCurrent === false; })() &&
+          res.meta.notes.some((n) => /NO current \(in-force\) version/i.test(n)),
+        JSON.stringify({ notes: res.meta.notes }));
+    },
+  );
+
+  _clearCache(); // leave a clean cache for any later suite.
+}
+
 // ─── Meta-test: the harness FAILS LOUDLY when a guarded behavior breaks ────
 // Proves the assertions are real (not vacuously green). We re-run the D2
 // invariant against a DELIBERATELY-WRONG expectation and confirm it would fail;
@@ -2185,6 +2531,7 @@ async function main() {
   await testSbaSizeStandard();
   await testFarClauseLookup();
   await testFarComplianceMatrix();
+  await testFarSearch();
   await testSearchOutageHonesty();
   await testGetOpportunityDetailHonesty();
 

@@ -127,5 +127,43 @@ export declare function farComplianceMatrix(args: {
         gates: number;
     };
 }>>;
+/** Which regulation family a far_search scope targets. */
+type FarSearchScope = "far" | "dfars" | "both";
+/** One far_search result row. */
+type FarSearchRow = {
+    regulation: Regulation;
+    type: string;
+    /** The FAR/DFARS part as a number (null if unparseable), for partsOnly. */
+    part: number | null;
+    section: string;
+    headingPath: string;
+    excerpt: string;
+    score: number;
+    ecfrUrl: string;
+    effectiveOn: string;
+    endsOn: string | null;
+    /** endsOn==null ⇒ the CURRENT (in-force) version; false ⇒ a kept historical. */
+    isCurrent: boolean;
+};
+export declare function farSearch(args: {
+    query: string;
+    scope?: FarSearchScope;
+    dedupeVersions?: boolean;
+    partsOnly?: number[];
+    perPage?: number;
+}): Promise<import("./meta.js").MetaBundle<{
+    query: string;
+    scope: FarSearchScope;
+    rows: FarSearchRow[];
+    returned: number;
+    distinctSections: number;
+    titleUpToDateAsOf: string | null;
+    farOverhaulRisk: {
+        note: string;
+        authoritativeList: string;
+        deviationSources: string[];
+        appliesTo: Regulation;
+    };
+}>>;
 export {};
 //# sourceMappingURL=far.d.ts.map

@@ -48,6 +48,13 @@ export async function search(args) {
         // an "unpermitted parameter" error from the eCFR API).
         url.searchParams.set("hierarchy[title]", String(args.titleNumber));
     }
+    // Optional chapter filter (additive; existing ecfr_search callers pass none).
+    // Within Title 48: chapter 1 = FAR, chapter 2 = DFARS, chapter 5 = GSAM, etc.
+    // This is what lets far_search scope to FAR/DFARS and keep GSAM/agency
+    // supplements out server-side. Same hierarchy[…] contract as the title filter.
+    if (args.chapter !== undefined) {
+        url.searchParams.set("hierarchy[chapter]", String(args.chapter));
+    }
     const json = await fetchJson(url.toString());
     const data = {
         results: (json.results ?? []).map((r) => ({
@@ -67,6 +74,11 @@ export async function search(args) {
                 ? buildEcfrUrl(r.hierarchy)
                 : "",
             effectiveOn: r.starts_on ?? "",
+            // Additive: the version's end date. null = the CURRENT (in-force) version;
+            // a non-null date = a HISTORICAL version. eCFR search returns ~5 versions
+            // per section; existing ecfr_search callers simply ignore this extra field,
+            // while far_search uses it to collapse historical dups to the current one.
+            endsOn: r.ends_on ?? null,
         })),
     };
     // Truthful `_meta` (spec §1.2 A6, §2.3). eCFR returns a hit count in

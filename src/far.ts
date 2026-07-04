@@ -35,7 +35,7 @@
 
 import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
 import { memoize } from "./cache.js";
-import { listTitles } from "./ecfr.js";
+import { listTitles, search as ecfrSearch } from "./ecfr.js";
 import { withMeta } from "./meta.js";
 
 const ECFR = "https://www.ecfr.gov/api";
@@ -683,6 +683,297 @@ export async function farComplianceMatrix(args: {
       : undefined,
     filtersApplied: [],
     filtersDropped: [],
+    notes,
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// far_search — FAR/DFARS-scoped semantic search (the discovery front-door).
+//
+// COMPOSES ecfr.search. It fixes the two compliance-use-case flaws of the raw
+// full-text ecfr_search: (1) it mixes GSAM/agency-supplement sections into FAR
+// results (the 552-over-52 mis-rank), and (2) it returns eCFR's ~5×-per-section
+// HISTORICAL duplicates. far_search scopes by chapter (FAR=1 / DFARS=2) — which
+// keeps GSAM (chapter 5) and other supplements out at the source — and collapses
+// each section's historical versions to the CURRENT one (ends_on==null). It's
+// the "which clauses touch topic X" front-door that then feeds far_clause_lookup
+// for authoritative text.
+//
+// TRUTHFULNESS invariants (a reviewer WILL attack these):
+//   - scope:far returns ONLY FAR (chapter-1) rows — no GSAM/agency-supplement
+//     leakage. The chapter filter bites server-side; we also never re-admit a
+//     non-FAR section.
+//   - dedupeVersions NEVER drops a DISTINCT section — it only collapses the SAME
+//     section's historical dups; the raw→distinct collapse is disclosed, and
+//     dedupeVersions:false returns every raw row (incl. historical).
+//   - isCurrent per row === (endsOn==null), honest. A section with NO current
+//     row in the window keeps its LATEST version, marked isCurrent:false + noted.
+//   - A search-endpoint FAILURE PROPAGATES (ecfr.search throws) — a DOWN service
+//     must NEVER read as "0 results" (the load-bearing project lesson).
+//   - No fabricated totalAvailable — a deduped view has no clean upstream count.
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Which regulation family a far_search scope targets. */
+type FarSearchScope = "far" | "dfars" | "both";
+
+/** eCFR Title-48 chapter for a single-regulation scope (1=FAR, 2=DFARS). */
+const SCOPE_CHAPTER: Record<"far" | "dfars", number> = { far: 1, dfars: 2 };
+
+/** The mapped shape of one ecfr.search result row (fields far_search consumes). */
+type EcfrSearchRow = Awaited<ReturnType<typeof ecfrSearch>>["data"]["results"][number];
+
+/** One far_search result row. */
+type FarSearchRow = {
+  regulation: Regulation;
+  type: string;
+  /** The FAR/DFARS part as a number (null if unparseable), for partsOnly. */
+  part: number | null;
+  section: string;
+  headingPath: string;
+  excerpt: string;
+  score: number;
+  ecfrUrl: string;
+  effectiveOn: string;
+  endsOn: string | null;
+  /** endsOn==null ⇒ the CURRENT (in-force) version; false ⇒ a kept historical. */
+  isCurrent: boolean;
+};
+
+/** Regulation family from the eCFR chapter we queried, falling back to the
+ * section prefix (252.→DFARS, 52.→FAR) when a row's chapter is ambiguous. The
+ * queried chapter is authoritative (the server-side filter guarantees it), so we
+ * prefer it and only consult the prefix as a defense-in-depth cross-check. */
+function regulationForRow(queriedChapter: number, section: string): Regulation {
+  if (queriedChapter === 1) return "FAR";
+  if (queriedChapter === 2) return "DFARS";
+  // Defensive fallback (should not hit for scope far/dfars): infer from prefix.
+  return regulationFor(section);
+}
+
+/** Parse a hierarchy.part string to a number; null when absent/unparseable. */
+function partNumber(part: string | undefined): number | null {
+  if (part === undefined || part === "") return null;
+  const n = Number(part);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Map one raw ecfr.search row → a FarSearchRow, tagging regulation from the
+ * chapter we queried with and deriving isCurrent from endsOn.
+ */
+function mapFarRow(raw: EcfrSearchRow, queriedChapter: number): FarSearchRow {
+  return {
+    regulation: regulationForRow(queriedChapter, raw.section ?? ""),
+    type: raw.type ?? "",
+    part: partNumber(raw.part),
+    section: raw.section ?? "",
+    headingPath: raw.headingPath ?? "",
+    excerpt: raw.excerpt ?? "",
+    score: raw.score ?? 0,
+    ecfrUrl: raw.ecfrUrl ?? "",
+    effectiveOn: raw.effectiveOn ?? "",
+    endsOn: raw.endsOn ?? null,
+    isCurrent: (raw.endsOn ?? null) === null,
+  };
+}
+
+/**
+ * Collapse same-section historical versions to ONE row per distinct section:
+ * keep the CURRENT version (endsOn==null) if present; otherwise keep the LATEST
+ * (max effectiveOn) and mark it isCurrent:false. NEVER drops a distinct section —
+ * only same-section dups. Input order of first appearance is preserved.
+ */
+/**
+ * The dedup/identity key for a row. Numbered sections key on `section`. But eCFR
+ * returns chapter/part/subpart-level hits — e.g. "Appendix G to Chapter 2" — with
+ * NO hierarchy.section; those must NOT all collide on "" (which would silently
+ * collapse DISTINCT appendices into one and corrupt distinctSections). Fall back
+ * to headingPath, then ecfrUrl, then a per-row anon sentinel — so every DISTINCT
+ * entity gets a distinct key, while a single section's own historical versions
+ * still group together (their headingPath/ecfrUrl is stable across versions).
+ */
+function rowKey(row: FarSearchRow, index: number): string {
+  return row.section || row.headingPath || row.ecfrUrl || `__anon_${index}`;
+}
+
+function dedupeBySection(rows: FarSearchRow[]): FarSearchRow[] {
+  const order: string[] = [];
+  const bySection = new Map<string, FarSearchRow>();
+  rows.forEach((row, i) => {
+    const key = rowKey(row, i);
+    const existing = bySection.get(key);
+    if (existing === undefined) {
+      order.push(key);
+      bySection.set(key, row);
+      return;
+    }
+    // Prefer a current row; between two non-current rows keep the later one.
+    if (existing.isCurrent) return; // already have the current version
+    if (row.isCurrent) {
+      bySection.set(key, row);
+      return;
+    }
+    // Both historical → keep the one with the later effectiveOn (string compare
+    // is correct for ISO YYYY-MM-DD dates).
+    if (row.effectiveOn > existing.effectiveOn) bySection.set(key, row);
+  });
+  return order.map((k) => bySection.get(k) as FarSearchRow);
+}
+
+export async function farSearch(args: {
+  query: string;
+  scope?: FarSearchScope;
+  dedupeVersions?: boolean;
+  partsOnly?: number[];
+  perPage?: number;
+}) {
+  const scope: FarSearchScope = args.scope ?? "far";
+  const dedupeVersions = args.dedupeVersions ?? true;
+  const perPage = args.perPage ?? 5;
+  const partsOnly =
+    args.partsOnly && args.partsOnly.length > 0 ? args.partsOnly : null;
+
+  // Fetch a LARGER raw window than perPage because dedup + partsOnly collapse
+  // rows. Cap at 50 (eCFR search allows more, but 50 is plenty for a top-N view).
+  const rawWindow = Math.min(perPage * 5, 50);
+
+  // ── Fetch the raw rows. A search-endpoint failure PROPAGATES (ecfr.search
+  // throws via fetchWithRetry) — never caught→empty. `both` = two calls merged.
+  const chapters: number[] =
+    scope === "both" ? [1, 2] : [SCOPE_CHAPTER[scope]];
+  let hitWindowCap = false;
+  let offScopeDropped = 0;
+  const mapped: FarSearchRow[] = [];
+  for (const chapter of chapters) {
+    const res = await ecfrSearch({
+      query: args.query,
+      titleNumber: 48,
+      chapter,
+      perPage: rawWindow,
+    });
+    const rows = res.data.results;
+    // If a chapter's raw page filled the window, MORE distinct rows may exist
+    // beyond it → disclose truncation.
+    if (rows.length >= rawWindow) hitWindowCap = true;
+    for (const raw of rows) {
+      // DEFENSE-IN-DEPTH (the load-bearing "no leakage" invariant): the chapter
+      // filter is server-side, but never TRUST it blindly — if a row's OWN
+      // hierarchy.chapter doesn't match the chapter we queried (a GSAM/agency
+      // section that slipped through), DROP it rather than mislabel it FAR/DFARS.
+      // scope:far returns ONLY FAR (chapter 1) rows, full stop. A row with no
+      // chapter at all is kept (the server filter is the primary guarantee; we
+      // only reject a row that positively contradicts the queried scope).
+      const rawChapter =
+        raw.chapter !== undefined && raw.chapter !== ""
+          ? Number(raw.chapter)
+          : null;
+      if (rawChapter !== null && rawChapter !== chapter) {
+        offScopeDropped++;
+        continue;
+      }
+      mapped.push(mapFarRow(raw, chapter));
+    }
+  }
+
+  // ── partsOnly (client-side): restrict to rows whose part is in the list. ──
+  const partFiltered = partsOnly
+    ? mapped.filter((r) => r.part !== null && partsOnly.includes(r.part))
+    : mapped;
+
+  // ── dedupeVersions (default true): collapse same-section historical dups. ──
+  const deduped = dedupeVersions
+    ? dedupeBySection(partFiltered)
+    : partFiltered;
+
+  // ── Return the top perPage DISTINCT rows. ────────────────────────────────
+  const rows = deduped.slice(0, perPage);
+  // Count distinct on the SAME key dedupe uses (section, falling back to
+  // headingPath/ecfrUrl for section-less appendix/part-level hits) — counting on
+  // `section` alone would report every section-less appendix as one.
+  const distinctSections = new Set(rows.map((r, i) => rowKey(r, i))).size;
+
+  // A raw window that filled up, OR a post-slice cut, both mean more may exist.
+  const truncated = hitWindowCap || deduped.length > rows.length;
+
+  // ── Currency (Title 48) — placed in `data` because buildMeta drops it. ────
+  const currency = await title48Currency();
+
+  // ── Disclosing notes. ─────────────────────────────────────────────────────
+  // A human-readable label for the scope (used in several notes below).
+  const scopeRegLabel =
+    scope === "far" ? "FAR" : scope === "dfars" ? "DFARS" : "FAR/DFARS";
+  const notes: string[] = [];
+  // The raw→distinct collapse note reports the IN-SCOPE rows (post off-scope
+  // drop), so it reflects historical-version collapse only, not the scope guard.
+  const inScopeRaw = mapped.length;
+  if (dedupeVersions && inScopeRaw > deduped.length) {
+    notes.push(
+      `${inScopeRaw} raw result(s) → ${deduped.length} distinct current section(s) (historical versions collapsed; set dedupeVersions:false to see all).`,
+    );
+  }
+  // Disclose the defense-in-depth scope guard if it dropped any off-scope row (a
+  // GSAM/agency-supplement section the server-side chapter filter let slip).
+  if (offScopeDropped > 0) {
+    notes.push(
+      `${offScopeDropped} result(s) outside the requested scope (${scopeRegLabel}) were dropped by a defense-in-depth chapter check — far_search returns ONLY ${scopeRegLabel} (Title 48 chapter ${chapters.join("/")}) sections, never GSAM/agency-supplement leakage.`,
+    );
+  }
+  // Disclose any kept-historical row (a distinct section with NO current version
+  // in the window) so isCurrent:false is never a silent surprise.
+  const keptHistorical = rows.filter((r) => !r.isCurrent).map((r) => r.section);
+  if (dedupeVersions && keptHistorical.length > 0) {
+    notes.push(
+      `${keptHistorical.length} section(s) had NO current (in-force) version within the fetched window, so their LATEST historical version was kept and marked isCurrent:false: ${keptHistorical.join(", ")}. Confirm the current text with far_clause_lookup.`,
+    );
+  }
+  if (truncated) {
+    notes.push(
+      `More distinct sections may exist beyond this view (the raw search window or the perPage limit was reached). Narrow the query or raise perPage to see more.`,
+    );
+  }
+  // The RFO currency caveat is ALWAYS surfaced (structural, never per-row-fabricated).
+  notes.push(
+    `RFO caveat: eCFR carries the CODIFIED ${scopeRegLabel} only. The Revolutionary FAR Overhaul is replacing FAR parts via agency class deviations that may not appear here — verify the controlling deviation (farOverhaulRisk.authoritativeList) before relying on a result.`,
+  );
+
+  // farOverhaulRisk applies to the whole scope. Pass a representative regulation
+  // (FAR for far/both, DFARS for dfars) — the caveat text/URLs are identical; the
+  // appliesTo tag reflects the scope's primary family.
+  const farOverhaulRisk = buildFarOverhaulRisk(
+    scope === "dfars" ? "DFARS" : "FAR",
+  );
+
+  // Currency + farOverhaulRisk live in `data` (top-level), NOT the meta partial:
+  // buildMeta finalizes a FIXED-shape ResponseMeta and drops unknown keys, so
+  // these would be silently discarded if passed via _meta (mirrors far_clause_lookup).
+  const data = {
+    query: args.query,
+    scope,
+    rows,
+    returned: rows.length,
+    distinctSections,
+    titleUpToDateAsOf: currency.upToDateAsOf,
+    farOverhaulRisk,
+  };
+
+  const filtersApplied = ["scope"];
+  if (partsOnly) filtersApplied.push("partsOnly");
+  if (dedupeVersions) filtersApplied.push("dedupeVersions");
+
+  return withMeta(data, {
+    source: "ecfr:search/v1 (FAR-scoped)",
+    keylessMode: true,
+    returned: rows.length,
+    // A deduped/scoped view has NO clean upstream match count (eCFR's total_count
+    // counts RAW historical versions across the whole title-chapter, not distinct
+    // current sections). Do NOT fabricate one — null is the honest answer.
+    totalAvailable: null,
+    // With totalAvailable null, buildMeta cannot derive truncation, so we pass it
+    // explicitly when the window/limit was hit (more distinct rows may exist).
+    truncated,
+    filtersApplied,
+    filtersDropped: [],
+    fieldsUnavailable: [],
     notes,
   });
 }
