@@ -124,8 +124,8 @@ export type AwardParentIdv = {
 export declare function getAwardDetail(generatedInternalId: string): Promise<{
     awardId: string;
     recipient: string;
-    totalObligation: number;
-    baseAndAllOptions: number;
+    totalObligation: number | null;
+    baseAndAllOptions: number | null;
     baseExercisedOptions: number | null;
     subawardCount: number | null;
     contractAwardType: string | null;
@@ -205,8 +205,8 @@ export declare function analyzeIncumbent(args: {
     };
     signals: {
         obligatedVsCeiling: {
-            obligated: number;
-            baseAndAllOptions: number;
+            obligated: number | null;
+            baseAndAllOptions: number | null;
             baseExercisedOptions: number | null;
             pctConsumed: number | null;
         };
