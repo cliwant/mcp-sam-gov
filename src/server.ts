@@ -49,6 +49,8 @@ import {
   withMeta,
   type ResponseMeta,
 } from "./meta.js";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
@@ -1302,7 +1304,7 @@ function synthesizeDefaultMeta(
   return buildMeta({ source, keylessMode, complete: true, truncated: false });
 }
 
-async function runTool(
+export async function runTool(
   name: string,
   args: Record<string, unknown>,
   sam: SamGovClient,
@@ -1995,7 +1997,42 @@ function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
   return { type: "string", ...(description ? { description } : {}) };
 }
 
-main().catch((err) => {
-  console.error("[mcp-sam-gov] FATAL:", err);
-  process.exit(1);
-});
+// Start the stdio server ONLY when run directly (node dist/server.js / the
+// mcp-sam-gov bin) — NOT when imported (the fault-injection tests import
+// runTool to exercise the REAL tool-dispatch over a mocked fetch). Preserves
+// the launch: `node dist/server.js` → argv[1] === this file → main() runs;
+// smoke-test.mjs's spawn("node", ["dist/server.js"]) is the same (a subprocess
+// whose argv[1] is dist/server.js); an `import { runTool }` sets argv[1] to the
+// importing script → no match → main() does NOT run, the server is not spawned.
+// Was this module run DIRECTLY (node dist/server.js / the mcp-sam-gov bin), or
+// merely IMPORTED (the fault-injection tests import runTool over a mocked fetch)?
+// Only the direct case starts the stdio server. Canonicalize BOTH sides through
+// realpathSync before comparing, so it holds no matter how symlinks land:
+//   - the `mcp-sam-gov` bin is a symlink to dist/server.js on Unix/macOS, and npm
+//     installs the package dir itself via a symlink — argv[1] must be realpath'd;
+//   - under `--preserve-symlinks-main`, Node keeps import.meta.url as the symlink
+//     path, so THAT side must be realpath'd too.
+// Realpath'ing both and comparing as file:// URLs (pathToFileURL normalizes
+// Windows drive-casing/slashes) makes the check robust across every real launch.
+const invokedDirectly = (() => {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  const canonical = (p: string): string => {
+    try {
+      return pathToFileURL(realpathSync(p)).href;
+    } catch {
+      return pathToFileURL(p).href; // not a real path → best-effort raw
+    }
+  };
+  try {
+    return canonical(argv1) === canonical(fileURLToPath(import.meta.url));
+  } catch {
+    return import.meta.url === pathToFileURL(argv1).href; // extreme fallback
+  }
+})();
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error("[mcp-sam-gov] FATAL:", err);
+    process.exit(1);
+  });
+}
