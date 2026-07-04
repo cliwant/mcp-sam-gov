@@ -25,6 +25,7 @@ export declare function listTitles(): Promise<{
 export declare function search(args: {
     query: string;
     titleNumber?: number;
+    chapter?: number;
     perPage?: number;
 }): Promise<import("./meta.js").MetaBundle<{
     results: {
@@ -39,6 +40,7 @@ export declare function search(args: {
         score: number;
         ecfrUrl: string;
         effectiveOn: string;
+        endsOn: string | null;
     }[];
 }>>;
 //# sourceMappingURL=ecfr.d.ts.map

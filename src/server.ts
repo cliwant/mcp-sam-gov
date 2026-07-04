@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 50 keyless tools wrapping every public federal-contracting data
+ * 51 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -463,6 +463,41 @@ const FarComplianceMatrixInput = z.object({
     .describe(
       "Tag resolved rows that are pass/fail award-eligibility gates (Section 889, CMMC, limitations on subcontracting) with a gate label; others get gate:null. Default true. false ⇒ all gate:null.",
     ),
+});
+
+// FAR/DFARS-scoped search (composes ecfr_search, filtered to FAR/DFARS + deduped)
+const FarSearchInput = z.object({
+  query: z
+    .string()
+    .min(1, "query must be a non-empty search string.")
+    .describe(
+      "What to search FAR/DFARS text for, e.g. 'limitations on subcontracting', 'covered defense information', 'commercial item'.",
+    ),
+  scope: z
+    .enum(["far", "dfars", "both"])
+    .optional()
+    .describe(
+      "Which corpus to search: 'far' (Title 48 chapter 1, the default), 'dfars' (chapter 2), or 'both'. Excludes GSAM/agency supplements.",
+    ),
+  dedupeVersions: z
+    .boolean()
+    .optional()
+    .describe(
+      "Collapse each section's historical versions to the current (in-force) one. Default true. false ⇒ return all raw rows incl. historical.",
+    ),
+  partsOnly: z
+    .array(z.number().int())
+    .optional()
+    .describe(
+      "Restrict results to these FAR/DFARS parts, e.g. [52] for clause text only, [12] for commercial-item policy.",
+    ),
+  perPage: z
+    .number()
+    .int()
+    .min(1)
+    .max(20)
+    .optional()
+    .describe("Number of DISTINCT sections to return (1–20). Default 5."),
 });
 
 // SBA size standards
@@ -990,7 +1025,7 @@ const TOOLS: ToolDef[] = [
     inputSchema: FedRegListAgenciesInput,
   },
 
-  // ━━━ eCFR (3) ━━━
+  // ━━━ eCFR (4) ━━━
   {
     name: "ecfr_search",
     description:
@@ -1014,6 +1049,12 @@ const TOOLS: ToolDef[] = [
     description:
       "Turn a solicitation's cited FAR/DFARS clause list into a proposal-ready compliance matrix (for a Section L/M response). COMPOSES far_clause_lookup over 1–25 clauses (deduped case-insensitively): each resolved row carries the clause text + prescription + regulation + a gate flag marking pass/fail award-eligibility GATES (Section 889 52.204-24/25/26, limitations on subcontracting 52.219-14, DFARS cyber 252.204-7012/7020/7021 incl. CMMC) + the farOverhaulRisk currency caveat. TRUTHFUL by construction: a clause that genuinely isn't in Title 48 (HTTP 404) goes to `unresolved`, while a clause that couldn't be fetched (eCFR down/5xx/rate-limited) goes to a SEPARATE `errored` bucket — a DOWN service is never reported as 'clause doesn't exist'; `summary.total` proves no clause is dropped. Does NOT parse the PDF solicitation to extract the clause list, and gives NO legal advice or compliance verdict. Keyless.",
     inputSchema: FarComplianceMatrixInput,
+  },
+  {
+    name: "far_search",
+    description:
+      "FAR/DFARS-scoped semantic search — the 'which clauses touch topic X' front-door that feeds far_clause_lookup. COMPOSES ecfr_search but fixes its two compliance flaws: (1) it filters to FAR (Title 48 chapter 1) or DFARS (chapter 2), EXCLUDING GSAM/agency supplements (so 'limitations on subcontracting' no longer mis-ranks GSAM 552.x over FAR 52.x), and (2) it collapses eCFR's ~5-versions-per-section HISTORICAL duplicates to the CURRENT in-force version (endsOn==null). scope: far (default) | dfars | both. dedupeVersions (default true; false shows all historical rows). partsOnly restricts to given parts (e.g. [52] clause text). Returns distinct sections with regulation/section/headingPath/excerpt/score/ecfrUrl/effectiveOn/endsOn/isCurrent, distinctSections, and the farOverhaulRisk caveat. TRUTHFUL: dedupe never drops a distinct section (the raw→distinct collapse is disclosed); a kept-historical row is marked isCurrent:false; a search-endpoint outage THROWS (never a fake 0 results); totalAvailable is null (a deduped view has no clean upstream count). Keyless.",
+    inputSchema: FarSearchInput,
   },
 
   // ━━━ SBA — Size Standards (1) ━━━
@@ -1779,6 +1820,8 @@ async function runTool(
       return await far.farComplianceMatrix(
         FarComplianceMatrixInput.parse(args),
       );
+    case "far_search":
+      return await far.farSearch(FarSearchInput.parse(args));
 
     // SBA — Size Standards
     case "sba_size_standard":
