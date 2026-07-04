@@ -13,8 +13,10 @@
  * SAM attachments are predominantly PDF (compressed streams / CID fonts — not
  * hand-rollable), so PDF text extraction uses `unpdf` (a single self-contained
  * package that bundles pdfjs; no transitive deps). text/HTML also occur and are
- * decoded/stripped locally. DOCX and other binaries are NOT half-parsed — they
- * return `text:null` with an honest note.
+ * decoded/stripped locally. DOCX is a ZIP whose `word/document.xml` holds the
+ * body text (deflate-compressed); we parse the ZIP container by hand and inflate
+ * that entry with Node's built-in `node:zlib` — NO new dependency. Other
+ * binaries are NOT half-parsed — they return `text:null` with an honest note.
  *
  * Truthfulness invariants (a reviewer WILL attack these):
  *   - A DOWN fetch (5xx / network / timeout) THROWS `upstream_unavailable`
@@ -22,12 +24,15 @@
  *   - A 404 THROWS `not_found` (the attachment id is gone).
  *   - A PDF that fails to parse (encrypted/corrupt) → `text:null` +
  *     `extractionError` note — NEVER a crash, NEVER a fake "".
- *   - A non-extractable format (docx/binary) → `text:null` + honest note.
+ *   - A DOCX that fails to parse (corrupt/not-a-zip/no `word/document.xml`) →
+ *     `text:null` + a disclosed note — NEVER a crash, NEVER a fake "".
+ *   - A non-extractable format (binary) → `text:null` + honest note.
  *   - SSRF: only sam.gov / api.sam.gov hosts are fetched; anything else →
  *     `invalid_input` with NO network call.
  *   - `truncated`/`pages` are honest.
  */
 
+import zlib from "node:zlib";
 import { extractText, getDocumentProxy } from "unpdf";
 import { ToolErrorCarrier, type ToolError } from "./errors.js";
 import { withMeta, type MetaBundle } from "./meta.js";
@@ -42,6 +47,14 @@ const MAX_MAX_CHARS = 500_000;
  * body is read into an ArrayBuffer + parsed by unpdf.
  */
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+/**
+ * Cap on the DECOMPRESSED size of a DOCX's `word/document.xml`. The fetch size
+ * guard bounds the compressed input, but deflate can expand ~1000× — a crafted
+ * "zip bomb" DOCX (SAM accepts vendor uploads) could inflate to GBs and OOM. A
+ * real Word body is far under this; `inflateRawSync` throws past it → caught →
+ * text:null + a disclosed note.
+ */
+const MAX_DOCX_XML_BYTES = 100 * 1024 * 1024;
 
 /** Browser-ish UA — SAM serves the keyless file endpoint to a normal client. */
 const BROWSER_UA =
@@ -244,6 +257,145 @@ function stripHtml(html: string): string {
     .trim();
 }
 
+/**
+ * Extract the body text of a DOCX (Office Open XML) file, dependency-free.
+ *
+ * A DOCX is a ZIP archive; the document body lives in `word/document.xml`
+ * (normally deflate-compressed, ZIP method 8). We parse the ZIP container by
+ * hand — locate the End-Of-Central-Directory record, walk the central
+ * directory to find `word/document.xml`, read its local file header to compute
+ * the compressed-data offset, slice those bytes, and inflate them with Node's
+ * built-in `node:zlib` (`inflateRawSync`; method 0 = stored → bytes as-is). The
+ * resulting XML is reduced to plain text: `</w:p>`/`</w:tr>` become newlines,
+ * `<w:tab/>` a tab, ALL remaining tags are stripped whole (so open-tag
+ * attributes like `w14:paraId="…"` never leak), entities are decoded, and
+ * runs of intra-line whitespace are collapsed.
+ *
+ * DEFENSIVE: every offset/length read is bounds-checked. Any structural problem
+ * (buffer too small, EOCD/CD/LFH signature bad, an offset or length past the
+ * end of the buffer, `word/document.xml` absent, an unsupported compression
+ * method, or an inflate throw) raises a normal `Error`. It never reads out of
+ * bounds, never loops unbounded, and never returns garbage — the CALLER catches
+ * the throw and reports `text:null` + a disclosed note.
+ *
+ * @throws {Error} on any malformed/unsupported input.
+ */
+function extractDocxText(bytes: Uint8Array): string {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u32 = (o: number): number => dv.getUint32(o, true); // little-endian
+  const u16 = (o: number): number => dv.getUint16(o, true);
+  const utf8 = (start: number, end: number): string =>
+    new TextDecoder("utf-8", { fatal: false }).decode(
+      bytes.subarray(start, end),
+    );
+
+  const EOCD_SIG = 0x06054b50; // PK\x05\x06 End-Of-Central-Directory
+  const CD_SIG = 0x02014b50; // PK\x01\x02 central-directory file header
+  const LFH_SIG = 0x04034b50; // PK\x03\x04 local file header
+
+  const n = bytes.length;
+  // EOCD is 22 bytes minimum (before any trailing comment).
+  if (n < 22) throw new Error("not a valid DOCX (file too small to be a ZIP)");
+
+  // 1. Locate the End-Of-Central-Directory by scanning backward. It sits within
+  //    the last 22 bytes + an optional comment (<= 0xffff), so bound the scan.
+  let eocd = -1;
+  const minStart = Math.max(0, n - 22 - 0xffff);
+  for (let i = n - 22; i >= minStart; i--) {
+    if (u32(i) === EOCD_SIG) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) {
+    throw new Error("not a valid DOCX (ZIP End-Of-Central-Directory not found)");
+  }
+
+  const entryCount = u16(eocd + 10);
+  const cdOffset = u32(eocd + 16);
+  if (cdOffset >= n) {
+    throw new Error("corrupt DOCX (ZIP central-directory offset past end of file)");
+  }
+
+  // 2. Walk the central directory to find `word/document.xml`.
+  let p = cdOffset;
+  let target: { method: number; compressedSize: number; lho: number } | null =
+    null;
+  for (let e = 0; e < entryCount; e++) {
+    if (p + 46 > n) {
+      throw new Error("corrupt DOCX (ZIP central-directory entry truncated)");
+    }
+    if (u32(p) !== CD_SIG) {
+      throw new Error("corrupt DOCX (ZIP central-directory signature invalid)");
+    }
+    const method = u16(p + 10);
+    const compressedSize = u32(p + 20);
+    const nameLen = u16(p + 28);
+    const extraLen = u16(p + 30);
+    const commentLen = u16(p + 32);
+    const lho = u32(p + 42);
+    const nameStart = p + 46;
+    if (nameStart + nameLen > n) {
+      throw new Error("corrupt DOCX (ZIP entry name past end of file)");
+    }
+    const name = utf8(nameStart, nameStart + nameLen);
+    if (name === "word/document.xml") {
+      target = { method, compressedSize, lho };
+      break;
+    }
+    p = nameStart + nameLen + extraLen + commentLen;
+  }
+  if (!target) {
+    throw new Error(
+      "not a valid Word document (word/document.xml not found in the ZIP)",
+    );
+  }
+
+  // 3. Read the local file header to compute where the entry's data begins.
+  const { method, compressedSize, lho } = target;
+  if (lho + 30 > n) {
+    throw new Error("corrupt DOCX (ZIP local file header past end of file)");
+  }
+  if (u32(lho) !== LFH_SIG) {
+    throw new Error("corrupt DOCX (ZIP local file header signature invalid)");
+  }
+  const localNameLen = u16(lho + 26);
+  const localExtraLen = u16(lho + 28);
+  const dataStart = lho + 30 + localNameLen + localExtraLen;
+  if (dataStart + compressedSize > n) {
+    throw new Error("corrupt DOCX (ZIP entry data past end of file)");
+  }
+  const comp = bytes.subarray(dataStart, dataStart + compressedSize);
+
+  // 4. Decompress: method 8 = deflate (raw), method 0 = stored (as-is).
+  let xmlBytes: Uint8Array;
+  if (method === 8) {
+    // maxOutputLength caps the inflated size → throws on a zip-bomb DOCX.
+    xmlBytes = zlib.inflateRawSync(comp, { maxOutputLength: MAX_DOCX_XML_BYTES });
+  } else if (method === 0) {
+    xmlBytes = comp;
+  } else {
+    throw new Error(`unsupported DOCX ZIP compression method ${method}`);
+  }
+  const xml = new TextDecoder("utf-8", { fatal: false }).decode(xmlBytes);
+
+  // 5. XML → text. Convert paragraph/row breaks and tabs to whitespace FIRST,
+  //    then strip ALL remaining tags whole (`<w:p w14:paraId="…">` included, so
+  //    no attribute text leaks), decode entities, collapse intra-line runs.
+  const text = decodeEntities(
+    xml
+      .replace(/<\/w:p>/g, "\n")
+      .replace(/<\/w:tr>/g, "\n")
+      .replace(/<w:tab\b[^>]*\/?>/g, "\t")
+      .replace(/<[^>]+>/g, ""),
+  )
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return text;
+}
+
 /** The tool's success payload (rides in a MetaBundle). */
 export type AttachmentTextData = {
   url: string;
@@ -393,12 +545,27 @@ export async function fetchAttachmentText(
         `PDF text extraction failed (extractionError): ${(e as Error).message}. The file may be encrypted, corrupt, or image-only (scanned). It was NOT read; download it at ${url}.`,
       );
     }
+  } else if (format === "docx") {
+    // DOCX (ZIP + word/document.xml): extract the body text dependency-free.
+    // A corrupt/invalid/no-word-document DOCX is NOT an outage and NOT an empty
+    // document — disclose the failure and return text:null (the B1 empty-guard
+    // downstream turns a genuinely empty body into text:null + a disclosed note).
+    try {
+      text = extractDocxText(bytes);
+      pages = null;
+    } catch (e) {
+      text = null;
+      pages = null;
+      notes.push(
+        `DOCX text extraction failed: ${(e as Error).message}. The file may be corrupt or not a valid Word document — download it at ${url}.`,
+      );
+    }
   } else if (format === "html") {
     text = stripHtml(new TextDecoder("utf-8", { fatal: false }).decode(bytes));
   } else if (format === "text") {
     text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   } else {
-    // docx / binary / other — do NOT half-parse.
+    // binary / other — do NOT half-parse.
     text = null;
     pages = null;
     notes.push(

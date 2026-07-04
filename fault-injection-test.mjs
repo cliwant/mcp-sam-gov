@@ -37,6 +37,7 @@
  * leak state into one another.
  */
 
+import zlib from "node:zlib";
 import { buildMeta } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail } from "./dist/usaspending.js";
@@ -2564,6 +2565,84 @@ const SAM_ATT_URL =
 /** Finalize a MetaBundle's partial meta exactly as the server layer does. */
 const finalMeta = (bundle) => buildMeta(bundle.meta);
 
+// ── DOCX fixtures, built at test time (deterministic, OFFLINE). ──────────────
+// A DOCX is a ZIP whose `word/document.xml` holds the body text. The extractor
+// only reads that entry, so a ZIP containing just it suffices. We build the ZIP
+// container BY HAND (local header + data + central directory + EOCD) and
+// deflate-raw the XML with the SAME zlib the extractor reverses — so a passing
+// assertion proves the hand-rolled ZIP walk + zlib.inflateRawSync + XML-strip
+// actually ran on real compressed bytes, NOT a stub. (`stored:true` emits an
+// uncompressed method-0 entry to exercise that branch too.)
+const _CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function _crc32(buf) {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = _CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function _concatBytes(arrays) {
+  let len = 0;
+  for (const a of arrays) len += a.length;
+  const out = new Uint8Array(len);
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
+}
+/**
+ * Build a minimal, STRUCTURALLY VALID .docx (ZIP) byte array whose sole entry is
+ * `word/document.xml` = `documentXml`. Deflate-raw compressed (method 8) unless
+ * `stored` (method 0). `entryName` overrides the entry name (to build a valid
+ * ZIP that LACKS word/document.xml for the negative case).
+ */
+function buildDocxFixture(documentXml, { stored = false, entryName = "word/document.xml" } = {}) {
+  const enc = new TextEncoder();
+  const name = enc.encode(entryName);
+  const raw = enc.encode(documentXml);
+  const comp = stored ? raw : zlib.deflateRawSync(raw);
+  const crc = _crc32(raw);
+  const method = stored ? 0 : 8;
+
+  const lfh = new Uint8Array(30);
+  const ldv = new DataView(lfh.buffer);
+  ldv.setUint32(0, 0x04034b50, true);   // PK\x03\x04
+  ldv.setUint16(4, 20, true);           // version needed
+  ldv.setUint16(8, method, true);       // compression method
+  ldv.setUint32(14, crc, true);         // crc-32
+  ldv.setUint32(18, comp.length, true); // compressed size
+  ldv.setUint32(22, raw.length, true);  // uncompressed size
+  ldv.setUint16(26, name.length, true); // name length
+  const localBlock = _concatBytes([lfh, name, comp]);
+
+  const cdh = new Uint8Array(46);
+  const cdv = new DataView(cdh.buffer);
+  cdv.setUint32(0, 0x02014b50, true);   // PK\x01\x02
+  cdv.setUint16(4, 20, true);           // version made by
+  cdv.setUint16(6, 20, true);           // version needed
+  cdv.setUint16(10, method, true);      // method
+  cdv.setUint32(16, crc, true);         // crc-32
+  cdv.setUint32(20, comp.length, true); // compressed size
+  cdv.setUint32(24, raw.length, true);  // uncompressed size
+  cdv.setUint16(28, name.length, true); // name length
+  cdv.setUint32(42, 0, true);           // local header offset
+  const cdBlock = _concatBytes([cdh, name]);
+
+  const eocd = new Uint8Array(22);
+  const edv = new DataView(eocd.buffer);
+  edv.setUint32(0, 0x06054b50, true);        // PK\x05\x06
+  edv.setUint16(8, 1, true);                 // entries this disk
+  edv.setUint16(10, 1, true);                // total entries
+  edv.setUint32(12, cdBlock.length, true);   // CD size
+  edv.setUint32(16, localBlock.length, true);// CD offset
+  return _concatBytes([localBlock, cdBlock, eocd]);
+}
+
 async function testFetchAttachmentText() {
   section("11. sam_fetch_attachment_text: extract text + truthful null/outage/SSRF (fetch-mock)");
 
@@ -2652,6 +2731,177 @@ async function testFetchAttachmentText() {
         m.notes.some((n) => /not extractable/i.test(n)), JSON.stringify(m.notes));
       ok("binary ⇒ _meta.complete:false + text in fieldsUnavailable",
         m.complete === false && m.fieldsUnavailable.includes("text"), JSON.stringify(m));
+    },
+  );
+
+  // ── (d-docx-1) DOCX HAPPY PATH — REAL extraction. A minimal but valid DOCX
+  // (ZIP + word/document.xml, deflate-raw compressed) whose body carries a known
+  // sentence ⇒ the tool inflates + strips it and returns the real text. A passing
+  // assertion proves the hand-rolled ZIP walk + zlib.inflateRawSync + XML-strip
+  // ACTUALLY RAN on real compressed bytes, not a stub. pages:null (DOCX has no
+  // fixed page count without rendering — never fabricated).
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: buildDocxFixture(
+          "<w:document><w:body><w:p><w:r><w:t>KNOWN SOW SENTENCE</w:t></w:r></w:p></w:body></w:document>",
+        ),
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="test.docx"',
+        },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      const m = finalMeta(r);
+      ok("DOCX ⇒ format:docx", r.data.format === "docx", r.data.format);
+      ok("DOCX ⇒ text CONTAINS the fixture's real body (inflate+strip ran on the bytes)",
+        typeof r.data.text === "string" && r.data.text.includes("KNOWN SOW SENTENCE"),
+        JSON.stringify(r.data.text));
+      ok("DOCX ⇒ extracted:true", r.data.extracted === true, JSON.stringify(r.data.extracted));
+      ok("DOCX ⇒ pages:null (no fabricated page count)", r.data.pages === null, JSON.stringify(r.data.pages));
+      ok("DOCX ⇒ filename parsed from content-disposition", r.data.filename === "test.docx", r.data.filename);
+      ok("DOCX ⇒ _meta.complete:true (document fully delivered)", m.complete === true, JSON.stringify(m.complete));
+      ok("DOCX ⇒ _meta.returned:1", m.returned === 1, JSON.stringify(m.returned));
+    },
+  );
+
+  // ── (d-docx-2) ATTRIBUTE-JUNK — the open tag carries w14:paraId="…" attributes.
+  // Stripping FULL tags (not partial) means the extracted text is exactly "Hello"
+  // and NEVER leaks "paraId"/"w14"/the attribute value as body text.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: buildDocxFixture(
+          '<w:p w14:paraId="ABC123" w14:textId="DEAD"><w:r><w:t>Hello</w:t></w:r></w:p>',
+        ),
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="attrs.docx"',
+        },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      const t = r.data.text ?? "";
+      ok("DOCX attr-junk ⇒ text is exactly 'Hello'", t === "Hello", JSON.stringify(t));
+      ok("DOCX attr-junk ⇒ NO 'paraId' leaked into text", !t.includes("paraId"), JSON.stringify(t));
+      ok("DOCX attr-junk ⇒ NO 'w14' leaked into text", !t.includes("w14"), JSON.stringify(t));
+      ok("DOCX attr-junk ⇒ NO attribute value ('ABC123') leaked into text",
+        !t.includes("ABC123"), JSON.stringify(t));
+    },
+  );
+
+  // ── (d-docx-3) CORRUPT DOCX — PK\x03\x04 magic (so detectFormat says docx) then
+  // garbage (no central directory / no word/document.xml). The defensive ZIP walk
+  // THROWS internally; the tool CATCHES it ⇒ text:null + an extraction-failure
+  // note, NO crash/throw out of the tool. A bad DOCX is not an outage, not "".
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: new Uint8Array([
+          0x50, 0x4b, 0x03, 0x04,
+          ...strToBytes("not a real zip at all, no central directory record here"),
+        ]),
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="broken.docx"',
+        },
+      }),
+    async () => {
+      const res = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("corrupt DOCX ⇒ does NOT throw (a bad DOCX is not an outage)", res.threw === false,
+        res.threw ? String(res.error) : "");
+      if (!res.threw) {
+        const r = res.value;
+        const m = finalMeta(r);
+        ok("corrupt DOCX ⇒ format:docx (PK magic + .docx ext still detect it)",
+          r.data.format === "docx", r.data.format);
+        ok("corrupt DOCX ⇒ text:null (NOT a fabricated string)", r.data.text === null,
+          JSON.stringify(r.data.text));
+        ok("corrupt DOCX ⇒ pages:null", r.data.pages === null, JSON.stringify(r.data.pages));
+        ok("corrupt DOCX ⇒ extraction-failure note disclosed",
+          m.notes.some((n) => /DOCX text extraction failed/i.test(n)), JSON.stringify(m.notes));
+        ok("corrupt DOCX ⇒ _meta.complete:false + text in fieldsUnavailable",
+          m.complete === false && (m.fieldsUnavailable ?? []).includes("text"), JSON.stringify(m));
+      }
+    },
+  );
+
+  // ── (d-docx-4) EMPTY DOCX — a VALID zip whose word/document.xml has no <w:t>
+  // (empty body). Extraction yields "" ⇒ the B1 empty-guard turns it into
+  // text:null + a disclosed note, NEVER "" delivered as an empty document.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: buildDocxFixture("<w:document><w:body><w:p></w:p></w:body></w:document>"),
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="empty.docx"',
+        },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      const m = finalMeta(r);
+      ok("empty DOCX ⇒ format:docx", r.data.format === "docx", r.data.format);
+      ok("empty DOCX ⇒ text:null (B1 empty-guard; never '' as a fake empty document)",
+        r.data.text === null && r.data.extracted === false,
+        JSON.stringify({ text: r.data.text, extracted: r.data.extracted }));
+      ok("empty DOCX ⇒ empty/whitespace disclosed + text in fieldsUnavailable",
+        m.notes.some((n) => /empty\/whitespace|nothing to read/i.test(n)) &&
+        (m.fieldsUnavailable ?? []).includes("text"),
+        JSON.stringify({ notes: m.notes, fieldsUnavailable: m.fieldsUnavailable }));
+    },
+  );
+
+  // ── (d-docx-5) VALID ZIP, NO word/document.xml — a real zip container whose
+  // only entry is some other file ⇒ the walk finds no word/document.xml and
+  // THROWS internally; the tool CATCHES it ⇒ text:null + disclosed note, no crash.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: buildDocxFixture("<x/>", { entryName: "other/file.xml" }),
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="nodoc.docx"',
+        },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      const m = finalMeta(r);
+      ok("DOCX w/o word/document.xml ⇒ text:null (caught, not crashed)",
+        r.data.text === null && r.data.extracted === false,
+        JSON.stringify({ text: r.data.text, extracted: r.data.extracted }));
+      ok("DOCX w/o word/document.xml ⇒ extraction-failure note names word/document.xml",
+        m.notes.some((n) => /word\/document\.xml|not a valid Word document/i.test(n)),
+        JSON.stringify(m.notes));
+    },
+  );
+
+  // ── (d-docx-6) STORED (method 0) entry — an uncompressed word/document.xml
+  // exercises the method-0 (no inflate) branch of the extractor.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: buildDocxFixture(
+          "<w:p><w:r><w:t>STORED ENTRY TEXT</w:t></w:r></w:p>",
+          { stored: true },
+        ),
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="stored.docx"',
+        },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      ok("DOCX stored (method 0) ⇒ text extracted (no-inflate branch)",
+        typeof r.data.text === "string" && r.data.text.includes("STORED ENTRY TEXT"),
+        JSON.stringify(r.data.text));
     },
   );
 

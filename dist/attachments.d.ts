@@ -13,8 +13,10 @@
  * SAM attachments are predominantly PDF (compressed streams / CID fonts — not
  * hand-rollable), so PDF text extraction uses `unpdf` (a single self-contained
  * package that bundles pdfjs; no transitive deps). text/HTML also occur and are
- * decoded/stripped locally. DOCX and other binaries are NOT half-parsed — they
- * return `text:null` with an honest note.
+ * decoded/stripped locally. DOCX is a ZIP whose `word/document.xml` holds the
+ * body text (deflate-compressed); we parse the ZIP container by hand and inflate
+ * that entry with Node's built-in `node:zlib` — NO new dependency. Other
+ * binaries are NOT half-parsed — they return `text:null` with an honest note.
  *
  * Truthfulness invariants (a reviewer WILL attack these):
  *   - A DOWN fetch (5xx / network / timeout) THROWS `upstream_unavailable`
@@ -22,7 +24,9 @@
  *   - A 404 THROWS `not_found` (the attachment id is gone).
  *   - A PDF that fails to parse (encrypted/corrupt) → `text:null` +
  *     `extractionError` note — NEVER a crash, NEVER a fake "".
- *   - A non-extractable format (docx/binary) → `text:null` + honest note.
+ *   - A DOCX that fails to parse (corrupt/not-a-zip/no `word/document.xml`) →
+ *     `text:null` + a disclosed note — NEVER a crash, NEVER a fake "".
+ *   - A non-extractable format (binary) → `text:null` + honest note.
  *   - SSRF: only sam.gov / api.sam.gov hosts are fetched; anything else →
  *     `invalid_input` with NO network call.
  *   - `truncated`/`pages` are honest.
