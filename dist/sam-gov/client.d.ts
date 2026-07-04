@@ -71,7 +71,31 @@ export declare class SamGovClient {
     private buildAuthSearchUrl;
     private searchPublic;
     private getOpportunityPublic;
+    /**
+     * Fetch the public attachment-download URLs for a notice.
+     *
+     * TRUTHFULNESS (DOWN-reads-as-absent guard): this is called ONLY after the
+     * detail endpoint already 200'd (the notice exists). The resources endpoint
+     * then returns HTTP 200 for every real notice — a genuine NO-attachment
+     * notice is 200 with an empty list. So any non-200 (or a network fault) here
+     * is an OUTAGE, never a genuine "no attachments", and MUST NOT be swallowed
+     * into `[]` — that would let a DOWN list-fetch read as "no documents" and an
+     * AI skip a solicitation whose RFP it could have read. We THROW on non-200
+     * and let a network error propagate; the caller (getOpportunityPublic / the
+     * auth tier) catches it INDIVIDUALLY and records the degradation. A 200 →
+     * the genuine links, which MAY be `[]` (an honest empty, disclosed as such).
+     */
     private getPublicResourceLinks;
+    /**
+     * Resolve an awarding-organization id to its canonical path/name.
+     *
+     * TRUTHFULNESS (same guard as getPublicResourceLinks): a genuine org with no
+     * path → 200 + empty field; a non-200/network fault → an OUTAGE. Do NOT
+     * swallow the outage into `""` (that reads as "no organization" when the
+     * fetch was DOWN). THROW on non-200; let a network error propagate. The
+     * caller catches it INDIVIDUALLY and records the degradation. A 200 → the
+     * name, which MAY be `""` (an honest empty).
+     */
     private getPublicOrgName;
     private publicHeaders;
     private warn;

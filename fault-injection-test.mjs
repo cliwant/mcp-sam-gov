@@ -3132,6 +3132,252 @@ async function testFetchAttachmentText() {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 12. sam_get_opportunity ENRICHMENT honesty (C25) — the enrichment sub-fetch
+//     DOWN-reads-as-absent swallow (dist/sam-gov/index.js SamGovClient, fetch-
+//     mock). Closes the sweep started for search (§9) and detail (§10).
+//
+//     The defect: within an otherwise-successful getOpportunity, the two
+//     enrichment sub-fetches (getPublicResourceLinks / getPublicOrgName)
+//     collapsed EVERY non-200 / network fault into `[]` / `""` — so a DOWN
+//     attachment-list read as "no attachments" and a DOWN org read as "no
+//     organization". Since attachments are now READABLE, a hollow `[]` makes
+//     an AI skip a solicitation whose RFP it could have read.
+//
+//     Live grounding: the resources/org endpoints are called ONLY after the
+//     detail endpoint already 200'd (the notice EXISTS); they then return 200
+//     for every real notice (a genuine NO-attachment notice = 200-empty). So
+//     any non-200 there is an OUTAGE, never a genuine empty. The fix: the
+//     sub-fetches THROW on non-200; getOpportunityPublic catches each
+//     INDIVIDUALLY, records the degraded bucket on `enrichmentDegraded`, and
+//     the wrapper emits an honest `_meta.degraded` + a disclosing note — while
+//     a genuine 200-empty stays a plain, non-degraded result (no crying wolf).
+//     We drive the REAL keyless SamGovClient over a mocked detail(200) +
+//     varied enrichment responses.
+// ══════════════════════════════════════════════════════════════════════════
+async function testGetOpportunityEnrichmentHonesty() {
+  section("12. sam_get_opportunity enrichment (attachments/org) outage-vs-empty honesty (fetch-mock)");
+
+  // Keyless ⇒ auth tier skipped; ONLY the public detail+enrichment tiers run.
+  const client = () => new SamGovClient({ fetch: globalThis.fetch });
+
+  // Same classifiers as §10 (the detail + the two enrichment surfaces).
+  const isDetail = (u) => /\/opps\/v2\/opportunities\/[^/]+($|\?)/.test(u);
+  const isResources = (u) => /\/opps\/v3\/opportunities\/[^/]+\/resources/.test(u);
+  const isOrg = (u) => /\/federalorganizations\/v1\/organizations\//.test(u);
+
+  const REALID = "686796f3919a49f598fcc1493fe81f0a";
+
+  // A valid detail body (200) with data2.title + data2.organizationId, so the
+  // notice is FOUND and the org enrichment is ATTEMPTED. Mirrors §10.
+  const detailBody = () => ({
+    data2: {
+      title: "SAMPLE NOTICE TITLE",
+      type: "Solicitation",
+      organizationId: "ORG123",
+      solicitationNumber: "SOL-9",
+      postedDate: "2026-07-01",
+      solicitation: { setAside: "SBA", deadlines: { response: "2026-08-01T17:00:00-04:00" } },
+      naics: [{ code: ["541512"] }],
+    },
+    description: [{ body: "The full RFP body text." }],
+  });
+  const detailOk = () => mockResponse({ status: 200, json: detailBody() });
+
+  // A resources 200 body carrying ONE real attachment (resourceId present).
+  const resourcesWith = () =>
+    mockResponse({
+      status: 200,
+      json: { _embedded: { opportunityAttachmentList: [{ attachments: [{ resourceId: "res-1", name: "rfp.pdf" }] }] } },
+    });
+  // A resources 200 body with a GENUINELY empty list (the honest no-attachment).
+  const resourcesEmpty = () =>
+    mockResponse({ status: 200, json: { _embedded: { opportunityAttachmentList: [{ attachments: [] }] } } });
+  const orgOk = () =>
+    mockResponse({ status: 200, json: { _embedded: [{ org: { fullParentPathName: "DOD.ARMY" } }] } });
+
+  // Build a handler whose detail is always 200 and whose enrichment responses
+  // are supplied per-case: `res(u)` / `org(u)` return a mockResponse or throw.
+  const handler = (res, org) => (u) => {
+    if (isResources(u)) return res(u);
+    if (isOrg(u)) return org(u);
+    if (isDetail(u)) return detailOk();
+    return failClosed()();
+  };
+
+  // Reproduce the server.ts sam_get_opportunity wrapper's EXACT degraded
+  // mapping over a SamOpportunity, returning { data, meta } (meta finalized via
+  // buildMeta exactly as the server layer does). A healthy notice returns
+  // meta:null (the server would synthesize a default complete:true meta).
+  const wrap = (o) => {
+    const data = {
+      found: true,
+      noticeId: o.noticeId,
+      title: o.title,
+      agency: o.fullParentPathName,
+      attachments: (o.resourceLinks ?? []).map((url, idx) => ({ index: idx, url })),
+    };
+    if (!o.enrichmentDegraded?.length) return { data, meta: null };
+    const notes = o.enrichmentDegraded.map((b) =>
+      b === "attachments"
+        ? "The attachment list could not be fetched (a service issue) — this notice MAY have attachments not shown here; retry. This is NOT a confirmation it has none."
+        : "The awarding-organization path could not be resolved (a service issue) — it is unavailable here, not absent.");
+    const meta = buildMeta({
+      source: "sam.gov (keyless)",
+      keylessMode: true,
+      complete: false,
+      degraded: { attempted: o.enrichmentDegraded.length, succeeded: 0, failed: o.enrichmentDegraded.length },
+      notes,
+    });
+    return { data, meta };
+  };
+
+  // ── (a) resources 503 (org ok) ⇒ enrichmentDegraded:["attachments"]; the
+  // wrapper meta is degraded (complete:false, failed>=1) + the attachments note;
+  // resourceLinks is [] (DISCLOSED as unknown, not silently "none").
+  await withFetch(
+    handler(() => mockResponse({ status: 503 }), orgOk),
+    async () => {
+      const o = await client().getOpportunity(REALID);
+      ok("resources 503 ⇒ notice STILL returned (outage did not sink it)",
+        o && o.noticeId === REALID && o.title === "SAMPLE NOTICE TITLE",
+        JSON.stringify(o && { id: o.noticeId }));
+      ok("resources 503 ⇒ enrichmentDegraded contains 'attachments'",
+        Array.isArray(o?.enrichmentDegraded) && o.enrichmentDegraded.includes("attachments"),
+        JSON.stringify(o?.enrichmentDegraded));
+      ok("resources 503 ⇒ did NOT flag 'organization' (org was healthy)",
+        !o.enrichmentDegraded.includes("organization") && o.fullParentPathName === "DOD.ARMY",
+        JSON.stringify({ deg: o.enrichmentDegraded, org: o.fullParentPathName }));
+      ok("resources 503 ⇒ resourceLinks is [] (empty, but disclosed as unknown)",
+        Array.isArray(o.resourceLinks) && o.resourceLinks.length === 0,
+        JSON.stringify(o.resourceLinks));
+      const { meta } = wrap(o);
+      ok("resources 503 ⇒ wrapper _meta.complete === false",
+        meta && meta.complete === false, JSON.stringify(meta && { c: meta.complete }));
+      ok("resources 503 ⇒ wrapper _meta.degraded.failed >= 1",
+        meta && meta.degraded && meta.degraded.failed >= 1,
+        JSON.stringify(meta && meta.degraded));
+      ok("resources 503 ⇒ a note DISCLOSES 'MAY have attachments' (not a silent none)",
+        meta && meta.notes.some((n) => /MAY have attachments/i.test(n) && /NOT a confirmation/i.test(n)),
+        JSON.stringify(meta && meta.notes));
+    },
+  );
+
+  // ── (b) resources 200-EMPTY (org ok) ⇒ NO enrichmentDegraded; healthy, the
+  // wrapper synthesizes no degraded meta (a genuine no-attachment notice — no
+  // crying wolf).
+  await withFetch(
+    handler(resourcesEmpty, orgOk),
+    async () => {
+      const o = await client().getOpportunity(REALID);
+      ok("resources 200-empty ⇒ NO enrichmentDegraded (genuine empty, not an outage)",
+        o && o.enrichmentDegraded === undefined,
+        JSON.stringify(o && { deg: o.enrichmentDegraded }));
+      ok("resources 200-empty ⇒ resourceLinks is [] (honest empty)",
+        Array.isArray(o.resourceLinks) && o.resourceLinks.length === 0,
+        JSON.stringify(o.resourceLinks));
+      const { meta } = wrap(o);
+      ok("resources 200-empty ⇒ wrapper emits NO degraded meta (no false note)",
+        meta === null, JSON.stringify(meta));
+    },
+  );
+
+  // ── (c) org 503 (resources ok, organizationId present) ⇒
+  // enrichmentDegraded:["organization"] + its note; attachments unaffected.
+  await withFetch(
+    handler(resourcesWith, () => mockResponse({ status: 503 })),
+    async () => {
+      const o = await client().getOpportunity(REALID);
+      ok("org 503 ⇒ enrichmentDegraded contains 'organization'",
+        Array.isArray(o?.enrichmentDegraded) && o.enrichmentDegraded.includes("organization"),
+        JSON.stringify(o?.enrichmentDegraded));
+      ok("org 503 ⇒ did NOT flag 'attachments' (resources was healthy, 1 link)",
+        !o.enrichmentDegraded.includes("attachments") && (o.resourceLinks ?? []).length === 1,
+        JSON.stringify({ deg: o.enrichmentDegraded, links: o.resourceLinks }));
+      ok("org 503 ⇒ fullParentPathName is '' (empty, but disclosed as unknown)",
+        o.fullParentPathName === "", JSON.stringify(o.fullParentPathName));
+      const { meta } = wrap(o);
+      ok("org 503 ⇒ wrapper _meta degraded + the organization note",
+        meta && meta.complete === false && meta.degraded.failed >= 1 &&
+        meta.notes.some((n) => /awarding-organization path could not be resolved/i.test(n) && /not absent/i.test(n)),
+        JSON.stringify(meta && { c: meta.complete, notes: meta.notes }));
+    },
+  );
+
+  // ── (d) BOTH healthy (resources-with + org ok) ⇒ no enrichmentDegraded, no
+  // degraded meta (the plain happy result — attachments + agency populated).
+  await withFetch(
+    handler(resourcesWith, orgOk),
+    async () => {
+      const o = await client().getOpportunity(REALID);
+      ok("both healthy ⇒ NO enrichmentDegraded",
+        o && o.enrichmentDegraded === undefined, JSON.stringify(o && o.enrichmentDegraded));
+      ok("both healthy ⇒ resourceLinks has the 1 attachment, org resolved",
+        (o.resourceLinks ?? []).length === 1 && o.fullParentPathName === "DOD.ARMY",
+        JSON.stringify({ links: o.resourceLinks, org: o.fullParentPathName }));
+      const { meta } = wrap(o);
+      ok("both healthy ⇒ wrapper emits NO degraded meta (plain result)",
+        meta === null, JSON.stringify(meta));
+    },
+  );
+
+  // ── (e) BOTH fail (resources 503 + org 503) ⇒
+  // enrichmentDegraded:["attachments","organization"], degraded.failed === 2.
+  await withFetch(
+    handler(() => mockResponse({ status: 503 }), () => mockResponse({ status: 503 })),
+    async () => {
+      const o = await client().getOpportunity(REALID);
+      ok("both fail ⇒ enrichmentDegraded has BOTH buckets",
+        Array.isArray(o?.enrichmentDegraded) &&
+        o.enrichmentDegraded.includes("attachments") &&
+        o.enrichmentDegraded.includes("organization") &&
+        o.enrichmentDegraded.length === 2,
+        JSON.stringify(o?.enrichmentDegraded));
+      const { meta } = wrap(o);
+      ok("both fail ⇒ wrapper _meta.degraded.failed === 2 (both disclosed)",
+        meta && meta.degraded && meta.degraded.failed === 2 && meta.notes.length === 2,
+        JSON.stringify(meta && meta.degraded));
+    },
+  );
+
+  // ── (f) resources NETWORK fault (fetch rejects) ⇒ same as 503: degraded
+  // "attachments", NOT a silent []. (Proves a raw network error is caught by
+  // the per-enrichment .catch, not swallowed inside the sub-fetch.)
+  await withFetch(
+    (u) => {
+      if (isResources(u)) throw new Error("ECONNRESET");
+      if (isOrg(u)) return orgOk();
+      if (isDetail(u)) return detailOk();
+      return failClosed()();
+    },
+    async () => {
+      const o = await client().getOpportunity(REALID);
+      ok("resources network fault ⇒ enrichmentDegraded 'attachments' (never a silent [])",
+        Array.isArray(o?.enrichmentDegraded) && o.enrichmentDegraded.includes("attachments") &&
+        (o.resourceLinks ?? []).length === 0,
+        JSON.stringify({ deg: o?.enrichmentDegraded, links: o?.resourceLinks }));
+    },
+  );
+
+  // ── (g) detail body WITHOUT organizationId ⇒ org enrichment is SKIPPED (never
+  // attempted), so an org outage cannot occur and NO "organization" bucket is
+  // recorded even when resources also succeeds. (Guards: no phantom org degrade.)
+  await withFetch(
+    (u) => {
+      if (isResources(u)) return resourcesEmpty();
+      if (isOrg(u)) return failClosed()(); // MUST NOT be called
+      if (isDetail(u)) return mockResponse({ status: 200, json: { data2: { title: "NO ORG NOTICE", type: "Solicitation" }, description: [{ body: "x" }] } });
+      return failClosed()();
+    },
+    async () => {
+      const o = await client().getOpportunity(REALID);
+      ok("no organizationId ⇒ org enrichment skipped, NO enrichmentDegraded",
+        o && o.title === "NO ORG NOTICE" && o.enrichmentDegraded === undefined && o.fullParentPathName === "",
+        JSON.stringify(o && { deg: o.enrichmentDegraded, org: o.fullParentPathName }));
+    },
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
@@ -3154,6 +3400,7 @@ async function main() {
   await testFarSearch();
   await testSearchOutageHonesty();
   await testGetOpportunityDetailHonesty();
+  await testGetOpportunityEnrichmentHonesty();
   await testFetchAttachmentText();
 
   // Prove the harness bites.
