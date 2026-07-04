@@ -51,6 +51,7 @@ import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
 import { searchGrants, getGrant } from "./dist/grants.js";
+import { searchDocuments as fedRegSearch, getDocument as fedRegGet } from "./dist/federal-register.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -3922,6 +3923,76 @@ async function testGrantsHonesty() {
   );
 }
 
+// Federal Register (fed_register_search / fed_register_get_document) — honest-by-
+// construction via fetchWithRetry (all 3 fns share fetchJson), now PERMANENTLY
+// guarded. Locks: outage → throws upstream_unavailable (never a silent empty "no
+// rules"); a genuine 404 on a document → throws not_found (distinct from an
+// outage); a genuine zero (count 0) → honest empty + totalAvailable:0.
+async function testFederalRegisterHonesty() {
+  section("15. federalregister.gov search/get outage-vs-genuine-zero honesty (fetch-mock)");
+  const isSearch = (u) => /federalregister\.gov\/api\/v1\/documents\.json/.test(u);
+  const isDoc = (u) => /federalregister\.gov\/api\/v1\/documents\/[^/]+\.json/.test(u);
+
+  // 1. search 503 ⇒ throws upstream_unavailable (NOT a fabricated empty result)
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => fedRegSearch({ query: "acquisition" }));
+      ok("fedreg search 503 ⇒ throws upstream_unavailable (NOT a fake empty 'no documents')",
+        threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // 2. GENUINE zero (count 0) ⇒ honest empty + totalAvailable:0, truncated:false
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { count: 0, total_pages: 0, results: [] } }) : failClosed()()),
+    async () => {
+      const res = await fedRegSearch({ query: "zzznotarealrule" });
+      ok("fedreg search genuine-zero ⇒ honest empty documents[] (a real no-match)",
+        Array.isArray(res.data.documents) && res.data.documents.length === 0, JSON.stringify(res.data.documents));
+      ok("fedreg search genuine-zero ⇒ _meta.totalAvailable 0 + truncated false (distinct from an outage)",
+        res.meta.totalAvailable === 0 && res.meta.truncated === false, JSON.stringify(res.meta));
+    },
+  );
+
+  // 3. results ⇒ maps + TYPE_MAP + totalAvailable = count, truncated when returned<count
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { count: 57, total_pages: 6, results: [
+      { document_number: "2024-12345", title: "Small Business Set-Aside Rule", type: "Proposed Rule", publication_date: "2024-06-01", agencies: [{ name: "Department of Defense", slug: "defense-department" }] },
+    ] } }) : failClosed()()),
+    async () => {
+      const res = await fedRegSearch({ query: "set-aside", perPage: 1 });
+      const d0 = res.data.documents[0];
+      ok("fedreg search results ⇒ maps doc (documentNumber/title/type via TYPE_MAP/agencies)",
+        res.data.documents.length === 1 && d0.documentNumber === "2024-12345" &&
+        d0.type === "PRORULE" && d0.typeDisplay === "Proposed Rule" && d0.agencies[0].slug === "defense-department",
+        JSON.stringify(d0));
+      ok("fedreg search results ⇒ totalAvailable=57 (real total) + truncated true (1<57)",
+        res.meta.totalAvailable === 57 && res.meta.truncated === true, JSON.stringify(res.meta));
+    },
+  );
+
+  // 4. getDocument 503 ⇒ throws upstream_unavailable (outage, not a hollow record)
+  await withFetch(
+    (u) => (isDoc(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => fedRegGet("2024-12345"));
+      ok("fedreg getDocument 503 ⇒ throws upstream_unavailable (never a fabricated record)",
+        threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // 5. getDocument 404 ⇒ throws not_found (genuine missing doc, distinct from outage)
+  await withFetch(
+    (u) => (isDoc(u) ? mockResponse({ status: 404 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => fedRegGet("0000-00000"));
+      ok("fedreg getDocument 404 ⇒ throws not_found (genuine miss, distinct from an outage)",
+        threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError));
+    },
+  );
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -3947,6 +4018,7 @@ async function main() {
   await testGetOpportunityEnrichmentHonesty();
   await testFetchAttachmentText();
   await testGrantsHonesty();
+  await testFederalRegisterHonesty();
 
   // Prove the harness bites.
   await selfCheck();
