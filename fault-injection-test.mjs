@@ -38,7 +38,13 @@
  */
 
 import zlib from "node:zlib";
-import { buildMeta } from "./dist/meta.js";
+// The REAL server tool-dispatcher. Importing dist/server.js is SAFE (does not
+// spawn the stdio server) because main() is entry-point-gated: it runs only
+// when argv[1] === dist/server.js (a direct `node dist/server.js` / the bin /
+// smoke's spawn), never on an import like this one. §9/§12/§13 call this real
+// runTool over a mocked fetch so a regression in the real wrapper turns RED.
+import { runTool } from "./dist/server.js";
+import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
@@ -2173,37 +2179,23 @@ async function testSearchOutageHonesty() {
     isActive: true,
   });
 
-  // The EXACT mapping sam_search_opportunities / sam_search_shaping apply to a
-  // SamSearchResult (mirrors server.ts): on r.degraded → an honest incomplete
-  // partial; else the normal partial. Fed through the REAL buildMeta so the
-  // assertions exercise the shipped invariant logic, not a copy of it.
-  const metaForSearch = (r) =>
-    r.degraded
-      ? buildMeta({
-          source:
-            "sam.gov/sgs/v1 (keyless HAL) (DEGRADED — search backend unavailable)",
-          keylessMode: true,
-          complete: false,
-          totalAvailable: null,
-          returned: 0,
-          notes: [
-            r.degraded.reason +
-              " This is a service outage, not a confirmed zero — retry.",
-          ],
-        })
-      : buildMeta({
-          source: "sam.gov/sgs/v1 (keyless HAL)",
-          keylessMode: true,
-          truncated: r.totalRecords > r.opportunitiesData.length,
-          returned: r.opportunitiesData.length,
-          totalAvailable: r.totalRecords,
-        });
+  // Drive the REAL server wrapper: call runTool("sam_search_opportunities", …)
+  // over the SAME mocked SGS HAL, then finalize its returned MetaBundle through
+  // the REAL buildMeta exactly as the CallTool handler does (`buildMeta(raw.meta)`).
+  // This replaces the former inline `metaForSearch` copy — the outage-vs-zero
+  // mapping under test is now the SHIPPED wrapper code, so a regression edited
+  // into server.ts's degraded/genuine-zero branch turns these assertions RED.
+  // A keyless client is built INSIDE withFetch (so its captured fetchImpl is the
+  // patched mock) and passed straight into runTool.
+  const metaForSearch = (bundle) => buildMeta(bundle.meta);
+  const runSearch = (args, sam) => runTool("sam_search_opportunities", args, sam);
 
   // ── (a) TOTAL OUTAGE: the SGS search URL 503s on every attempt ⇒ the result
   // carries `.degraded` and is an empty 0 — but a DISTINGUISHABLE one.
   await withFetch(
     (u) => (isSgs(u) ? mockResponse({ status: 503 }) : failClosed()()),
     async () => {
+      const sam = new SamGovClient({});
       const r = await client().searchOpportunities({ query: "widgets" });
       ok("outage (SGS 503) ⇒ result.degraded set with a reason",
         r.degraded && typeof r.degraded.reason === "string" &&
@@ -2212,8 +2204,13 @@ async function testSearchOutageHonesty() {
       ok("outage ⇒ totalRecords 0 AND opportunitiesData empty (the empty shape…)",
         r.totalRecords === 0 && r.opportunitiesData.length === 0,
         JSON.stringify({ t: r.totalRecords, n: r.opportunitiesData.length }));
-      // …but the tool `_meta` must NOT read as a confirmed zero.
-      const m = metaForSearch(r);
+      // …but the REAL wrapper's tool `_meta` must NOT read as a confirmed zero.
+      const bundle = await runSearch({ query: "widgets" }, sam);
+      ok("outage ⇒ real wrapper returns null data count (totalRecords null, returned 0)",
+        bundle.data.totalRecords === null && bundle.data.returned === 0 &&
+        bundle.data.opportunities.length === 0,
+        JSON.stringify(bundle.data));
+      const m = metaForSearch(bundle);
       ok("outage ⇒ _meta.complete === false (NOT 'complete' over an outage)",
         m.complete === false, JSON.stringify(m.complete));
       ok("outage ⇒ _meta.totalAvailable === null (we do NOT know the count — never 0)",
@@ -2246,13 +2243,18 @@ async function testSearchOutageHonesty() {
   await withFetch(
     (u) => (isSgs(u) ? sgsPage([], 0) : failClosed()()),
     async () => {
+      const sam = new SamGovClient({});
       const r = await client().searchOpportunities({ query: "nomatchxyz" });
       ok("genuine zero ⇒ NO .degraded marker (healthy source, real 0)",
         r.degraded === undefined, JSON.stringify(r.degraded));
       ok("genuine zero ⇒ totalRecords === 0, opportunitiesData empty",
         r.totalRecords === 0 && r.opportunitiesData.length === 0,
         JSON.stringify({ t: r.totalRecords, n: r.opportunitiesData.length }));
-      const m = metaForSearch(r);
+      const bundle = await runSearch({ query: "nomatchxyz" }, sam);
+      ok("genuine zero ⇒ real wrapper data: totalRecords 0, returned 0 (a real count, not null)",
+        bundle.data.totalRecords === 0 && bundle.data.returned === 0,
+        JSON.stringify(bundle.data));
+      const m = metaForSearch(bundle);
       ok("genuine zero ⇒ _meta.complete === true (a real, complete zero)",
         m.complete === true, JSON.stringify(m.complete));
       ok("genuine zero ⇒ _meta.totalAvailable === 0 (the true count, asserted)",
@@ -2271,13 +2273,15 @@ async function testSearchOutageHonesty() {
   await withFetch(
     (u) => (isSgs(u) ? sgsPage([], 5) : failClosed()()),
     async () => {
+      const sam = new SamGovClient({});
       const r = await client().searchOpportunities({ query: "widgets", offset: 100 });
       ok("partial page ⇒ totalRecords stays 5 (NOT replaced by 0)",
         r.totalRecords === 5, JSON.stringify(r.totalRecords));
       ok("partial page ⇒ this page is empty (0 rows) but that is honest, not degraded",
         r.opportunitiesData.length === 0 && r.degraded === undefined,
         JSON.stringify({ n: r.opportunitiesData.length, d: r.degraded }));
-      const m = metaForSearch(r);
+      const bundle = await runSearch({ query: "widgets", offset: 100 }, sam);
+      const m = metaForSearch(bundle);
       ok("partial page ⇒ _meta.totalAvailable === 5 AND truncated (5 > 0 returned)",
         m.totalAvailable === 5 && m.truncated === true && m.complete === false,
         JSON.stringify({ ta: m.totalAvailable, tr: m.truncated, c: m.complete }));
@@ -2290,12 +2294,18 @@ async function testSearchOutageHonesty() {
   await withFetch(
     (u) => (isSgs(u) ? sgsPage([oppRow("N1"), oppRow("N2")], 2) : failClosed()()),
     async () => {
+      const sam = new SamGovClient({});
       const r = await client().searchOpportunities({ query: "widgets" });
       ok("healthy non-empty ⇒ NO .degraded, totalRecords 2, 2 rows mapped",
         r.degraded === undefined && r.totalRecords === 2 &&
         r.opportunitiesData.length === 2 && r.opportunitiesData[0].noticeId === "N1",
         JSON.stringify({ d: r.degraded, t: r.totalRecords, n: r.opportunitiesData.length }));
-      const m = metaForSearch(r);
+      const bundle = await runSearch({ query: "widgets" }, sam);
+      ok("healthy non-empty ⇒ real wrapper maps 2 rows (noticeId carried through)",
+        bundle.data.returned === 2 && bundle.data.opportunities.length === 2 &&
+        bundle.data.opportunities[0].noticeId === "N1",
+        JSON.stringify({ n: bundle.data.returned, first: bundle.data.opportunities[0]?.noticeId }));
+      const m = metaForSearch(bundle);
       ok("healthy non-empty ⇒ _meta.complete true, totalAvailable 2 (no false degrade)",
         m.complete === true && m.totalAvailable === 2 &&
         !m.notes.some((n) => /service outage/i.test(n)),
@@ -2318,15 +2328,18 @@ async function testSearchOutageHonesty() {
     await withFetch(
       (u) => (isSgs(u) ? mockResponse({ status: 200, json: body }) : failClosed()()),
       async () => {
+        const sam = new SamGovClient({});
         const r = await client().searchOpportunities({ query: "widgets" });
         ok(`hollow-200 (${label}) ⇒ result.degraded set (NOT a fake genuine-zero)`,
           !!r.degraded && r.totalRecords === 0 && r.opportunitiesData.length === 0,
           JSON.stringify({ degraded: r.degraded }));
-        const m = metaForSearch(r);
-        ok(`hollow-200 (${label}) ⇒ _meta complete:false + totalAvailable:null + outage note`,
-          m.complete === false && m.totalAvailable === null &&
+        const bundle = await runSearch({ query: "widgets" }, sam);
+        const m = metaForSearch(bundle);
+        ok(`hollow-200 (${label}) ⇒ real wrapper: totalRecords null + complete:false + totalAvailable:null + outage note`,
+          bundle.data.totalRecords === null && m.complete === false &&
+          m.totalAvailable === null &&
           m.notes.some((n) => /service outage, not a confirmed zero/i.test(n)),
-          JSON.stringify({ c: m.complete, ta: m.totalAvailable }));
+          JSON.stringify({ tr: bundle.data.totalRecords, c: m.complete, ta: m.totalAvailable }));
       },
     );
   }
@@ -3286,31 +3299,19 @@ async function testGetOpportunityEnrichmentHonesty() {
     return failClosed()();
   };
 
-  // Reproduce the server.ts sam_get_opportunity wrapper's EXACT degraded
-  // mapping over a SamOpportunity, returning { data, meta } (meta finalized via
-  // buildMeta exactly as the server layer does). A healthy notice returns
-  // meta:null (the server would synthesize a default complete:true meta).
-  const wrap = (o) => {
-    const data = {
-      found: true,
-      noticeId: o.noticeId,
-      title: o.title,
-      agency: o.fullParentPathName,
-      attachments: (o.resourceLinks ?? []).map((url, idx) => ({ index: idx, url })),
-    };
-    if (!o.enrichmentDegraded?.length) return { data, meta: null };
-    const notes = o.enrichmentDegraded.map((b) =>
-      b === "attachments"
-        ? "The attachment list could not be fetched (a service issue) — this notice MAY have attachments not shown here; retry. This is NOT a confirmation it has none."
-        : "The awarding-organization path could not be resolved (a service issue) — it is unavailable here, not absent.");
-    const meta = buildMeta({
-      source: "sam.gov (keyless)",
-      keylessMode: true,
-      complete: false,
-      degraded: { attempted: o.enrichmentDegraded.length, succeeded: 0, failed: o.enrichmentDegraded.length },
-      notes,
-    });
-    return { data, meta };
+  // Drive the REAL server wrapper: call runTool("sam_get_opportunity", …) over
+  // the SAME mocked detail+enrichment fetch, then finalize its result exactly as
+  // the CallTool handler does — a MetaBundle (via withMeta) → { data, meta:
+  // buildMeta(raw.meta) }; a plain object (healthy notice) → { data, meta:null }
+  // (the server would synthesize a default complete:true meta). This replaces the
+  // former inline `wrap` copy, so a regression in server.ts's enrichmentDegraded
+  // → _meta.degraded/note mapping turns these assertions RED. `sam` is a keyless
+  // client built INSIDE withFetch so its captured fetchImpl is the patched mock.
+  const wrap = async (noticeId, sam) => {
+    const raw = await runTool("sam_get_opportunity", { noticeId }, sam);
+    return isMetaBundle(raw)
+      ? { data: raw.data, meta: buildMeta(raw.meta) }
+      : { data: raw, meta: null };
   };
 
   // ── (a) resources 503 (org ok) ⇒ enrichmentDegraded:["attachments"]; the
@@ -3319,6 +3320,7 @@ async function testGetOpportunityEnrichmentHonesty() {
   await withFetch(
     handler(() => mockResponse({ status: 503 }), orgOk),
     async () => {
+      const sam = new SamGovClient({});
       const o = await client().getOpportunity(REALID);
       ok("resources 503 ⇒ notice STILL returned (outage did not sink it)",
         o && o.noticeId === REALID && o.title === "SAMPLE NOTICE TITLE",
@@ -3332,7 +3334,10 @@ async function testGetOpportunityEnrichmentHonesty() {
       ok("resources 503 ⇒ resourceLinks is [] (empty, but disclosed as unknown)",
         Array.isArray(o.resourceLinks) && o.resourceLinks.length === 0,
         JSON.stringify(o.resourceLinks));
-      const { meta } = wrap(o);
+      const { data, meta } = await wrap(REALID, sam);
+      ok("resources 503 ⇒ real wrapper STILL returns found:true (notice not sunk)",
+        data && data.found === true && data.attachments.length === 0,
+        JSON.stringify(data && { found: data.found, att: data.attachments.length }));
       ok("resources 503 ⇒ wrapper _meta.complete === false",
         meta && meta.complete === false, JSON.stringify(meta && { c: meta.complete }));
       ok("resources 503 ⇒ wrapper _meta.degraded.failed >= 1",
@@ -3350,6 +3355,7 @@ async function testGetOpportunityEnrichmentHonesty() {
   await withFetch(
     handler(resourcesEmpty, orgOk),
     async () => {
+      const sam = new SamGovClient({});
       const o = await client().getOpportunity(REALID);
       ok("resources 200-empty ⇒ NO enrichmentDegraded (genuine empty, not an outage)",
         o && o.enrichmentDegraded === undefined,
@@ -3357,9 +3363,9 @@ async function testGetOpportunityEnrichmentHonesty() {
       ok("resources 200-empty ⇒ resourceLinks is [] (honest empty)",
         Array.isArray(o.resourceLinks) && o.resourceLinks.length === 0,
         JSON.stringify(o.resourceLinks));
-      const { meta } = wrap(o);
-      ok("resources 200-empty ⇒ wrapper emits NO degraded meta (no false note)",
-        meta === null, JSON.stringify(meta));
+      const { data, meta } = await wrap(REALID, sam);
+      ok("resources 200-empty ⇒ real wrapper returns a PLAIN result (found:true, no degraded meta)",
+        meta === null && data && data.found === true, JSON.stringify({ meta, found: data?.found }));
     },
   );
 
@@ -3368,6 +3374,7 @@ async function testGetOpportunityEnrichmentHonesty() {
   await withFetch(
     handler(resourcesWith, () => mockResponse({ status: 503 })),
     async () => {
+      const sam = new SamGovClient({});
       const o = await client().getOpportunity(REALID);
       ok("org 503 ⇒ enrichmentDegraded contains 'organization'",
         Array.isArray(o?.enrichmentDegraded) && o.enrichmentDegraded.includes("organization"),
@@ -3377,7 +3384,7 @@ async function testGetOpportunityEnrichmentHonesty() {
         JSON.stringify({ deg: o.enrichmentDegraded, links: o.resourceLinks }));
       ok("org 503 ⇒ fullParentPathName is '' (empty, but disclosed as unknown)",
         o.fullParentPathName === "", JSON.stringify(o.fullParentPathName));
-      const { meta } = wrap(o);
+      const { meta } = await wrap(REALID, sam);
       ok("org 503 ⇒ wrapper _meta degraded + the organization note",
         meta && meta.complete === false && meta.degraded.failed >= 1 &&
         meta.notes.some((n) => /awarding-organization path could not be resolved/i.test(n) && /not absent/i.test(n)),
@@ -3390,15 +3397,17 @@ async function testGetOpportunityEnrichmentHonesty() {
   await withFetch(
     handler(resourcesWith, orgOk),
     async () => {
+      const sam = new SamGovClient({});
       const o = await client().getOpportunity(REALID);
       ok("both healthy ⇒ NO enrichmentDegraded",
         o && o.enrichmentDegraded === undefined, JSON.stringify(o && o.enrichmentDegraded));
       ok("both healthy ⇒ resourceLinks has the 1 attachment, org resolved",
         (o.resourceLinks ?? []).length === 1 && o.fullParentPathName === "DOD.ARMY",
         JSON.stringify({ links: o.resourceLinks, org: o.fullParentPathName }));
-      const { meta } = wrap(o);
-      ok("both healthy ⇒ wrapper emits NO degraded meta (plain result)",
-        meta === null, JSON.stringify(meta));
+      const { data, meta } = await wrap(REALID, sam);
+      ok("both healthy ⇒ real wrapper emits NO degraded meta (plain result, 1 attachment)",
+        meta === null && data && data.attachments.length === 1 && data.agency === "DOD.ARMY",
+        JSON.stringify({ meta, att: data?.attachments.length, agency: data?.agency }));
     },
   );
 
@@ -3407,6 +3416,7 @@ async function testGetOpportunityEnrichmentHonesty() {
   await withFetch(
     handler(() => mockResponse({ status: 503 }), () => mockResponse({ status: 503 })),
     async () => {
+      const sam = new SamGovClient({});
       const o = await client().getOpportunity(REALID);
       ok("both fail ⇒ enrichmentDegraded has BOTH buckets",
         Array.isArray(o?.enrichmentDegraded) &&
@@ -3414,7 +3424,7 @@ async function testGetOpportunityEnrichmentHonesty() {
         o.enrichmentDegraded.includes("organization") &&
         o.enrichmentDegraded.length === 2,
         JSON.stringify(o?.enrichmentDegraded));
-      const { meta } = wrap(o);
+      const { meta } = await wrap(REALID, sam);
       ok("both fail ⇒ wrapper _meta.degraded.failed === 2 (both disclosed)",
         meta && meta.degraded && meta.degraded.failed === 2 && meta.notes.length === 2,
         JSON.stringify(meta && meta.degraded));
@@ -3474,13 +3484,23 @@ async function testGetOpportunityEnrichmentHonesty() {
 //     `data.returned > 0` (`else if (data.returned > 0)`), so an empty page is a
 //     complete, honest result with NO warming note / suffix.
 //
-//     server.ts's runTool is NOT exported (importing it spawns an MCP server on
-//     stdio — see §9), so — exactly as §9 does for the degraded-vs-healthy
-//     mapping — we reproduce the EXACT enrichment source/notes/fieldsUnavailable
-//     ASSEMBLY the handler runs (including the gated branch that was changed) and
-//     drive it through the REAL enrichSearchOpportunities (dist/gsa-csv.js) +
-//     buildMeta (dist/meta.js). The assertion therefore exercises the shipped
-//     branch/note logic, not a paraphrase of it.
+//     COVERAGE — the load-bearing empty-page fix is now driven through the REAL
+//     runTool. Case (a) (ENABLED + GENUINELY-EMPTY page) calls the exported
+//     runTool("sam_search_opportunities", …) over a mocked SGS HAL with the CSV
+//     backbone enabled (SAM_GOV_ENABLE_CSV=1, restored after): on returned===0
+//     the wrapper NEVER calls tryGetReadyIndex (the `returned>0 ? … : null`
+//     ternary short-circuits — so NO background warm, NO network, NO disk, fully
+//     deterministic offline) and the gated `else if (returned>0)` is skipped, so
+//     a regression that re-emits the "index warming" suffix/note on an empty page
+//     turns case (a) RED. Cases (b)/(c)/(d) exercise the WARM/cold-non-empty
+//     enrichment branches, whose disclosure depends on the module-global `loaded`
+//     CSV index — impractical to force into a specific warm/cold state
+//     deterministically OFFLINE via the real runTool (the warm is a fire-and-
+//     forget async that mutates process-global state). Those three stay on the
+//     faithful inline `assembleEnrichment` reproduction below, which still drives
+//     the REAL enrichSearchOpportunities (dist/gsa-csv.js) + buildMeta
+//     (dist/meta.js). (§9 and §12 additionally cover the real runTool end-to-end
+//     for the search-outage and get_opportunity-enrichment wrappers.)
 // ══════════════════════════════════════════════════════════════════════════
 async function testSearchEnrichmentGating() {
   section("13. sam_search_opportunities CSV enrichment disclosure gating (empty-page warming fix)");
@@ -3575,25 +3595,43 @@ async function testSearchEnrichmentGating() {
     rowCount: warmSnapshot.size,
   };
 
-  // ── (a) THE FIX: ENABLED + COLD index + GENUINELY-EMPTY page (returned===0) ⇒
-  // NO "index warming" source suffix and NO "retry … for an enriched page" note.
-  // The empty page is a complete, honest result — nothing to enrich.
+  // ── (a) THE FIX, via the REAL runTool: ENABLED + GENUINELY-EMPTY page
+  // (returned===0) ⇒ NO "index warming" source suffix and NO "retry … for an
+  // enriched page" note. We enable the CSV backbone (SAM_GOV_ENABLE_CSV=1) and
+  // call runTool("sam_search_opportunities", …) over a mocked SGS HAL that
+  // returns a healthy 200 with page.totalElements=0. On the empty page the
+  // wrapper's `returned>0 ? tryGetReadyIndex(…) : null` ternary short-circuits →
+  // tryGetReadyIndex is NEVER called (no background warm, no network, no disk),
+  // and the gated `else if (returned>0)` is skipped → the plain, un-warmed
+  // result. A regression that re-emits the warming suffix/note on an empty page
+  // turns this RED. The env flag is restored in the finally.
   {
-    const r = assembleEnrichment({
-      data: { returned: 0, opportunities: [] },
-      enabled: true,
-      readyIndex: null, // cold — would have hit the warming branch pre-fix
-      totalRecords: 0,
-    });
-    ok("empty-page (returned===0, enabled, cold) ⇒ source has NO '(index warming)' suffix",
-      !/index warming/i.test(r.source) && r.source === "sam.gov/sgs/v1 (keyless HAL)",
-      JSON.stringify(r.source));
-    ok("empty-page ⇒ NO 'index warming'/'Retry … enriched page' note (nothing to enrich)",
-      !r.notes.some((n) => /index is warming|enriched page|enrichment pending/i.test(n)),
-      JSON.stringify(r.notes));
-    ok("empty-page ⇒ _meta.source carries no warming suffix; complete:true (real, complete zero)",
-      !/index warming/i.test(r.meta.source) && r.meta.complete === true,
-      JSON.stringify({ source: r.meta.source, complete: r.meta.complete }));
+    const sgsEmpty = (u) =>
+      isSgs(u)
+        ? mockResponse({ status: 200, json: { page: { totalElements: 0 }, _embedded: { results: [] } } })
+        : failClosed()();
+    const prevEnable = process.env.SAM_GOV_ENABLE_CSV;
+    process.env.SAM_GOV_ENABLE_CSV = "1";
+    try {
+      await withFetch(sgsEmpty, async () => {
+        const sam = new SamGovClient({});
+        const bundle = await runTool("sam_search_opportunities", { query: "nomatchxyz" }, sam);
+        const m = buildMeta(bundle.meta);
+        ok("empty-page (returned===0, REAL runTool, CSV enabled) ⇒ source has NO '(index warming)' suffix",
+          !/index warming/i.test(bundle.meta.source) &&
+          bundle.meta.source === "sam.gov/sgs/v1 (keyless HAL)",
+          JSON.stringify(bundle.meta.source));
+        ok("empty-page (REAL runTool) ⇒ NO 'index warming'/'Retry … enriched page' note (nothing to enrich)",
+          !(bundle.meta.notes ?? []).some((n) => /index is warming|enriched page|enrichment pending/i.test(n)),
+          JSON.stringify(bundle.meta.notes));
+        ok("empty-page (REAL runTool) ⇒ _meta.source carries no warming suffix; complete:true (real, complete zero)",
+          !/index warming/i.test(m.source) && m.complete === true && bundle.data.returned === 0,
+          JSON.stringify({ source: m.source, complete: m.complete, returned: bundle.data.returned }));
+      });
+    } finally {
+      if (prevEnable === undefined) delete process.env.SAM_GOV_ENABLE_CSV;
+      else process.env.SAM_GOV_ENABLE_CSV = prevEnable;
+    }
   }
 
   // ── (b) UNCHANGED behavior: ENABLED + COLD index + NON-EMPTY page (returned>0)

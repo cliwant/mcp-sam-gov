@@ -16,5 +16,6 @@
  * var to unlock higher SAM.gov rate limits + archives older than
  * ~12 months — optional).
  */
-export {};
+import { SamGovClient } from "./sam-gov/index.js";
+export declare function runTool(name: string, args: Record<string, unknown>, sam: SamGovClient): Promise<unknown>;
 //# sourceMappingURL=server.d.ts.map
