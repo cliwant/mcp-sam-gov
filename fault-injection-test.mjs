@@ -802,6 +802,44 @@ async function testAnalyzeIncumbent() {
         JSON.stringify(res.data.pressureHints));
     },
   );
+
+  // ── Blank recipient_name on the award ⇒ the incumbent identity is UNKNOWN.
+  // Two masquerades to guard: incumbent must be null (not "" = "none"), and with
+  // includeOtherAwards the SKIPPED recipient search must not let the empty
+  // incumbentOtherAwards read as "no other awards". Same class as D1. (Detail +
+  // transactions succeed; only the recipient_name is absent.)
+  await withFetch(
+    (u) => {
+      if (isAwardsDetail(u)) return mockResponse({ status: 200, json: awardDetailBody({ recipient: { recipient_name: "" } }) });
+      if (isTransactions(u)) {
+        return mockResponse({ status: 200, json: { results: [{}, {}], page_metadata: { hasNext: false } } });
+      }
+      // These MUST NOT be hit — a blank recipient means the search is skipped.
+      if (isSpendingByAward(u) || isSpendingByAwardCount(u)) {
+        throw new Error("recipient search must be SKIPPED when recipient_name is blank");
+      }
+      return failClosed()();
+    },
+    async () => {
+      const res = await analyzeIncumbent({ generatedInternalId: GEN });
+      ok("blank recipient ⇒ award.incumbent === null (UNKNOWN, not '' = 'none')",
+        res.data.award.incumbent === null, JSON.stringify(res.data.award.incumbent));
+      ok("blank recipient ⇒ _meta.fieldsUnavailable includes 'recipient_name'",
+        res.meta.fieldsUnavailable.includes("recipient_name"), JSON.stringify(res.meta.fieldsUnavailable));
+      ok("blank recipient ⇒ a note DISCLOSES the incumbent identity is UNKNOWN",
+        res.meta.notes.some((n) => /incumbent identity is UNKNOWN/i.test(n)), JSON.stringify(res.meta.notes));
+      ok("blank recipient + includeOtherAwards ⇒ incumbentOtherAwards === [] (skipped, disclosed)",
+        Array.isArray(res.data.incumbentOtherAwards) && res.data.incumbentOtherAwards.length === 0,
+        JSON.stringify(res.data.incumbentOtherAwards));
+      ok("blank recipient ⇒ a note DISCLOSES the empty list is a SKIPPED search (not 'no awards')",
+        res.meta.notes.some((n) => /SKIPPED, not run and found empty/i.test(n)), JSON.stringify(res.meta.notes));
+      ok("blank recipient (includeOtherAwards) ⇒ _meta.complete === false (masquerade averted)",
+        res.meta.complete === false, JSON.stringify(res.meta.complete));
+      // The award-level signals are still COMPLETE and honest (modCount from the good page).
+      ok("blank recipient ⇒ award-level signals still populated (modCount=2 from the good page)",
+        res.data.signals.modCount === 2, JSON.stringify(res.data.signals.modCount));
+    },
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════

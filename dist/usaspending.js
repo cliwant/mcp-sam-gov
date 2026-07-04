@@ -687,10 +687,17 @@ export async function analyzeIncumbent(args) {
             otherAwardsFailed = true;
         }
     }
+    // The award record carries no recipient_name → the incumbent identity is
+    // UNKNOWN. Two masquerades to avoid: (1) `incumbent: ""` reads as "none"
+    // rather than "unknown"; (2) with includeOtherAwards, the recipient search is
+    // SKIPPED (the `detail.recipient` guard above is falsy) so `incumbentOtherAwards`
+    // stays undefined → `?? []` emits an empty list that reads as "no other awards"
+    // when the search never ran. Same class as the D1 otherAwardsFailed disclosure.
+    const incumbentUnknown = !detail.recipient;
     const data = {
         award: {
             awardId: detail.awardId,
-            incumbent: detail.recipient,
+            incumbent: detail.recipient || null,
             awardingAgency: detail.awardingAgency ?? null,
             awardingSubAgency: detail.awardingSubAgency ?? null,
             naicsCode: detail.naicsCode ?? null,
@@ -710,6 +717,9 @@ export async function analyzeIncumbent(args) {
     const fieldsUnavailable = [...ANALYZE_FIELDS_UNAVAILABLE];
     if (numberOfOffers === null) {
         fieldsUnavailable.push("number_of_offers_received");
+    }
+    if (incumbentUnknown) {
+        fieldsUnavailable.push("recipient_name");
     }
     // List ONLY the calls actually attempted — never assert a recipient search
     // that failed or was skipped (D1). enrichmentCalls stays in lockstep with
@@ -732,6 +742,12 @@ export async function analyzeIncumbent(args) {
     if (otherAwardsFailed) {
         notes.push("incumbentOtherAwards could not be retrieved (the recipient search FAILED) and is shown as an EMPTY list — this is NOT a confirmation that the incumbent has no other awards.");
     }
+    if (incumbentUnknown) {
+        notes.push("The award record carries no recipient_name — the incumbent identity is UNKNOWN (returned as null), NOT 'none'. Incumbent-specific analysis (identity, other awards) cannot be performed on this record.");
+        if (includeOtherAwards) {
+            notes.push("incumbentOtherAwards is an EMPTY list because there is no recipient name to search by — the recipient search was SKIPPED, not run and found empty. This is NOT a confirmation that the incumbent has no other awards.");
+        }
+    }
     if (pctConsumed === null) {
         notes.push("obligatedVsCeiling.pctConsumed is null because the award's ceiling (base_and_all_options) is absent, zero, or a negative data-entry value — consumption cannot be computed.");
     }
@@ -740,7 +756,11 @@ export async function analyzeIncumbent(args) {
     }
     // A failed secondary enrichment means this is NOT the complete picture →
     // force complete:false so an AI never reads partial data as complete (D1/D2).
-    const degraded = transactionsFailed || otherAwardsFailed;
+    // A blank recipient with includeOtherAwards is the same class: the emitted
+    // empty incumbentOtherAwards would otherwise read as complete.
+    const degraded = transactionsFailed ||
+        otherAwardsFailed ||
+        (includeOtherAwards && incumbentUnknown);
     return withMeta(data, {
         source: ANALYZE_INCUMBENT_SOURCE,
         keylessMode: true,
