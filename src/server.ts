@@ -1454,10 +1454,15 @@ async function runTool(
             enrichmentNotes.push(
               `GSA CSV freshness — snapshot last-modified: ${outcome.freshness.csvLastModified ?? "unknown"}; index built: ${outcome.freshness.indexBuiltAt}; index age: ${outcome.freshness.indexAgeHours ?? "unknown"}h. The snapshot can lag the live HAL by up to ~24h.`,
             );
-          } else {
-            // Enabled but the index isn't warm yet (cold cache / background
-            // refresh in flight). Return the normal HAL page un-enriched and
-            // disclose the pending warm — never block on the download.
+          } else if (data.returned > 0) {
+            // Enabled, rows exist that COULD be enriched, but the index isn't
+            // warm yet (cold cache / background refresh in flight). Return the
+            // normal HAL page un-enriched and disclose the pending warm — never
+            // block on the download. Gated on returned>0: on a genuinely-empty
+            // (returned===0) page there are NO rows to enrich, so a "retry for an
+            // enriched page" note would be misleading — a retry cannot add rows.
+            // That case falls through with the plain un-enriched source/notes
+            // (the empty page is a complete, honest result).
             source = "sam.gov/sgs/v1 (keyless HAL) + gsa-csv (index warming)";
             enrichmentNotes.push(
               "GSA-CSV enrichment pending — the CSV index is warming (a background download/build was kicked off); naics/set-aside/place-of-performance were NOT enriched this call. Retry shortly for an enriched page, or fetch sam_get_opportunity now.",

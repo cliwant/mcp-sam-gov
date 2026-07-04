@@ -80,17 +80,25 @@ function stripXml(s) {
         .trim();
 }
 /**
- * Normalize a raw clauseNumber to its bare `NN.NNN-N` / `NNN.NNN-NNNN` core:
- * strip a leading `FAR`/`DFARS` (case-insensitive) and surrounding
- * whitespace/stray punctuation. Returns "" if nothing usable remains.
+ * Normalize a raw clauseNumber to its bare `NN.NNN-N` / `NNN.NNN-NNNN` core by
+ * stripping ONLY a leading `FAR`/`DFARS` prefix (case-insensitive) and
+ * surrounding whitespace. It DOES NOT strip embedded characters: doing so would
+ * fabricate a plausible-but-wrong clause from garbage (e.g. `52.212-4extra5` →
+ * `52.212-45`, a DIFFERENT real clause) that then passes CLAUSE_RE and fetches a
+ * silently-wrong answer. By leaving embedded/trailing junk in place, a non-clause
+ * input fails CLAUSE_RE below and farClauseLookup throws `invalid_input` — exactly
+ * as the server Zod boundary (regex `^\s*(?:d?far[s]?\b[\s.:#-]*)?\d{1,3}\.\d{3,4}-\d{1,4}\s*$`)
+ * already rejects it, so far.ts is safe called standalone. The legit shapes
+ * (`52.212-4`, `FAR 52.212-4`, `DFARS 252.204-7012`, ` 52.212-4 `) still collapse
+ * to the bare clause and succeed.
  */
 function normalizeClauseNumber(raw) {
     return (raw ?? "")
         .trim()
-        // Leading regulation prefix (FAR 52.212-4 / DFARS 252.204-7012).
+        // Strip ONLY the leading regulation prefix (FAR 52.212-4 / DFARS 252.204-7012)
+        // and its separator; NOTHING else is removed, so embedded garbage survives to
+        // be rejected by CLAUSE_RE (never mangled into a valid-looking clause).
         .replace(/^\s*(?:d?far[s]?)\b[\s.:#-]*/i, "")
-        // Strip anything that isn't part of a clause number (keep digits . -).
-        .replace(/[^\d.\-]/g, "")
         .trim();
 }
 const CLAUSE_RE = /^\d{1,3}\.\d{3,4}-\d{1,4}$/;
