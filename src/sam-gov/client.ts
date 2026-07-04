@@ -129,7 +129,18 @@ export class SamGovClient {
           const hit = json.opportunitiesData?.[0];
           if (hit) {
             if (!hit.resourceLinks || hit.resourceLinks.length === 0) {
-              hit.resourceLinks = await this.getPublicResourceLinks(noticeId);
+              // Same DOWN-reads-as-absent guard on the keyed path: a failed
+              // resource-list fetch is an outage, not "no attachments" —
+              // record the degradation instead of silently returning `[]`.
+              hit.resourceLinks = await this.getPublicResourceLinks(
+                noticeId,
+              ).catch(() => {
+                hit.enrichmentDegraded = [
+                  ...(hit.enrichmentDegraded ?? []),
+                  "attachments",
+                ];
+                return [];
+              });
             }
             return hit;
           }
@@ -562,10 +573,25 @@ export class SamGovClient {
         upstreamEndpoint: "sam:opps/v2/opportunities",
       });
     }
+    // Each enrichment sub-fetch is caught INDIVIDUALLY: an outage on one must
+    // neither sink the notice (the primary fields still return) nor silently
+    // zero the field (a swallowed `[]`/`""` would read as "no attachments"/"no
+    // org"). We record WHICH bucket degraded so the wrapper can disclose an
+    // honest `_meta.degraded` + a note ("MAY have attachments; retry — NOT a
+    // confirmation it has none"), and never flag the OTHER (healthy) enrichment.
+    const enrichmentDegraded: string[] = [];
     const [resourceLinks, fullParentPathName] = await Promise.all([
-      this.getPublicResourceLinks(noticeId),
+      this.getPublicResourceLinks(noticeId).catch((e) => {
+        this.warn("resourceLinks enrichment failed", e);
+        enrichmentDegraded.push("attachments");
+        return [] as string[];
+      }),
       d.organizationId
-        ? this.getPublicOrgName(d.organizationId)
+        ? this.getPublicOrgName(d.organizationId).catch((e) => {
+            this.warn("orgName enrichment failed", e);
+            enrichmentDegraded.push("organization");
+            return "";
+          })
         : Promise.resolve(""),
     ]);
     return {
@@ -589,54 +615,71 @@ export class SamGovClient {
       pointOfContact: d.pointOfContact ?? [],
       uiLink: `https://sam.gov/opp/${noticeId}/view`,
       resourceLinks,
+      enrichmentDegraded: enrichmentDegraded.length
+        ? enrichmentDegraded
+        : undefined,
     };
   }
 
+  /**
+   * Fetch the public attachment-download URLs for a notice.
+   *
+   * TRUTHFULNESS (DOWN-reads-as-absent guard): this is called ONLY after the
+   * detail endpoint already 200'd (the notice exists). The resources endpoint
+   * then returns HTTP 200 for every real notice — a genuine NO-attachment
+   * notice is 200 with an empty list. So any non-200 (or a network fault) here
+   * is an OUTAGE, never a genuine "no attachments", and MUST NOT be swallowed
+   * into `[]` — that would let a DOWN list-fetch read as "no documents" and an
+   * AI skip a solicitation whose RFP it could have read. We THROW on non-200
+   * and let a network error propagate; the caller (getOpportunityPublic / the
+   * auth tier) catches it INDIVIDUALLY and records the degradation. A 200 →
+   * the genuine links, which MAY be `[]` (an honest empty, disclosed as such).
+   */
   private async getPublicResourceLinks(noticeId: string): Promise<string[]> {
-    try {
-      const url = `${PUBLIC_BASE}/opps/v3/opportunities/${encodeURIComponent(noticeId)}/resources`;
-      const r = await this.fetchImpl(url, { headers: this.publicHeaders() });
-      if (!r.ok) return [];
-      type Resp = {
-        _embedded?: {
-          opportunityAttachmentList?: {
-            attachments?: { resourceId?: string; name?: string }[];
-          }[];
-        };
-      };
-      const json = (await r.json()) as Resp;
-      const attachments =
-        json._embedded?.opportunityAttachmentList?.[0]?.attachments ?? [];
-      return attachments
-        .filter((a) => a.resourceId)
-        .map((a) => this.publicDownloadUrl(a.resourceId!));
-    } catch (err) {
-      this.warn("getPublicResourceLinks failed", err);
-      return [];
-    }
-  }
-
-  private async getPublicOrgName(orgId: string): Promise<string> {
-    try {
-      const url = `${PUBLIC_BASE}/federalorganizations/v1/organizations/${encodeURIComponent(orgId)}`;
-      const r = await this.fetchImpl(url, { headers: this.publicHeaders() });
-      if (!r.ok) return "";
-      type Resp = {
-        _embedded?: {
-          org?: {
-            fullParentPathName?: string;
-            agencyName?: string;
-            name?: string;
-          };
+    const url = `${PUBLIC_BASE}/opps/v3/opportunities/${encodeURIComponent(noticeId)}/resources`;
+    const r = await this.fetchImpl(url, { headers: this.publicHeaders() });
+    if (!r.ok) throw new Error(`resources HTTP ${r.status}`);
+    type Resp = {
+      _embedded?: {
+        opportunityAttachmentList?: {
+          attachments?: { resourceId?: string; name?: string }[];
         }[];
       };
-      const json = (await r.json()) as Resp;
-      const org = json._embedded?.[0]?.org;
-      return org?.fullParentPathName ?? org?.agencyName ?? org?.name ?? "";
-    } catch (err) {
-      this.warn("getPublicOrgName failed", err);
-      return "";
-    }
+    };
+    const json = (await r.json()) as Resp;
+    const attachments =
+      json._embedded?.opportunityAttachmentList?.[0]?.attachments ?? [];
+    return attachments
+      .filter((a) => a.resourceId)
+      .map((a) => this.publicDownloadUrl(a.resourceId!));
+  }
+
+  /**
+   * Resolve an awarding-organization id to its canonical path/name.
+   *
+   * TRUTHFULNESS (same guard as getPublicResourceLinks): a genuine org with no
+   * path → 200 + empty field; a non-200/network fault → an OUTAGE. Do NOT
+   * swallow the outage into `""` (that reads as "no organization" when the
+   * fetch was DOWN). THROW on non-200; let a network error propagate. The
+   * caller catches it INDIVIDUALLY and records the degradation. A 200 → the
+   * name, which MAY be `""` (an honest empty).
+   */
+  private async getPublicOrgName(orgId: string): Promise<string> {
+    const url = `${PUBLIC_BASE}/federalorganizations/v1/organizations/${encodeURIComponent(orgId)}`;
+    const r = await this.fetchImpl(url, { headers: this.publicHeaders() });
+    if (!r.ok) throw new Error(`org HTTP ${r.status}`);
+    type Resp = {
+      _embedded?: {
+        org?: {
+          fullParentPathName?: string;
+          agencyName?: string;
+          name?: string;
+        };
+      }[];
+    };
+    const json = (await r.json()) as Resp;
+    const org = json._embedded?.[0]?.org;
+    return org?.fullParentPathName ?? org?.agencyName ?? org?.name ?? "";
   }
 
   private publicHeaders(): HeadersInit {

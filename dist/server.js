@@ -1363,7 +1363,7 @@ async function runTool(name, args, sam) {
             const o = await sam.getOpportunity(noticeId);
             if (!o)
                 return { found: false, noticeId };
-            return {
+            const data = {
                 found: true,
                 noticeId: o.noticeId,
                 title: o.title,
@@ -1382,6 +1382,29 @@ async function runTool(name, args, sam) {
                 })),
                 uiLink: o.uiLink,
             };
+            // A HEALTHY notice returns EXACTLY as before (plain object → the server
+            // synthesizes a default complete:true `_meta`) — no crying wolf. ONLY
+            // when an enrichment sub-fetch DEGRADED (an outage, not a genuine empty)
+            // do we attach a degraded `_meta` disclosing that the empty field is
+            // UNKNOWN, not confirmed-absent. One failing sub-fetch does not flag the
+            // other: notes carry exactly one entry per degraded bucket.
+            if (o.enrichmentDegraded?.length) {
+                const notes = o.enrichmentDegraded.map((bucket) => bucket === "attachments"
+                    ? "The attachment list could not be fetched (a service issue) — this notice MAY have attachments not shown here; retry. This is NOT a confirmation it has none."
+                    : "The awarding-organization path could not be resolved (a service issue) — it is unavailable here, not absent.");
+                return withMeta(data, {
+                    source: sam.isKeyless ? "sam.gov (keyless)" : "api.sam.gov (keyed)",
+                    keylessMode: sam.isKeyless,
+                    complete: false,
+                    degraded: {
+                        attempted: o.enrichmentDegraded.length,
+                        succeeded: 0,
+                        failed: o.enrichmentDegraded.length,
+                    },
+                    notes,
+                });
+            }
+            return data;
         }
         case "sam_fetch_description": {
             const { noticeId } = SamFetchDescriptionInput.parse(args);
