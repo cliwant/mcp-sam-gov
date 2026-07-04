@@ -53,6 +53,7 @@ import { search as ecfrSearch } from "./dist/ecfr.js";
 import { searchGrants, getGrant } from "./dist/grants.js";
 import { searchDocuments as fedRegSearch, getDocument as fedRegGet } from "./dist/federal-register.js";
 import { searchWageDeterminations, getWageRates } from "./dist/pricing.js";
+import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -4075,6 +4076,54 @@ async function testPricingHonesty() {
   );
 }
 
+// GAO protests (gao_protest_lookup) — HTML/RSS-scraped (getText→fetchWithRetry→
+// .text()), now PERMANENTLY guarded, completing the test-robustness axis (4/4).
+// Locks: feed outage → throws upstream_unavailable (never a fake "no protests");
+// a genuine-empty feed (reachable, 0 items) → honest empty decisions[]; and gao's
+// structural honesty — it ALWAYS reports complete:false + totalAvailable:null
+// (the keyless RSS is a recent ~25-item window, never the full protest history).
+async function testGaoHonesty() {
+  section("17. gao.gov protest feed outage-vs-genuine-empty honesty (fetch-mock)");
+  const isFeed = (u) => /gao\.gov\/rss\/reportslegal\.xml/.test(u);
+  const rss = (items) => `<?xml version="1.0"?><rss><channel>${items}</channel></rss>`;
+  const protestItem = `<item><title>Acme Corp</title><link>https://www.gao.gov/products/b-421234</link><description>Acme Corp protests the award of a contract for widgets.</description><pubDate>Mon, 01 Jul 2024 00:00:00 GMT</pubDate></item>`;
+
+  // 1. Feed 503 ⇒ throws upstream_unavailable (never a fabricated empty protest list)
+  await withFetch(
+    (u) => (isFeed(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => gaoProtestLookup({}));
+      ok("gao feed 503 ⇒ throws upstream_unavailable (NOT a fake empty 'no protests')",
+        threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // 2. GENUINE-empty feed (reachable, valid XML, 0 items) ⇒ honest empty decisions[]
+  await withFetch(
+    (u) => (isFeed(u) ? mockResponse({ status: 200, json: rss("") }) : failClosed()()),
+    async () => {
+      const res = await gaoProtestLookup({});
+      ok("gao genuine-empty feed ⇒ honest empty decisions[] (feed reachable, no matches — not an outage)",
+        Array.isArray(res.data.decisions) && res.data.decisions.length === 0, JSON.stringify(res.data.decisions));
+    },
+  );
+
+  // 3. Feed with a protest item, enrich:false ⇒ maps feed-only decision + ALWAYS honest-partial
+  await withFetch(
+    (u) => (isFeed(u) ? mockResponse({ status: 200, json: rss(protestItem) }) : failClosed()()),
+    async () => {
+      const res = await gaoProtestLookup({ enrich: false });
+      const d0 = res.data.decisions[0];
+      ok("gao feed results (enrich:false) ⇒ maps feed-only decision (bNumber/title from RSS)",
+        res.data.decisions.length === 1 && d0.bNumber === "B-421234" && d0.title === "Acme Corp",
+        JSON.stringify(d0));
+      ok("gao ⇒ ALWAYS complete:false + totalAvailable:null + truncated (recent-window feed ≠ full protest history)",
+        res.meta.complete === false && res.meta.totalAvailable === null && res.meta.truncated === true,
+        JSON.stringify(res.meta));
+    },
+  );
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4102,6 +4151,7 @@ async function main() {
   await testGrantsHonesty();
   await testFederalRegisterHonesty();
   await testPricingHonesty();
+  await testGaoHonesty();
 
   // Prove the harness bites.
   await selfCheck();
