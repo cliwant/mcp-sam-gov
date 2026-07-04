@@ -1969,14 +1969,6 @@ export async function lookupAgency(searchText: string) {
   // Cache: agency lookups are extremely repeat-prone (`VA`, `DHS`, etc.)
   // and effectively static across a session.
   return memoize(`usas:agency:${searchText.toLowerCase()}`, async () => {
-  try {
-    const r = await fetch(`${USAS}/autocomplete/funding_agency/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ search_text: searchText, limit: 5 }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!r.ok) return { matches: [] };
     type Resp = {
       results?: {
         toptier_flag?: boolean;
@@ -1987,7 +1979,15 @@ export async function lookupAgency(searchText: string) {
         };
       }[];
     };
-    const json = (await r.json()) as Resp;
+    // Via postUsas (fetchWithRetry) so a DOWN service THROWS upstream_unavailable
+    // instead of returning `{ matches: [] }` — which an AI reads as "no such
+    // agency" when the endpoint is merely down. This was the last silent-empty-
+    // on-outage in the codebase; now consistent with autocompleteNaics/Recipient
+    // (a GENUINE no-match still returns an honest empty `matches`).
+    const json = await postUsas<Resp>("autocomplete/funding_agency/", {
+      search_text: searchText,
+      limit: 5,
+    });
     return {
       matches: (json.results ?? []).map((r) => ({
         name: r.toptier_agency?.name ?? "",
@@ -1996,9 +1996,6 @@ export async function lookupAgency(searchText: string) {
         isToptier: !!r.toptier_flag,
       })),
     };
-  } catch {
-    return { matches: [] };
-  }
   });
 }
 

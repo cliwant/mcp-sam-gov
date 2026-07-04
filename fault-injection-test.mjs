@@ -46,7 +46,7 @@ import zlib from "node:zlib";
 import { runTool } from "./dist/server.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -656,6 +656,45 @@ async function testAnalyzeIncumbent() {
         threw && error?.toolError?.kind === "not_found" &&
         error?.toolError?.retryable === false,
         JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── lookupAgency (usas_lookup_agency): the LAST silent-empty-on-outage in the
+  // codebase, now routed through postUsas (fetchWithRetry). A DOWN funding_agency
+  // autocomplete must THROW upstream_unavailable — NEVER return { matches: [] },
+  // which an AI reads as "no such agency" when the endpoint is merely down. A
+  // GENUINE no-match (200 + empty results) still returns an honest empty. Unique
+  // search_text per case avoids the memoize cache.
+  const isFundingAgency = (u) => /autocomplete\/funding_agency/.test(u);
+  await withFetch(
+    (u) => (isFundingAgency(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => lookupAgency("la-outage-503"));
+      ok("lookupAgency 503 ⇒ throws upstream_unavailable (NOT a fake { matches: [] })",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+  await withFetch(
+    (u) => (isFundingAgency(u) ? mockResponse({ status: 200, json: { results: [] } }) : failClosed()()),
+    async () => {
+      const r = await lookupAgency("la-genuine-empty-xyz");
+      ok("lookupAgency 200-empty ⇒ honest empty matches (a real no-match, never fabricated)",
+        Array.isArray(r.matches) && r.matches.length === 0,
+        JSON.stringify(r));
+    },
+  );
+  await withFetch(
+    (u) => (isFundingAgency(u)
+      ? mockResponse({ status: 200, json: { results: [{ toptier_flag: true, toptier_agency: { name: "Department of Veterans Affairs", abbreviation: "VA", toptier_code: "036" } }] } })
+      : failClosed()()),
+    async () => {
+      const r = await lookupAgency("la-maps-va");
+      ok("lookupAgency 200 ⇒ maps matches (name/abbreviation/toptierCode/isToptier)",
+        r.matches.length === 1 && r.matches[0].name === "Department of Veterans Affairs" &&
+        r.matches[0].abbreviation === "VA" && r.matches[0].toptierCode === "036" && r.matches[0].isToptier === true,
+        JSON.stringify(r.matches));
     },
   );
 
