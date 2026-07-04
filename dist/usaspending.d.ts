@@ -59,9 +59,9 @@ export declare function searchIndividualAwards(args: {
 }): Promise<MetaBundle<{
     awards: {
         awardId: string;
-        recipient: string;
+        recipient: string | null;
         amount: number;
-        awardingAgency: string;
+        awardingAgency: string | null;
         awardingSubAgency: string | undefined;
         naicsCode: string | undefined;
         naicsDescription: string | undefined;
@@ -82,9 +82,9 @@ export declare function searchAwardsByRecipient(args: {
 }): Promise<MetaBundle<{
     awards: {
         awardId: string;
-        recipient: string;
+        recipient: string | null;
         amount: number;
-        awardingAgency: string;
+        awardingAgency: string | null;
         awardingSubAgency: string | undefined;
         naicsCode: string | undefined;
         naicsDescription: string | undefined;
@@ -123,7 +123,7 @@ export type AwardParentIdv = {
 };
 export declare function getAwardDetail(generatedInternalId: string): Promise<{
     awardId: string;
-    recipient: string;
+    recipient: string | null;
     totalObligation: number | null;
     baseAndAllOptions: number | null;
     baseExercisedOptions: number | null;
@@ -178,9 +178,9 @@ export declare function analyzeIncumbent(args: {
 }): Promise<MetaBundle<{
     incumbentOtherAwards?: {
         awardId: string;
-        recipient: string;
+        recipient: string | null;
         amount: number;
-        awardingAgency: string;
+        awardingAgency: string | null;
         awardingSubAgency: string | undefined;
         naicsCode: string | undefined;
         naicsDescription: string | undefined;

@@ -272,9 +272,9 @@ export async function searchIndividualAwards(args) {
     const data = {
         awards: results.map((r) => ({
             awardId: r["Award ID"] ?? "",
-            recipient: r["Recipient Name"] ?? "",
+            recipient: r["Recipient Name"] || null,
             amount: r["Award Amount"] ?? 0,
-            awardingAgency: r["Awarding Agency"] ?? "",
+            awardingAgency: r["Awarding Agency"] || null,
             awardingSubAgency: r["Awarding Sub Agency"],
             // D1: NAICS now returned (parity with usas_search_awards_by_recipient).
             naicsCode: r.NAICS?.code,
@@ -344,9 +344,9 @@ export async function searchAwardsByRecipient(args) {
     const data = {
         awards: results.map((r) => ({
             awardId: r["Award ID"] ?? "",
-            recipient: r["Recipient Name"] ?? "",
+            recipient: r["Recipient Name"] || null,
             amount: r["Award Amount"] ?? 0,
-            awardingAgency: r["Awarding Agency"] ?? "",
+            awardingAgency: r["Awarding Agency"] || null,
             awardingSubAgency: r["Awarding Sub Agency"],
             naicsCode: r.NAICS?.code,
             naicsDescription: r.NAICS?.description,
@@ -489,7 +489,11 @@ export async function getAwardDetail(generatedInternalId) {
             : null;
         return {
             awardId: json.piid ?? "",
-            recipient: json.recipient?.recipient_name ?? "",
+            // Identity field is null (UNKNOWN) when absent OR blank — never "" (which
+            // reads as "no recipient"). `|| null` catches both a missing recipient_name
+            // and a present-but-empty one. Consistent with analyzeIncumbent's incumbent
+            // field (#43) and the money fields below.
+            recipient: json.recipient?.recipient_name || null,
             // Money fields are null (UNKNOWN) when USAspending omits them — never 0.
             // A null base_and_all_options is common and legitimate (IDVs/BPAs carry
             // the ceiling at the vehicle level, grants/loans have no ceiling concept);
