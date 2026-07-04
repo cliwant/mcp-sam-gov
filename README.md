@@ -4,7 +4,7 @@
 
 ### **$4 trillion of public federal data, one `npm install` away.**
 
-The most comprehensive **keyless** MCP server for US federal contracting + spending + regulation. **36 tools** that work today, in any AI agent.
+The most comprehensive **keyless** MCP server for US federal contracting + spending + regulation. **52 tools** that work today, in any AI agent.
 
 [![npm](https://img.shields.io/npm/v/@cliwant/mcp-sam-gov?color=cb3837&label=%40cliwant%2Fmcp-sam-gov&logo=npm)](https://www.npmjs.com/package/@cliwant/mcp-sam-gov)
 [![mcp-registry](https://img.shields.io/badge/MCP%20Registry-active-2ea44f?logo=anthropic)](https://registry.modelcontextprotocol.io/v0/servers?search=cliwant)
@@ -50,7 +50,7 @@ The most comprehensive **keyless** MCP server for US federal contracting + spend
 |---|---|
 | GovWin: $30K-$100K/yr per seat | Free, MIT license |
 | API key registration → wait 24h → quota tier shopping | `npm install` → working in 60s |
-| 5 separate vendor APIs / scrapers | 1 unified surface, 36 tools |
+| 5 separate vendor APIs / scrapers | 1 unified surface, 52 tools |
 | LLMs hallucinate NAICS codes / agency names | Anti-hallucination autocomplete guards built-in |
 | Brittle scraping breaks weekly | Daily live smoke test ([badge above](#)) |
 | Procurement officer → IT ticket → 3-week wait | Claude Desktop double-click install |
@@ -73,7 +73,7 @@ The federal data this wraps is **public domain**. There is no good reason it sho
 | ⚖️ **Regulations (FAR/CFR)** | "Find FAR sections about SDVOSB set-aside" | 2 eCFR tools |
 | 🎓 **Federal grants** | "Cybersecurity grants posted in the last 30 days" | 2 Grants.gov tools |
 
-**36 tools total. Zero API keys. p50 latency 257ms, p95 766ms** (live benchmarks against federal APIs).
+**52 tools total. Zero API keys. p50 latency 257ms, p95 766ms** (live benchmarks against federal APIs).
 
 ---
 
@@ -100,7 +100,7 @@ If you already use Claude Code (the CLI):
 /plugin install cliwant/mcp-sam-gov
 ```
 
-This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 36 tools.
+This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 52 tools.
 
 ### 🔵 Path 3 — Manual install for any MCP host (Codex, Cursor, Continue, Gemini)
 
@@ -168,7 +168,7 @@ Then point your host config at the absolute path:
 
 (Or skip this entirely — use Path 1's `.mcpb` and it auto-configures.)
 
-Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (36 tools)".
+Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (52 tools)".
 
 ### Claude Code
 
@@ -293,20 +293,23 @@ Get a free key at [sam.gov/SAM/pages/public/searchKeyData.jsf](https://sam.gov/S
 
 ---
 
-## Tool catalog (36 tools)
+## Tool catalog (52 tools)
 
 <details>
-<summary><b>SAM.gov — opportunities + attachments (5 tools)</b></summary>
+<summary><b>SAM.gov — opportunities + attachments (8 tools)</b></summary>
 
 - `sam_search_opportunities` — keyless HAL search (~47K active)
+- `sam_search_shaping` — pre-solicitation radar (Sources Sought / Presol / Special Notices before the RFP exists)
 - `sam_get_opportunity` — full detail by 32-char hex noticeId (POCs + attachments + body)
 - `sam_fetch_description` — full RFP body as plain text
 - `sam_attachment_url` — public download URL for resourceId
+- `sam_fetch_attachment_text` — extract attachment text (RFP / SOW / Q&A), PDF + text/HTML, keyless
 - `sam_lookup_organization` — federal-organization id → fullParentPathName
+- `sam_lookup_notice_fields` — batch-fill nulled naics/setAside/PoP/deadline for 1–100 noticeIds from the opt-in GSA CSV backbone
 </details>
 
 <details>
-<summary><b>USAspending — awards + recipients (8 tools)</b></summary>
+<summary><b>USAspending — awards + recipients (10 tools)</b></summary>
 
 - `usas_search_awards` — share-of-wallet at agency × NAICS
 - `usas_search_individual_awards` — line items (returns generatedInternalId)
@@ -314,8 +317,10 @@ Get a free key at [sam.gov/SAM/pages/public/searchKeyData.jsf](https://sam.gov/S
 - `usas_lookup_agency` — abbreviation → canonical name
 - `usas_search_awards_by_recipient` — recipient win history
 - `usas_search_subawards` — supply-chain / teaming
-- `usas_search_expiring_contracts` — recompete radar
+- `usas_search_recompetes` — recompete radar (PoP ending in a window around today, soonest-first)
+- `usas_search_expiring_contracts` — deprecated alias of `usas_search_recompetes` (legacy shape)
 - `usas_get_award_detail` — period of performance, options, set-aside, competition
+- `usas_analyze_incumbent` — per-award incumbent + public recompete-pressure signals (hints, not a score)
 </details>
 
 <details>
@@ -363,10 +368,19 @@ Get a free key at [sam.gov/SAM/pages/public/searchKeyData.jsf](https://sam.gov/S
 </details>
 
 <details>
-<summary><b>eCFR — Code of Federal Regulations (2 tools)</b></summary>
+<summary><b>eCFR + FAR/DFARS — Code of Federal Regulations (5 tools)</b></summary>
 
-- `ecfr_search` — full-text search (titleNumber=48 for FAR)
+- `ecfr_search` — full-text search across all 50 CFR titles (titleNumber=48 for FAR)
 - `ecfr_list_titles` — all 50 CFR titles + last-amended dates
+- `far_clause_lookup` — authoritative FAR/DFARS clause text + its prescription (exact clause number)
+- `far_search` — FAR/DFARS-scoped search (excludes GSAM, collapses to current in-force version)
+- `far_compliance_matrix` — cited-clause list → proposal-ready Section L/M compliance matrix (award-eligibility gates flagged)
+</details>
+
+<details>
+<summary><b>SBA — size standards (1 tool)</b></summary>
+
+- `sba_size_standard` — small-business size standard for a 6-digit NAICS (set-aside eligibility gate)
 </details>
 
 <details>
@@ -374,6 +388,23 @@ Get a free key at [sam.gov/SAM/pages/public/searchKeyData.jsf](https://sam.gov/S
 
 - `grants_search` — opportunity search
 - `grants_get_opportunity` — full grant detail
+</details>
+
+<details>
+<summary><b>Pricing & wage determinations (3 tools)</b></summary>
+
+- `sam_search_wage_determinations` — find SCA / Davis-Bacon wage determinations for a locality (keyless)
+- `sam_get_wage_rates` — prevailing-wage + fringe/H&W rate table parsed from a WD, plus EO minimum-wage floor
+- `gsa_benchmark_labor_rates` — GSA CALC awarded ceiling-rate market band for a labor category (distribution, not a single price)
+</details>
+
+<details>
+<summary><b>Integrity, teaming & protests (4 tools)</b></summary>
+
+- `sam_check_exclusions` — keyless SAM debarment/exclusion screening by name and/or UEI/CAGE
+- `sam_integrity_lookup` — one-call integrity screen (exclusion verdict + honest FAPIIS pointer)
+- `usas_search_teaming_partners` — small-business teaming-partner discovery by cert × NAICS × agency, exclusion-screened
+- `gao_protest_lookup` — recent GAO bid-protest decisions from the public RSS feed (recent window only)
 </details>
 
 ---
