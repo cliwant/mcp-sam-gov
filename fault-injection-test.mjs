@@ -45,6 +45,7 @@ import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
+import { fetchAttachmentText } from "./dist/attachments.js";
 import {
   SamGovClient,
   daysUntilResponse,
@@ -107,6 +108,26 @@ function mockResponse({ status = 200, json = {}, headers = {} } = {}) {
     headers: { get: (k) => hdrs.get(String(k).toLowerCase()) ?? null },
     json: async () => json,
     text: async () => (typeof json === "string" ? json : JSON.stringify(json)),
+  };
+}
+
+/**
+ * A `Response`-like object for a BINARY body. The attachment path reads
+ * `.arrayBuffer()` (not `.json()`/`.text()`), so we expose that alongside the
+ * `.ok/.status/.headers.get()` surface. `bytes` is a Uint8Array; we hand back a
+ * fresh ArrayBuffer sliced to exactly its view (so a subarray fixture is safe).
+ */
+function mockBinaryResponse({ status = 200, bytes = new Uint8Array(0), headers = {}, url = undefined } = {}) {
+  const hdrs = new Map(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    // res.url = the FINAL url after redirects (for the redirect-host SSRF check).
+    // undefined ⇒ the tool treats the (already allow-listed) input host as final.
+    url,
+    headers: { get: (k) => hdrs.get(String(k).toLowerCase()) ?? null },
+    arrayBuffer: async () =>
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   };
 }
 
@@ -2512,6 +2533,355 @@ async function testGetOpportunityDetailHonesty() {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 11. sam_fetch_attachment_text — read the ACTUAL solicitation document.
+//
+// The prior sections guard "a DOWN read must never read as absent/empty" for
+// list/detail/description surfaces. This tool adds a DOCUMENT surface with the
+// same contract PLUS real text extraction (unpdf, offline, on the bytes) and an
+// SSRF allow-list. We drive the REAL fetchAttachmentText over mockBinaryResponse
+// (it reads .arrayBuffer(), not .json()). The PDF fixture is a hand-rolled,
+// uncompressed, single-page PDF whose content stream draws "HELLO PDF TEXT" — so
+// a passing assertion proves unpdf actually parsed real bytes, not a stub.
+// ══════════════════════════════════════════════════════════════════════════
+
+// A valid, minimal PDF (588 bytes) drawing the literal "HELLO PDF TEXT" on one
+// page. Verified offline that unpdf.extractText returns that string / 1 page.
+const TINY_PDF_B64 =
+  "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA1IDAgUiA+PiA+PiAvQ29udGVudHMgNCAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA0NSA+PgpzdHJlYW0KQlQgL0YxIDI0IFRmIDcyIDcwMCBUZCAoSEVMTE8gUERGIFRFWFQpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvRm9udCAvU3VidHlwZSAvVHlwZTEgL0Jhc2VGb250IC9IZWx2ZXRpY2EgPj4KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMTUgMDAwMDAgbiAKMDAwMDAwMDI0MSAwMDAwMCBuIAowMDAwMDAwMzM2IDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNiAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKNDA2CiUlRU9G";
+// A valid single-page PDF with NO /Contents (no text layer) — the shape of a
+// scanned/image-only attachment. Verified offline: unpdf returns totalPages:1,
+// text:"" and does NOT throw. Proves the empty-text-layer guard (B1) fires.
+const BLANK_PDF_B64 =
+  "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSA+PgplbmRvYmoKeHJlZgowIDQKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDQgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjE4NgolJUVPRg==";
+const b64ToBytes = (b64) => Uint8Array.from(Buffer.from(b64, "base64"));
+const strToBytes = (s) => new TextEncoder().encode(s);
+
+// A real SAM keyless attachment download URL shape.
+const SAM_ATT_URL =
+  "https://sam.gov/api/prod/opps/v3/opportunities/resources/files/abc123def456/download";
+
+/** Finalize a MetaBundle's partial meta exactly as the server layer does. */
+const finalMeta = (bundle) => buildMeta(bundle.meta);
+
+async function testFetchAttachmentText() {
+  section("11. sam_fetch_attachment_text: extract text + truthful null/outage/SSRF (fetch-mock)");
+
+  // ── (a) PDF happy path — REAL extraction via unpdf on the fixture bytes.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: b64ToBytes(TINY_PDF_B64),
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="test.pdf"',
+        },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      const m = finalMeta(r);
+      ok("PDF ⇒ format:pdf", r.data.format === "pdf", r.data.format);
+      ok("PDF ⇒ text CONTAINS the fixture's real text (unpdf ran on the bytes)",
+        typeof r.data.text === "string" && r.data.text.includes("HELLO PDF TEXT"),
+        JSON.stringify(r.data.text));
+      ok("PDF ⇒ pages >= 1 (honest page count)", r.data.pages >= 1, `pages=${r.data.pages}`);
+      ok("PDF ⇒ extracted:true", r.data.extracted === true, JSON.stringify(r.data.extracted));
+      ok("PDF ⇒ filename parsed from content-disposition", r.data.filename === "test.pdf", r.data.filename);
+      ok("PDF ⇒ _meta.complete:true (document fully delivered)", m.complete === true, JSON.stringify(m));
+      ok("PDF ⇒ _meta.returned:1", m.returned === 1, JSON.stringify(m.returned));
+    },
+  );
+
+  // ── (b) HTML — tags stripped, <script> CONTENT dropped, entities decoded.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: strToBytes(
+          "<html><body><script>var x=1;</script><p>Hello &amp; world</p></body></html>",
+        ),
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      ok("HTML ⇒ format:html", r.data.format === "html", r.data.format);
+      ok("HTML ⇒ text contains 'Hello & world' (entity decoded)",
+        r.data.text.includes("Hello & world"), JSON.stringify(r.data.text));
+      ok("HTML ⇒ <script> CONTENT stripped (no 'var x=1')",
+        !r.data.text.includes("var x=1"), JSON.stringify(r.data.text));
+      ok("HTML ⇒ extracted:true", r.data.extracted === true, JSON.stringify(r.data.extracted));
+    },
+  );
+
+  // ── (c) text/plain — verbatim UTF-8 passthrough.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: strToBytes("plain body"),
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      ok("text ⇒ format:text", r.data.format === "text", r.data.format);
+      ok("text ⇒ text === body verbatim", r.data.text === "plain body", JSON.stringify(r.data.text));
+    },
+  );
+
+  // ── (d) Binary non-PDF (PNG magic 89 50 4E 47) ⇒ text:null, honest note,
+  // NEVER "" masquerading as an empty document.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]),
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="logo.png"',
+        },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      const m = finalMeta(r);
+      ok("binary ⇒ format:binary", r.data.format === "binary", r.data.format);
+      ok("binary ⇒ text:null (NOT '' — never a fake empty document)", r.data.text === null,
+        JSON.stringify(r.data.text));
+      ok("binary ⇒ extracted:false", r.data.extracted === false, JSON.stringify(r.data.extracted));
+      ok("binary ⇒ disclosed 'not extractable' note",
+        m.notes.some((n) => /not extractable/i.test(n)), JSON.stringify(m.notes));
+      ok("binary ⇒ _meta.complete:false + text in fieldsUnavailable",
+        m.complete === false && m.fieldsUnavailable.includes("text"), JSON.stringify(m));
+    },
+  );
+
+  // ── (e) Corrupt PDF (%PDF header + garbage) ⇒ text:null + extractionError
+  // note, NO crash/throw. A bad PDF is NOT an outage and NOT an empty doc.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: strToBytes("%PDF-1.4\nthis is not a real pdf body at all %%EOF"),
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="broken.pdf"',
+        },
+      }),
+    async () => {
+      const res = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("corrupt PDF ⇒ does NOT throw (a bad PDF is not an outage)", res.threw === false,
+        res.threw ? String(res.error) : "");
+      if (!res.threw) {
+        const r = res.value;
+        const m = finalMeta(r);
+        ok("corrupt PDF ⇒ format:pdf (magic bytes still detect it)", r.data.format === "pdf", r.data.format);
+        ok("corrupt PDF ⇒ text:null (NOT a fabricated string)", r.data.text === null,
+          JSON.stringify(r.data.text));
+        ok("corrupt PDF ⇒ pages:null", r.data.pages === null, JSON.stringify(r.data.pages));
+        ok("corrupt PDF ⇒ extractionError note disclosed",
+          m.notes.some((n) => /extractionError/i.test(n)), JSON.stringify(m.notes));
+        ok("corrupt PDF ⇒ _meta.complete:false", m.complete === false, JSON.stringify(m.complete));
+      }
+    },
+  );
+
+  // ── (f) 503 ⇒ THROWS upstream_unavailable (retryable). A down service is
+  // NOT an empty attachment — never text:"".
+  await withFetch(
+    () => mockBinaryResponse({ status: 503, bytes: new Uint8Array(0) }),
+    async () => {
+      const { threw, error } = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("503 ⇒ throws upstream_unavailable, retryable:true (NOT empty text)",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (g) 404 ⇒ THROWS not_found (the attachment id is gone).
+  await withFetch(
+    () => mockBinaryResponse({ status: 404, bytes: new Uint8Array(0) }),
+    async () => {
+      const { threw, error } = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("404 ⇒ throws not_found, retryable:false",
+        threw && error?.toolError?.kind === "not_found" &&
+        error?.toolError?.retryable === false,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (h) Network fault (fetch rejects) ⇒ THROWS upstream_unavailable retryable
+  // — never a silent empty text.
+  await withFetch(
+    () => { throw new Error("ECONNRESET"); },
+    async () => {
+      const { threw, error } = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("network fault ⇒ throws upstream_unavailable retryable (never silent empty)",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (i) maxChars small (5) on a text body ⇒ truncated:true + disclosed,
+  // text length <= 5.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: strToBytes("abcdefghij"),
+        headers: { "content-type": "text/plain" },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL, maxChars: 5 });
+      const m = finalMeta(r);
+      ok("maxChars=5 ⇒ text length <= 5", r.data.text.length <= 5, `len=${r.data.text.length}`);
+      ok("maxChars=5 ⇒ truncated:true", r.data.truncated === true, JSON.stringify(r.data.truncated));
+      ok("maxChars=5 ⇒ truncation disclosed in a note",
+        m.notes.some((n) => /truncat/i.test(n)), JSON.stringify(m.notes));
+      ok("maxChars=5 ⇒ _meta.complete:false (couldn't fully deliver)",
+        m.complete === false, JSON.stringify(m.complete));
+    },
+  );
+
+  // ── (j) SSRF: a non-SAM host ⇒ invalid_input, NO fetch.
+  await withFetch(
+    () => { throw new Error("NETWORK LEAKED — SSRF guard failed to block a non-SAM host"); },
+    async () => {
+      const { threw, error } = await expectThrow(() =>
+        fetchAttachmentText({ url: "https://evil.example/x/download" }));
+      ok("non-SAM host ⇒ throws invalid_input (no fetch attempted)",
+        threw && error?.toolError?.kind === "invalid_input",
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (k) SSRF: an http:// (non-TLS) SAM-looking URL ⇒ invalid_input, NO fetch.
+  await withFetch(
+    () => { throw new Error("NETWORK LEAKED — accepted a non-https URL"); },
+    async () => {
+      const { threw, error } = await expectThrow(() =>
+        fetchAttachmentText({ url: "http://sam.gov/api/prod/opps/x/download" }));
+      ok("http:// (non-TLS) ⇒ throws invalid_input (no fetch attempted)",
+        threw && error?.toolError?.kind === "invalid_input",
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (l) Not even a URL ⇒ invalid_input, NO fetch.
+  await withFetch(
+    () => { throw new Error("NETWORK LEAKED — accepted a non-URL string"); },
+    async () => {
+      const { threw, error } = await expectThrow(() =>
+        fetchAttachmentText({ url: "not a url at all" }));
+      ok("non-URL string ⇒ throws invalid_input (no fetch attempted)",
+        threw && error?.toolError?.kind === "invalid_input",
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (B1) IMAGE-ONLY / no-text-layer PDF (scanned doc) ⇒ text:null + disclosed,
+  // NOT text:"" reported as a fully-delivered empty document. Keeps honest pages.
+  await withFetch(
+    () =>
+      mockBinaryResponse({
+        status: 200,
+        bytes: b64ToBytes(BLANK_PDF_B64),
+        headers: { "content-disposition": 'attachment; filename="scanned.pdf"' },
+      }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      const m = finalMeta(r);
+      ok("image-only PDF ⇒ text:null (NOT '' masquerading as an empty document)",
+        r.data.text === null && r.data.extracted === false,
+        JSON.stringify({ text: r.data.text, extracted: r.data.extracted }));
+      ok("image-only PDF ⇒ pages kept honest (it HAS a page, just no text layer)",
+        r.data.pages === 1, JSON.stringify(r.data.pages));
+      ok("image-only PDF ⇒ _meta complete:false + fieldsUnavailable:['text'] + 'no text layer' note",
+        m.complete === false && (m.fieldsUnavailable ?? []).includes("text") &&
+        m.notes.some((n) => /no extractable text layer|scanned\/image-only/i.test(n)),
+        JSON.stringify({ complete: m.complete, notes: m.notes }));
+    },
+  );
+
+  // ── (empty body) a text/plain body of "" ⇒ text:null + disclosed (not "").
+  await withFetch(
+    () => mockBinaryResponse({ status: 200, bytes: new Uint8Array(0), headers: { "content-type": "text/plain" } }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      ok("empty body ⇒ text:null (never '' as a fake empty document)",
+        r.data.text === null && r.data.extracted === false, JSON.stringify(r.data));
+    },
+  );
+
+  // ── (non-UTF-8) a text/plain body that is actually UTF-16 (NUL soup when
+  // decoded as UTF-8) ⇒ text:null + charset note, NOT garbage-as-text.
+  await withFetch(
+    () => mockBinaryResponse({
+      status: 200,
+      bytes: new Uint8Array([72, 0, 101, 0, 108, 0, 108, 0, 111, 0]), // "Hello" UTF-16LE
+      headers: { "content-type": "text/plain" },
+    }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      const m = finalMeta(r);
+      ok("non-UTF-8 (UTF-16) text ⇒ text:null + charset note (no NUL/garbage as text)",
+        r.data.text === null &&
+        m.notes.some((n) => /could not be decoded as readable UTF-8|character set/i.test(n)),
+        JSON.stringify({ text: r.data.text, notes: m.notes }));
+    },
+  );
+
+  // ── (redirect SSRF) fetch followed a redirect to a NON-SAM/non-S3 host
+  // (cloud-metadata) ⇒ refuse to read it back (invalid_input), even on a 200.
+  await withFetch(
+    () => mockBinaryResponse({
+      status: 200,
+      bytes: strToBytes("secret internal metadata"),
+      url: "https://169.254.169.254/latest/meta-data/",
+      headers: { "content-type": "text/plain" },
+    }),
+    async () => {
+      const { threw, error } = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("redirect to non-SAM host (169.254.169.254) ⇒ throws invalid_input (SSRF: final host re-validated)",
+        threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (redirect to S3) the LEGITIMATE hop: SAM 303-redirects to its S3 store;
+  // the final host is *.s3.amazonaws.com ⇒ ALLOWED (extraction must still work).
+  await withFetch(
+    () => mockBinaryResponse({
+      status: 200,
+      bytes: b64ToBytes(TINY_PDF_B64),
+      url: "https://iae-fbo-attachments.s3.amazonaws.com/abc?X-Amz-Expires=9",
+      headers: { "content-disposition": 'attachment; filename="test.pdf"' },
+    }),
+    async () => {
+      const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+      ok("redirect to SAM's S3 store ⇒ ALLOWED, extracts the PDF text (the legit hop is not blocked)",
+        r.data.format === "pdf" && typeof r.data.text === "string" && r.data.text.includes("HELLO PDF TEXT"),
+        JSON.stringify({ format: r.data.format, textHead: (r.data.text ?? "").slice(0, 20) }));
+    },
+  );
+
+  // ── (size cap) a content-length over the 50MB cap ⇒ refuse BEFORE buffering.
+  await withFetch(
+    () => mockBinaryResponse({
+      status: 200,
+      bytes: strToBytes("small body but header lies big"),
+      headers: { "content-type": "application/pdf", "content-length": String(60 * 1024 * 1024) },
+    }),
+    async () => {
+      const { threw, error } = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("oversized content-length (60MB) ⇒ throws invalid_input (bounded before buffering)",
+        threw && error?.toolError?.kind === "invalid_input" &&
+        /MB|limit/i.test(error?.toolError?.message ?? ""),
+        JSON.stringify(error?.toolError));
+    },
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
@@ -2534,6 +2904,7 @@ async function main() {
   await testFarSearch();
   await testSearchOutageHonesty();
   await testGetOpportunityDetailHonesty();
+  await testFetchAttachmentText();
 
   // Prove the harness bites.
   await selfCheck();
