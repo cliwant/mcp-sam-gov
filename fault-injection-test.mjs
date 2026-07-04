@@ -1883,6 +1883,289 @@ async function testSearchOutageHonesty() {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 10. getOpportunity / fetchOpportunityDescription OUTAGE-vs-ABSENT honesty
+//     (C21) — the SAM DETAIL path (dist/sam-gov/index.js SamGovClient, fetch-
+//     mock). Sibling of #9 (which covers SEARCH): #9 fixed DOWN-reads-as-zero
+//     on the list endpoint; this fixes DOWN-reads-as-not-found on the detail
+//     endpoint.
+//
+//     The defect: getOpportunityPublic collapsed EVERY non-ok status AND a
+//     hollow 200 (no data2.title) to null, and getOpportunity re-swallowed any
+//     outage throw to null; fetchOpportunityDescription swallowed a DOWN fetch
+//     into "Description not available." The wrapper maps null → { found:false },
+//     so an AI read "this notice does not exist" when SAM was DOWN.
+//
+//     LIVE-GROUNDED mapping (2026-07-04, re-verified this session): a real
+//     32-hex id → 200 + data2.title; a malformed/absent id → 401 (stable, never
+//     404/200-empty). So 401/404 → null (genuine absent → found:false); every
+//     other non-2xx / network / hollow-200 → THROW upstream_unavailable
+//     (retryable). We drive the REAL keyless SamGovClient over the mocked detail
+//     URL; the enrichment sub-calls (resources / org) are given benign 200s so
+//     their best-effort swallow (out of scope) does not muddy the assertions.
+// ══════════════════════════════════════════════════════════════════════════
+async function testGetOpportunityDetailHonesty() {
+  section("10. getOpportunity / description outage-vs-absent honesty (fetch-mock)");
+
+  // Keyless ⇒ auth tier skipped; ONLY the public detail tier runs.
+  const client = () => new SamGovClient({ fetch: globalThis.fetch });
+
+  // URL classifiers for the detail surface (from getOpportunityPublic).
+  const isDetail = (u) => /\/opps\/v2\/opportunities\/[^/]+($|\?)/.test(u);
+  const isResources = (u) => /\/opps\/v3\/opportunities\/[^/]+\/resources/.test(u);
+  const isOrg = (u) => /\/federalorganizations\/v1\/organizations\//.test(u);
+
+  // A detail body in getOpportunityPublic's EXACT read shape:
+  // { data2: { title, … }, description: [{ body }] }.
+  const detailBody = (over = {}) => ({
+    data2: {
+      title: "SAMPLE NOTICE TITLE",
+      type: "Solicitation",
+      organizationId: "ORG123",
+      solicitationNumber: "SOL-9",
+      postedDate: "2026-07-01",
+      solicitation: { setAside: "SBA", deadlines: { response: "2026-08-01T17:00:00-04:00" } },
+      naics: [{ code: ["541512"] }],
+      ...over,
+    },
+    description: [{ body: "The full RFP body text." }],
+  });
+  // Benign enrichment responses so the out-of-scope sub-calls never throw.
+  const resourcesOk = () =>
+    mockResponse({ status: 200, json: { _embedded: { opportunityAttachmentList: [{ attachments: [] }] } } });
+  const orgOk = () =>
+    mockResponse({ status: 200, json: { _embedded: [{ org: { fullParentPathName: "DOD.ARMY" } }] } });
+
+  // A detail handler: `detail(url)` decides the detail-endpoint response; the
+  // enrichment URLs always resolve benignly.
+  const detailHandler = (detail) => (u) => {
+    if (isResources(u)) return resourcesOk();
+    if (isOrg(u)) return orgOk();
+    if (isDetail(u)) return detail(u);
+    return failClosed()();
+  };
+
+  const REALID = "686796f3919a49f598fcc1493fe81f0a";
+
+  // ── (a) 200 + data2.title ⇒ getOpportunity returns the notice (found).
+  await withFetch(
+    detailHandler(() => mockResponse({ status: 200, json: detailBody() })),
+    async () => {
+      const o = await client().getOpportunity(REALID);
+      ok("200 + data2.title ⇒ returns an object (found)",
+        o && o.noticeId === REALID && o.title === "SAMPLE NOTICE TITLE",
+        JSON.stringify(o && { id: o.noticeId, title: o.title }));
+      ok("200 ⇒ mapped fields carried (naics/setAside/deadline/description)",
+        o && o.naicsCode === "541512" && o.typeOfSetAside === "SBA" &&
+        o.responseDeadLine === "2026-08-01T17:00:00-04:00" &&
+        o.description === "The full RFP body text.",
+        JSON.stringify(o && { naics: o.naicsCode, sa: o.typeOfSetAside }));
+    },
+  );
+
+  // ── (b) 401 ⇒ null (genuine not-found — the live-grounded "absent" signal for
+  // most bogus/malformed ids: UNAUTHORIZED "Error occured while get...").
+  await withFetch(
+    detailHandler(() => mockResponse({ status: 401 })),
+    async () => {
+      const o = await client().getOpportunity("00000000000000000000000000000000");
+      ok("401 ⇒ null (genuine absent, NOT a thrown outage)", o === null,
+        `returned ${JSON.stringify(o)}`);
+    },
+  );
+
+  // ── (c) 404 ⇒ null (also genuine not-found).
+  await withFetch(
+    detailHandler(() => mockResponse({ status: 404 })),
+    async () => {
+      const o = await client().getOpportunity(REALID);
+      ok("404 ⇒ null (genuine absent, NOT a thrown outage)", o === null,
+        `returned ${JSON.stringify(o)}`);
+    },
+  );
+
+  // ── (c2) 400 ⇒ null (RE-GROUNDED live 2026-07-04: some bogus 32-hex ids get a
+  // STABLE 400 BAD_REQUEST "Invalid request data" — the endpoint CLIENT-REJECTS
+  // the id, semantically identical to 401/404 here. A 4xx is "not a retrievable
+  // notice" = absent, NOT an outage. This is the exact id the live edge-case
+  // suite exercises; mapping it to a retryable throw would cry wolf.)
+  await withFetch(
+    detailHandler(() => mockResponse({ status: 400 })),
+    async () => {
+      const o = await client().getOpportunity("0000000000000000000000000000abcd");
+      ok("400 ⇒ null (client-rejected id = absent, NOT a thrown outage)", o === null,
+        `returned ${JSON.stringify(o)}`);
+    },
+  );
+
+  // ── (c3) 429 ⇒ THROWS rate_limited (the ONE 4xx that is NOT an absence — a
+  // retryable throttle. Must NOT collapse to null/found:false, else a
+  // rate-limited id reads as "does not exist").
+  await withFetch(
+    detailHandler(() => mockResponse({ status: 429 })),
+    async () => {
+      const { threw, error } = await expectThrow(() => client().getOpportunity(REALID));
+      ok("429 ⇒ throws rate_limited retryable (NOT null / found:false)",
+        threw && error?.toolError?.kind === "rate_limited" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (c4) 403 ⇒ THROWS upstream_unavailable (NOT null). The endpoint's live
+  // absent vocabulary is strictly {400,401,404}; 403 was NEVER emitted, so a 403
+  // is a CDN/WAF block = an OUTAGE, not an absence. Mapping it to null would let a
+  // WAF-blocked notice read as found:false (a DOWN-reads-as-absent lie). Only the
+  // three confirmed absent statuses null; every other non-2xx (incl. 403) throws.
+  await withFetch(
+    detailHandler(() => mockResponse({ status: 403 })),
+    async () => {
+      const { threw, error } = await expectThrow(() => client().getOpportunity(REALID));
+      ok("403 ⇒ throws upstream_unavailable (NOT null — a WAF/CDN block is an outage, not an absence)",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (d) 503 ⇒ THROWS upstream_unavailable (retryable), NOT null. A DOWN
+  // service must never read as found:false.
+  await withFetch(
+    detailHandler(() => mockResponse({ status: 503 })),
+    async () => {
+      const { threw, error } = await expectThrow(() => client().getOpportunity(REALID));
+      ok("503 ⇒ throws (never a silent null)", threw,
+        `threw=${threw}`);
+      ok("503 ⇒ kind:upstream_unavailable, retryable:true (classified outage)",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (e) NETWORK FAULT (fetch rejects) ⇒ throws upstream_unavailable retryable,
+  // never a masked null.
+  await withFetch(
+    (u) => {
+      if (isResources(u)) return resourcesOk();
+      if (isOrg(u)) return orgOk();
+      if (isDetail(u)) throw new Error("ECONNRESET");
+      return failClosed()();
+    },
+    async () => {
+      const { threw, error } = await expectThrow(() => client().getOpportunity(REALID));
+      ok("network fault ⇒ throws upstream_unavailable retryable (never silent null)",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (f) HOLLOW 200 (no data2.title) ⇒ THROWS upstream_unavailable, NOT null.
+  // A CDN/proxy hollow body is a degraded response, not a confirmed absence.
+  for (const [label, body] of [
+    ["{} (empty object)", {}],
+    ['{"data2":{}} (data2 present, no title)', { data2: {} }],
+    ['{"message":"Access Denied"} (proxy envelope)', { message: "Access Denied" }],
+  ]) {
+    await withFetch(
+      detailHandler(() => mockResponse({ status: 200, json: body })),
+      async () => {
+        const { threw, error } = await expectThrow(() => client().getOpportunity(REALID));
+        ok(`hollow-200 (${label}) ⇒ throws (NOT a fake found:false)`, threw,
+          `threw=${threw}`);
+        ok(`hollow-200 (${label}) ⇒ kind:upstream_unavailable, retryable:true`,
+          threw && error?.toolError?.kind === "upstream_unavailable" &&
+          error?.toolError?.retryable === true,
+          JSON.stringify(error?.toolError));
+      },
+    );
+  }
+
+  // ── (g) WRAPPER CONTRACT: reproduce the server.ts wrapper's `if (!o) return
+  // { found:false }` logic around getOpportunity. A 401 (absent) ⇒ found:false;
+  // a 503 (outage) ⇒ the throw PROPAGATES (expectThrow) — it must NOT be
+  // rendered as found:false. This proves the wrappers need no local catch: the
+  // throw reaches the global tool-error mapper (upstream_unavailable), and only
+  // a genuine absence yields found:false.
+  const wrapperGetOpportunity = async (id) => {
+    const o = await client().getOpportunity(id); // throws on outage
+    if (!o) return { found: false, noticeId: id };
+    return { found: true, noticeId: o.noticeId };
+  };
+  await withFetch(
+    detailHandler(() => mockResponse({ status: 401 })),
+    async () => {
+      const res = await wrapperGetOpportunity("00000000000000000000000000000000");
+      ok("wrapper: 401 (absent) ⇒ { found:false } (genuine not-found preserved)",
+        res.found === false, JSON.stringify(res));
+    },
+  );
+  await withFetch(
+    detailHandler(() => mockResponse({ status: 503 })),
+    async () => {
+      const { threw, error, value } = await expectThrow(() => wrapperGetOpportunity(REALID));
+      ok("wrapper: 503 (outage) ⇒ throws, NOT { found:false } (no fabricated absence)",
+        threw && value === undefined, JSON.stringify(value));
+      ok("wrapper: 503 propagates as upstream_unavailable (global mapper input)",
+        threw && error?.toolError?.kind === "upstream_unavailable",
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (h) fetchOpportunityDescription: a URL whose fetch 503s ⇒ THROWS
+  // upstream_unavailable (does NOT fabricate "Description not available.").
+  await withFetch(
+    (u) => (/sam\.gov/.test(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() =>
+        client().fetchOpportunityDescription("https://sam.gov/api/prod/opps/v2/opportunities/X/description"));
+      ok("description URL 503 ⇒ throws upstream_unavailable (no fabricated 'not available')",
+        threw && error?.toolError?.kind === "upstream_unavailable" &&
+        error?.toolError?.retryable === true,
+        JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (i) fetchOpportunityDescription: a URL that 200s with a text body ⇒
+  // returns the cleaned text (happy path unchanged).
+  await withFetch(
+    (u) => (/sam\.gov/.test(u)
+      ? mockResponse({ status: 200, json: "<p>Hello&nbsp;RFP world</p>", headers: { "content-type": "text/html" } })
+      : failClosed()()),
+    async () => {
+      const text = await client().fetchOpportunityDescription("https://sam.gov/desc/X");
+      ok("description URL 200 (text) ⇒ returns cleaned body text",
+        typeof text === "string" && /Hello RFP world/.test(text),
+        JSON.stringify(text));
+    },
+  );
+
+  // ── (j) fetchOpportunityDescription: a URL that 200s with a JSON body ⇒
+  // returns the body field (json passthrough unchanged).
+  await withFetch(
+    (u) => (/sam\.gov/.test(u)
+      ? mockResponse({ status: 200, json: { body: "JSON body text" }, headers: { "content-type": "application/hal+json" } })
+      : failClosed()()),
+    async () => {
+      const text = await client().fetchOpportunityDescription("https://sam.gov/desc/X");
+      ok("description URL 200 (json) ⇒ returns the body field",
+        text === "JSON body text", JSON.stringify(text));
+    },
+  );
+
+  // ── (k) fetchOpportunityDescription: a PLAIN-TEXT input (no `http`) ⇒
+  // passthrough, byte-unchanged, no fetch attempted (offline-safe).
+  await withFetch(
+    () => failClosed()(), // any fetch would throw the leak sentinel
+    async () => {
+      const text = await client().fetchOpportunityDescription("Already-extracted body text.");
+      ok("plain-text input ⇒ passthrough unchanged (no fetch)",
+        text === "Already-extracted body text.", JSON.stringify(text));
+    },
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
@@ -1903,6 +2186,7 @@ async function main() {
   await testFarClauseLookup();
   await testFarComplianceMatrix();
   await testSearchOutageHonesty();
+  await testGetOpportunityDetailHonesty();
 
   // Prove the harness bites.
   await selfCheck();
