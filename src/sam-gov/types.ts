@@ -75,6 +75,17 @@ export type SamOpportunity = {
   placeOfPerformance?: SamLocation | null;
   uiLink?: string;
   resourceLinks?: string[] | null;
+  /**
+   * Which enrichment sub-fetches DEGRADED on an outage (subset of
+   * ["attachments", "organization"]). Set ONLY when a sub-fetch's HTTP call
+   * failed (non-200 / network / timeout) — the corresponding field
+   * (`resourceLinks` / `fullParentPathName`) is then empty but UNKNOWN, NOT
+   * confirmed-absent. Additive + optional: a healthy notice (incl. a genuine
+   * 200-empty attachment list or empty org path) NEVER sets it. Tool wrappers
+   * read it to emit an honest `_meta.degraded` + a disclosing note instead of
+   * a silent "no attachments"/"no organization" lie.
+   */
+  enrichmentDegraded?: string[];
 };
 
 export type SamSearchFilters = {
