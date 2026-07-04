@@ -46,7 +46,7 @@ import zlib from "node:zlib";
 import { runTool } from "./dist/server.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -821,6 +821,12 @@ async function testAnalyzeIncumbent() {
       return failClosed()();
     },
     async () => {
+      // getAwardDetail's RAW recipient must also be null (not "") — usas_get_award_detail
+      // exposes it directly, and it must be consistent with analyzeIncumbent's incumbent.
+      const dd = await getAwardDetail(GEN);
+      ok("blank recipient ⇒ getAwardDetail.recipient === null (raw detail honest, not '')",
+        dd.recipient === null, JSON.stringify(dd.recipient));
+
       const res = await analyzeIncumbent({ generatedInternalId: GEN });
       ok("blank recipient ⇒ award.incumbent === null (UNKNOWN, not '' = 'none')",
         res.data.award.incumbent === null, JSON.stringify(res.data.award.incumbent));
@@ -881,6 +887,42 @@ async function testAnalyzeIncumbent() {
       // NOT forced-degraded (disclosed via fieldsUnavailable, analysis still valid).
       ok("null money ⇒ _meta.complete !== false (disclosed, not a failure/degradation)",
         res.meta.complete !== false, JSON.stringify(res.meta.complete));
+    },
+  );
+
+  // ── Search-result identity fields: a row missing Recipient Name / Awarding
+  // Agency must map to null (UNKNOWN), never "" (which reads as "no recipient").
+  // Same invariant as getAwardDetail. (Rare on the core spending_by_award columns,
+  // but the mapper must not fabricate an empty-string identity.)
+  await withFetch(
+    (u) => {
+      if (isSpendingByAward(u)) {
+        return mockResponse({
+          status: 200,
+          json: {
+            results: [
+              { "Award ID": "X1", "Award Amount": 100, generated_internal_id: "X1" }, // no Recipient Name / Awarding Agency
+              { "Award ID": "X2", "Recipient Name": "REAL CORP", "Awarding Agency": "Department of Energy", "Award Amount": 200, generated_internal_id: "X2" },
+            ],
+            page_metadata: { hasNext: false },
+          },
+        });
+      }
+      if (isSpendingByAwardCount(u)) return mockResponse({ status: 200, json: { results: { contracts: 2 } } });
+      return failClosed()();
+    },
+    async () => {
+      const r = await searchAwardsByRecipient({ recipientName: "ANY CO", limit: 5 });
+      const rows = r.data.awards;
+      const x1 = rows.find((a) => a.awardId === "X1");
+      const x2 = rows.find((a) => a.awardId === "X2");
+      ok("search row missing recipient ⇒ recipient === null (not '')",
+        x1.recipient === null, JSON.stringify(x1.recipient));
+      ok("search row missing awardingAgency ⇒ awardingAgency === null (not '')",
+        x1.awardingAgency === null, JSON.stringify(x1.awardingAgency));
+      ok("search row WITH identity ⇒ values preserved unchanged (no over-nulling)",
+        x2.recipient === "REAL CORP" && x2.awardingAgency === "Department of Energy",
+        JSON.stringify({ r: x2.recipient, a: x2.awardingAgency }));
     },
   );
 }
