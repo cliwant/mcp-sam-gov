@@ -490,9 +490,13 @@ export async function getAwardDetail(generatedInternalId) {
         return {
             awardId: json.piid ?? "",
             recipient: json.recipient?.recipient_name ?? "",
-            totalObligation: json.total_obligation ?? 0,
-            baseAndAllOptions: json.base_and_all_options ?? 0,
-            // base_exercised_options is present alongside the ceiling (verified).
+            // Money fields are null (UNKNOWN) when USAspending omits them — never 0.
+            // A null base_and_all_options is common and legitimate (IDVs/BPAs carry
+            // the ceiling at the vehicle level, grants/loans have no ceiling concept);
+            // rendering it as 0 would read as "a $0 ceiling", a data-absence-as-present
+            // masquerade. Consistent with baseExercisedOptions, which already nulls.
+            totalObligation: json.total_obligation ?? null,
+            baseAndAllOptions: json.base_and_all_options ?? null,
             baseExercisedOptions: json.base_exercised_options ?? null,
             subawardCount: json.subaward_count ?? null,
             // Award type + human description (e.g. "C" / "DELIVERY ORDER").
@@ -616,10 +620,10 @@ export async function analyzeIncumbent(args) {
     // --- 3. Signals (all PUBLIC, individual — never combined into a score) -
     const obligated = detail.totalObligation;
     const ceiling = detail.baseAndAllOptions;
-    // pctConsumed only when the ceiling is a usable positive number; a 0/absent
-    // or data-error negative ceiling → null (never a divide-by-zero or a
-    // nonsensical negative/inflated ratio).
-    const pctConsumed = typeof ceiling === "number" && ceiling > 0
+    // pctConsumed only when BOTH obligated is a number AND the ceiling is a usable
+    // positive number; a null/absent obligated or a 0/absent/negative ceiling → null
+    // (never a divide-by-zero, a null-coerced-to-0 ratio, or a nonsensical negative).
+    const pctConsumed = typeof obligated === "number" && typeof ceiling === "number" && ceiling > 0
         ? obligated / ceiling
         : null;
     const currentEndDate = detail.periodOfPerformance.endDate;
@@ -721,6 +725,12 @@ export async function analyzeIncumbent(args) {
     if (incumbentUnknown) {
         fieldsUnavailable.push("recipient_name");
     }
+    // Null money fields are UNKNOWN, not $0 — disclose so an AI never cites a
+    // fabricated zero (the values themselves are now null in obligatedVsCeiling).
+    if (obligated === null)
+        fieldsUnavailable.push("total_obligation");
+    if (ceiling === null)
+        fieldsUnavailable.push("base_and_all_options");
     // List ONLY the calls actually attempted — never assert a recipient search
     // that failed or was skipped (D1). enrichmentCalls stays in lockstep with
     // this list: detail + transactions are always attempted; the recipient call
@@ -749,7 +759,7 @@ export async function analyzeIncumbent(args) {
         }
     }
     if (pctConsumed === null) {
-        notes.push("obligatedVsCeiling.pctConsumed is null because the award's ceiling (base_and_all_options) is absent, zero, or a negative data-entry value — consumption cannot be computed.");
+        notes.push("obligatedVsCeiling.pctConsumed is null because the obligated amount or the award's ceiling (base_and_all_options) is absent (null), zero, or a negative data-entry value — consumption cannot be computed.");
     }
     if (numberOfOffers === null) {
         notes.push("number_of_offers_received is null on this award, so the 'single_offer' hint could not be evaluated (absence of the hint does NOT imply competition).");
