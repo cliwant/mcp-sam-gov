@@ -1310,6 +1310,87 @@ async function testFarClauseLookup() {
         JSON.stringify(calls.map((c) => c.url)));
     },
   );
+  _clearCache(); // wipe case (i)'s NULL currency before the normalize cases below.
+
+  // ── (j) NORMALIZE HARDENING (truthfulness): normalizeClauseNumber must strip
+  // ONLY a leading FAR/DFARS prefix + surrounding whitespace — NEVER embedded
+  // characters. The old `.replace(/[^\d.\-]/g,"")` mangled a garbage input like
+  // "52.212-4extra5" into "52.212-45" (a DIFFERENT real clause) that passed
+  // CLAUSE_RE and fetched a SILENTLY-WRONG answer. The fix leaves the junk in
+  // place so CLAUSE_RE rejects it ⇒ invalid_input, aligning far.ts standalone
+  // with the server Zod boundary (which already rejects the same strings). These
+  // reject cases reach NO network (the guard fires before any fetch).
+  for (const bad of [
+    "52.212-4extra5", // the load-bearing case: would have mangled → 52.212-45
+    "52.212-4/5",
+    "52.212-4 and 52.204-25",
+    "foo52.212-4",
+    "52.212-4.",       // trailing punct is NOT part of the clause (Zod rejects too)
+  ]) {
+    await withFetch(
+      // Any fetch would be a bug: the input must be rejected before the versioner.
+      () => { throw new Error(`NETWORK LEAKED — a mangled clause '${bad}' was fetched instead of rejected`); },
+      async () => {
+        const { threw, error } = await expectThrow(() =>
+          farClauseLookup({ clauseNumber: bad }));
+        ok(`normalize: '${bad}' ⇒ invalid_input (NOT a mangled fetch of a wrong clause)`,
+          threw && error?.toolError?.kind === "invalid_input" &&
+          error?.toolError?.retryable === false,
+          JSON.stringify(error?.toolError));
+      },
+    );
+  }
+
+  // ── (j2) NORMALIZE — the LEGIT shapes still resolve: a bare clause, a 'FAR '
+  // prefix, and surrounding whitespace all normalize to the SAME bare clause and
+  // succeed (d.clauseNumber is the stripped core '52.212-4'). Proves the fix did
+  // not over-tighten — only garbage is rejected, valid prefixes/whitespace pass.
+  _clearCache();
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u) && ecfrSection(u) === "52.212-4") return xml(CLAUSE_XML_52_212_4);
+      return failClosed()();
+    },
+    async () => {
+      for (const [label, input] of [
+        ["bare '52.212-4'", "52.212-4"],
+        ["prefixed 'FAR 52.212-4'", "FAR 52.212-4"],
+        ["whitespace ' 52.212-4 '", " 52.212-4 "],
+      ]) {
+        const res = await farClauseLookup({ clauseNumber: input, includePrescription: false });
+        ok(`normalize: ${label} ⇒ resolves to bare clause '52.212-4' (prefix/space stripped, not mangled)`,
+          res.data.clauseNumber === "52.212-4",
+          JSON.stringify(res.data.clauseNumber));
+      }
+    },
+  );
+
+  // ── (j3) DFARS prefix stripping still works: 'DFARS 252.204-7012' normalizes to
+  // the bare '252.204-7012' and resolves (regulation DFARS), proving the prefix
+  // strip is intact for the DFARS family too.
+  _clearCache();
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return titles();
+      if (isEcfrFull(u)) {
+        const s = ecfrSection(u);
+        if (s === "252.204-7012") return xml(CLAUSE_XML_252_204_7012);
+        if (s === "204.7304")
+          return xml(`<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="204.7304" TYPE="SECTION"><HEAD>204.7304 Solicitation provisions and contract clauses.</HEAD>
+<P>(c) Use the clause at 252.204-7012.</P></DIV8>`);
+      }
+      return failClosed()();
+    },
+    async () => {
+      const res = await farClauseLookup({ clauseNumber: "DFARS 252.204-7012" });
+      ok("normalize: 'DFARS 252.204-7012' ⇒ bare '252.204-7012', regulation DFARS",
+        res.data.clauseNumber === "252.204-7012" && res.data.regulation === "DFARS",
+        JSON.stringify({ c: res.data.clauseNumber, reg: res.data.regulation }));
+    },
+  );
+
   _clearCache(); // leave a clean cache for any later suite.
 }
 
@@ -3378,6 +3459,198 @@ async function testGetOpportunityEnrichmentHonesty() {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 13. sam_search_opportunities GSA-CSV enrichment disclosure gating — the
+//     empty-page (returned===0) FALSE-warming fix (server.ts CSV-enrichment
+//     block, ~L1421-1466).
+//
+//     The defect: with the CSV backbone ENABLED but its index cold, the
+//     `ready = data.returned > 0 ? tryGetReadyIndex(...) : null` line yields
+//     `ready===null` on a GENUINELY-EMPTY page (returned===0). Control then fell
+//     into the `else` "index warming" branch, which set source "(index warming)"
+//     and pushed a note telling the caller to "Retry shortly for an enriched
+//     page". On a 0-row page there is NOTHING to enrich — a retry cannot add rows
+//     — so that note is misleading. The fix gates the warming disclosure on
+//     `data.returned > 0` (`else if (data.returned > 0)`), so an empty page is a
+//     complete, honest result with NO warming note / suffix.
+//
+//     server.ts's runTool is NOT exported (importing it spawns an MCP server on
+//     stdio — see §9), so — exactly as §9 does for the degraded-vs-healthy
+//     mapping — we reproduce the EXACT enrichment source/notes/fieldsUnavailable
+//     ASSEMBLY the handler runs (including the gated branch that was changed) and
+//     drive it through the REAL enrichSearchOpportunities (dist/gsa-csv.js) +
+//     buildMeta (dist/meta.js). The assertion therefore exercises the shipped
+//     branch/note logic, not a paraphrase of it.
+// ══════════════════════════════════════════════════════════════════════════
+async function testSearchEnrichmentGating() {
+  section("13. sam_search_opportunities CSV enrichment disclosure gating (empty-page warming fix)");
+
+  // A faithful reproduction of the server.ts CSV-enrichment assembly (the block
+  // that was changed): given a `data` page ({returned, opportunities}), whether
+  // the CSV is enabled, and a `readyIndex` (null = cold/warming), produce the
+  // { source, notes, fieldsUnavailable, meta } the handler would emit. The ONLY
+  // load-bearing line under test is the warming branch's `else if (returned>0)`
+  // gate — every other line mirrors server.ts verbatim.
+  const assembleEnrichment = ({ data, enabled, readyIndex, totalRecords }) => {
+    let enrichedOpps = data.opportunities;
+    let fieldsUnavailable = ["naics", "setAside", "placeOfPerformance"];
+    const enrichmentNotes = [];
+    let source = "sam.gov/sgs/v1 (keyless HAL)";
+    let freshness = undefined;
+
+    if (enabled) {
+      const ready = data.returned > 0 ? readyIndex : null;
+      if (ready) {
+        const outcome = enrichSearchOpportunities(enrichedOpps, ready);
+        enrichedOpps = outcome.opportunities;
+        freshness = outcome.freshness;
+        source = "sam.gov/sgs/v1 (keyless HAL) + gsa-csv (daily bulk CSV snapshot)";
+        fieldsUnavailable = ["naics", "setAside", "placeOfPerformance"].filter(
+          (f) => !outcome.fieldsFilled.has(f),
+        );
+        const filledList = [...outcome.fieldsFilled];
+        if (filledList.length > 0) {
+          enrichmentNotes.push(
+            `naics/set-aside/place-of-performance for results present in today's GSA CSV snapshot were enriched from the GSA daily bulk CSV (source: gsa-csv) — filled fields this page: ${filledList.join(", ")}. set-aside here is the CSV short code (e.g. 'SBA') that matches sam_get_opportunity's setAside. Confirm real-time values (e.g. a just-amended deadline) with sam_get_opportunity.`,
+          );
+        } else {
+          enrichmentNotes.push(
+            "GSA-CSV enrichment ran but filled no fields on this page (the matched snapshot rows carried no non-empty naics/set-aside/place-of-performance) — values remain null; fetch sam_get_opportunity.",
+          );
+        }
+        if (outcome.missingCount > 0) {
+          enrichmentNotes.push(
+            `${outcome.missingCount} of ${data.returned} results were not in the current CSV snapshot (too new or archived) — their naics/set-aside/PoP remain null; fetch sam_get_opportunity for those noticeIds.`,
+          );
+        }
+        enrichmentNotes.push(
+          `GSA CSV freshness — snapshot last-modified: ${outcome.freshness.csvLastModified ?? "unknown"}; index built: ${outcome.freshness.indexBuiltAt}; index age: ${outcome.freshness.indexAgeHours ?? "unknown"}h. The snapshot can lag the live HAL by up to ~24h.`,
+        );
+      } else if (data.returned > 0) {
+        // THE GATED BRANCH (the fix): only disclose warming when rows exist that
+        // COULD be enriched. returned===0 falls through with the plain source.
+        source = "sam.gov/sgs/v1 (keyless HAL) + gsa-csv (index warming)";
+        enrichmentNotes.push(
+          "GSA-CSV enrichment pending — the CSV index is warming (a background download/build was kicked off); naics/set-aside/place-of-performance were NOT enriched this call. Retry shortly for an enriched page, or fetch sam_get_opportunity now.",
+        );
+      }
+    }
+
+    // The handler's filter-honesty note branch (returned>0/empty both add ONE of
+    // these; neither mentions enrichment) then the enrichment notes.
+    const notes = [];
+    notes.push(
+      "naics/setAside/placeOfPerformance are null because the keyless list endpoint omits those values — call sam_get_opportunity for a notice to obtain them.",
+    );
+    notes.push(...enrichmentNotes);
+
+    const meta = buildMeta({
+      source,
+      keylessMode: true,
+      truncated: totalRecords > data.returned,
+      returned: data.returned,
+      totalAvailable: totalRecords,
+      filtersApplied: [],
+      filtersDropped: [],
+      fieldsUnavailable,
+      notes,
+    });
+    return { source, notes, fieldsUnavailable, freshness, meta, opportunities: enrichedOpps };
+  };
+
+  // A warm ReadyIndex over ONE notice (the same hand-built shape §2b uses), so
+  // the returned>0 warm path exercises the REAL enrichSearchOpportunities.
+  const FIELDS = (o = {}) => ({
+    title: "", type: "", setAsideCode: "", setAside: "", responseDeadline: "",
+    naicsCode: "", popCity: "", popState: "", popZip: "", popCountry: "", active: "",
+    ...o,
+  });
+  const warmSnapshot = new Map([
+    ["aaaa0000aaaa0000aaaa0000aaaa0001", FIELDS({ naicsCode: "541512", setAsideCode: "SBA", type: "Solicitation" })],
+  ]);
+  const warmIndex = {
+    get: (id) => warmSnapshot.get((id ?? "").trim().toLowerCase()),
+    csvLastModified: "Wed, 02 Jul 2026 06:00:00 GMT",
+    indexBuiltAt: new Date().toISOString(),
+    rowCount: warmSnapshot.size,
+  };
+
+  // ── (a) THE FIX: ENABLED + COLD index + GENUINELY-EMPTY page (returned===0) ⇒
+  // NO "index warming" source suffix and NO "retry … for an enriched page" note.
+  // The empty page is a complete, honest result — nothing to enrich.
+  {
+    const r = assembleEnrichment({
+      data: { returned: 0, opportunities: [] },
+      enabled: true,
+      readyIndex: null, // cold — would have hit the warming branch pre-fix
+      totalRecords: 0,
+    });
+    ok("empty-page (returned===0, enabled, cold) ⇒ source has NO '(index warming)' suffix",
+      !/index warming/i.test(r.source) && r.source === "sam.gov/sgs/v1 (keyless HAL)",
+      JSON.stringify(r.source));
+    ok("empty-page ⇒ NO 'index warming'/'Retry … enriched page' note (nothing to enrich)",
+      !r.notes.some((n) => /index is warming|enriched page|enrichment pending/i.test(n)),
+      JSON.stringify(r.notes));
+    ok("empty-page ⇒ _meta.source carries no warming suffix; complete:true (real, complete zero)",
+      !/index warming/i.test(r.meta.source) && r.meta.complete === true,
+      JSON.stringify({ source: r.meta.source, complete: r.meta.complete }));
+  }
+
+  // ── (b) UNCHANGED behavior: ENABLED + COLD index + NON-EMPTY page (returned>0)
+  // ⇒ the warming disclosure STILL fires (rows exist that could be enriched). This
+  // guards that the fix suppresses ONLY the empty-page case, not the real one.
+  {
+    const r = assembleEnrichment({
+      data: { returned: 1, opportunities: [{ noticeId: "zzz", title: "T", responseDeadline: null, naics: null, setAside: null }] },
+      enabled: true,
+      readyIndex: null, // cold
+      totalRecords: 1,
+    });
+    ok("non-empty cold page (returned>0) ⇒ source DOES carry '(index warming)' (unchanged)",
+      /index warming/i.test(r.source), JSON.stringify(r.source));
+    ok("non-empty cold page ⇒ the warming/'retry for an enriched page' note IS present (unchanged)",
+      r.notes.some((n) => /index is warming/i.test(n) && /enriched page/i.test(n)),
+      JSON.stringify(r.notes));
+  }
+
+  // ── (c) SANITY: ENABLED + WARM index + NON-EMPTY page ⇒ the healthy enriched
+  // path is untouched by the gating change (real enrichSearchOpportunities fills
+  // naics/setAside; source is the enriched source, NOT warming).
+  {
+    const r = assembleEnrichment({
+      data: {
+        returned: 1,
+        opportunities: [{ noticeId: "aaaa0000aaaa0000aaaa0000aaaa0001", title: "HAL A", responseDeadline: null, naics: null, setAside: null }],
+      },
+      enabled: true,
+      readyIndex: warmIndex,
+      totalRecords: 1,
+    });
+    ok("warm non-empty page ⇒ enriched source (NOT warming), fields filled from CSV",
+      /daily bulk CSV snapshot/.test(r.source) && !/index warming/i.test(r.source) &&
+      r.opportunities[0].naics === "541512" && r.opportunities[0].setAside === "SBA",
+      JSON.stringify({ source: r.source, naics: r.opportunities[0].naics }));
+    ok("warm non-empty page ⇒ an enrichment 'filled fields' note present (healthy path intact)",
+      r.notes.some((n) => /enriched from the GSA daily bulk CSV/i.test(n)),
+      JSON.stringify(r.notes));
+  }
+
+  // ── (d) DISABLED CSV (default) + empty page ⇒ plain un-enriched result, no
+  // enrichment note at all (the disabled path is unaffected by the fix).
+  {
+    const r = assembleEnrichment({
+      data: { returned: 0, opportunities: [] },
+      enabled: false,
+      readyIndex: null,
+      totalRecords: 0,
+    });
+    ok("disabled + empty page ⇒ plain HAL source, no enrichment/warming note",
+      r.source === "sam.gov/sgs/v1 (keyless HAL)" &&
+      !r.notes.some((n) => /index is warming|enriched page|gsa csv/i.test(n)),
+      JSON.stringify({ source: r.source, notes: r.notes }));
+  }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
@@ -3399,6 +3672,7 @@ async function main() {
   await testFarComplianceMatrix();
   await testFarSearch();
   await testSearchOutageHonesty();
+  await testSearchEnrichmentGating();
   await testGetOpportunityDetailHonesty();
   await testGetOpportunityEnrichmentHonesty();
   await testFetchAttachmentText();
