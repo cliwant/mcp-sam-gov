@@ -52,6 +52,7 @@ import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
 import { searchGrants, getGrant } from "./dist/grants.js";
 import { searchDocuments as fedRegSearch, getDocument as fedRegGet } from "./dist/federal-register.js";
+import { searchWageDeterminations, getWageRates } from "./dist/pricing.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -3993,6 +3994,87 @@ async function testFederalRegisterHonesty() {
   );
 }
 
+// Pricing — wage determinations (sam_search_wage_determinations / sam_get_wage_rates),
+// keyless via SAM SGS (index=sca/dbra) + WDOL, now PERMANENTLY guarded. Both route
+// through getJson→fetchWithRetry. Locks: search outage → throws upstream_unavailable
+// (never a fake "no WDs"); genuine zero (page.totalElements 0) → honest empty +
+// totalAvailable:0; getWageRates outage → throws; a hollow-200 (empty WD document)
+// → throws schema_drift (an unreadable WD must NEVER read as an empty rate table);
+// a 404 → throws not_found (distinct from an outage).
+async function testPricingHonesty() {
+  section("16. pricing wage-determination search/rates outage-vs-genuine-zero honesty (fetch-mock)");
+  const isWdSearch = (u) => /sgs\/v1\/search.*index=(sca|dbra)/.test(u);
+  const isWdDetail = (u) => /wdol\/v1\/wd\/[^/]+\/\d+/.test(u);
+
+  // 1. WD search 503 ⇒ throws upstream_unavailable (never a fabricated empty result)
+  await withFetch(
+    (u) => (isWdSearch(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => searchWageDeterminations({ coverage: "sca" }));
+      ok("pricing WD search 503 ⇒ throws upstream_unavailable (NOT a fake empty 'no WDs')",
+        threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // 2. GENUINE zero (page.totalElements 0) ⇒ honest empty + totalAvailable:0, truncated:false
+  await withFetch(
+    (u) => (isWdSearch(u) ? mockResponse({ status: 200, json: { _embedded: { results: [] }, page: { totalElements: 0 } } }) : failClosed()()),
+    async () => {
+      const res = await searchWageDeterminations({ coverage: "sca" });
+      ok("pricing WD search genuine-zero ⇒ honest empty determinations[] (a real no-match)",
+        Array.isArray(res.data.determinations) && res.data.determinations.length === 0, JSON.stringify(res.data.determinations));
+      ok("pricing WD search genuine-zero ⇒ _meta.totalAvailable 0 + truncated false (distinct from outage)",
+        res.meta.totalAvailable === 0 && res.meta.truncated === false, JSON.stringify(res.meta));
+    },
+  );
+
+  // 3. results ⇒ maps + totalAvailable = totalElements, truncated when returned<total
+  await withFetch(
+    (u) => (isWdSearch(u) ? mockResponse({ status: 200, json: { _embedded: { results: [
+      { fullReferenceNumber: "2015-4281", shortReferenceNumber: "VA281", type: { code: "SCA", value: "Service Contract Act" }, title: "VA SCA WD", isActive: true, isStandard: true },
+    ] }, page: { totalElements: 30 } } }) : failClosed()()),
+    async () => {
+      const res = await searchWageDeterminations({ coverage: "sca", limit: 1 });
+      const d0 = res.data.determinations[0];
+      ok("pricing WD search results ⇒ maps determination (fullReferenceNumber/coverage/isActive)",
+        res.data.determinations.length === 1 && d0.fullReferenceNumber === "2015-4281" &&
+        d0.coverage === "SCA" && d0.isActive === true, JSON.stringify(d0));
+      ok("pricing WD search results ⇒ totalAvailable=30 (real total) + truncated true (1<30)",
+        res.meta.totalAvailable === 30 && res.meta.truncated === true, JSON.stringify(res.meta));
+    },
+  );
+
+  // 4. getWageRates detail 503 (explicit revision skips history) ⇒ throws upstream_unavailable
+  await withFetch(
+    (u) => (isWdDetail(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => getWageRates({ reference: "2015-4281", revision: 5 }));
+      ok("pricing getWageRates detail 503 ⇒ throws upstream_unavailable (outage, not fabricated rates)",
+        threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // 5. getWageRates hollow-200 (empty WD document) ⇒ throws schema_drift (never empty rates)
+  await withFetch(
+    (u) => (isWdDetail(u) ? mockResponse({ status: 200, json: { document: "" } }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => getWageRates({ reference: "2015-4281", revision: 5 }));
+      ok("pricing getWageRates empty-document ⇒ throws schema_drift (hollow-200 never reads as empty rate table)",
+        threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // 6. getWageRates detail 404 ⇒ throws not_found (genuine missing WD, distinct from outage)
+  await withFetch(
+    (u) => (isWdDetail(u) ? mockResponse({ status: 404 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => getWageRates({ reference: "0000-0000", revision: 1 }));
+      ok("pricing getWageRates detail 404 ⇒ throws not_found (genuine miss, distinct from an outage)",
+        threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError));
+    },
+  );
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4019,6 +4101,7 @@ async function main() {
   await testFetchAttachmentText();
   await testGrantsHonesty();
   await testFederalRegisterHonesty();
+  await testPricingHonesty();
 
   // Prove the harness bites.
   await selfCheck();
