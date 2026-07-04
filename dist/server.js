@@ -3,7 +3,7 @@
  * @cliwant/mcp-sam-gov — Model Context Protocol server for SAM.gov
  * + USAspending + Federal Register + eCFR + Grants.gov + GAO + wage/pricing.
  *
- * 51 keyless tools wrapping every public federal-contracting data
+ * 52 keyless tools wrapping every public federal-contracting data
  * source that doesn't require an API key. Compatible with:
  *   - Claude Desktop  (claude_desktop_config.json)
  *   - Claude Code     (.mcp.json or `claude mcp add`)
@@ -31,6 +31,7 @@ import * as integrity from "./integrity.js";
 import * as gao from "./gao.js";
 import * as gsaCsv from "./gsa-csv.js";
 import * as sba from "./sba.js";
+import { fetchAttachmentText } from "./attachments.js";
 import { toToolError } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 const SERVER_NAME = "mcp-sam-gov";
@@ -94,6 +95,32 @@ const SamAttachmentUrlInput = z.object({
     resourceId: z
         .string()
         .describe("Resource id from sam_get_opportunity → resourceLinks (URL-tail hex)"),
+});
+const SamFetchAttachmentTextInput = z.object({
+    url: z
+        .string()
+        .url()
+        .refine((u) => {
+        try {
+            const p = new URL(u);
+            const h = p.hostname.toLowerCase();
+            return (p.protocol === "https:" &&
+                (h === "sam.gov" || h === "api.sam.gov" || h.endsWith(".sam.gov")));
+        }
+        catch {
+            return false;
+        }
+    }, {
+        message: "url must be an https:// SAM attachment download URL on sam.gov / api.sam.gov (from sam_get_opportunity's attachments[].url). Arbitrary hosts are refused (SSRF hygiene).",
+    })
+        .describe("SAM attachment download URL from sam_get_opportunity → attachments[].url / resourceLinks (https://sam.gov/api/prod/opps/v3/opportunities/resources/files/{id}/download). Must be a sam.gov / api.sam.gov host."),
+    maxChars: z
+        .number()
+        .int()
+        .min(1000)
+        .max(500_000)
+        .optional()
+        .describe("Cap on returned text characters (default 200000, max 500000). Truncation is disclosed in _meta (truncated:true)."),
 });
 // USAspending — awards & recipients
 const UsasFiltersBase = z.object({
@@ -648,6 +675,11 @@ const TOOLS = [
         name: "sam_attachment_url",
         description: "Build the public download URL for an attachment resourceId. The URL returns a 303 redirect to a signed S3 URL — fetch with redirect:'follow' to get the file bytes.",
         inputSchema: SamAttachmentUrlInput,
+    },
+    {
+        name: "sam_fetch_attachment_text",
+        description: "Extract the TEXT of a SAM notice attachment (the actual RFP / SOW / Q&A / wage tables) by its download URL — so an AI can read the real solicitation, not just its metadata. Give it a sam_get_opportunity attachments[].url (resourceLinks). Keyless. Handles PDF (via pdfjs) + text/HTML; returns { format, text, pages, filename, sizeBytes, truncated, extracted }. HONEST: a DOCX / binary that can't be read keyless returns text:null + a note (never fabricated); a corrupt/encrypted PDF returns text:null + an extractionError note (never a crash); a DOWN fetch throws a retryable upstream_unavailable (never empty text); a 404 throws not_found. Only sam.gov / api.sam.gov URLs are fetched (SSRF hygiene). maxChars caps the text (default 200000) and truncation is disclosed.",
+        inputSchema: SamFetchAttachmentTextInput,
     },
     {
         name: "sam_lookup_organization",
@@ -1369,6 +1401,10 @@ async function runTool(name, args, sam) {
         case "sam_attachment_url": {
             const { resourceId } = SamAttachmentUrlInput.parse(args);
             return { downloadUrl: sam.publicDownloadUrl(resourceId) };
+        }
+        case "sam_fetch_attachment_text": {
+            const input = SamFetchAttachmentTextInput.parse(args);
+            return await fetchAttachmentText(input);
         }
         case "sam_lookup_organization": {
             const { organizationId } = SamLookupOrgInput.parse(args);
