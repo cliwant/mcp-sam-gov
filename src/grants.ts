@@ -172,9 +172,21 @@ export async function getGrant(args: { opportunityId: string }) {
     throw new Error(`Grants.gov error: ${json.msg ?? "unknown"}`);
   }
   const d = json.data ?? {};
+  // NOT-FOUND: Grants.gov's fetchOpportunity returns errorcode:0 ("Webservice
+  // Succeeds") + a HOLLOW `data` object even for a NONEXISTENT opportunityId
+  // (LIVE-VERIFIED 2026-07-06: id 999999999 → errorcode 0 but data carries NO
+  // id / opportunityNumber / opportunityTitle / synopsis — only skeleton fields).
+  // Mapping that shell would fabricate a grant (id:0, title:"") for an opportunity
+  // that does NOT exist — an absence-as-present lie. `id` is the reliable signal:
+  // a real grant ALWAYS carries a numeric `id`, the hollow shell never does.
+  if (d.id === undefined || d.id === null) {
+    return { found: false as const, opportunityId: args.opportunityId };
+  }
   const s = d.synopsis ?? {};
   return {
-    id: d.id ?? 0,
+    found: true as const,
+    id: d.id, // guaranteed present past the not-found guard above
+
     opportunityNumber: d.opportunityNumber ?? "",
     title: d.opportunityTitle ?? "",
     agency: { code: s.agencyCode ?? d.owningAgencyCode, name: s.agencyName },
