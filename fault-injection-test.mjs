@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, searchSubawards } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -5512,6 +5512,47 @@ async function testAgencyDetailTools() {
   });
 }
 
+// §36: usas_search_subawards — field mapping (A3 fix) + count-honesty. This tool
+// was live-smoke only (no offline guard). Locks in TWO real invariants: (1) the A3
+// fix — subaward NAICS is read from the "NAICS" field, NOT the invalid "Sub-Award
+// NAICS" the old code sent (which spending_by_award silently echoes back as null,
+// so the arg looked honored but returned nothing); (2) totalAvailable is the SUM of
+// the spending_by_award_count buckets (the REAL, uncapped total — LIVE-VERIFIED
+// C75: DoD subcontracts = 2,209,649, NOT capped at 10k), never the returned page
+// length. NON-VACUITY: mapping naicsCode from a wrong field, or totalAvailable from
+// results.length, turns the respective assertion RED.
+async function testSearchSubawardsMapping() {
+  section("36. usas_search_subawards — A3 NAICS field mapping + count-honesty (total = uncapped spending_by_award_count sum, not page length)");
+  const isAwardPage = (u) => /spending_by_award(?!_count)/.test(u);
+  const isAwardCount = (u) => /spending_by_award_count/.test(u);
+
+  await withFetch((u, init) => {
+    if (isAwardCount(u)) return mockResponse({ status: 200, json: { results: { subcontracts: 2209649, subgrants: 0 } } });
+    if (isAwardPage(u)) {
+      // A3 GUARD: the request MUST ask for "NAICS" (valid), never "Sub-Award NAICS"
+      // (invalid → silent null), and must set subawards:true.
+      const body = JSON.parse(init.body);
+      ok("36 request uses subawards:true + the VALID 'NAICS' field (A3: never 'Sub-Award NAICS')",
+        body.subawards === true && body.fields.includes("NAICS") && !body.fields.includes("Sub-Award NAICS"),
+        JSON.stringify({ sub: body.subawards, fields: body.fields }));
+      return mockResponse({ status: 200, json: { results: [
+        { "Sub-Award ID": "SUB1", "Sub-Award Recipient": "ACME SUBCONTRACTOR LLC", "Sub-Award Amount": 50000, "Sub-Award Date": "2025-03-01", NAICS: { code: "541512", description: "COMPUTER SYSTEMS DESIGN SERVICES" }, prime_award_generated_internal_id: "CONT_AWD_PRIME1" },
+      ], page_metadata: { hasNext: true } } });
+    }
+    return failClosed()();
+  }, async () => {
+    const res = await searchSubawards({ agency: "Department of Defense", limit: 1 });
+    const s0 = res.data.subawards[0];
+    ok("36 maps subaward row (subAwardId/subRecipient/amount/actionDate/primeAwardId)",
+      s0.subAwardId === "SUB1" && s0.subRecipient === "ACME SUBCONTRACTOR LLC" && s0.amount === 50000 && s0.actionDate === "2025-03-01" && s0.primeAwardId === "CONT_AWD_PRIME1",
+      JSON.stringify(s0));
+    ok("36 A3: naicsCode/naicsDescription mapped from the NAICS{code,description} field (not silently null)",
+      s0.naicsCode === "541512" && s0.naicsDescription === "COMPUTER SYSTEMS DESIGN SERVICES", JSON.stringify({ c: s0.naicsCode, d: s0.naicsDescription }));
+    ok("36 count-honesty: totalAvailable = SUM of spending_by_award_count buckets (2,209,649) — the REAL uncapped total, NOT the 1 returned row",
+      res.meta.totalAvailable === 2209649, JSON.stringify(res.meta.totalAvailable));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -5558,6 +5599,7 @@ async function main() {
   await testLookupOrgOutageHonesty();
   await testRecipientProfileNotFound();
   await testAgencyDetailTools();
+  await testSearchSubawardsMapping();
 
   // Prove the harness bites.
   await selfCheck();
