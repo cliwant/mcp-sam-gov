@@ -441,20 +441,31 @@ const cases = [
     // (`count`), so _meta.totalAvailable must be a NUMBER (never null) — the
     // AI can tell a top-N slice from the complete set. When agencySlugs are
     // passed, _meta.notes must warn that an unknown slug is silently ignored.
-    label: "A5: fed_register_search _meta.totalAvailable is a number",
+    label: "A5: fed_register_search _meta.totalAvailable is a real number, OR null when the count saturates at the 10k FR cap (FEDREG-1)",
     name: "fed_register_search_documents",
     args: { agencySlugs: ["veterans-affairs-department"], perPage: 3 },
     accept: ({ env }) => {
       if (!env.ok || !env._meta) return false;
       const m = env._meta;
       const returned = env.data?.documents?.length ?? 0;
-      // Real total: a number, and (since a slug was given) a note mentioning it.
-      const totalIsNumber = typeof m.totalAvailable === "number";
       const returnedOk = m.returned === returned;
       const slugNote =
         Array.isArray(m.notes) &&
         m.notes.some((n) => n.toLowerCase().includes("slug"));
-      // truncated must agree with returned<totalAvailable.
+      // FEDREG-1: the FR API HARD-CAPS `count` at 10,000. A broad slug (VA has far
+      // more than 10k documents) SATURATES → totalAvailable must be null (unknown
+      // exact, NOT the capped 10000), truncated true, and a note must disclose the
+      // cap. A narrower future result (< 10k) → a real number total with truncated
+      // agreeing with returned<total.
+      if (env.data?.totalRecordsSaturated === true) {
+        const totalNull = m.totalAvailable === null;
+        const truncTrue = m.truncated === true;
+        const capNote =
+          Array.isArray(m.notes) &&
+          m.notes.some((n) => /caps its match count/i.test(n));
+        return totalNull && truncTrue && capNote && returnedOk && slugNote;
+      }
+      const totalIsNumber = typeof m.totalAvailable === "number";
       const truncOk = m.truncated === returned < m.totalAvailable;
       return totalIsNumber && returnedOk && slugNote && truncOk;
     },
