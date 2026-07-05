@@ -561,6 +561,10 @@ type TeamingAwardRow = {
   recipient_id?: string | null;
   "Start Date"?: string | null;
   "End Date"?: string | null;
+  // The award's BASE obligation date = when it was first awarded/obligated (the real
+  // "award date"). Always in the past; unlike "End Date" (PoP end, often FUTURE for
+  // ongoing contracts) it is the correct source for a recency signal.
+  "Base Obligation Date"?: string | null;
   generated_internal_id?: string | null;
 };
 
@@ -677,6 +681,7 @@ export async function searchTeamingPartners(args: {
     "recipient_id",
     "Start Date",
     "End Date",
+    "Base Obligation Date",
   ];
 
   // --- Scan a bounded number of award-value-sorted pages, then aggregate by
@@ -726,7 +731,17 @@ export async function searchTeamingPartners(args: {
       const key = row.recipient_id ?? `name:${norm(name)}`;
       const amount =
         typeof row["Award Amount"] === "number" ? row["Award Amount"] : 0;
-      const date = row["End Date"] ?? row["Start Date"] ?? null;
+      // LEAD-8 / TEAM-1 fix (Codex dogfood C76): `mostRecentAwardDate` and each
+      // sample award's `date` are the AWARD date — sourced from Base Obligation
+      // Date (when the award was first obligated, always past — live-verified 40/40
+      // populated & 0 future for contract types A/B/C/D), NOT "End Date" (the PoP
+      // END, which is FUTURE for ongoing contracts — live-verified 13/40 future,
+      // producing "award dates" like 2027-05-16). "End Date" is DELIBERATELY NOT a
+      // fallback: it is the only future-capable field, so falling back to it would
+      // reintroduce the exact bug on a sparse row. Start Date (PoP start, ~always
+      // past) is the sole fallback; when both are absent the award date is unknown
+      // (null) rather than a fabricated/future value.
+      const date = row["Base Obligation Date"] ?? row["Start Date"] ?? null;
       let c = byRecipient.get(key);
       if (!c) {
         c = {
