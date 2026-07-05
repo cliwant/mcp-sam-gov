@@ -37,6 +37,23 @@ jobs:
       - name: Fault-injection harness (offline, deterministic — 407+ assertions)
         run: node fault-injection-test.mjs
 
+  coverage:
+    # REQUIRED: c8 coverage of the deterministic fault suite against a floor
+    # (.c8rc.json). Deterministic → no flakiness; a PR that adds code without
+    # tests drops below the floor and fails, forcing coverage to not regress.
+    name: coverage gate (c8 ≥ floor, deterministic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Coverage floor (c8 --check-coverage via .c8rc.json)
+        run: npm run coverage
+
   live-smoke:
     # NON-BLOCKING: hits live upstreams (SAM/USAspending/eCFR/…). USAspending in
     # particular flakes, so this reports signal without gating merges.

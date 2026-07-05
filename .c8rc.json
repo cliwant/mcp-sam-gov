@@ -1,0 +1,10 @@
+{
+  "include": ["dist/**/*.js"],
+  "exclude": ["dist/**/*.d.ts", "dist/**/*.js.map"],
+  "reporter": ["text-summary"],
+  "check-coverage": true,
+  "statements": 66,
+  "branches": 66,
+  "functions": 61,
+  "lines": 66
+}
