@@ -53,7 +53,7 @@ import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
 import { searchGrants, getGrant } from "./dist/grants.js";
 import { searchDocuments as fedRegSearch, getDocument as fedRegGet } from "./dist/federal-register.js";
-import { searchWageDeterminations, getWageRates } from "./dist/pricing.js";
+import { searchWageDeterminations, getWageRates, benchmarkLaborRates } from "./dist/pricing.js";
 import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
@@ -4959,6 +4959,107 @@ async function testUpstreamConcurrencyBounded() {
     peak >= 2 && peak <= 5, `peak=${peak} concurrent (a Promise.all-all-clauses regression would peak at 12; sequential would be 1)`);
 }
 
+// §30: gsa_benchmark_labor_rates distribution correctness (PRICE-1).
+// GSA CALC serves a GLOBALLY ascending-by-current_price list and reports an
+// EXACT `total`; descending sort 406s and the price_range filter does not narrow
+// (all LIVE-VERIFIED 2026-07-05). The ORIGINAL sampler paged only the first N
+// rows (the CHEAPEST N) and reported THEIR min/median/max as the category's
+// distribution — so for any category exceeding the ~300-row page budget the
+// median/max were biased far LOW (LIVE: "Program Manager" 2114 matches → it
+// reported median $115 / max $131 when the true median is $178 and max is $485,
+// ~35% and ~73% low). The fix reads min/median/max at the true quantile RANKS of
+// the sorted index (exact), and only falls back to a leading sample when the
+// count is SATURATED — where it DISCLOSES the median/max as a downward-biased
+// lower bound. NON-VACUITY: reverting to the leading-sample sampler makes the
+// 30a median/max assertions RED (they'd read ~249.5 / 399, not 1099.5 / 2099).
+async function testCalcBenchmarkDistribution() {
+  section("30. real-data-shaped replay (PRICE-1) — gsa_benchmark_labor_rates reports EXACT median/max via quantile-rank paging of CALC's price-sorted index, NOT a cheapest-N (downward-biased) sample");
+
+  const PS = 100; // the tool's PAGE_ROWS
+  // A CALC-shaped mock: N rows, current_price(rank)=100+rank (globally ascending,
+  // exactly how CALC serves them), page_size honored. education_level splits at
+  // the median so a stratified (low+high) fetch is provable from the vocabulary.
+  function calcMock(relation, N) {
+    return (u) => {
+      if (!/\/calc\/v3\/api\/ceilingrates\//.test(u)) return failClosed()();
+      const q = new URL(u).searchParams;
+      const page = Number(q.get("page") ?? 1);
+      const size = Number(q.get("page_size") ?? PS);
+      const start = (page - 1) * size;
+      const hits = [];
+      for (let i = 0; i < size; i++) {
+        const rank = start + i;
+        if (rank >= N) break;
+        hits.push({ _source: {
+          labor_category: "Widget Analyst",
+          current_price: 100 + rank,
+          next_year_price: 105 + rank,
+          second_year_price: 110 + rank,
+          education_level: rank < Math.floor(N / 2) ? "BA" : "PHD",
+          min_years_experience: 5,
+          business_size: "s",
+        } });
+      }
+      return mockResponse({ status: 200, json: { hits: { total: { value: N, relation }, hits } } });
+    };
+  }
+
+  // (a) KNOWN total (relation "eq", N=2000 ≫ the 300-row budget) ⇒ EXACT quantiles.
+  //     true min=100, median=avg(price@999,price@1000)=avg(1099,1100)=1099.5, max=2099.
+  await withFetch(calcMock("eq", 2000), async (calls) => {
+    const res = await benchmarkLaborRates({ laborCategory: "Widget Analyst" });
+    const d = res.data;
+    ok("30a exact min = true global min (100)", d.currentRate.min === 100, JSON.stringify(d.currentRate));
+    ok("30a exact median = TRUE median 1099.5 (a cheapest-300 sample reports ~249.5 — the bug)",
+      d.currentRate.median === 1099.5, JSON.stringify(d.currentRate));
+    ok("30a exact max = TRUE max 2099 (a cheapest-300 sample reports 399 — the bug)",
+      d.currentRate.max === 2099, JSON.stringify(d.currentRate));
+    ok("30a currentRateExact === true (distribution fully characterized by rank reads)",
+      d.currentRateExact === true, JSON.stringify(d.currentRateExact));
+    ok("30a _meta.truncated === true (only a SAMPLE of rows returned) — yet currentRateExact flags the stats as exact (the two signals are distinct)",
+      res.meta.truncated === true, JSON.stringify(res.meta.truncated));
+    ok("30a _meta.totalAvailable === 2000 (exact count known)",
+      res.meta.totalAvailable === 2000, JSON.stringify(res.meta.totalAvailable));
+    // Stratification: the soft-stat sample reaches the HIGH band (PHD), which a
+    // cheapest-N sample (all BA) never would — proves it paged high, not just low.
+    ok("30a stratified sample spans low AND high bands (educationLevelsInSample has BA + PHD)",
+      d.educationLevelsInSample.includes("BA") && d.educationLevelsInSample.includes("PHD"),
+      JSON.stringify(d.educationLevelsInSample));
+    // Bounded: targeted paging touches only a few pages, never a 20-page full scan.
+    const calcCalls = calls.filter((c) => /ceilingrates/.test(c.url)).length;
+    ok("30a bounded targeted paging (≤ 5 CALC calls for N=2000, not a 20-page full scan)",
+      calcCalls <= 5, `calcCalls=${calcCalls}`);
+  });
+
+  // (b) SATURATED (relation "gte", true total unknown) ⇒ min exact, median/max a
+  //     DISCLOSED downward-biased lower bound; currentRateExact === false.
+  await withFetch(calcMock("gte", 10000), async () => {
+    const res = await benchmarkLaborRates({ laborCategory: "Widget Analyst" });
+    const d = res.data;
+    ok("30b saturated ⇒ currentRateExact === false (cannot locate ranks without an exact total)",
+      d.currentRateExact === false, JSON.stringify(d.currentRateExact));
+    ok("30b saturated ⇒ currentRate.min still exact (100 — the low tail is reachable)",
+      d.currentRate.min === 100, JSON.stringify(d.currentRate));
+    ok("30b saturated ⇒ _meta.truncated === true", res.meta.truncated === true, JSON.stringify(res.meta.truncated));
+    ok("30b saturated ⇒ a note DISCLOSES the median/max as a downward-biased lower bound",
+      res.meta.notes.some((n) => /DOWNWARD-BIASED LOWER BOUND/.test(n)), JSON.stringify(res.meta.notes));
+  });
+
+  // (c) SMALL known total (N=40 ≤ one page) ⇒ exact over the full set, 1 fetch.
+  //     prices 100..139; median even = avg(119,120)=119.5; max=139.
+  await withFetch(calcMock("eq", 40), async (calls) => {
+    const res = await benchmarkLaborRates({ laborCategory: "Widget Analyst" });
+    const d = res.data;
+    ok("30c small exact: median 119.5, max 139, min 100 over the full 40 (currentRateExact)",
+      d.currentRate.median === 119.5 && d.currentRate.max === 139 && d.currentRate.min === 100 && d.currentRateExact === true,
+      JSON.stringify(d.currentRate));
+    ok("30c all 40 rows returned ⇒ _meta.truncated === false (nothing withheld)",
+      res.meta.truncated === false, JSON.stringify(res.meta.truncated));
+    const calcCalls = calls.filter((c) => /ceilingrates/.test(c.url)).length;
+    ok("30c small total ⇒ single-page fetch (all ranks on page 1)", calcCalls === 1, `calcCalls=${calcCalls}`);
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4999,6 +5100,7 @@ async function main() {
   await testSubAgencyAwardsNull();
   await testFarFutureAsOfDate();
   await testUpstreamConcurrencyBounded();
+  await testCalcBenchmarkDistribution();
 
   // Prove the harness bites.
   await selfCheck();

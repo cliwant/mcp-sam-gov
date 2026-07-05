@@ -606,32 +606,107 @@ export async function benchmarkLaborRates(args) {
             totalRelation = q.hits?.total?.relation ?? "eq";
         }
     }
-    // Gather the sample (bounded pages of 20).
-    const rows = [];
+    // ── Build the current-price distribution ────────────────────────────────
+    // CALC serves a GLOBALLY ascending-by-current_price list and reports an exact
+    // `total` for non-saturated queries (descending sort → HTTP 406; the
+    // `price_range` filter does NOT narrow — both LIVE-VERIFIED 2026-07-05). So the
+    // first N rows are the CHEAPEST N: sampling only those and reporting
+    // min/median/max understates the distribution badly (a 2000+-row category
+    // understated its median by ~35% and its max by ~70% in practice). When the
+    // total is KNOWN we therefore read the EXACT min/median/max by paging straight
+    // to the quantile RANKS, touching only a few targeted pages. Only when the
+    // count is SATURATED (true total unknown) do we fall back to a leading-rows
+    // sample — and then we DISCLOSE that median/max are a downward-biased lower
+    // bound, never presenting them as the true distribution.
+    const saturated = totalRelation !== "eq"; // e.g. "gte" at the 10000 cap
+    const matchCount = totalValue;
     const firstRows = (first.hits?.hits ?? []).map((h) => h._source ?? {});
-    rows.push(...firstRows);
-    for (let page = 2; page <= maxSamplePages; page++) {
-        if (rows.length >= totalValue && totalRelation === "eq")
-            break;
-        const r = await getJson(buildUrl(matcher, page), { Accept: "application/json" }, "gsa:calc:page");
-        const pageRows = (r.hits?.hits ?? []).map((h) => h._source ?? {});
-        if (pageRows.length === 0)
-            break;
-        rows.push(...pageRows);
-        if (pageRows.length < PAGE_ROWS)
-            break;
+    const pageCache = new Map([[1, firstRows]]);
+    async function rowsForPage(pg) {
+        const cached = pageCache.get(pg);
+        if (cached)
+            return cached;
+        const r = await getJson(buildUrl(matcher, pg), { Accept: "application/json" }, "gsa:calc:page");
+        const pr = (r.hits?.hits ?? []).map((h) => h._source ?? {});
+        pageCache.set(pg, pr);
+        return pr;
     }
-    const current = rows.map((r) => r.current_price).filter((n) => typeof n === "number").sort((a, b) => a - b);
+    // Exact current_price at a 0-indexed GLOBAL rank in the ascending list. Sets
+    // `rankClamped` if the requested offset isn't present (CALC limited deep
+    // paging, or the total exceeded the paginable rows) so we DOWNGRADE from
+    // "exact" rather than silently report a clamped (low) value as the truth.
+    let rankClamped = false;
+    async function priceAtRank(rank) {
+        const pg = Math.floor(rank / PAGE_ROWS) + 1;
+        const off = rank % PAGE_ROWS;
+        const pr = await rowsForPage(pg);
+        let row = pr[off];
+        if (row === undefined) {
+            rankClamped = true;
+            row = pr[pr.length - 1];
+        }
+        const v = row?.current_price;
+        return typeof v === "number" ? v : null;
+    }
+    let currentRateStat;
+    let statsExact;
+    let rows; // rows backing the SOFT stats (escalation/education/samples)
+    if (!saturated && matchCount > 0) {
+        // EXACT path: read the true min/median/max by rank. For an even population
+        // the median is the mean of the two central ranks.
+        const minV = await priceAtRank(0);
+        const maxV = await priceAtRank(matchCount - 1);
+        let medianV;
+        if (matchCount % 2 === 0) {
+            const a = await priceAtRank(matchCount / 2 - 1);
+            const b = await priceAtRank(matchCount / 2);
+            medianV = a !== null && b !== null ? (a + b) / 2 : (a ?? b);
+        }
+        else {
+            medianV = await priceAtRank((matchCount - 1) / 2);
+        }
+        // If a rank couldn't be reached (paging cap) or a price was missing, the
+        // read is no longer provably exact — degrade honestly to the fallback story.
+        statsExact =
+            !rankClamped && minV !== null && medianV !== null && maxV !== null;
+        currentRateStat = { min: minV, median: medianV, max: maxV, n: matchCount };
+        // Soft stats run over the STRATIFIED union of the quantile pages we fetched
+        // (low/median/high bands) — far more representative than the first N
+        // cheapest rows, though not exhaustive.
+        rows = [...pageCache.values()].flat();
+    }
+    else {
+        // FALLBACK (saturated / unknown total): we cannot locate the quantile ranks,
+        // so sample the leading (cheapest) pages. min stays exact; median/max are a
+        // DISCLOSED downward-biased lower bound over the lowest-priced rows.
+        for (let page = 2; page <= maxSamplePages; page++) {
+            const pr = await rowsForPage(page);
+            if (pr.length === 0)
+                break;
+            if (pr.length < PAGE_ROWS)
+                break;
+        }
+        rows = [...pageCache.values()].flat();
+        const cur = rows
+            .map((r) => r.current_price)
+            .filter((n) => typeof n === "number")
+            .sort((a, b) => a - b);
+        currentRateStat = {
+            min: cur[0] ?? null,
+            median: median(cur),
+            max: cur[cur.length - 1] ?? null,
+            n: cur.length,
+        };
+        statsExact = false;
+    }
     const nextYear = rows.map((r) => r.next_year_price).filter((n) => typeof n === "number").sort((a, b) => a - b);
     const secondYear = rows.map((r) => r.second_year_price).filter((n) => typeof n === "number").sort((a, b) => a - b);
-    // The distinct education_level values actually PRESENT in the sample (the
+    // The distinct education_level values actually PRESENT in the fetched rows (the
     // vocabulary is inconsistent — a mix of codes and full words), so the AI sees
     // the real values rather than a fabricated canonical set.
     const educationLevelsInSample = [
         ...new Set(rows.map((r) => r.education_level).filter((x) => Boolean(x))),
     ];
-    const saturated = totalRelation !== "eq"; // e.g. "gte" at the 10000 cap
-    const matchCount = totalValue;
     const data = {
         laborCategory,
         matcher, // "search" (exact) | "q" (fuzzy fallback)
@@ -640,12 +715,12 @@ export async function benchmarkLaborRates(args) {
         matchCountSaturated: saturated,
         filtersApplied: filters,
         sampleSize: rows.length,
-        currentRate: {
-            min: current[0] ?? null,
-            median: median(current),
-            max: current[current.length - 1] ?? null,
-            n: current.length,
-        },
+        currentRate: currentRateStat,
+        // Whether currentRate {min,median,max} are EXACT over all matches (read at
+        // the quantile ranks) or a downward-biased lower bound over a leading sample
+        // (saturated/unknown total). An AI must NOT read a biased median as the
+        // market middle — this flag + the notes say which it is.
+        currentRateExact: statsExact,
         escalatedRate: {
             nextYearMedian: median(nextYear),
             secondYearMedian: median(secondYear),
@@ -671,9 +746,9 @@ export async function benchmarkLaborRates(args) {
         "CALC rates are awarded CEILING (catalog) rates from GSA schedule contracts — they are NOT actual task-order prices paid, and real competed prices are frequently lower.",
         "CALC rates are FULLY BURDENED (they already include the contractor's wrap: overhead, G&A, fringe, and fee) — do NOT re-apply a wrap rate on top.",
         "The escalatedRate medians (nextYear/secondYear) are each vendor's own contracted escalation, NOT a market escalation index — treat them as a distribution, not a forecast.",
-        `Distribution statistics (min/median/max) are computed over the ${rows.length} fetched row(s) (bounded at ${PAGE_ROWS}×${maxSamplePages} pages)${rows.length >= matchCount && !saturated
-            ? " — the full match set."
-            : `, not the full ${matchCount}${saturated ? "+" : ""} matches; raise maxSamplePages or narrow with filters for a fuller sample.`}`,
+        statsExact
+            ? `currentRate {min, median, max} are EXACT over all ${matchCount} matches — read directly at the quantile ranks of CALC's ascending price-sorted index, NOT a leading subsample. (min/median/max come from separate paged requests, so under an active CALC index refresh they could reflect slightly different snapshots.) escalatedRate medians and educationLevelsInSample are computed over a ${rows.length}-row sample covering the low, median, and high price points, so treat those two as representative estimates rather than exhaustive.`
+            : `currentRate.min is exact, but currentRate.median/max are computed over the ${rows.length} LOWEST-priced sampled row(s) and are a DOWNWARD-BIASED LOWER BOUND: CALC returns rows in ascending price order and the exact total was not known (saturated), so the true median/max are HIGHER than reported. Narrow with filters (businessSize, educationLevel code, minYearsExperience, sin, priceRange) or a more specific laborCategory to get an exact count and unbiased statistics.`,
     ];
     if (saturated) {
         notes.push(`matchCount is SATURATED: the API returned relation='${totalRelation}' at ${matchCount}, so the true match total is AT LEAST ${matchCount} (unknown exact). totalAvailable is null. Narrow with filters (businessSize, educationLevel code, minYearsExperience, sin, priceRange) or a more specific laborCategory for an exact count.`);
@@ -690,6 +765,11 @@ export async function benchmarkLaborRates(args) {
         returned: rows.length,
         // totalAvailable is REAL only when relation === "eq"; saturated → null.
         totalAvailable: saturated ? null : matchCount,
+        // `truncated` keeps its codebase-wide meaning: fewer rows were RETURNED than
+        // exist (we page only to the quantile ranks, not the whole set). Distribution
+        // completeness is a SEPARATE signal — `currentRateExact` above — so a consumer
+        // is never told "complete data" when only a sample of rows came back, yet also
+        // learns the min/median/max are exact.
         truncated: rows.length < matchCount,
         filtersApplied,
         filtersDropped,

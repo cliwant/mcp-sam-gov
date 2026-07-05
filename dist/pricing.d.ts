@@ -67,7 +67,7 @@ export declare function benchmarkLaborRates(args: {
     maxSamplePages?: number;
 }): Promise<import("./meta.js").MetaBundle<{
     laborCategory: string;
-    matcher: "q" | "search";
+    matcher: "search" | "q";
     fuzzy: boolean;
     matchCount: number;
     matchCountSaturated: boolean;
@@ -79,6 +79,7 @@ export declare function benchmarkLaborRates(args: {
         max: number | null;
         n: number;
     };
+    currentRateExact: boolean;
     escalatedRate: {
         nextYearMedian: number | null;
         secondYearMedian: number | null;
