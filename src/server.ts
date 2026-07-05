@@ -42,7 +42,7 @@ import * as gao from "./gao.js";
 import * as gsaCsv from "./gsa-csv.js";
 import * as sba from "./sba.js";
 import { fetchAttachmentText } from "./attachments.js";
-import { toToolError } from "./errors.js";
+import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
   buildMeta,
   isMetaBundle,
@@ -1739,15 +1739,45 @@ export async function runTool(
       // SamGovClient internal method — exposed via direct fetch since
       // it's not on the public surface. Use the public sam.gov endpoint
       // directly (already keyless).
-      const r = await fetch(
-        `https://sam.gov/api/prod/federalorganizations/v1/organizations/${encodeURIComponent(organizationId)}`,
-        {
+      const orgUrl = `https://sam.gov/api/prod/federalorganizations/v1/organizations/${encodeURIComponent(organizationId)}`;
+      let r: Response;
+      try {
+        r = await fetch(orgUrl, {
           headers: { Accept: "application/hal+json" },
           signal: AbortSignal.timeout(10_000),
-        },
-      );
+        });
+      } catch (e) {
+        // A network-level fault (DNS, connection reset, timeout) is an OUTAGE, not
+        // absence — classify as retryable rather than letting it surface as the
+        // generic `unknown` (which an agent won't retry).
+        if (e instanceof ToolErrorCarrier) throw e;
+        throw new ToolErrorCarrier({
+          kind: "upstream_unavailable",
+          message: `SAM federalorganizations lookup for '${organizationId}' failed: ${(e as Error).message}. This is an outage, not a missing organization. Retry.`,
+          retryable: true,
+          retryAfterSeconds: 30,
+          upstreamEndpoint: "sam:federalorganizations",
+        });
+      }
       if (!r.ok) {
-        return { found: false, organizationId, status: r.status };
+        // 404 = the organization genuinely does not exist → a real negative (the
+        // tool's found:false contract), NOT an error.
+        if (r.status === 404) {
+          return { found: false, organizationId, status: 404 };
+        }
+        // Every OTHER non-2xx is an upstream fault, not absence — classify via the
+        // shared errorFromResponse matrix (400/403→invalid_input non-retryable,
+        // 429→rate_limited with Retry-After, 5xx→upstream_unavailable retryable;
+        // carries upstreamStatus) so a down/blocking service is NEVER read as "org
+        // not found" (the fetch-failure-as-absent masquerade).
+        throw new ToolErrorCarrier(errorFromResponse(r, "sam:federalorganizations"));
+      }
+      // This endpoint signals a NONEXISTENT org id with a 200 + EMPTY body
+      // (live-verified 2026-07-06) — a genuine absence. Read text first so an
+      // empty/degraded body never crashes `r.json()` into a mislabeled `unknown`.
+      const orgText = await r.text();
+      if (!orgText.trim()) {
+        return { found: false, organizationId, status: 200 };
       }
       type Resp = {
         _embedded?: {
@@ -1760,8 +1790,21 @@ export async function runTool(
           };
         }[];
       };
-      const json = (await r.json()) as Resp;
-      const org = json._embedded?.[0]?.org;
+      let orgJson: Resp;
+      try {
+        orgJson = JSON.parse(orgText) as Resp;
+      } catch {
+        // A non-empty, non-JSON 200 (e.g. an HTML error/interstitial page from the
+        // CDN/WAF) is a DEGRADED response — do NOT fabricate found:false on garbage;
+        // surface it as schema_drift so the caller knows it's unconfirmed, not absent.
+        throw new ToolErrorCarrier({
+          kind: "schema_drift",
+          message: `SAM federalorganizations returned a 200 with a non-JSON body for '${organizationId}' — unexpected shape; cannot confirm whether the organization exists.`,
+          retryable: false,
+          upstreamEndpoint: "sam:federalorganizations",
+        });
+      }
+      const org = orgJson._embedded?.[0]?.org;
       return {
         found: !!org,
         organizationId,
