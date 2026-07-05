@@ -4671,6 +4671,60 @@ async function testErrorTaxonomy() {
     toToolError(new Error("boom"), "t").kind === "unknown", JSON.stringify(toToolError(new Error("boom"), "t").kind));
 }
 
+// REAL-DATA REPLAY (lens: my mock ≠ reality). §20 validated the SCA parser against
+// SYNTHETIC fixtures I hand-built from code comments — a fiction if the real SAM WD
+// text format differs. Here we freeze a slice of an ACTUAL live SAM WD document
+// (2015-4045 rev 36, captured 2026-07-05 — real bytes verbatim, incl. the real
+// header/whitespace) and assert the parser handles the REAL shape. This surfaced a
+// real defect the synthetic fixtures missed: real WDs carry a FOOTNOTE column, and
+// footnoted occupations ("(see N)") polluted the parsed title + lost the material
+// signal (footnote 2 = night/Sunday differential). The fix cleans the title and
+// exposes `footnotes`. It ALSO validates the C53 H&W-disambiguation + EO parse on
+// the real document's actual wording (which really does carry the EO-13706 variant).
+async function testRealWdReplay() {
+  section("23. real-data replay — C53 SCA parser vs a FROZEN slice of a real SAM WD (2015-4045, live-captured)");
+  const isWdDetail = (u) => /wdol\/v1\/wd\/[^/]+\/\d+/.test(u);
+  // Verbatim real bytes (SAM WDOL detail.document for 2015-4045 rev 36).
+  const REAL_WD_2015_4045 = [
+    "OCCUPATION CODE - TITLE                                    FOOTNOTE    RATE",
+    "01000 - Administrative Support And Clerical Occupations",
+    "01011 - Accounting Clerk I                                             23.25",
+    "01012 - Accounting Clerk II                                            26.08",
+    "01013 - Accounting Clerk III                                           29.18",
+    "01020 - Administrative Assistant                                       38.37",
+    "01035 - Court Reporter                                                 23.73",
+    "30621 - Weather Observer, Senior                           (see 2)     29.20",
+    "contract is subject to Executive Order 13658, the contractor must pay all covered ",
+    "workers at least $13.65 per hour (or the applicable wage rate listed on this wage determination, if it is higher) for all hours spent performing on the contract from May 11, 2026, through December 31, 2026. ",
+    "HEALTH & WELFARE: $5.55 per hour, up to 40 hours per week, or $222.00 per week or ",
+    "HEALTH & WELFARE EO 13706: $5.09 per hour, up to 40 hours per week, or $203.60 per ",
+  ].join("\n");
+  const detail = {
+    document: REAL_WD_2015_4045, active: true, standard: true, publishDate: "2026-06-25",
+    location: { mapping: [{ state: "MA", counties: ["Barnstable"], statewideFlag: false }] },
+  };
+  await withFetch((u) => (isWdDetail(u) ? mockResponse({ status: 200, json: detail }) : failClosed()()), async () => {
+    const res = await getWageRates({ reference: "2015-4045", revision: 36, coverage: "sca" });
+    const d = res.data;
+    ok("real WD ⇒ coverage SCA + 6 coded rows parsed (category header 01000 NOT counted) + parseConfidence high",
+      d.coverage === "SCA" && d.rates.length === 6 && !d.rates.some((r) => r.code === "01000") && d.parseConfidence === "high", JSON.stringify({ n: d.rates.length, conf: d.parseConfidence }));
+    const foot = d.rates.find((r) => r.code === "30621");
+    ok("real WD FOOTNOTE FIX ⇒ 30621 title CLEAN 'Weather Observer, Senior' + footnotes:[2] + baseRate 29.20 (marker not buried in title)",
+      !!foot && foot.title === "Weather Observer, Senior" && Array.isArray(foot.footnotes) && foot.footnotes.length === 1 && foot.footnotes[0] === 2 && foot.baseRate === 29.2, JSON.stringify(foot));
+    const norm = d.rates.find((r) => r.code === "01011");
+    ok("real WD ⇒ normal occupation clean ('Accounting Clerk I', footnotes null) — footnote field not over-applied",
+      !!norm && norm.title === "Accounting Clerk I" && norm.baseRate === 23.25 && norm.footnotes === null, JSON.stringify(norm));
+    ok("real WD ⇒ NO title polluted with '(see' or a double-space (column whitespace collapsed across all rows)",
+      !d.rates.some((r) => /\(see|  /.test(r.title)), JSON.stringify(d.rates.map((r) => r.title)));
+    ok("real WD H&W disambiguation ON REAL WORDING ⇒ WD-wide $5.55, NOT the real EO-13706 sick-leave $5.09 variant",
+      d.healthAndWelfarePerHour === 5.55, JSON.stringify(d.healthAndWelfarePerHour));
+    ok("real WD EO floor ON REAL CROSS-LINE WORDING ⇒ EO 13658 @ $13.65 (number+cite read from actual text, not hardcoded)",
+      d.executiveOrderMinimumWage && d.executiveOrderMinimumWage.executiveOrder === "EO 13658" && d.executiveOrderMinimumWage.minimumWage === 13.65, JSON.stringify(d.executiveOrderMinimumWage));
+    ok("real WD ⇒ a note flags footnoted occupations carry MATERIAL extra pay rules (steer to raw for definitions)",
+      (res.meta.notes || []).some((n) => /footnotes/i.test(n) && /MATERIAL extra pay/i.test(n)), JSON.stringify(res.meta.notes));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4704,6 +4758,7 @@ async function main() {
   await testPricingParseReplay();
   await testUsasPaginationTruthfulness();
   await testErrorTaxonomy();
+  await testRealWdReplay();
 
   // Prove the harness bites.
   await selfCheck();
