@@ -4229,6 +4229,55 @@ async function testParserFuzz() {
     feedBad.length === 0, JSON.stringify(feedBad.slice(0, 4)));
 }
 
+// Metamorphic/property invariants — a lens for LOGIC bugs (wrong answers/
+// inconsistencies), which crash-fuzz and happy-path dogfood cannot catch. A
+// narrower filter must never INCREASE the result set; the same call twice must
+// be identical. A fixed mixed rawset makes narrowing ACTUALLY reduce (the
+// non-vacuity assert makes a trivially-passing test impossible).
+async function testMetamorphic() {
+  section("19. metamorphic/property invariants — far_search filter monotonicity + idempotency");
+  const row = (o = {}) => ({
+    type: "SECTION",
+    hierarchy: { title: "48", chapter: String(o.chapter ?? 1), part: String(o.part ?? 52), section: o.section ?? "52.219-14" },
+    hierarchy_headings: { title: "FAR", section: o.heading ?? "heading" },
+    full_text_excerpt: o.excerpt ?? "…subcontracting…",
+    score: 1, starts_on: "2022-10-28", ends_on: o.ends_on ?? null,
+  });
+  // 2 FAR (ch1) sections in DIFFERENT parts (52, 19) + 1 DFARS (ch2) section, so
+  // scope:both→3, scope:far→2 (drops DFARS), scope:far+partsOnly[52]→1 (drops part-19).
+  const RAWSET = [
+    row({ chapter: 1, part: 52, section: "52.219-14" }),
+    row({ chapter: 1, part: 19, section: "19.809-2", heading: "set-aside" }),
+    row({ chapter: 2, part: 252, section: "252.219-7000", heading: "dfars sub" }),
+  ];
+  const handler = (u) => {
+    if (isEcfrTitles(u)) return mockResponse({ status: 200, json: TITLES_JSON });
+    if (isEcfrSearchResults(u)) return mockResponse({ status: 200, json: { results: RAWSET, meta: { total_count: RAWSET.length } } });
+    return failClosed()();
+  };
+  let both, far, farP52, farAgain;
+  await withFetch(handler, async () => {
+    both = await farSearch({ query: "subcontracting", scope: "both" });
+    far = await farSearch({ query: "subcontracting", scope: "far" });
+    farP52 = await farSearch({ query: "subcontracting", scope: "far", partsOnly: [52] });
+    farAgain = await farSearch({ query: "subcontracting", scope: "far" });
+  });
+  const nBoth = both.data.rows.length, nFar = far.data.rows.length, nP52 = farP52.data.rows.length;
+  ok("metamorphic non-vacuity ⇒ narrowing ACTUALLY reduces (both=3 > far=2 > far+part52=1)",
+    nBoth === 3 && nFar === 2 && nP52 === 1, JSON.stringify({ nBoth, nFar, nP52 }));
+  ok("filter MONOTONICITY ⇒ count(scope:both) ≥ count(scope:far) ≥ count(far+partsOnly[52])",
+    nBoth >= nFar && nFar >= nP52, JSON.stringify({ nBoth, nFar, nP52 }));
+  ok("scope narrowing correctness ⇒ scope:far drops DFARS(ch2) 252.219-7000; scope:both keeps it",
+    !far.data.rows.some((r) => r.section === "252.219-7000") && both.data.rows.some((r) => r.section === "252.219-7000"),
+    JSON.stringify(far.data.rows.map((r) => r.section)));
+  ok("partsOnly correctness ⇒ far+partsOnly[52] keeps ONLY part-52 (52.219-14), drops part-19",
+    nP52 === 1 && farP52.data.rows[0].section === "52.219-14",
+    JSON.stringify(farP52.data.rows.map((r) => r.section)));
+  ok("IDEMPOTENCY ⇒ far_search(same args, same upstream) twice ⇒ byte-identical rows",
+    JSON.stringify(far.data.rows) === JSON.stringify(farAgain.data.rows),
+    `n1=${nFar} n2=${farAgain.data.rows.length}`);
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4258,6 +4307,7 @@ async function main() {
   await testPricingHonesty();
   await testGaoHonesty();
   await testParserFuzz();
+  await testMetamorphic();
 
   // Prove the harness bites.
   await selfCheck();
