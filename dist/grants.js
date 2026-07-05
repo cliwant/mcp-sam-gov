@@ -44,7 +44,8 @@ export async function searchGrants(args) {
             opportunityNumber: g.number ?? "",
             title: g.title ?? "",
             agencyCode: g.agencyCode ?? "",
-            agencyName: g.agencyName ?? "",
+            // GRANT-2: prefer `agency` (the real agency name) over the empty `agencyName`.
+            agencyName: g.agency ?? g.agencyName ?? "",
             openDate: g.openDate,
             closeDate: g.closeDate,
             status: g.oppStatus,
@@ -113,12 +114,27 @@ export async function getGrant(args) {
         return { found: false, opportunityId: args.opportunityId };
     }
     const s = d.synopsis ?? {};
+    const rawContact = s.agencyContactName ?? s.agencyName ?? null;
     return {
         found: true,
         id: d.id, // guaranteed present past the not-found guard above
         opportunityNumber: d.opportunityNumber ?? "",
         title: d.opportunityTitle ?? "",
-        agency: { code: s.agencyCode ?? d.owningAgencyCode, name: s.agencyName },
+        // GRANT-2: `name` is the REAL agency (subtier preferred, else the department),
+        // NOT synopsis.agencyName (which is the contact person). Fall back through both
+        // the synopsis and top-level `data` locations. `department` is the top-tier
+        // agency; `contactName` preserves the person the mislabeled old `name` held
+        // (newlines collapsed so it renders on one line).
+        agency: {
+            code: s.agencyCode ?? d.owningAgencyCode,
+            name: s.agencyDetails?.agencyName ??
+                d.agencyDetails?.agencyName ??
+                s.topAgencyDetails?.agencyName ??
+                d.topAgencyDetails?.agencyName ??
+                null,
+            department: s.topAgencyDetails?.agencyName ?? d.topAgencyDetails?.agencyName ?? null,
+            contactName: rawContact ? rawContact.replace(/\s*\n\s*/g, " — ") : null,
+        },
         description: s.synopsisDesc ?? d.synopsisDesc ?? "",
         postingDate: s.postingDate,
         responseDate: s.responseDate,
