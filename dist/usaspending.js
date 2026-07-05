@@ -1263,16 +1263,17 @@ export async function searchSubAgencySpending(args) {
     const limit = 10;
     const json = await postUsas("search/spending_by_category/awarding_subagency", { filters, limit, page: 1 });
     const results = json.results ?? [];
-    // NOTE: the awarding_subagency endpoint returns `amount` but NOT a per-
-    // subagency award `count` (verified 2026-07-03), so `awards` here is always
-    // the defaulted 0 — a fabricated count, same class as B1. `data` is kept
-    // byte-identical this PR (value-semantics fix deferred); the lie is flagged
-    // in `_meta.fieldsUnavailable` + a note so the AI won't report "0 awards".
+    // The awarding_subagency endpoint returns `amount` but NOT a per-subagency
+    // award `count` (verified 2026-07-03). Emitting `awards: 0` would be a
+    // FABRICATED count (0 reads as "zero contracts", not "unknown") — the exact B1
+    // class. So `awards` is `null` (honest "unavailable"), consistent with
+    // searchAwards' B1 fix, AND flagged in `_meta.fieldsUnavailable` + a note. An
+    // AI that ignores `_meta` still sees null, never a fake 0.
     const data = {
         subAgencies: results.map((r) => ({
             name: r.name ?? "",
             amount: r.amount ?? 0,
-            awards: r.count ?? 0,
+            awards: null,
         })),
     };
     return withMeta(data, categoryAggregateMeta({
@@ -1282,7 +1283,7 @@ export async function searchSubAgencySpending(args) {
         hasNext: json.page_metadata?.hasNext,
         fieldsUnavailable: ["awards"],
         extraNotes: [
-            "Per-subagency award COUNTS are not returned by this endpoint — the `awards` field is 0 for every row (a placeholder, not a real count). Use amount for ranking; do not report `awards` as a contract count.",
+            "Per-subagency award COUNTS are not returned by this endpoint — the `awards` field is null for every row (unavailable, NOT a real count and NOT 0). Use amount for ranking; do not report `awards` as a contract count.",
         ],
     }));
 }

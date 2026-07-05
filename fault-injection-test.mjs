@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -4857,6 +4857,32 @@ async function testRealUsasReplay() {
   });
 }
 
+// data-absence-as-present (the 2nd truthfulness class, T16). The awarding_subagency
+// endpoint returns `amount` but NO per-subagency award count; emitting `awards: 0`
+// would be a FABRICATED count (0 reads as "zero contracts", masking "unknown") —
+// the exact B1 class searchAwards was already fixed for. This case was documented
+// but the value-fix was DEFERRED (kept awards:0 + a _meta note). Now awards:null
+// (honest), consistent with the B1 standard, so an AI that ignores _meta still
+// sees null not a fake 0. Guards against re-introducing the fabricated-0 lie.
+async function testSubAgencyAwardsNull() {
+  section("27. data-absence-as-present (T16) — subagency awards is null (unavailable), NOT a fabricated 0-count");
+  // Real awarding_subagency rows: `amount` present, `count` ABSENT (per the API).
+  const isSubAgency = (u) => /spending_by_category\/awarding_subagency/.test(u);
+  await withFetch(
+    (u) => (isSubAgency(u) ? mockResponse({ status: 200, json: { results: [{ name: "Department of the Army", amount: 5e9 }, { name: "Department of the Navy", amount: 3e9 }], page_metadata: { hasNext: false } } }) : failClosed()()),
+    async () => {
+      const res = await searchSubAgencySpending({ agency: "Department of Defense", fiscalYear: 2025 });
+      const subs = res.data.subAgencies;
+      ok("subagency B1-class ⇒ EVERY row's `awards` is null (unavailable), NEVER a fabricated 0 (0 would read as 'zero contracts')",
+        subs.length === 2 && subs.every((s) => s.awards === null), JSON.stringify(subs.map((s) => ({ n: s.name, a: s.awards }))));
+      ok("subagency ⇒ amount preserved (present real field) while count is honestly null — not conflated",
+        subs[0].amount === 5e9 && subs[1].amount === 3e9, JSON.stringify(subs.map((s) => s.amount)));
+      ok("subagency ⇒ _meta.fieldsUnavailable declares 'awards' + a note says null/NOT a count (belt-and-suspenders with the null value)",
+        (res.meta.fieldsUnavailable || []).includes("awards") && (res.meta.notes || []).some((n) => /awards.*null.*(NOT|not).*count/i.test(n)), JSON.stringify(res.meta.fieldsUnavailable));
+    },
+  );
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4894,6 +4920,7 @@ async function main() {
   await testRealGaoReplay();
   await testRealEcfrReplay();
   await testRealUsasReplay();
+  await testSubAgencyAwardsNull();
 
   // Prove the harness bites.
   await selfCheck();
