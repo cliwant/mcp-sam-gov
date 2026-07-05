@@ -3,8 +3,8 @@
   "exclude": ["dist/**/*.d.ts", "dist/**/*.js.map"],
   "reporter": ["text-summary"],
   "check-coverage": true,
-  "statements": 66,
-  "branches": 66,
-  "functions": 61,
-  "lines": 66
+  "statements": 68,
+  "branches": 67,
+  "functions": 62,
+  "lines": 68
 }
