@@ -19,11 +19,16 @@ jobs:
     # REQUIRED gate: fully offline + deterministic (the fault harness mocks fetch
     # and neutralizes setTimeout backoff, so it never touches the network). This
     # is what makes "robustness" enforced rather than nominal.
-    name: gate — build + fault-injection (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    # Cross-OS: the maintainer + a large share of MCP-host users run Windows, where
+    # path handling, CRLF line-endings, and the entry-point self-detection differ
+    # from Linux. Running the deterministic gate on windows-latest too makes the
+    # user's actual platform an ENFORCED target, not an assumption.
+    name: gate — build + fault-injection (${{ matrix.os }} · Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         node: ['20.x', '22.x']
     steps:
       - uses: actions/checkout@v4
