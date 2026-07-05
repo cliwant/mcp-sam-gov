@@ -4761,6 +4761,57 @@ async function testRealGaoReplay() {
   });
 }
 
+// REAL-DATA REPLAY (lens: my mock ≠ reality) — 3rd parser, extends C56/C57.
+// far_clause_lookup fetches the eCFR versioner-full XML and extracts heading/text via a
+// hand-rolled <HEAD>/stripXml parser (C18 fixed 3 real defects here). §9/§18's fixtures
+// are hand-built. Here we freeze a VERBATIM real Title-48 section XML (52.219-14, captured
+// 2026-07-01) and assert the parser handles the REAL shape — which carries structural tags
+// the synthetic fixtures lacked: <EXTRACT>, <HD1> (holding the "(OCT 2022)" revision),
+// <HD3>(End of clause), <CITA>, and INLINE <I>…</I> tags inside <P>. Live-verified the
+// parser is correct on this clause; this locks the real shape. (includePrescription:false
+// ⇒ only the clause + titles fetches, deterministic.)
+async function testRealEcfrReplay() {
+  section("25. real-data replay — far_clause_lookup versioner-XML parser vs a VERBATIM real Title-48 section (52.219-14, live-captured)");
+  const REAL_CLAUSE_52_219_14 = `<?xml version="1.0" encoding="UTF-8"?>
+<DIV8 N="52.219-14" TYPE="SECTION" hierarchy_metadata="{&quot;path&quot;:&quot;/on/_SUBSTITUTE_DATE_/title-48/section-52.219-14&quot;,&quot;citation&quot;:&quot;48 CFR 52.219-14&quot;,&quot;alternate_reference&quot;:&quot;FAR 52.219-14&quot;}">
+<HEAD>52.219-14 Limitations on Subcontracting.</HEAD>
+<P>As prescribed in 19.507(e), insert the following clause:</P>
+<EXTRACT>
+<HD1>Limitations on Subcontracting (OCT 2022)
+</HD1>
+<P>(a) This clause does not apply to the unrestricted portion of a partial set-aside.</P>
+<P>(b) <I>Definition. Similarly situated entity,</I> as used in this clause, means a first-tier subcontractor, including an independent contractor, that—</P>
+<P>(1) Has the same small business program status as that which qualified the prime contractor for the award (<I>e.g.,</I> for a small business set-aside contract, any small business concern, without regard to its socioeconomic status); and</P>
+<P>(e) <I>Limitations on subcontracting.</I> By submission of an offer and execution of a contract, the Contractor agrees that in performance of a contract assigned a North American Industry Classification System (NAICS) code for—</P>
+<P>(1) Services (except construction), it will not pay more than 50 percent of the amount paid by the Government for contract performance to subcontractors that are not similarly situated entities.</P></EXTRACT>
+<HD3>(End of clause)
+</HD3>
+<CITA TYPE="N">[86 FR 44245, Aug. 11, 2021, as amended at 87 FR 58226, Sept. 23, 2022]
+</CITA>
+</DIV8>`;
+  const isEcfrFullSection = (u) => isEcfrFull(u) && ecfrSection(u) === "52.219-14";
+  await withFetch((u) => {
+    if (isEcfrTitles(u)) return mockResponse({ status: 200, json: TITLES_JSON });
+    if (isEcfrFullSection(u)) return mockResponse({ status: 200, json: REAL_CLAUSE_52_219_14 });
+    return failClosed()();
+  }, async () => {
+    const res = await farClauseLookup({ clauseNumber: "52.219-14", includePrescription: false });
+    const d = res.data;
+    ok("real eCFR XML ⇒ heading extracted from real <HEAD> with the leading clause-number stripped ('Limitations on Subcontracting.')",
+      d.heading === "Limitations on Subcontracting.", JSON.stringify(d.heading));
+    ok("real eCFR XML ⇒ revision 'OCT 2022' parsed from the real <HD1> token, prescribedIn '19.507(e)' from real <P>",
+      d.revision === "OCT 2022" && d.prescribedIn === "19.507(e)", JSON.stringify({ rev: d.revision, presc: d.prescribedIn }));
+    ok("real eCFR XML ⇒ stripXml removed ALL real structural tags (no <P>/<I>/<EXTRACT>/<HD1>/<HD3>/<CITA>/<DIV8> residue in text)",
+      typeof d.text === "string" && !/<\/?(P|I|EXTRACT|HD1|HD3|CITA|DIV8|HEAD)\b/i.test(d.text), JSON.stringify((d.text || "").slice(0, 60)));
+    ok("real eCFR XML ⇒ INLINE <I> handled cleanly: 'Definition. Similarly situated entity, as used in this clause' (no tag residue, no split word)",
+      /Definition\. Similarly situated entity, as used in this clause/.test(d.text), JSON.stringify((d.text || "").match(/.{0,10}Similarly situated entity.{0,30}/)?.[0]));
+    ok("real eCFR XML ⇒ substantive text preserved: real '50 percent', 'similarly situated entities', '(End of clause)'",
+      /50 percent/.test(d.text) && /similarly situated entities/.test(d.text) && /\(End of clause\)/.test(d.text), `len=${(d.text || "").length}`);
+    ok("real eCFR XML ⇒ isCurrent true (asOfDate 2026-07-01 === titles up_to_date_as_of) — HEAD-gate passed, NOT a hollow/schema_drift error",
+      d.isCurrent === true && d.asOfDate === "2026-07-01", JSON.stringify({ cur: d.isCurrent, asOf: d.asOfDate }));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4796,6 +4847,7 @@ async function main() {
   await testErrorTaxonomy();
   await testRealWdReplay();
   await testRealGaoReplay();
+  await testRealEcfrReplay();
 
   // Prove the harness bites.
   await selfCheck();
