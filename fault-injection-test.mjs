@@ -2187,11 +2187,23 @@ async function testSbaSizeStandard() {
   await withFetch(
     (u) => (u.includes("naics.json") ? mockResponse({ status: 200, json: NAICS }) : failClosed()()),
     async () => {
-      const receipts = (await sizeStandard({ naics: "541512" })).data;
+      const receiptsRes = await sizeStandard({ naics: "541512" });
+      const receipts = receiptsRes.data;
       ok("receipts NAICS ⇒ type receipts, threshold $34M (×1e6), unit receipts",
         receipts.standardType === "receipts" && receipts.threshold === 34_000_000 &&
         receipts.unit === "USD annual receipts" && receipts.revenueLimitUSD === 34_000_000,
         JSON.stringify(receipts));
+      // LEAD-12: a found single-NAICS lookup is a COMPLETE exact answer, never a
+      // truncated slice of the ~978-row dataset. Assert the DERIVED _meta the agent
+      // sees (buildMeta, exactly as server.ts finalizes it) — the mock has count=3,
+      // so sourcing totalAvailable from the dataset size would force truncation.
+      const rMeta = buildMeta(receiptsRes.meta);
+      ok("6 LEAD-12 found:true single lookup ⇒ complete=true & truncated=false (NOT mislabeled as truncated)",
+        rMeta.complete === true && rMeta.truncated === false,
+        JSON.stringify({ complete: rMeta.complete, truncated: rMeta.truncated }));
+      ok("6 LEAD-12 found:true ⇒ totalAvailable=1 (the one matching standard) & returned=1 — NOT the dataset row count",
+        rMeta.totalAvailable === 1 && rMeta.returned === 1,
+        JSON.stringify({ totalAvailable: rMeta.totalAvailable, returned: rMeta.returned }));
       const emp = (await sizeStandard({ naics: "336411" })).data;
       ok("employee NAICS ⇒ type employees, threshold 1500 (NOT ×1e6), unit employees",
         emp.standardType === "employees" && emp.threshold === 1500 && emp.unit === "employees",
@@ -2203,10 +2215,20 @@ async function testSbaSizeStandard() {
         assets.standardType === "assets" && assets.unit === "USD assets" &&
         assets.revenueLimitUSD === null && assets.assetLimitUSD === 850_000_000,
         JSON.stringify(assets));
-      const missing = (await sizeStandard({ naics: "999999" })).data;
+      const missingRes = await sizeStandard({ naics: "999999" });
+      const missing = missingRes.data;
       ok("unknown NAICS ⇒ found:false, no fabricated standard",
         missing.found === false && missing.threshold === null && missing.standardType === "unknown",
         JSON.stringify(missing));
+      // LEAD-12: a definitive not-found is COMPLETE and NOT truncated — the machine
+      // flags must not tell the agent to paginate for records that do not exist.
+      const mMeta = buildMeta(missingRes.meta);
+      ok("6 LEAD-12 found:false definitive not-found ⇒ complete=true & truncated=false (never 'paginate for more')",
+        mMeta.complete === true && mMeta.truncated === false,
+        JSON.stringify({ complete: mMeta.complete, truncated: mMeta.truncated }));
+      ok("6 LEAD-12 found:false ⇒ totalAvailable=0 & returned=0 (zero match this NAICS, NOT the dataset row count)",
+        mMeta.totalAvailable === 0 && mMeta.returned === 0,
+        JSON.stringify({ totalAvailable: mMeta.totalAvailable, returned: mMeta.returned }));
     },
   );
 }

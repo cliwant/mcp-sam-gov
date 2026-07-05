@@ -184,8 +184,14 @@ export async function sizeStandard(args: { naics: string }) {
       source: "sba.gov naics.json (keyless)",
       keylessMode: true,
       returned: 0,
-      totalAvailable: count,
-      complete: false,
+      // LEAD-12 fix (C78 adversarial review): a definitive not-found is a COMPLETE,
+      // non-truncated answer — the tool scanned the whole cached dataset and confirmed
+      // the NAICS is absent. totalAvailable is 0 (zero records match THIS query), NOT
+      // the ~978-row dataset size; sourcing `count` here made returned(0) < 978 →
+      // truncated:true → complete:false, which falsely told the agent to paginate for
+      // the "other 977 results" that do not exist. complete now derives to true. The
+      // dataset size stays in the note below (its correct home = prose disclosure).
+      totalAvailable: 0,
       fieldsUnavailable: [
         "description",
         "sector",
@@ -286,7 +292,13 @@ export async function sizeStandard(args: { naics: string }) {
     source: "sba.gov naics.json (keyless)",
     keylessMode: true,
     returned: 1,
-    totalAvailable: count,
+    // LEAD-12 fix (Codex C76 dogfood, C78 live-repro): a single-NAICS lookup has
+    // exactly ONE matching size standard — totalAvailable is 1, NOT the whole
+    // dataset row count (`count`, ~978). Using `count` made totalAvailable(978) >
+    // returned(1), which buildMeta reads as totalProvesTruncation → truncated:true
+    // → complete:false, MISLABELING a complete exact answer as a truncated 1-of-978
+    // result (the explicit complete:true above was silently overridden).
+    totalAvailable: 1,
     complete: true,
     fieldsUnavailable,
     notes,
