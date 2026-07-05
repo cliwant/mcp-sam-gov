@@ -109,3 +109,23 @@ jobs:
       - name: npm audit (production deps)
         run: npm audit --omit=dev
         continue-on-error: true
+
+  perf:
+    # NON-BLOCKING: the 225 MB GSA-CSV backbone must stay bounded-RAM (streamed,
+    # not load-all). RSS is environment-noisy, so this is a VISIBLE regression
+    # signal, not a hard gate — a load-all regression grows RSS by ≥ the CSV file
+    # size and trips it, while streaming grows by ~the compact index.
+    name: perf — GSA-CSV bounded-RAM streaming (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: CSV backbone memory + scale (fixture)
+        run: npm run perf
+        continue-on-error: true
