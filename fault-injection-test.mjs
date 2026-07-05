@@ -4883,6 +4883,42 @@ async function testSubAgencyAwardsNull() {
   );
 }
 
+// far_clause_lookup future/uncodified asOfDate (found via C63 dogfood: a real agent
+// inferred asOfDate=today when today > the latest eCFR codification, and the tool
+// replied "clause not found (may be wrong, reserved, or removed)" about a VALID
+// clause). The problem is the DATE, not the clause — so it must be a clear
+// invalid_input pointing at the latest date, NOT a not_found that reads as
+// "the clause was removed". Guard fires BEFORE any clause fetch (only titles).
+async function testFarFutureAsOfDate() {
+  section("28. far_clause_lookup future asOfDate ⇒ honest invalid_input (date past latest edition), NOT 'clause not found/removed'");
+  const CLAUSE_XML = '<?xml version="1.0"?><DIV8 N="52.219-14" TYPE="SECTION"><HEAD>52.219-14 Limitations on Subcontracting.</HEAD><P>As prescribed in 19.507(e), insert the following clause:</P><P>(a) This clause does not apply to the unrestricted portion of a partial set-aside.</P></DIV8>';
+  // TITLES_JSON.up_to_date_as_of is 2026-07-01. asOfDate 2026-07-05 is 4 days past it.
+  const titlesHandler = (u, extra) => {
+    if (isEcfrTitles(u)) return mockResponse({ status: 200, json: TITLES_JSON });
+    return extra(u);
+  };
+  // 1. future date ⇒ invalid_input, message names the latest date + "NOT missing", NO clause fetch reached.
+  await withFetch((u) => titlesHandler(u, () => failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => farClauseLookup({ clauseNumber: "52.219-14", asOfDate: "2026-07-05", includePrescription: false }));
+    ok("far future asOfDate ⇒ throws invalid_input (NOT not_found — the DATE is wrong, the clause is fine), no clause fetch reached",
+      threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError?.kind));
+    ok("far future asOfDate ⇒ message names the latest codification (2026-07-01) + says the clause is NOT missing/removed (actionable, non-misleading)",
+      /latest available codification is 2026-07-01/.test(error?.toolError?.message || "") && /NOT missing or removed/i.test(error?.toolError?.message || ""), JSON.stringify(error?.toolError?.message));
+  });
+  // 2. far-future date (2030) ⇒ same honest invalid_input (not a masked not_found).
+  await withFetch((u) => titlesHandler(u, () => failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => farClauseLookup({ clauseNumber: "52.219-14", asOfDate: "2030-01-01", includePrescription: false }));
+    ok("far far-future asOfDate (2030) ⇒ invalid_input, not not_found",
+      threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError?.kind));
+  });
+  // 3. NON-VACUITY / no-regression: asOfDate ON the latest date is NOT rejected — the clause fetches + parses.
+  await withFetch((u) => titlesHandler(u, (u2) => (isEcfrFull(u2) && ecfrSection(u2) === "52.219-14" ? mockResponse({ status: 200, json: CLAUSE_XML }) : failClosed()())), async () => {
+    const res = await farClauseLookup({ clauseNumber: "52.219-14", asOfDate: "2026-07-01", includePrescription: false });
+    ok("far asOfDate == latest (2026-07-01) ⇒ NOT rejected: clause fetches + parses (guard only rejects FUTURE dates, non-vacuous)",
+      res.data.heading === "Limitations on Subcontracting." && res.data.isCurrent === true, JSON.stringify({ h: res.data.heading, cur: res.data.isCurrent }));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4921,6 +4957,7 @@ async function main() {
   await testRealEcfrReplay();
   await testRealUsasReplay();
   await testSubAgencyAwardsNull();
+  await testFarFutureAsOfDate();
 
   // Prove the harness bites.
   await selfCheck();
