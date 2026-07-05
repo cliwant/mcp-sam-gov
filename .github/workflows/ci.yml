@@ -1,0 +1,75 @@
+name: CI
+
+# Deterministic hard gate (build + offline fault-injection) on every push/PR,
+# plus non-blocking visibility jobs (live smoke/edge, supply-chain audit).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    # REQUIRED gate: fully offline + deterministic (the fault harness mocks fetch
+    # and neutralizes setTimeout backoff, so it never touches the network). This
+    # is what makes "robustness" enforced rather than nominal.
+    name: gate — build + fault-injection (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20.x', '22.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Build (tsc; also catches src/dist drift)
+        run: npm run build
+      - name: Fault-injection harness (offline, deterministic — 407+ assertions)
+        run: node fault-injection-test.mjs
+
+  live-smoke:
+    # NON-BLOCKING: hits live upstreams (SAM/USAspending/eCFR/…). USAspending in
+    # particular flakes, so this reports signal without gating merges.
+    name: live-smoke + edge (non-blocking — live upstreams)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Edge-case suite (live — flaky usas tolerated)
+        run: node edge-case-test.mjs
+        continue-on-error: true
+      - name: Smoke suite (live — flaky usas tolerated)
+        run: npm run smoke
+        continue-on-error: true
+
+  audit:
+    # NON-BLOCKING supply-chain signal (T9 will harden into a gate).
+    name: supply-chain audit (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: npm
+      - run: npm ci
+      - name: npm audit (production deps)
+        run: npm audit --omit=dev
+        continue-on-error: true
