@@ -44,6 +44,7 @@ import zlib from "node:zlib";
 // smoke's spawn), never on an import like this one. §9/§12/§13 call this real
 // runTool over a mocked fetch so a regression in the real wrapper turns RED.
 import { runTool } from "./dist/server.js";
+import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards } from "./dist/usaspending.js";
@@ -4632,6 +4633,44 @@ async function testUsasPaginationTruthfulness() {
   });
 }
 
+// Error-taxonomy contract (the CENTRAL classifier `toToolError`, which the server's
+// CallTool handler now routes ALL errors through). An AI consumer keys on
+// `error.kind` to decide retry-vs-fix: an input mistake (limit above the cap, a
+// value outside an enum) MUST surface as `invalid_input` with a readable message —
+// NOT `unknown` carrying Zod's raw JSON dump (which reads as a mysterious, maybe-
+// transient failure and invites a useless retry). This lens was motivated by a C55
+// Codex dogfood round: gpt-5.5's first individual-awards call failed on limit>50,
+// and only a clean `invalid_input`/"limit must be ≤50" lets it self-correct.
+// Guards the REAL dispatch path (runTool throws the ZodError; toToolError classifies).
+async function testErrorTaxonomy() {
+  section("22. error taxonomy — Zod input-validation ⇒ invalid_input (clean msg), not unknown+raw-dump");
+  // (a) A real tool SCHEMA rejects an out-of-range limit ⇒ runTool throws a ZodError
+  //     BEFORE any network call (validation is the boundary). Non-vacuous: if the
+  //     .max(50) cap were removed this would not throw.
+  let zerr;
+  await withFetch(failClosed(), async () => {
+    try {
+      await runTool("usas_search_individual_awards", { agency: "Department of Defense", naics: "541512", limit: 100 }, new SamGovClient({}));
+    } catch (e) { zerr = e; }
+  });
+  ok("invalid limit(100>50) ⇒ runTool throws a ZodError BEFORE any fetch (schema boundary enforced)",
+    zerr !== undefined && zerr?.constructor?.name === "ZodError", `thrown=${zerr?.constructor?.name}`);
+  // (b) toToolError (the server's centralized classifier) ⇒ invalid_input, retryable:false.
+  const te = toToolError(zerr, "usas_search_individual_awards");
+  ok("ZodError ⇒ kind:'invalid_input' (NOT 'unknown') + retryable:false — agent knows to FIX input, not retry",
+    te.kind === "invalid_input" && te.retryable === false, JSON.stringify({ kind: te.kind, retryable: te.retryable }));
+  // (c) CLEAN field-level message — NOT the raw Zod JSON issue array.
+  ok("ZodError ⇒ readable message ('...for <tool>: limit: ...'), NOT a raw Zod dump starting with '['",
+    /Invalid input for usas_search_individual_awards/.test(te.message) && /limit/.test(te.message) && !/^\s*\[/.test(te.message), JSON.stringify(te.message));
+  // (d) A classified ToolErrorCarrier keeps its kind — never re-downgraded to unknown.
+  ok("ToolErrorCarrier(not_found) ⇒ kind preserved (not_found), never downgraded",
+    toToolError(new ToolErrorCarrier({ kind: "not_found", message: "x", retryable: false }), "t").kind === "not_found", "carrier passthrough");
+  // (e) Non-vacuity the OTHER way: a GENERIC Error stays 'unknown' — invalid_input is
+  //     NOT over-applied (proves (b) keys on ZodError specifically, not everything).
+  ok("generic Error ⇒ kind:'unknown' (honest fallback; invalid_input is NOT over-applied to all errors)",
+    toToolError(new Error("boom"), "t").kind === "unknown", JSON.stringify(toToolError(new Error("boom"), "t").kind));
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4664,6 +4703,7 @@ async function main() {
   await testMetamorphic();
   await testPricingParseReplay();
   await testUsasPaginationTruthfulness();
+  await testErrorTaxonomy();
 
   // Prove the harness bites.
   await selfCheck();

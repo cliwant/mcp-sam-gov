@@ -969,20 +969,12 @@ async function main() {
         }
         catch (err) {
             // Structured error envelope. The agent can read `error.kind`
-            // and `error.retryable` to decide what to do next. A Zod input-validation
-            // failure (e.g. a value outside an enum like an unrecognized socioeconomic
-            // cert) is a caller error → surface it as a NON-retryable `invalid_input`
-            // with the field-level issues, never a generic `unknown`.
-            const error = err instanceof z.ZodError
-                ? {
-                    kind: "invalid_input",
-                    message: `Invalid input for ${name}: ${err.issues
-                        .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-                        .join("; ")}`,
-                    retryable: false,
-                    upstreamEndpoint: name,
-                }
-                : toToolError(err, name);
+            // and `error.retryable` to decide what to do next. Classification is
+            // centralized in `toToolError`, which maps a Zod input-validation failure
+            // (e.g. a value outside an enum, or a limit above the max) to a
+            // NON-retryable `invalid_input` with readable field-level issues — never a
+            // generic `unknown` carrying Zod's raw JSON dump.
+            const error = toToolError(err, name);
             const envelope = { ok: false, error };
             return {
                 content: [

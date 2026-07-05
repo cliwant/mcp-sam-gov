@@ -18,6 +18,8 @@
  * the error to the user with appropriate framing.
  */
 
+import { ZodError } from "zod";
+
 export type ErrorKind =
   /** HTTP 429. Retry after `retryAfterSeconds`. */
   | "rate_limited"
@@ -192,6 +194,21 @@ function parseRetryAfter(value: string | null): number {
  */
 export function toToolError(e: unknown, endpointLabel?: string): ToolError {
   if (e instanceof ToolErrorCarrier) return e.toolError;
+  // A Zod input-validation failure is a CALLER error (e.g. limit above the max,
+  // a value outside an enum). Classify it as `invalid_input` with a readable
+  // field-level message — NEVER a generic `unknown` carrying Zod's raw JSON
+  // issue array (which an agent can't act on, and which mislabels a fixable
+  // input problem as a mysterious/possibly-transient failure).
+  if (e instanceof ZodError) {
+    return {
+      kind: "invalid_input",
+      message: `Invalid input${endpointLabel ? ` for ${endpointLabel}` : ""}: ${e.issues
+        .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+        .join("; ")}`,
+      retryable: false,
+      upstreamEndpoint: endpointLabel,
+    };
+  }
   if (e instanceof Error) {
     const msg = e.message;
     // Common fetch timeout signature
