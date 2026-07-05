@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes, spendingOverTime, getRecipientProfile } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -5439,6 +5439,58 @@ async function testRecipientProfileNotFound() {
   });
 }
 
+// §35: agency-detail workflow tools (usas_get_agency_profile /
+// usas_get_agency_budget_function) — offline mapping + not_found. C73 live-verified
+// both sound (agency lookup→profile round-trip consistent for DoD/VA/DHS; nonexistent
+// toptier → 404 "does not exist"; budget_function current-FY populated with a real
+// page_metadata.total), but neither had ANY offline guard. This locks in: the field
+// mapping, the REAL total (page_metadata.total, never the returned-row count), and
+// the not_found classification of a nonexistent toptier code.
+async function testAgencyDetailTools() {
+  section("35. usas_get_agency_profile / _budget_function — offline mapping + not_found (workflow-chain tools, were untested offline)");
+  const isProfile = (u) => /\/agency\/[^/]+\/?(\?|$)/.test(u) && !/budget_function|\/awards/.test(u);
+  const isBudget = (u) => /\/agency\/[^/]+\/budget_function\//.test(u);
+
+  // 35a getAgencyProfile 200 ⇒ maps fields.
+  await withFetch((u) => (isProfile(u) ? mockResponse({ status: 200, json: { toptier_code: "097", name: "Department of Defense", abbreviation: "DOD", subtier_agency_count: 40, mission: "Provide the military forces." } }) : failClosed()()), async () => {
+    const res = await getAgencyProfile("097");
+    ok("35a getAgencyProfile 200 ⇒ maps toptierCode/name/abbreviation/subtierAgencyCount",
+      res.toptierCode === "097" && res.name === "Department of Defense" && res.abbreviation === "DOD" && res.subtierAgencyCount === 40, JSON.stringify(res));
+  });
+
+  // 35b getAgencyProfile nonexistent code (404) ⇒ not_found (never a fabricated empty profile).
+  await withFetch((u) => (isProfile(u) ? mockResponse({ status: 404, json: { detail: "Agency with a toptier code of '999' does not exist" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => getAgencyProfile("999"));
+    ok("35b getAgencyProfile nonexistent code ⇒ not_found (via getUsas classification, not a fake empty profile)",
+      threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // 35c getAgencyBudgetFunction 200 ⇒ maps functions/programs + the REAL total from
+  // page_metadata.total (NOT the returned-row count — the endpoint reports a true total).
+  await withFetch((u) => (isBudget(u) ? mockResponse({ status: 200, json: {
+    toptier_code: "097", fiscal_year: 2026,
+    results: [
+      { name: "National Defense", children: [{ name: "Dept of the Army", obligated_amount: 1035482198021.19, gross_outlay_amount: 900000000000 }] },
+      { name: "Income Security", children: [{ name: "Military retirement", obligated_amount: 50000000000, gross_outlay_amount: 48000000000 }] },
+    ],
+    page_metadata: { page: 1, total: 6, hasNext: true },
+  } }) : failClosed()()), async () => {
+    const res = await getAgencyBudgetFunction({ toptierCode: "097", fiscalYear: 2026, limit: 2 });
+    const f = res.data.functions;
+    ok("35c getAgencyBudgetFunction 200 ⇒ maps functions/programs (name/obligated/outlays)",
+      f.length === 2 && f[0].name === "National Defense" && f[0].programs[0].obligated === 1035482198021.19 && f[0].programs[0].outlays === 900000000000, JSON.stringify(f[0]));
+    ok("35c _meta.totalAvailable === page_metadata.total (6, the REAL FY count) — NOT the 2 returned rows; truncated true",
+      res.meta.totalAvailable === 6 && res.meta.truncated === true, JSON.stringify({ ta: res.meta.totalAvailable, tr: res.meta.truncated }));
+  });
+
+  // 35d getAgencyBudgetFunction nonexistent code (404) ⇒ not_found.
+  await withFetch((u) => (isBudget(u) ? mockResponse({ status: 404, json: { detail: "Agency with a toptier code of '999' does not exist" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => getAgencyBudgetFunction({ toptierCode: "999", fiscalYear: 2024 }));
+    ok("35d getAgencyBudgetFunction nonexistent code ⇒ not_found (not a fabricated empty budget)",
+      threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError?.kind));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -5484,6 +5536,7 @@ async function main() {
   await testSpendingOverTimeContractScope();
   await testLookupOrgOutageHonesty();
   await testRecipientProfileNotFound();
+  await testAgencyDetailTools();
 
   // Prove the harness bites.
   await selfCheck();
