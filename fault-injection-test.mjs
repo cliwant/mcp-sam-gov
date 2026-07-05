@@ -4276,6 +4276,44 @@ async function testParserFuzz() {
   );
   ok(`GAO parseFeed fuzz ${feedIters} malformed RSS ⇒ 0 crashes/hangs, decisions[] always`,
     feedBad.length === 0, JSON.stringify(feedBad.slice(0, 4)));
+
+  // ── (d) far_clause_lookup versioner XML parser (regex tag-strip + <HEAD> extract)
+  // over hostile/malformed XML via the REAL tool path (mock titles + versioner-full).
+  // far_clause_lookup had 3 real parse bugs historically (C18); the regexes look
+  // ReDoS-safe (lazy `[\s\S]*?`, `<[^>]*>`) — this locks that against regression.
+  const xmlIters = 400;
+  const xmlBad = [];
+  let deepParses = 0;
+  let xmlBody = "";
+  await withFetch(
+    (u) => {
+      if (isEcfrTitles(u)) return mockResponse({ status: 200, json: TITLES_JSON });
+      if (isEcfrFull(u)) return mockResponse({ status: 200, json: xmlBody });
+      return failClosed()();
+    },
+    async () => {
+      for (let i = 0; i < xmlIters; i++) {
+        const kind = i % 6;
+        if (kind === 0) { let s = ""; for (let k = 0; k < rint(600); k++) s += String.fromCharCode(rint(128)); xmlBody = s; } // ascii noise
+        else if (kind === 1) xmlBody = "<HEAD>".repeat(1 + rint(80)) + "x";                                                  // many opens, unclosed
+        else if (kind === 2) xmlBody = "<".repeat(rint(400)) + ">".repeat(rint(400));                                        // bracket soup (stripXml)
+        else if (kind === 3) xmlBody = "<HEAD>" + "a".repeat(rint(2000)) + (rint(2) ? "</HEAD>" : "");                       // huge head, maybe unclosed
+        else if (kind === 4) xmlBody = "<?xml?><HEAD>" + "<b>".repeat(rint(60)) + "52.212-4 text " + "</b>".repeat(rint(60)) + "</HEAD>"; // nested tags + valid-ish
+        else xmlBody = "<HEAD>&" + "amp;".repeat(rint(120)) + "<![CDATA[" + "]".repeat(rint(120)) + "]]> real clause text here</HEAD>"; // entities/CDATA
+        try {
+          const r = await farClauseLookup({ clauseNumber: "52.212-4" });
+          if (!r || !r.data || typeof r.data !== "object") xmlBad.push({ i, why: "bad-shape", kind });
+          else if (r.data.text || r.data.heading) deepParses++; // reached the parse (non-vacuity)
+        } catch (e) {
+          if (!(e && e.toolError)) xmlBad.push({ i, why: "unclassified:" + String(e && e.message).slice(0, 60), kind });
+        }
+      }
+    },
+  );
+  ok(`far_clause_lookup versioner XML fuzz ${xmlIters} malformed ⇒ 0 crashes/hangs (result or classified error)`,
+    xmlBad.length === 0, JSON.stringify(xmlBad.slice(0, 4)));
+  ok(`far XML fuzz non-vacuity ⇒ some inputs reach the deep parse (heading/text extracted, not all early-rejected)`,
+    deepParses > 0, `deepParses=${deepParses}/${xmlIters}`);
 }
 
 // Metamorphic/property invariants — a lens for LOGIC bugs (wrong answers/
