@@ -5283,6 +5283,76 @@ async function testSpendingOverTimeContractScope() {
   });
 }
 
+// §33: sam_lookup_organization — a 5xx OUTAGE must NOT be reported as "org not
+// found" (ORG-1, fetch-failure-as-absent). The handler did `if(!r.ok) return
+// {found:false,...}` for EVERY non-2xx, so a 503/WAF-block during a SAM outage made
+// every organization "not found" (SAM outages are real — see the WAF handling
+// elsewhere). Fix: 404 → found:false (a real negative); any other non-2xx → a
+// classified retryable error (upstream_unavailable / rate_limited), matching the
+// server's taxonomy. The lint missed this because the returned shape wasn't an
+// EMPTY literal ({found:false,status} has keys) — a reminder the invariant is
+// semantic, not syntactic. NON-VACUITY: reverting to a blanket found:false makes
+// the 503/429 cases return instead of throw → 33a/33b RED.
+async function testLookupOrgOutageHonesty() {
+  section("33. sam_lookup_organization — 5xx/429 OUTAGE ⇒ classified retryable error, NOT a fake 'org not found' (ORG-1)");
+  const sam = new SamGovClient({});
+  const isOrg = (u) => /\/federalorganizations\/v1\/organizations\//.test(u);
+
+  // 503 outage ⇒ THROW upstream_unavailable (retryable) + upstreamStatus, never found:false.
+  await withFetch((u) => (isOrg(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("sam_lookup_organization", { organizationId: "100000000" }, sam));
+    ok("33a 503 ⇒ THROWS upstream_unavailable+retryable+upstreamStatus (a down service is never 'org not found')",
+      threw && error?.toolError?.kind === "upstream_unavailable" && error?.toolError?.retryable === true && error?.toolError?.upstreamStatus === 503,
+      JSON.stringify({ threw, kind: error?.toolError?.kind, retryable: error?.toolError?.retryable, us: error?.toolError?.upstreamStatus }));
+  });
+
+  // 429 ⇒ THROW rate_limited (retryable).
+  await withFetch((u) => (isOrg(u) ? mockResponse({ status: 429 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("sam_lookup_organization", { organizationId: "100000000" }, sam));
+    ok("33b 429 ⇒ THROWS rate_limited (retryable)",
+      threw && error?.toolError?.kind === "rate_limited" && error?.toolError?.retryable === true, JSON.stringify(error?.toolError?.kind));
+  });
+
+  // 404 ⇒ the GENUINE not-found case STILL returns found:false (not thrown) — we
+  // only reclassify OUTAGES, we don't break real absence.
+  await withFetch((u) => (isOrg(u) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
+    const res = await runTool("sam_lookup_organization", { organizationId: "NOPE-000" }, sam);
+    ok("33c 404 ⇒ found:false (real absence preserved, NOT thrown)",
+      res.found === false && res.status === 404, JSON.stringify(res));
+  });
+
+  // 200 with an org ⇒ found:true + mapped fields (happy path intact).
+  await withFetch((u) => (isOrg(u) ? mockResponse({ status: 200, json: { _embedded: [{ org: { agencyName: "DEPARTMENT OF X", fullParentPathName: "X.Y", name: "Y OFFICE", type: "OFFICE", level: 3 } }] } }) : failClosed()()), async () => {
+    const res = await runTool("sam_lookup_organization", { organizationId: "100000000" }, sam);
+    ok("33d 200 with org ⇒ found:true + fields mapped (happy path intact)",
+      res.found === true && res.agencyName === "DEPARTMENT OF X" && res.level === 3, JSON.stringify({ f: res.found, a: res.agencyName }));
+  });
+
+  // 400 ⇒ invalid_input, NON-retryable (a malformed id — retrying can't help; via
+  // the shared errorFromResponse matrix, not lumped into retryable upstream_unavailable).
+  await withFetch((u) => (isOrg(u) ? mockResponse({ status: 400 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("sam_lookup_organization", { organizationId: "bad id" }, sam));
+    ok("33e 400 ⇒ invalid_input + retryable:false (NOT a retry-forever upstream_unavailable)",
+      threw && error?.toolError?.kind === "invalid_input" && error?.toolError?.retryable === false, JSON.stringify({ kind: error?.toolError?.kind, retryable: error?.toolError?.retryable }));
+  });
+
+  // 200 + EMPTY body ⇒ found:false — this endpoint's real not-found signal
+  // (live-verified). Must NOT crash r.json() into a mislabeled `unknown`.
+  await withFetch((u) => (isOrg(u) ? mockResponse({ status: 200, json: "" }) : failClosed()()), async () => {
+    const res = await runTool("sam_lookup_organization", { organizationId: "999999999999" }, sam);
+    ok("33f 200 + empty body ⇒ found:false (genuine absence, not an `unknown` crash)",
+      res.found === false && res.status === 200, JSON.stringify(res));
+  });
+
+  // 200 + non-JSON body (HTML error/interstitial) ⇒ schema_drift — degraded, NOT
+  // a fabricated found:false on garbage.
+  await withFetch((u) => (isOrg(u) ? mockResponse({ status: 200, json: "<html>Access Denied</html>" }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("sam_lookup_organization", { organizationId: "100000000" }, sam));
+    ok("33g 200 + non-JSON body ⇒ schema_drift (unconfirmed, NOT fabricated found:false)",
+      threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -5326,6 +5396,7 @@ async function main() {
   await testCalcBenchmarkDistribution();
   await testRecompeteWindowScan();
   await testSpendingOverTimeContractScope();
+  await testLookupOrgOutageHonesty();
 
   // Prove the harness bites.
   await selfCheck();
