@@ -747,7 +747,7 @@ const TOOLS = [
     // ━━━ USAspending — Aggregate Analysis (6) ━━━
     {
         name: "usas_spending_over_time",
-        description: "Time-series aggregation of federal spending. Group by fiscal_year / quarter / month, filter by agency / NAICS / set-aside. Use for 'how has VA 541512 spending trended over the past 5 years' — returns yearly/quarterly/monthly $ rollups.",
+        description: "Time-series aggregation of federal CONTRACT spending (award types A/B/C/D — grants, IDVs, loans, and other obligation types are EXCLUDED, matching the other usas_search_*_spending tools; disclosed in _meta). Group by fiscal_year / quarter / month, filter by agency / NAICS / set-aside. Use for 'how has VA 541512 contract spending trended over the past 5 years' — returns yearly/quarterly/monthly $ rollups of contract obligations (grantObligations/idvObligations are null, NOT 0, to avoid implying an agency has no grant/IDV spending).",
         inputSchema: UsasSpendingOverTimeInput,
     },
     {

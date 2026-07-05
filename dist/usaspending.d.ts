@@ -333,8 +333,8 @@ export declare function spendingOverTime(args: {
     agency?: string;
     naics?: string;
     setAside?: string;
-}): Promise<{
-    group: string | undefined;
+}): Promise<MetaBundle<{
+    group: string;
     timeline: {
         timePeriod: {
             fiscal_year?: string;
@@ -343,10 +343,10 @@ export declare function spendingOverTime(args: {
         };
         total: number;
         contractObligations: number;
-        grantObligations: number;
-        idvObligations: number;
+        grantObligations: number | null;
+        idvObligations: number | null;
     }[];
-}>;
+}>>;
 export declare function searchPscSpending(args: {
     agency?: string;
     naics?: string;
