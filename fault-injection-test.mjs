@@ -5058,6 +5058,46 @@ async function testCalcBenchmarkDistribution() {
     const calcCalls = calls.filter((c) => /ceilingrates/.test(c.url)).length;
     ok("30c small total ⇒ single-page fetch (all ranks on page 1)", calcCalls === 1, `calcCalls=${calcCalls}`);
   });
+
+  // (d) ODD known total (N=41) ⇒ exact single-rank median (not the even-average
+  //     branch). prices 100..140; median = price@rank20 = 120; max = 140.
+  await withFetch(calcMock("eq", 41), async () => {
+    const res = await benchmarkLaborRates({ laborCategory: "Widget Analyst" });
+    const d = res.data;
+    ok("30d odd exact median = price@middle-rank (120), max 140, min 100, currentRateExact",
+      d.currentRate.median === 120 && d.currentRate.max === 140 && d.currentRate.min === 100 && d.currentRateExact === true,
+      JSON.stringify(d.currentRate));
+  });
+
+  // (e) `total` DISAGREES with paginable rows (CALC reports 300 but only 150 are
+  //     actually paginable — a real Elasticsearch total/deep-paging skew). The
+  //     max-rank read lands on an empty page ⇒ rankClamped ⇒ currentRateExact
+  //     DOWNGRADES to false rather than silently reporting a clamped (low) max as
+  //     the truth. min stays exact. (Guards adversarial-review item 3a.)
+  function calcMockCapped(claimedTotal, actualRows) {
+    return (u) => {
+      if (!/\/calc\/v3\/api\/ceilingrates\//.test(u)) return failClosed()();
+      const q = new URL(u).searchParams;
+      const page = Number(q.get("page") ?? 1);
+      const size = Number(q.get("page_size") ?? PS);
+      const start = (page - 1) * size;
+      const hits = [];
+      for (let i = 0; i < size; i++) {
+        const rank = start + i;
+        if (rank >= actualRows) break; // fewer rows than `claimedTotal` promises
+        hits.push({ _source: { labor_category: "Widget Analyst", current_price: 100 + rank } });
+      }
+      return mockResponse({ status: 200, json: { hits: { total: { value: claimedTotal, relation: "eq" }, hits } } });
+    };
+  }
+  await withFetch(calcMockCapped(300, 150), async () => {
+    const res = await benchmarkLaborRates({ laborCategory: "Widget Analyst" });
+    const d = res.data;
+    ok("30e total(300) > paginable(150): rank unreachable ⇒ currentRateExact === false (honest downgrade, not a clamped low max as truth)",
+      d.currentRateExact === false, JSON.stringify(d.currentRateExact));
+    ok("30e degraded read ⇒ currentRate.min still exact (100)", d.currentRate.min === 100, JSON.stringify(d.currentRate));
+    ok("30e degraded read ⇒ _meta.truncated === true (not the full picture)", res.meta.truncated === true, JSON.stringify(res.meta.truncated));
+  });
 }
 
 async function main() {
