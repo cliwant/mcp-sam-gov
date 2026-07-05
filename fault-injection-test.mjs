@@ -4725,6 +4725,42 @@ async function testRealWdReplay() {
   });
 }
 
+// REAL-DATA REPLAY (lens: my mock ≠ reality) — 2nd parser, extends C56. gao_protest_lookup
+// scrapes the LIVE GAO Legal-Products RSS with a hand-rolled string/regex parser; §17's
+// fault fixtures are hand-built. Here we freeze 2 VERBATIM real RSS <item>s (captured
+// 2026-07-05) and assert the RSS-level parse handles the REAL shape — including two real
+// edges the hand-built mocks didn't cover, both VERIFIED against the live site as correct
+// (not defects): (a) GAO's own feed publishes a %2C-encoded multi-B link
+// (…/b-424347%2Cb-424347.2) — bNumber must extract the BASE "B-424347" while decisionUrl
+// passes the real URL through unchanged; (b) a pending-protest description yields
+// outcome:null at the RSS level (an outcome is NOT fabricated before the decision page is
+// read). Also validates RFC-822 pubDate → ISO date on real bytes.
+async function testRealGaoReplay() {
+  section("24. real-data replay — gao_protest_lookup RSS parser vs 2 FROZEN real GAO RSS items (live-captured)");
+  const REAL_GAO_RSS = [
+    '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>GAO Legal Products</title>',
+    '<item><title>Strategic Alliance Business Group, LLC</title><link>https://www.gao.gov/products/b-423306.19</link><description>Strategic Alliance Business Group, LLC, a small business of Fairfax, Virginia, protests the elimination of its proposal from the competition under solicitation No. 80TECH24R0001.</description><pubDate>Thu, 02 Jul 2026 14:04:08 -0400</pubDate><guid isPermaLink="false">/products/b-423306.19</guid></item>',
+    '<item><title>InterImage Inc.</title><link>https://www.gao.gov/products/b-424347%2Cb-424347.2</link><description>InterImage, Inc., of Arlington, Virginia, protests the issuance of a task order to Trillion Technology Solutions, Inc.</description><pubDate>Fri, 26 Jun 2026 10:22:23 -0400</pubDate><guid isPermaLink="false">/products/b-424347%2Cb-424347.2</guid></item>',
+    "</channel></rss>",
+  ].join("\n");
+  const isRss = (u) => /reportslegal\.xml/.test(u);
+  // enrich:false ⇒ RSS-only, NO product-page fetch ⇒ deterministic; failClosed proves it.
+  await withFetch((u) => (isRss(u) ? mockResponse({ status: 200, json: REAL_GAO_RSS }) : failClosed()()), async () => {
+    const r = await gaoProtestLookup({ enrich: false, limit: 5 });
+    const rows = r.data.decisions;
+    ok("real GAO RSS ⇒ parses 2 decisions (returned===2, no product-page fetch reached)",
+      r.meta.returned === 2 && rows.length === 2, JSON.stringify({ returned: r.meta.returned, n: rows.length }));
+    const sa = rows.find((d) => /Strategic Alliance/.test(d.protester || d.title || ""));
+    ok("real GAO RSS ⇒ Strategic Alliance: bNumber B-423306.19 + decisionDate 2026-07-02 (RFC-822 pubDate → ISO)",
+      !!sa && sa.bNumber === "B-423306.19" && sa.decisionDate === "2026-07-02", JSON.stringify(sa && { b: sa.bNumber, d: sa.decisionDate }));
+    const ii = rows.find((d) => /InterImage/.test(d.protester || d.title || ""));
+    ok("real GAO RSS EDGE ⇒ %2C multi-B link ⇒ bNumber extracts BASE 'B-424347' AND decisionUrl passes GAO's real %2C URL through unchanged",
+      !!ii && ii.bNumber === "B-424347" && ii.decisionUrl === "https://www.gao.gov/products/b-424347%2Cb-424347.2", JSON.stringify(ii && { b: ii.bNumber, url: ii.decisionUrl }));
+    ok("real GAO RSS TRUTHFULNESS ⇒ outcome:null at RSS level for BOTH (a pending-protest description does NOT fabricate an outcome before the decision page is read)",
+      rows.every((d) => d.outcome === null), JSON.stringify(rows.map((d) => d.outcome)));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4759,6 +4795,7 @@ async function main() {
   await testUsasPaginationTruthfulness();
   await testErrorTaxonomy();
   await testRealWdReplay();
+  await testRealGaoReplay();
 
   // Prove the harness bites.
   await selfCheck();
