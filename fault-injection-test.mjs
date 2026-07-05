@@ -46,7 +46,7 @@ import zlib from "node:zlib";
 import { runTool } from "./dist/server.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -4516,6 +4516,122 @@ async function testPricingParseReplay() {
   });
 }
 
+// usas_search_individual_awards paginates the `spending_by_award` endpoint, which
+// is CURSOR-style and carries NO grand total in its own page_metadata. The tool's
+// truthfulness therefore rests on a COMPANION `spending_by_award_count` query
+// (awardCount, sums per-type buckets) for `totalAvailable`, and on awardPagination
+// for hasMore/nextOffset. This whole path (awardCount + awardPagination +
+// searchIndividualAwards) was UNTESTED. buildMeta's own invariants are covered in
+// §1; here we pin the TOOL-LEVEL pagination-truthfulness an AI consumer relies on
+// to answer "did I see every award?":
+//   • returned === rows.length (meta never overstates what came back)
+//   • totalAvailable = companion count, or null on companion failure — NEVER the
+//     page length (§3.3: never substitute page size for an unknown total)
+//   • totalAvailable is INVARIANT under `limit` (proves it's the true count, not
+//     a page-derived number) — a metamorphic check
+//   • truncated / pagination.hasMore / complete correctly encode "more exists"
+//   • usas_search_awards (share-of-wallet): the B1 fix — award COUNTS are null
+//     (not 0), so an AI never reads "0 contracts worth $3.4B" (a self-contradiction)
+// All fixtures are fixed rawsets ⇒ deterministic; every assertion pins a specific
+// value ⇒ non-vacuous.
+async function testUsasPaginationTruthfulness() {
+  section("21. usas pagination truthfulness — spending_by_award companion-count + awardPagination + share-of-wallet B1 (fixed-rawset, deterministic)");
+  const isAwardCount = (u) => /spending_by_award_count/.test(u);
+  const isAwardPage = (u) => /spending_by_award(?!_count)/.test(u);
+  const isCatRecipient = (u) => /spending_by_category\/recipient/.test(u);
+  const awardRows = (n) => Array.from({ length: n }, (_, i) => ({
+    "Award ID": `CONT-${i}`, "Recipient Name": `Recipient ${i}`, "Award Amount": 1000 * (i + 1),
+    "Awarding Agency": "DOD", NAICS: { code: "541512", description: "IT" }, generated_internal_id: `CONT_AWD_${i}`,
+  }));
+  const catRows = (n) => Array.from({ length: n }, (_, i) => ({ name: `Vendor ${i}`, amount: 1_000_000 * (i + 1) })); // amount only — NO count field
+  // count:null ⇒ companion endpoint 503s (awardCount catches ⇒ null). count:{...} ⇒ 200 buckets.
+  const usasHandler = ({ page = [], hasNext = false, count = null, cat = null }) => (u) => {
+    if (isAwardCount(u)) return count === null ? mockResponse({ status: 503 }) : mockResponse({ status: 200, json: { results: count } });
+    if (isAwardPage(u)) return mockResponse({ status: 200, json: { results: page, page_metadata: { hasNext } } });
+    if (isCatRecipient(u)) return mockResponse({ status: 200, json: { results: cat ?? [] } });
+    return failClosed()();
+  };
+
+  // NOTE: withMeta returns a MetaBundle carrying the RAW PARTIAL meta; the SERVER
+  // finalizes it via buildMeta (server.ts) — that is where `truncated`/`complete`
+  // are DERIVED (from totalAvailable/pagination.hasMore). So we finalize the same
+  // way the server does and assert on the CONSUMER-VISIBLE meta, not the partial.
+  const finalize = (res) => buildMeta(res.meta);
+
+  // S1. total known, full page < total ⇒ truncated + hasMore + nextOffset advance.
+  await withFetch(usasHandler({ page: awardRows(10), hasNext: true, count: { contracts: 240, idvs: 10 } }), async () => {
+    const res = await searchIndividualAwards({ agency: "DOD", limit: 10 });
+    const meta = finalize(res);
+    ok("usas individual ⇒ meta.returned === data.awards.length (never overstates rows)",
+      meta.returned === 10 && res.data.awards.length === 10, JSON.stringify({ r: meta.returned, n: res.data.awards.length }));
+    ok("usas individual TRUTHFULNESS ⇒ totalAvailable = companion count SUM (250), NOT the page length (10)",
+      meta.totalAvailable === 250, JSON.stringify(meta.totalAvailable));
+    ok("usas individual ⇒ page(10)<total(250) ⇒ truncated + hasMore + nextOffset=10 + complete:false",
+      meta.truncated === true && meta.pagination.hasMore === true && meta.pagination.nextOffset === 10 && meta.complete === false, JSON.stringify(meta.pagination));
+  });
+
+  // S2. total known, page reaches total ⇒ complete.
+  await withFetch(usasHandler({ page: awardRows(3), hasNext: false, count: { contracts: 3 } }), async () => {
+    const res = await searchIndividualAwards({ agency: "DOD", limit: 10 });
+    const meta = finalize(res);
+    ok("usas individual ⇒ returned(3)===total(3) ⇒ truncated:false, hasMore:false, nextOffset:null, complete:true",
+      meta.returned === 3 && meta.totalAvailable === 3 && meta.truncated === false &&
+      meta.pagination.hasMore === false && meta.pagination.nextOffset === null && meta.complete === true, JSON.stringify(meta));
+  });
+
+  // S3. companion count FAILS ⇒ totalAvailable null (NEVER the page length); hasMore
+  // falls back to the upstream cursor's own hasNext.
+  await withFetch(usasHandler({ page: awardRows(10), hasNext: true, count: null }), async () => {
+    const res = await searchIndividualAwards({ agency: "DOD", limit: 10 });
+    const meta = finalize(res);
+    ok("usas individual TRUTHFULNESS ⇒ companion-count FAIL ⇒ totalAvailable null (NEVER fabricated as page length 10)",
+      meta.totalAvailable === null && meta.returned === 10, JSON.stringify({ t: meta.totalAvailable, r: meta.returned }));
+    ok("usas individual ⇒ count-fail ⇒ hasMore falls back to upstream page_metadata.hasNext(true) ⇒ truncated:true",
+      meta.pagination.hasMore === true && meta.truncated === true, JSON.stringify(meta.pagination));
+  });
+
+  // S4. companion fail + short page + upstream hasNext:false ⇒ hasMore false, total still null.
+  await withFetch(usasHandler({ page: awardRows(4), hasNext: false, count: null }), async () => {
+    const res = await searchIndividualAwards({ agency: "DOD", limit: 10 });
+    const meta = finalize(res);
+    ok("usas individual ⇒ count-fail + short page + upstream hasNext:false ⇒ hasMore:false, nextOffset:null, total null, truncated:false",
+      meta.pagination.hasMore === false && meta.pagination.nextOffset === null &&
+      meta.totalAvailable === null && meta.truncated === false, JSON.stringify({ p: meta.pagination, t: meta.totalAvailable, tr: meta.truncated }));
+  });
+
+  // S5. METAMORPHIC: same query, limit 5 vs 10 over an 8-award universe. The true
+  // total must be INVARIANT under limit (if it moved with limit it'd be page-derived).
+  let small, big;
+  await withFetch(usasHandler({ page: awardRows(5), hasNext: true, count: { contracts: 8 } }), async () => {
+    small = finalize(await searchIndividualAwards({ agency: "DOD", limit: 5 }));
+  });
+  await withFetch(usasHandler({ page: awardRows(8), hasNext: false, count: { contracts: 8 } }), async () => {
+    big = finalize(await searchIndividualAwards({ agency: "DOD", limit: 10 }));
+  });
+  ok("usas individual METAMORPHIC ⇒ totalAvailable INVARIANT under limit (8 at limit 5 AND 10) — it's the true count, not page-derived",
+    small.totalAvailable === 8 && big.totalAvailable === 8, JSON.stringify({ small: small.totalAvailable, big: big.totalAvailable }));
+  ok("usas individual METAMORPHIC ⇒ returned monotonic (5≤8) + truncated flips true→false as returned reaches total",
+    small.returned === 5 && big.returned === 8 && small.truncated === true && big.truncated === false, JSON.stringify({ sr: small.returned, br: big.returned, st: small.truncated, bt: big.truncated }));
+  ok("usas individual METAMORPHIC non-vacuity ⇒ returned ≤ totalAvailable in BOTH (5≤8, 8≤8)",
+    small.returned <= small.totalAvailable && big.returned <= big.totalAvailable, JSON.stringify({ s: [small.returned, small.totalAvailable], b: [big.returned, big.totalAvailable] }));
+
+  // S6. usas_search_awards (share-of-wallet aggregate): the B1 truthfulness fix —
+  // per-recipient award COUNTS are unavailable from spending_by_category/recipient
+  // (amount only), so they must be null (not 0). "0 contracts worth $3.4B" is a lie.
+  await withFetch(usasHandler({ cat: catRows(10) }), async () => {
+    const res = await searchAwards({ agency: "DOD" });
+    const meta = finalize(res);
+    ok("usas share-of-wallet B1 ⇒ totalAwards null (NOT 0) + every topRecipient.awards null — no '0 contracts worth $Xbn'",
+      res.data.totalAwards === null && res.data.topRecipients.length === 10 && res.data.topRecipients.every((r) => r.awards === null), JSON.stringify({ ta: res.data.totalAwards, sample: res.data.topRecipients[0] }));
+    ok("usas share-of-wallet ⇒ totalValue = sum(amount) > 0 (value present while count honestly null)",
+      res.data.totalValue > 0 && res.data.totalValue === res.data.topRecipients.reduce((s, r) => s + r.value, 0), JSON.stringify(res.data.totalValue));
+    ok("usas share-of-wallet TRUTHFULNESS ⇒ totalAvailable null (aggregate, no grand total — NEVER returned length) + fieldsUnavailable declares awards/totalAwards",
+      meta.totalAvailable === null && meta.fieldsUnavailable.includes("awards") && meta.fieldsUnavailable.includes("totalAwards"), JSON.stringify(meta.fieldsUnavailable));
+    ok("usas share-of-wallet ⇒ full page (returned 10 ≥ limit 10) ⇒ truncated:true (more recipients may exist)",
+      meta.returned === 10 && meta.truncated === true, JSON.stringify({ r: meta.returned, tr: meta.truncated }));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4547,6 +4663,7 @@ async function main() {
   await testParserFuzz();
   await testMetamorphic();
   await testPricingParseReplay();
+  await testUsasPaginationTruthfulness();
 
   // Prove the harness bites.
   await selfCheck();
