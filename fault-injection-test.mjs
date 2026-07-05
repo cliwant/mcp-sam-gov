@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes, spendingOverTime } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes, spendingOverTime, getRecipientProfile } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -5385,6 +5385,60 @@ async function testLookupOrgOutageHonesty() {
   });
 }
 
+// §34: usas_get_recipient_profile — a NONEXISTENT recipient is not_found, not
+// invalid_input (RECIP-1). USAspending signals a missing recipient with HTTP 400 +
+// detail "Recipient ID not found: '...'" (LIVE-VERIFIED — NOT a 404). The old path
+// (getUsas → fetchWithRetry → errorFromResponse) mapped that 400 to invalid_input
+// ("Bad request"), telling a caller its recipient_id was MALFORMED when the
+// recipient simply doesn't exist. Fix: inspect the 400 body — "not found" → not_found;
+// a genuine bad-input 400 stays invalid_input; 5xx stays retryable; 200 maps.
+// NON-VACUITY: reverting to getUsas makes 34a assert not_found on an invalid_input → RED.
+async function testRecipientProfileNotFound() {
+  section("34. usas_get_recipient_profile — nonexistent recipient ⇒ not_found (NOT invalid_input); USAspending's 400 'Recipient ID not found' classified honestly (RECIP-1)");
+  const isRecipient = (u) => /\/api\/v2\/recipient\/[^/]+\/?$/.test(u);
+
+  // 34a: 400 + "Recipient ID not found" ⇒ not_found (the real absence case).
+  await withFetch((u) => (isRecipient(u) ? mockResponse({ status: 400, json: { detail: "Recipient ID not found: '00000000-0000-0000-0000-000000000000-C'" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => getRecipientProfile("00000000-0000-0000-0000-000000000000-C"));
+    ok("34a 400 'Recipient ID not found' ⇒ not_found (NOT invalid_input 'bad request')",
+      threw && error?.toolError?.kind === "not_found" && error?.toolError?.retryable === false && error?.toolError?.upstreamStatus === 400,
+      JSON.stringify({ kind: error?.toolError?.kind, us: error?.toolError?.upstreamStatus }));
+    ok("34a not_found message names the recipient_id + points at usas_search_recipients",
+      /usas_search_recipients/.test(error?.toolError?.message ?? "") && /not.?found/i.test(error?.toolError?.message ?? ""),
+      JSON.stringify(error?.toolError?.message));
+  });
+
+  // 34b: a GENUINELY malformed-input 400 (no "not found" detail) ⇒ invalid_input
+  // (we only reclassify the not-found 400, not every 400).
+  await withFetch((u) => (isRecipient(u) ? mockResponse({ status: 400, json: { detail: "Field 'recipient_id' has an invalid format." } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => getRecipientProfile("garbage"));
+    ok("34b malformed 400 (no 'not found') ⇒ stays invalid_input (we don't over-reclassify)",
+      threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // 34c: 503 ⇒ upstream_unavailable retryable (an outage is never not_found).
+  await withFetch((u) => (isRecipient(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => getRecipientProfile("VALID-ID"));
+    ok("34c 503 ⇒ upstream_unavailable + retryable (outage, not not_found)",
+      threw && error?.toolError?.kind === "upstream_unavailable" && error?.toolError?.retryable === true, JSON.stringify(error?.toolError?.kind));
+  });
+
+  // 34d: 200 with a real profile ⇒ maps fields (happy path intact).
+  await withFetch((u) => (isRecipient(u) ? mockResponse({ status: 200, json: { name: "ACME CORP", recipient_id: "abc-C", recipient_level: "R", total_transaction_amount: 5000, total_transactions: 3 } }) : failClosed()()), async () => {
+    const res = await getRecipientProfile("abc-C");
+    ok("34d 200 ⇒ maps name/level/totalAmount/totalTransactions (happy path intact)",
+      res.name === "ACME CORP" && res.level === "R" && res.totalAmount === 5000 && res.totalTransactions === 3, JSON.stringify(res));
+  });
+
+  // 34e: HOLLOW 200 (no recipient_id and no name) ⇒ schema_drift, NOT a fabricated
+  // { name:"" } profile (defensive guard; cf. sam_lookup_organization / grants).
+  await withFetch((u) => (isRecipient(u) ? mockResponse({ status: 200, json: { total_transaction_amount: 0 } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => getRecipientProfile("degraded-C"));
+    ok("34e hollow 200 (no id/name) ⇒ schema_drift (NOT a fabricated empty profile)",
+      threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -5429,6 +5483,7 @@ async function main() {
   await testRecompeteWindowScan();
   await testSpendingOverTimeContractScope();
   await testLookupOrgOutageHonesty();
+  await testRecipientProfileNotFound();
 
   // Prove the harness bites.
   await selfCheck();
