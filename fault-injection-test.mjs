@@ -48,7 +48,7 @@ import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, searchSubawards } from "./dist/usaspending.js";
-import { checkExclusions, integrityLookup } from "./dist/integrity.js";
+import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
 import { searchGrants, getGrant } from "./dist/grants.js";
@@ -5590,6 +5590,133 @@ async function testSearchSubawardsMapping() {
   });
 }
 
+// §37: usas_search_teaming_partners — mostRecentAwardDate is the AWARD date (Base
+// Obligation Date), NOT the PoP End Date (TEAM-1, Codex dogfood C76 lead 8). The old
+// code sourced `const date = row["End Date"] ?? ...`, so a firm's "most recent award
+// date" was the latest PoP END — which is FUTURE for ongoing contracts (live-verified:
+// produced dates like 2027-06-17). Fix sources Base Obligation Date (always past).
+// NON-VACUITY: sourcing from End Date makes mostRecentAwardDate the future 2027 date → RED.
+async function testTeamingMostRecentAwardDate() {
+  section("37. usas_search_teaming_partners — mostRecentAwardDate = award (Base Obligation) date, NOT the future PoP End Date (TEAM-1)");
+  const isAwardCount = (u) => /spending_by_award_count/.test(u);
+  const isAwardPage = (u) => /spending_by_award(?!_count)/.test(u);
+
+  // One recipient with TWO awards: the more recent AWARD (base obligation 2024-03-01)
+  // runs to a FUTURE end (2027-06-17); the older award (base 2022-01-01) ended 2025.
+  // mostRecentAwardDate must be 2024-03-01 (latest base obligation), NEVER 2027-06-17.
+  const rows = [
+    { "Award ID": "A1", "Recipient Name": "ACME ANALYTICS LLC", "Award Amount": 900000, recipient_id: "r1", NAICS: { code: "541512" }, "Awarding Agency": "Department of Veterans Affairs", "Start Date": "2024-03-01", "End Date": "2027-06-17", "Base Obligation Date": "2024-03-01" },
+    { "Award ID": "A2", "Recipient Name": "ACME ANALYTICS LLC", "Award Amount": 500000, recipient_id: "r1", NAICS: { code: "541512" }, "Awarding Agency": "Department of Veterans Affairs", "Start Date": "2022-01-01", "End Date": "2025-01-01", "Base Obligation Date": "2022-01-01" },
+  ];
+  await withFetch((u) => {
+    if (isAwardCount(u)) return mockResponse({ status: 200, json: { results: { contracts: 2 } } });
+    if (isAwardPage(u)) return mockResponse({ status: 200, json: { results: rows, page_metadata: { hasNext: false, page: 1 } } });
+    return failClosed()();
+  }, async () => {
+    // excludeDebarred:false → skip the SAM exclusion screen (keep the mock focused).
+    const res = await searchTeamingPartners({ cert: "small_business", naics: "541512", excludeDebarred: false, limit: 5 });
+    const c0 = res.data.candidates[0];
+    ok("37 mostRecentAwardDate = 2024-03-01 (latest Base Obligation / award date) — NOT the future PoP end 2027-06-17",
+      c0.mostRecentAwardDate === "2024-03-01", JSON.stringify({ mrad: c0.mostRecentAwardDate, name: c0.recipientName }));
+    ok("37 mostRecentAwardDate is NOT in the future (award dates are always past)",
+      c0.mostRecentAwardDate <= "2026-07-06", JSON.stringify(c0.mostRecentAwardDate));
+    ok("37 sampleAwards[].date is also the award (base obligation) date, not the PoP end",
+      c0.sampleAwards.every((s) => s.date !== "2027-06-17") && c0.sampleAwards.some((s) => s.date === "2024-03-01"),
+      JSON.stringify(c0.sampleAwards.map((s) => s.date)));
+  });
+
+  // 37b: fallback — a row with NO Base Obligation Date falls back to Start Date
+  // (a past recency proxy). "End Date" is DELIBERATELY NOT a fallback (adversarial-
+  // review Finding 2/3): a row whose ONLY date is a FUTURE End Date must contribute
+  // NO date, so that future value can never become mostRecentAwardDate.
+  const fbRows = [
+    { "Award ID": "B1", "Recipient Name": "BETA CORP", "Award Amount": 300000, recipient_id: "rb", NAICS: { code: "541512" }, "Awarding Agency": "VA", "Start Date": "2023-05-05", "End Date": "2028-01-01" }, // no Base ⇒ Start Date (NOT the future End)
+    { "Award ID": "B2", "Recipient Name": "BETA CORP", "Award Amount": 200000, recipient_id: "rb", NAICS: { code: "541512" }, "Awarding Agency": "VA", "End Date": "2029-12-31" }, // ONLY a future End Date ⇒ contributes null, never sourced
+  ];
+  await withFetch((u) => {
+    if (isAwardCount(u)) return mockResponse({ status: 200, json: { results: { contracts: 2 } } });
+    if (isAwardPage(u)) return mockResponse({ status: 200, json: { results: fbRows, page_metadata: { hasNext: false, page: 1 } } });
+    return failClosed()();
+  }, async () => {
+    const res = await searchTeamingPartners({ cert: "small_business", naics: "541512", excludeDebarred: false, limit: 5 });
+    const c = res.data.candidates[0];
+    // B1 → Start 2023-05-05 (no Base); B2 → null (only End, dropped). Max = 2023-05-05.
+    ok("37b no Base ⇒ Start Date; future End Date NEVER sourced ⇒ mostRecentAwardDate = 2023-05-05 (not 2028/2029)",
+      c.mostRecentAwardDate === "2023-05-05", JSON.stringify(c.mostRecentAwardDate));
+    ok("37b a future End Date never appears as an award date (mostRecent + sampleAwards exclude 2028-01-01 / 2029-12-31)",
+      c.mostRecentAwardDate !== "2028-01-01" && c.mostRecentAwardDate !== "2029-12-31" &&
+        c.sampleAwards.every((s) => s.date !== "2028-01-01" && s.date !== "2029-12-31"),
+      JSON.stringify({ mostRecent: c.mostRecentAwardDate, sample: c.sampleAwards.map((s) => s.date) }));
+  });
+
+  // 37c: excludeDebarred integrity screen — an active exclusion whose NORMALIZED
+  // name EXACTLY matches a candidate drops it; a clean same-NAICS firm sharing no
+  // name is KEPT (the shared-token false-positive trap must not remove it).
+  const screenRows = [
+    { "Award ID": "A1", "Recipient Name": "ALPHA CORP", "Award Amount": 500000, recipient_id: "ra", NAICS: { code: "541512" }, "Awarding Agency": "VA", "Base Obligation Date": "2024-01-01" },
+    { "Award ID": "D1", "Recipient Name": "DEBARRED CO", "Award Amount": 400000, recipient_id: "rd", NAICS: { code: "541512" }, "Awarding Agency": "VA", "Base Obligation Date": "2024-06-01" },
+  ];
+  await withFetch((u) => {
+    if (isAwardCount(u)) return mockResponse({ status: 200, json: { results: { contracts: 2 } } });
+    if (isAwardPage(u)) return mockResponse({ status: 200, json: { results: screenRows, page_metadata: { hasNext: false, page: 1 } } });
+    // Same HAL for every screen call; checkExclusions' own name-gate keeps it only
+    // for the DEBARRED CO query, so ALPHA CORP screens clean without URL-sniffing.
+    if (isSgs(u)) return mockResponse({ status: 200, json: { _embedded: { results: [{ title: "DEBARRED CO", isActive: true, ueiSam: "UD", cageCode: "CD" }] }, page: { totalElements: 1 } } });
+    return failClosed()();
+  }, async () => {
+    const res = await searchTeamingPartners({ cert: "small_business", naics: "541512", excludeDebarred: true, limit: 10 });
+    const names = res.data.candidates.map((c) => c.recipientName);
+    ok("37c excludeDebarred: active EXACT-name-match exclusion ⇒ debarred firm DROPPED",
+      !names.includes("DEBARRED CO"), JSON.stringify(names));
+    ok("37c excludeDebarred: clean same-NAICS firm KEPT (shared-token false-positive avoided)",
+      names.includes("ALPHA CORP"), JSON.stringify(names));
+    ok("37c screen disclosed: note reports exactly one active-exclusion drop",
+      res.meta.notes.some((n) => /1 with an active exclusion (was|were) dropped/i.test(n)),
+      JSON.stringify(res.meta.notes));
+  });
+
+  // 37d: a row with NO date fields at all ⇒ mostRecentAwardDate stays null (no
+  // fabricated date); sampleAwards[].date null too (honest absence, not a guess).
+  const noDateRows = [
+    { "Award ID": "N1", "Recipient Name": "GAMMA LLC", "Award Amount": 100000, recipient_id: "rg", NAICS: { code: "541512" }, "Awarding Agency": "VA" },
+  ];
+  await withFetch((u) => {
+    if (isAwardCount(u)) return mockResponse({ status: 200, json: { results: { contracts: 1 } } });
+    if (isAwardPage(u)) return mockResponse({ status: 200, json: { results: noDateRows, page_metadata: { hasNext: false, page: 1 } } });
+    return failClosed()();
+  }, async () => {
+    const res = await searchTeamingPartners({ cert: "small_business", naics: "541512", excludeDebarred: false, limit: 5 });
+    const c = res.data.candidates[0];
+    ok("37d all date fields absent ⇒ mostRecentAwardDate is null (no fabricated date)",
+      c.mostRecentAwardDate === null, JSON.stringify(c.mostRecentAwardDate));
+    ok("37d sampleAwards[].date is null too (honest absence, not a guessed value)",
+      c.sampleAwards.every((s) => s.date === null), JSON.stringify(c.sampleAwards.map((s) => s.date)));
+  });
+
+  // 37e: FAIL-CLOSED screen — when the exclusion screen ERRORS, the candidate is
+  // NOT dropped, its excluded flag stays null (unknown ≠ clean), and the response
+  // DISCLOSES that screening degraded. A failed screen must never read as a pass.
+  const failRows = [
+    { "Award ID": "E1", "Recipient Name": "DELTA CORP", "Award Amount": 250000, recipient_id: "re", NAICS: { code: "541512" }, "Awarding Agency": "VA", "Base Obligation Date": "2024-03-03" },
+  ];
+  await withFetch((u) => {
+    if (isAwardCount(u)) return mockResponse({ status: 200, json: { results: { contracts: 1 } } });
+    if (isAwardPage(u)) return mockResponse({ status: 200, json: { results: failRows, page_metadata: { hasNext: false, page: 1 } } });
+    if (isSgs(u)) throw new Error("exclusions endpoint down"); // screen fails
+    return failClosed()();
+  }, async () => {
+    const res = await searchTeamingPartners({ cert: "small_business", naics: "541512", excludeDebarred: true, limit: 5 });
+    const c = res.data.candidates.find((x) => x.recipientName === "DELTA CORP");
+    ok("37e screen failure ⇒ candidate NOT dropped (fail-closed, not fail-open)",
+      c !== undefined, JSON.stringify(res.data.candidates.map((x) => x.recipientName)));
+    ok("37e screen failure ⇒ excluded stays null (unknown, NOT a clearance)",
+      c && c.excluded === null, JSON.stringify(c && c.excluded));
+    ok("37e screen failure DISCLOSED (a failed screen is not a clean result)",
+      res.meta.notes.some((n) => /screen FAILED/i.test(n) && /not a clean result/i.test(n)),
+      JSON.stringify(res.meta.notes));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -5637,6 +5764,7 @@ async function main() {
   await testRecipientProfileNotFound();
   await testAgencyDetailTools();
   await testSearchSubawardsMapping();
+  await testTeamingMostRecentAwardDate();
 
   // Prove the harness bites.
   await selfCheck();
