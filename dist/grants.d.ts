@@ -62,7 +62,9 @@ export declare function getGrant(args: {
     title: string;
     agency: {
         code: string | undefined;
-        name: string | undefined;
+        name: string | null;
+        department: string | null;
+        contactName: string | null;
     };
     description: string;
     postingDate: string | undefined;

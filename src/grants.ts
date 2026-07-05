@@ -62,6 +62,10 @@ export async function searchGrants(args: {
         number?: string;
         title?: string;
         agencyCode?: string;
+        // GRANT-2 (live-verified 2026-07-06): search2 returns the real agency NAME
+        // in `agency` (e.g. "Food and Nutrition Service"); `agencyName` is
+        // empty/absent on the search rows. Type both; the mapping prefers `agency`.
+        agency?: string;
         agencyName?: string;
         openDate?: string;
         closeDate?: string;
@@ -87,7 +91,8 @@ export async function searchGrants(args: {
       opportunityNumber: g.number ?? "",
       title: g.title ?? "",
       agencyCode: g.agencyCode ?? "",
-      agencyName: g.agencyName ?? "",
+      // GRANT-2: prefer `agency` (the real agency name) over the empty `agencyName`.
+      agencyName: g.agency ?? g.agencyName ?? "",
       openDate: g.openDate,
       closeDate: g.closeDate,
       status: g.oppStatus,
@@ -146,6 +151,11 @@ export async function getGrant(args: { opportunityId: string }) {
       opportunityTitle?: string;
       owningAgencyCode?: string;
       synopsisDesc?: string;
+      // GRANT-2: fetchOpportunity carries agencyDetails/topAgencyDetails at the TOP
+      // level too (sibling to synopsis) — a sparse-synopsis (e.g. forecasted) record
+      // may have them here but not under synopsis, so they are in the fallback chain.
+      agencyDetails?: { agencyName?: string; agencyCode?: string };
+      topAgencyDetails?: { agencyName?: string; agencyCode?: string };
       synopsis?: {
         synopsisDesc?: string;
         applicantTypes?: { description?: string }[];
@@ -160,6 +170,14 @@ export async function getGrant(args: { opportunityId: string }) {
         expectedNumberOfAwards?: number;
         agencyName?: string;
         agencyCode?: string;
+        // GRANT-2 (live-verified 2026-07-06): synopsis.agencyName is the CONTACT
+        // PERSON (== agencyContactName, e.g. "Andrew Day\nGrants/Agreements
+        // Officer"), NOT the agency. The real agency name lives in agencyDetails
+        // (subtier, e.g. "Food and Nutrition Service") and topAgencyDetails
+        // (department, e.g. "Department of Agriculture").
+        agencyContactName?: string;
+        agencyDetails?: { agencyName?: string; agencyCode?: string };
+        topAgencyDetails?: { agencyName?: string; agencyCode?: string };
       };
       opportunityHistoryDetails?: { actionType?: string; actionDate?: string }[];
       cfdas?: { cfdaNumber?: string; programTitle?: string }[];
@@ -183,13 +201,29 @@ export async function getGrant(args: { opportunityId: string }) {
     return { found: false as const, opportunityId: args.opportunityId };
   }
   const s = d.synopsis ?? {};
+  const rawContact = s.agencyContactName ?? s.agencyName ?? null;
   return {
     found: true as const,
     id: d.id, // guaranteed present past the not-found guard above
 
     opportunityNumber: d.opportunityNumber ?? "",
     title: d.opportunityTitle ?? "",
-    agency: { code: s.agencyCode ?? d.owningAgencyCode, name: s.agencyName },
+    // GRANT-2: `name` is the REAL agency (subtier preferred, else the department),
+    // NOT synopsis.agencyName (which is the contact person). Fall back through both
+    // the synopsis and top-level `data` locations. `department` is the top-tier
+    // agency; `contactName` preserves the person the mislabeled old `name` held
+    // (newlines collapsed so it renders on one line).
+    agency: {
+      code: s.agencyCode ?? d.owningAgencyCode,
+      name:
+        s.agencyDetails?.agencyName ??
+        d.agencyDetails?.agencyName ??
+        s.topAgencyDetails?.agencyName ??
+        d.topAgencyDetails?.agencyName ??
+        null,
+      department: s.topAgencyDetails?.agencyName ?? d.topAgencyDetails?.agencyName ?? null,
+      contactName: rawContact ? rawContact.replace(/\s*\n\s*/g, " — ") : null,
+    },
     description: s.synopsisDesc ?? d.synopsisDesc ?? "",
     postingDate: s.postingDate,
     responseDate: s.responseDate,
