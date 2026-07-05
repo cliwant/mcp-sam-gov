@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -5100,6 +5100,97 @@ async function testCalcBenchmarkDistribution() {
   });
 }
 
+// §31: usas_search_recompetes bounded-scan / early-stop / truncation truthfulness.
+// The recompete window (current PoP END date ∈ [windowStartDays, windowEndDays]) is
+// applied CLIENT-SIDE because USAspending exposes no server-side PoP-end filter
+// (LIVE-VERIFIED 2026-07-06: date_type=period_of_performance_current_end_date → HTTP
+// 500). The tool therefore pages spending_by_award sorted `End Date` DESC and
+// EARLY-STOPS at the first row below the window — correct ONLY because the stream is
+// End-Date-descending (LIVE-VERIFIED: strictly monotonic within AND across pages).
+// Two guarantees are load-bearing and had NO offline guard (live edge/smoke can't
+// force scanTruncated or verify the early-stop): (1) totalAvailable is EXACT only
+// when the window end was reached, else null + LOWER BOUND; (2) the early-stop must
+// not over-collect past-window rows. NON-VACUITY: removing the `pastWindow` break
+// makes 31a over-collect (RED); dropping the DESC sort request fails 31a's body
+// assertion; not setting scanTruncated makes 31b report totalAvailable 0 not null (RED).
+async function testRecompeteWindowScan() {
+  section("31. usas_search_recompetes — client-side PoP-end window: DESC-sort early-stop, exact-vs-LOWER-BOUND totalAvailable, missing-date counting (offline determinism for a live-only path)");
+
+  const DAY = 86400000;
+  const iso = (days) => new Date(Date.now() + days * DAY).toISOString().slice(0, 10);
+  const row = (endDays, amount, id) => ({
+    "Award ID": id,
+    "Recipient Name": `INC-${id}`,
+    "Award Amount": amount,
+    "End Date": endDays === null ? null : iso(endDays),
+    "Start Date": iso(-1000),
+    "Awarding Agency": "Department of Defense",
+    "Awarding Sub Agency": "Dept of the Army",
+    NAICS: { code: "541512" }, PSC: { code: "R425" },
+    "Contract Award Type": "DEFINITIVE CONTRACT",
+    generated_internal_id: `GID-${id}`,
+  });
+
+  // (a) EXACT: a DESC-by-End-Date stream — far-future (skip) → in-window (collect)
+  //     → past-window (BREAK). 5 in-window rows, 1 null-date (counted), then a
+  //     past-window row that must stop the scan (page 2 must NEVER be fetched).
+  const page1 = [
+    row(900, 5e6, "F1"), row(700, 5e6, "F2"), row(600, 5e6, "F3"), // d>548 far future → skip
+    row(500, 5e6, "W1"), row(300, 9e6, "W2"),                       // in window
+    row(null, 5e6, "NULL1"),                                        // missing end date → counted
+    row(100, 2e6, "W3"), row(10, 8e6, "W4"), row(-30, 1e6, "W5"),   // in window (−30 > −90)
+    row(-200, 4e6, "P1"),                                           // d<−90 → pastWindow BREAK
+  ];
+  const poisonPage2 = [row(-30, 9e9, "SHOULD_NOT_APPEAR")];
+  await withFetch((u, init) => {
+    if (!/spending_by_award(?!_count)/.test(u)) return failClosed()();
+    const body = JSON.parse(init.body);
+    // Guard the load-bearing PRECONDITION: the tool MUST request End-Date DESC
+    // (the early-stop is only valid for a descending stream).
+    ok("31a request sorts by End Date DESC (early-stop precondition)",
+      body.sort === "End Date" && body.order === "desc", JSON.stringify({ sort: body.sort, order: body.order }));
+    return mockResponse({ status: 200, json: { results: body.page === 1 ? page1 : poisonPage2, page_metadata: { hasNext: true, page: body.page } } });
+  }, async (calls) => {
+    const res = await searchRecompetes({ agency: "Department of Defense", scanBudgetPages: 5 });
+    const d = res.data, m = res.meta;
+    const ds = d.recompetes.map((r) => r.daysUntilCurrentEnd);
+    ok("31a collects EXACTLY the 5 in-window rows (past-window rows NOT over-collected — the break holds)",
+      d.recompetes.length === 5, JSON.stringify(ds));
+    ok("31a no far-future / past-window / null row leaked in (ids are W1..W5 only)",
+      d.recompetes.every((r) => /^W\d$/.test(r.awardId)), JSON.stringify(d.recompetes.map((r) => r.awardId)));
+    ok("31a sorted soonest-first (daysUntilCurrentEnd strictly ascending)",
+      ds.every((v, i) => i === 0 || v > ds[i - 1]), JSON.stringify(ds));
+    ok("31a totalAvailable EXACT (=5) — the window end was reached (early-stop fired), not truncated",
+      m.totalAvailable === 5 && m.truncated === false, JSON.stringify({ ta: m.totalAvailable, tr: m.truncated }));
+    ok("31a missing End Date COUNTED + disclosed (never silently dropped)",
+      m.notes.some((n) => /had no usable current PoP end date/i.test(n)), JSON.stringify(m.notes));
+    const awardCalls = calls.filter((c) => /spending_by_award(?!_count)/.test(c.url)).length;
+    ok("31a EARLY-STOP: page 2 never fetched (pastWindow break) — exactly 1 award page scanned",
+      awardCalls === 1, `awardCalls=${awardCalls}`);
+  });
+
+  // (b) TRUNCATED: the far-future tail fills the entire scan budget before the
+  //     window is reached ⇒ totalAvailable NULL (unknown), results a LOWER BOUND
+  //     — never a confident empty/exact-0. (The real DoD tail is exactly this:
+  //     live, 200 consecutive rows all ended beyond the 18-month window.)
+  const farFuturePage = Array.from({ length: 100 }, (_, i) => row(900 - i, 5e6, `FF${i}`)); // all d>548
+  await withFetch((u) => {
+    if (!/spending_by_award(?!_count)/.test(u)) return failClosed()();
+    return mockResponse({ status: 200, json: { results: farFuturePage, page_metadata: { hasNext: true, page: 1 } } });
+  }, async (calls) => {
+    const res = await searchRecompetes({ agency: "Department of Defense", scanBudgetPages: 2 });
+    const d = res.data, m = res.meta;
+    ok("31b far-future tail exhausts budget ⇒ 0 in-window rows collected (a LOWER BOUND, not a real empty)",
+      d.recompetes.length === 0, JSON.stringify(d.recompetes.length));
+    ok("31b totalAvailable === null (unknown — NOT a confident 0)", m.totalAvailable === null, JSON.stringify(m.totalAvailable));
+    ok("31b truncated === true", m.truncated === true, JSON.stringify(m.truncated));
+    ok("31b note discloses the LOWER BOUND + exhausted scan budget",
+      m.notes.some((n) => /LOWER BOUND/.test(n) && /scan budget/i.test(n)), JSON.stringify(m.notes));
+    const awardCalls = calls.filter((c) => /spending_by_award(?!_count)/.test(c.url)).length;
+    ok("31b scanned the full budget (2 pages) before giving up", awardCalls === 2, `awardCalls=${awardCalls}`);
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -5141,6 +5232,7 @@ async function main() {
   await testFarFutureAsOfDate();
   await testUpstreamConcurrencyBounded();
   await testCalcBenchmarkDistribution();
+  await testRecompeteWindowScan();
 
   // Prove the harness bites.
   await selfCheck();
