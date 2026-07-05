@@ -4812,6 +4812,51 @@ async function testRealEcfrReplay() {
   });
 }
 
+// REAL-DATA REPLAY (lens: my mock ≠ reality) — validates C54 against reality. §21's
+// usas pagination-truthfulness suite was built ENTIRELY on hand-built mocks. Here we
+// freeze VERBATIM real USAspending responses (spending_by_award + companion
+// spending_by_award_count for DoD × NAICS 541512, captured 2026-07-05) and assert the
+// C54 invariants hold on the REAL shape. Confirmed against the live API: page_metadata
+// carries hasNext + a cursor but NO total (exactly why totalAvailable MUST come from the
+// companion count), and — a detail the 2-bucket mock missed — the real count returns SIX
+// buckets (contracts/direct_payments/grants/idvs/loans/other) that awardCount must sum.
+async function testRealUsasReplay() {
+  section("26. real-data replay — usas_search_individual_awards vs VERBATIM real USAspending responses (DoD×541512, live-captured)");
+  const isAwardCount = (u) => /spending_by_award_count/.test(u);
+  const isAwardPage = (u) => /spending_by_award(?!_count)/.test(u);
+  // Real spending_by_award page (2 verbatim results + real page_metadata; note the real
+  // extra fields internal_id/agency_slug/awarding_agency_id the tool must IGNORE).
+  const REAL_PAGE = {
+    spending_level: "awards", limit: 2,
+    results: [
+      { internal_id: 350876734, "Award ID": "ZW05", "Recipient Name": "TYONEK MANUFACTURING, LLC", "Award Amount": 23712.4, "Awarding Agency": "Department of Defense", "Awarding Sub Agency": "Department of the Army", NAICS: { code: "541512", description: "COMPUTER SYSTEMS DESIGN SERVICES" }, "Place of Performance State Code": "WA", Description: "SERVICES TO SUPPORT TRAINING CLASS", awarding_agency_id: 1173, agency_slug: "department-of-defense", generated_internal_id: "CONT_AWD_ZW05_9700_W912HZ05D0013_9700" },
+      { internal_id: 350876681, "Award ID": "ZW04", "Recipient Name": "TYONEK MANUFACTURING, LLC", "Award Amount": 26621.92, "Awarding Agency": "Department of Defense", "Awarding Sub Agency": "Department of the Army", NAICS: { code: "541512", description: "COMPUTER SYSTEMS DESIGN SERVICES" }, "Place of Performance State Code": "AL", Description: "COURSE INSTRUCTION AT FT. WAINWRIGHT", awarding_agency_id: 1173, agency_slug: "department-of-defense", generated_internal_id: "CONT_AWD_ZW04_9700_W912HZ05D0013_9700" },
+    ],
+    page_metadata: { page: 1, hasNext: true, last_record_unique_id: 350876681, last_record_sort_value: "ZW04" },
+  };
+  // Real spending_by_award_count: SIX buckets (the 2-bucket §21 mock understated this).
+  const REAL_COUNT = { results: { contracts: 49990, direct_payments: 0, grants: 0, idvs: 0, loans: 0, other: 0 }, spending_level: "awards" };
+  await withFetch((u) => {
+    if (isAwardCount(u)) return mockResponse({ status: 200, json: REAL_COUNT });
+    if (isAwardPage(u)) return mockResponse({ status: 200, json: REAL_PAGE });
+    return failClosed()();
+  }, async () => {
+    const res = await searchIndividualAwards({ agency: "Department of Defense", naics: "541512", limit: 2 });
+    const meta = buildMeta(res.meta);
+    const a0 = res.data.awards[0];
+    ok("real usas ⇒ returned===awards.length===2 (real page mapped)",
+      meta.returned === 2 && res.data.awards.length === 2, JSON.stringify({ r: meta.returned, n: res.data.awards.length }));
+    ok("real usas TRUTHFULNESS ⇒ totalAvailable = SUM of the real SIX count buckets (49990), NOT the page length (2) — awardCount handles the real shape",
+      meta.totalAvailable === 49990, JSON.stringify(meta.totalAvailable));
+    ok("real usas ⇒ real field mapping: Award ID→awardId 'ZW05', Recipient Name→recipient, Award Amount→amount 23712.4, real NAICS.{code,description}→naicsCode/naicsDescription",
+      a0.awardId === "ZW05" && a0.recipient === "TYONEK MANUFACTURING, LLC" && a0.amount === 23712.4 && a0.naicsCode === "541512" && a0.naicsDescription === "COMPUTER SYSTEMS DESIGN SERVICES", JSON.stringify(a0));
+    ok("real usas ⇒ maps real Awarding Sub Agency + generated_internal_id; ignores real extra fields (internal_id/agency_slug not surfaced)",
+      a0.awardingSubAgency === "Department of the Army" && a0.generatedInternalId === "CONT_AWD_ZW05_9700_W912HZ05D0013_9700" && a0.internal_id === undefined && a0.agency_slug === undefined, JSON.stringify({ sub: a0.awardingSubAgency, gid: a0.generatedInternalId }));
+    ok("real usas ⇒ page(2) < total(49990) ⇒ truncated + hasMore + nextOffset 2 + complete:false (real 'more exists' signal)",
+      meta.truncated === true && meta.pagination.hasMore === true && meta.pagination.nextOffset === 2 && meta.complete === false, JSON.stringify(meta.pagination));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4848,6 +4893,7 @@ async function main() {
   await testRealWdReplay();
   await testRealGaoReplay();
   await testRealEcfrReplay();
+  await testRealUsasReplay();
 
   // Prove the harness bites.
   await selfCheck();
