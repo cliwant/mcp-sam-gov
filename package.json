@@ -92,6 +92,13 @@
     "unpdf": "^1.6.2",
     "zod": "^3.24.0"
   },
+  "//overrides": "Patch transitive advisories in @modelcontextprotocol/sdk's bundled HTTP/SSE transport (express/hono/ajv). This server uses ONLY the stdio transport, so these are not reachable here — but we patch them (all within-major, no breaking bump) for supply-chain hygiene + a clean `npm audit`. Revisit when the SDK bumps them upstream (we track the latest SDK).",
+  "overrides": {
+    "hono": "4.12.27",
+    "fast-uri": "3.1.3",
+    "qs": "6.15.3",
+    "ip-address": "10.2.0"
+  },
   "devDependencies": {
     "@anthropic-ai/mcpb": "^2.1.2",
     "@types/node": "^20.0.0",

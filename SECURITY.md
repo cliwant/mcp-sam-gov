@@ -49,6 +49,23 @@ Codex CLI, etc.). Notable surfaces and their mitigations:
   error — it is never silently reported as "no results" (a CI lint enforces
   this), so a consumer is not misled into acting on a masked failure.
 
+## Supply chain
+
+Three runtime dependencies: `@modelcontextprotocol/sdk`, `unpdf`, `zod`. A
+non-blocking CI job runs `npm audit --omit=dev` on every push for visibility.
+
+`@modelcontextprotocol/sdk` bundles a full HTTP/SSE server transport (`express`,
+`@hono/node-server`, `ajv`) for hosts that speak MCP over HTTP. **This server uses
+only the stdio transport** — it never imports or instantiates the HTTP transport
+(verified: no `express`/`hono`/`StreamableHTTP` references in `src/`) — so
+advisories in those packages are **not reachable** in this deployment. We
+nonetheless patch them, for supply-chain hygiene and a clean audit, via
+`package.json` `overrides` pinning within-major, non-breaking patched versions
+(e.g. `qs`, `fast-uri`, `hono`, `ip-address`); the deterministic gate + fault
+suite verify the stdio path is unchanged by these bumps. When the SDK updates its
+transitive deps upstream, we drop the overrides. `npm audit --omit=dev` currently
+reports **0** production vulnerabilities.
+
 ## Scope
 
 In scope: the server code in this repository (tool handlers, fetch/parse paths,
