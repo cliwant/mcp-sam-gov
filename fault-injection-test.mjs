@@ -4365,6 +4365,157 @@ async function testMetamorphic() {
     `n1=${nFar} n2=${farAgain.data.rows.length}`);
 }
 
+// getWageRates parses rates best-effort from a WD's PLAIN-TEXT `document` (SAM
+// exposes no structured rate JSON). Section 16 only proved the outage/empty/404
+// error paths — NOT the actual parse. Here we REPLAY realistic fixed SCA/DBA WD
+// document fixtures through the real getWageRates path (revision+coverage passed
+// ⇒ deterministic, single detail fetch) and assert parse correctness + the
+// TRUTHFULNESS invariants the parser owes an AI consumer:
+//   • SCA H&W is the WD-WIDE primary rate, NOT the EO-13706 sick-leave variant.
+//   • A poorly-parsed WD self-flags parseConfidence:'low' + steers to raw (never
+//     presents partial rows as authoritative).
+//   • DBA fringe is PER-CRAFT (distinct per row), not one shared figure.
+//   • format:'raw'|'both'|'parsed' honor a strict document/rates contract.
+// Every assertion targets a SPECIFIC known value ⇒ a broken regex/parser fails
+// (non-vacuous), and the fixtures exercise the pricing parse branches untouched
+// by section 16 (parseScaDocument / parseDbaDocument / EO-min / confidence / format).
+async function testPricingParseReplay() {
+  section("20. pricing WD-document PARSE replay — SCA/DBA rate parsing correctness + truthfulness (fixed-fixture, deterministic)");
+  const isWdDetail = (u) => /wdol\/v1\/wd\/[^/]+\/\d+/.test(u);
+  const wdDetail = (document) => ({
+    document, active: true, standard: true, publishDate: "2024-01-01",
+    location: { mapping: [{ state: "IA", counties: ["Polk"], statewideFlag: false }] },
+  });
+  const detailHandler = (doc) => (u) =>
+    isWdDetail(u) ? mockResponse({ status: 200, json: wdDetail(doc) }) : failClosed()();
+
+  // ── A. SCA happy-path: 6 coded rows + WD-wide H&W + EO-14026 floor ⇒ high confidence.
+  // Row 27101 carries trailing dot-leaders in the title to exercise the ".replace(/\.+$/)" clean.
+  const SCA_DOC = [
+    "REGISTER OF WAGE DETERMINATIONS UNDER THE SERVICE CONTRACT ACT",
+    "Wage Determination No.: 2015-4281   Revision No.: 5",
+    "",
+    "OCCUPATION CODE - TITLE                              RATE",
+    "01011 - Accounting Clerk I                           16.44",
+    "01012 - Accounting Clerk II                          18.46",
+    "05360 - Machinist                                    25.71",
+    "11150 - Janitor                                      14.10",
+    "23370 - General Maintenance Worker                   20.83",
+    "27101 - Guard I ....                                 15.62",
+    "",
+    "ALL OCCUPATIONS LISTED ABOVE RECEIVE THE FOLLOWING BENEFITS:",
+    "",
+    "HEALTH & WELFARE: $5.36 per hour or $214.40 per week or $929.07 per month",
+    "HEALTH & WELFARE EO 13706: $4.57 per hour, or $182.80 per week, or $792.13 per month",
+    "",
+    "This contract is subject to Executive Order 14026. The contractor must pay",
+    "all covered workers at least $17.20 per hour under this contract in 2024.",
+  ].join("\n");
+  await withFetch(detailHandler(SCA_DOC), async () => {
+    const res = await getWageRates({ reference: "2015-4281", revision: 5, coverage: "sca" });
+    const rates = res.data.rates;
+    ok("SCA parse ⇒ coverage:'SCA' + parses all 6 coded occupation rows",
+      res.data.coverage === "SCA" && Array.isArray(rates) && rates.length === 6, JSON.stringify({ cov: res.data.coverage, n: rates?.length }));
+    const mach = (rates || []).find((r) => r.code === "05360");
+    ok("SCA parse non-vacuity ⇒ code 05360 ⇒ title 'Machinist', baseRate 25.71 (last number on line)",
+      !!mach && mach.title === "Machinist" && mach.baseRate === 25.71, JSON.stringify(mach));
+    const guard = (rates || []).find((r) => r.code === "27101");
+    ok("SCA parse ⇒ trailing dot-leaders stripped from title (27101 ⇒ 'Guard I', not 'Guard I ....')",
+      !!guard && guard.title === "Guard I" && guard.baseRate === 15.62, JSON.stringify(guard));
+    ok("SCA parse ⇒ every row well-formed (5-digit code, non-empty title, finite +baseRate, no trailing dot)",
+      (rates || []).every((r) => /^\d{5}$/.test(r.code) && r.title.length > 0 && !/\.$/.test(r.title) && Number.isFinite(r.baseRate) && r.baseRate > 0), JSON.stringify(rates));
+    ok("SCA TRUTHFULNESS ⇒ H&W is the WD-WIDE primary $5.36, NOT the EO-13706 sick-leave $4.57 variant",
+      res.data.healthAndWelfarePerHour === 5.36, JSON.stringify(res.data.healthAndWelfarePerHour));
+    const eo = res.data.executiveOrderMinimumWage;
+    ok("SCA parse ⇒ EO minimum-wage floor read from text (EO 14026 @ $17.20), never hardcoded",
+      !!eo && eo.executiveOrder === "EO 14026" && eo.minimumWage === 17.20, JSON.stringify(eo));
+    ok("SCA parse ⇒ parseConfidence 'high' (≥5 rows AND H&W found)",
+      res.data.parseConfidence === "high", JSON.stringify(res.data.parseConfidence));
+    ok("SCA TRUTHFULNESS ⇒ a note states H&W is WD-WIDE (applies to ALL occupations, not per-occupation)",
+      (res.meta.notes || []).some((n) => /WD-WIDE Health & Welfare/i.test(n) && /ALL listed occupations/i.test(n)), JSON.stringify(res.meta.notes));
+  });
+
+  // ── B. H&W disambiguation TRAP: the EO-13706 $4.57 line appears FIRST. A naive
+  // "HEALTH.*WELFARE.*$(rate)" would grab $4.57; the real parser must still pick $5.36.
+  const SCA_HW_TRAP = [
+    "01011 - Accounting Clerk I                           16.44",
+    "05360 - Machinist                                    25.71",
+    "11150 - Janitor                                      14.10",
+    "23370 - General Maintenance Worker                   20.83",
+    "27101 - Guard I                                      15.62",
+    "HEALTH & WELFARE EO 13706: $4.57 per hour, or $182.80 per week",
+    "HEALTH & WELFARE: $5.36 per hour or $214.40 per week or $929.07 per month",
+  ].join("\n");
+  await withFetch(detailHandler(SCA_HW_TRAP), async () => {
+    const res = await getWageRates({ reference: "2015-4281", revision: 5, coverage: "sca" });
+    ok("SCA H&W trap ⇒ EO-13706 line FIRST but parser picks WD-wide $5.36 by CONTENT not order (non-vacuous)",
+      res.data.healthAndWelfarePerHour === 5.36 && res.data.rates.length === 5, JSON.stringify({ hw: res.data.healthAndWelfarePerHour, n: res.data.rates.length }));
+  });
+
+  // ── C. Low-confidence HONESTY: 2 rows, no H&W, no EO ⇒ must self-flag, never
+  // present partial rows as authoritative (mission: 오도 방지 / no misleading output).
+  const SCA_SPARSE = [
+    "01011 - Accounting Clerk I                           16.44",
+    "05360 - Machinist                                    25.71",
+  ].join("\n");
+  await withFetch(detailHandler(SCA_SPARSE), async () => {
+    const res = await getWageRates({ reference: "2015-4281", revision: 5, coverage: "sca" });
+    ok("SCA low-confidence ⇒ parseConfidence 'low' (2 rows <5, no H&W) + H&W null + EO null",
+      res.data.parseConfidence === "low" && res.data.healthAndWelfarePerHour === null && res.data.executiveOrderMinimumWage === null, JSON.stringify(res.data));
+    ok("SCA low-confidence TRUTHFULNESS ⇒ absent fields declared in _meta.fieldsUnavailable (not silent defaults)",
+      (res.meta.fieldsUnavailable || []).includes("healthAndWelfarePerHour") && (res.meta.fieldsUnavailable || []).includes("executiveOrderMinimumWage"), JSON.stringify(res.meta.fieldsUnavailable));
+    ok("SCA low-confidence TRUTHFULNESS ⇒ a note warns LOW + steers to raw (don't trust the parsed rows)",
+      (res.meta.notes || []).some((n) => /parseConfidence is LOW/i.test(n) && /raw/i.test(n)), JSON.stringify(res.meta.notes));
+  });
+
+  // ── D. DBA per-craft: ID header + 3 crafts, one with a WRAPPED multi-line label,
+  // distinct fringe columns. Proves fringe is PER-CRAFT (not one WD-wide figure).
+  const DBA_DOC = [
+    "                                    Rates       Fringes",
+    "",
+    "PLUM0198-005  07/01/2023",
+    "",
+    "    PLUMBER..........................$ 42.15    24.30",
+    "",
+    "    ELECTRICIAN......................$ 38.90    18.75",
+    "",
+    "    BRICKLAYER/STONE MASON: ZONE 1 (The",
+    "    Counties of Polk, Warren, and Dallas for",
+    "    all Crafts)......................$ 37.44    19.17",
+  ].join("\n");
+  await withFetch(detailHandler(DBA_DOC), async () => {
+    const res = await getWageRates({ reference: "IA20230012", revision: 3, coverage: "dba" });
+    const rates = res.data.rates;
+    ok("DBA parse ⇒ coverage:'DBA' + 3 craft rows + parseConfidence 'high'",
+      res.data.coverage === "DBA" && Array.isArray(rates) && rates.length === 3 && res.data.parseConfidence === "high", JSON.stringify({ cov: res.data.coverage, n: rates?.length, conf: res.data.parseConfidence }));
+    const plumber = (rates || []).find((r) => r.craft === "PLUMBER");
+    ok("DBA parse non-vacuity ⇒ PLUMBER ⇒ baseRate 42.15, fringe 24.30, rateIdentifier 'PLUM0198-005'",
+      !!plumber && plumber.baseRate === 42.15 && plumber.fringePerHour === 24.30 && plumber.rateIdentifier === "PLUM0198-005", JSON.stringify(plumber));
+    const fringes = (rates || []).map((r) => r.fringePerHour);
+    ok("DBA TRUTHFULNESS ⇒ fringe is PER-CRAFT (3 DISTINCT values 24.30/18.75/19.17, not one shared figure)",
+      new Set(fringes).size === 3 && fringes.every((f) => Number.isFinite(f)), JSON.stringify(fringes));
+    const brick = (rates || []).find((r) => r.craft === "BRICKLAYER/STONE MASON");
+    ok("DBA parse ⇒ WRAPPED multi-line craft label joined into full title (dot-leaders collapsed, scope preserved)",
+      !!brick && /Counties of Polk, Warren, and Dallas/.test(brick.title) && !/\.\./.test(brick.title) && /\)$/.test(brick.title) && brick.fringePerHour === 19.17, JSON.stringify(brick));
+    ok("DBA TRUTHFULNESS ⇒ a note states fringe is PER-CRAFT (contrast SCA's single WD-wide H&W)",
+      (res.meta.notes || []).some((n) => /PER-CRAFT/i.test(n) && /fringePerHour/i.test(n)), JSON.stringify(res.meta.notes));
+  });
+
+  // ── E. format METAMORPHIC contract: parsed⇒rates,no document · raw⇒document,no
+  // rates,confidence low · both⇒document AND rates. (Same SCA_DOC, only format varies.)
+  await withFetch(detailHandler(SCA_DOC), async () => {
+    const parsed = await getWageRates({ reference: "2015-4281", revision: 5, coverage: "sca", format: "parsed" });
+    ok("format:'parsed' ⇒ data.rates present, data.document ABSENT (no raw blob leaked)",
+      Array.isArray(parsed.data.rates) && parsed.data.rates.length === 6 && parsed.data.document === undefined, JSON.stringify({ n: parsed.data.rates?.length, hasDoc: parsed.data.document !== undefined }));
+    const raw = await getWageRates({ reference: "2015-4281", revision: 5, coverage: "sca", format: "raw" });
+    ok("format:'raw' ⇒ full document returned, NO parsed rates, parseConfidence forced 'low' (no asserted structure)",
+      raw.data.document === SCA_DOC && raw.data.rates === undefined && raw.data.parseConfidence === "low", JSON.stringify({ docMatch: raw.data.document === SCA_DOC, hasRates: raw.data.rates !== undefined, conf: raw.data.parseConfidence }));
+    const both = await getWageRates({ reference: "2015-4281", revision: 5, coverage: "sca", format: "both" });
+    ok("format:'both' ⇒ BOTH document AND parsed rates present (superset contract)",
+      both.data.document === SCA_DOC && Array.isArray(both.data.rates) && both.data.rates.length === 6, JSON.stringify({ docMatch: both.data.document === SCA_DOC, n: both.data.rates?.length }));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4395,6 +4546,7 @@ async function main() {
   await testGaoHonesty();
   await testParserFuzz();
   await testMetamorphic();
+  await testPricingParseReplay();
 
   // Prove the harness bites.
   await selfCheck();
