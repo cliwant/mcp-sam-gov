@@ -27,7 +27,9 @@ export declare function searchDocuments(args: {
     perPage?: number;
 }): Promise<import("./meta.js").MetaBundle<{
     totalRecords: number;
+    totalRecordsSaturated: boolean;
     totalPages: number;
+    totalPagesSaturated: boolean;
     documents: {
         documentNumber: string;
         title: string;
