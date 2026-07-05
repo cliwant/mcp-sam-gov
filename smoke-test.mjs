@@ -173,7 +173,22 @@ const tests = [
   {
     name: "usas_search_individual_awards",
     args: { agency: "Department of Veterans Affairs", naics: "541512", fiscalYear: 2025, limit: 3 },
-    verify: (r) => Array.isArray(r.awards),
+    // Shape-contract (drift detector), not just "an array came back": the parser
+    // maps specific real spending_by_award fields, so assert the identity fields
+    // survive (a renamed "Award ID"/generated_internal_id breaks them) AND at
+    // least one positive amount (a dropped "Award Amount" ⇒ every amount 0).
+    verify: (r) =>
+      Array.isArray(r.awards) &&
+      r.awards.length > 0 &&
+      r.awards.every(
+        (a) =>
+          typeof a.awardId === "string" &&
+          a.awardId.length > 0 &&
+          typeof a.generatedInternalId === "string" &&
+          a.generatedInternalId.length > 0 &&
+          typeof a.amount === "number",
+      ) &&
+      r.awards.some((a) => a.amount > 0),
   },
   {
     name: "usas_search_subagency_spending",
@@ -389,7 +404,23 @@ const tests = [
   {
     name: "grants_search",
     args: { keyword: "cybersecurity", rows: 3 },
-    verify: (r) => Array.isArray(r.grants),
+    // Shape-contract (drift detector): the parser maps specific grants.gov fields,
+    // so assert the STABLE ones survive on every row (a renamed id/opportunityNumber/
+    // title/status/cfdaList signals drift). agencyName/closeDate are intentionally
+    // NOT required non-empty — grants.gov really returns "" for forecast rows.
+    verify: (r) =>
+      Array.isArray(r.grants) &&
+      r.grants.length > 0 &&
+      r.grants.every(
+        (g) =>
+          typeof g.id === "string" &&
+          g.id.length > 0 &&
+          typeof g.opportunityNumber === "string" &&
+          typeof g.title === "string" &&
+          g.title.length > 0 &&
+          typeof g.status === "string" &&
+          Array.isArray(g.cfdaList),
+      ),
   },
   {
     name: "grants_get_opportunity",
