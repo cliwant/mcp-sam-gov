@@ -4124,6 +4124,111 @@ async function testGaoHonesty() {
   );
 }
 
+// Deterministic seeded PRNG (mulberry32) — reproducible fuzz in CI (Math.random
+// would make failures non-reproducible). The hand-rolled parsers (DOCX ZIP,
+// GSA-CSV, GAO RSS) all parse UNTRUSTED bytes; a crash/hang/OOB on hostile input
+// is a real Sev2 defect. Invariant under fuzz: return a sane result OR throw a
+// CLASSIFIED ToolErrorCarrier — never an uncaught RangeError/raw-throw/hang.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+async function testParserFuzz() {
+  section("18. parser fuzz — hostile/malformed bytes never crash/hang/OOB (deterministic seeded)");
+  const rnd = mulberry32(0x5a3c9e17);
+  const rint = (n) => Math.floor(rnd() * n);
+  const rbytes = (n) => { const a = new Uint8Array(n); for (let i = 0; i < n; i++) a[i] = rint(256); return a; };
+  const zipMagic = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  const validDocx = buildDocxFixture("<w:body><w:p><w:t>hello fuzz world</w:t></w:p></w:body>");
+
+  // ── (a) DOCX / ZIP parser via the REAL fetchAttachmentText path ──
+  let fuzzBytes = new Uint8Array(0);
+  const docxIters = 700;
+  const docxBad = [];
+  await withFetch(
+    () => mockBinaryResponse({
+      status: 200, bytes: fuzzBytes,
+      headers: { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="fuzz.docx"' },
+    }),
+    async () => {
+      for (let i = 0; i < docxIters; i++) {
+        const strat = i % 5;
+        if (strat === 0) fuzzBytes = rbytes(rint(2048));                                    // pure garbage
+        else if (strat === 1) fuzzBytes = _concatBytes([zipMagic, rbytes(rint(1024))]);     // PK magic + garbage
+        else if (strat === 2) { const m = validDocx.slice(); const f = 1 + rint(30); for (let k = 0; k < f; k++) m[rint(m.length)] = rint(256); fuzzBytes = m; } // bit-flip valid
+        else if (strat === 3) fuzzBytes = validDocx.slice(0, rint(validDocx.length + 1));   // truncate
+        else { const m = validDocx.slice(); for (let k = 0; k < 8; k++) m[m.length - 1 - rint(Math.min(30, m.length))] = rint(256); fuzzBytes = m; } // corrupt EOCD/CD tail
+        try {
+          const r = await fetchAttachmentText({ url: SAM_ATT_URL });
+          if (!r || !r.data || (r.data.text !== null && typeof r.data.text !== "string")) docxBad.push({ i, why: "bad-shape", strat });
+        } catch (e) {
+          if (!(e && e.toolError)) docxBad.push({ i, why: "unclassified:" + String(e && e.message).slice(0, 70), strat });
+        }
+      }
+    },
+  );
+  ok(`DOCX/ZIP fuzz ${docxIters} malformed inputs ⇒ 0 crashes (sane result or classified error only)`,
+    docxBad.length === 0, JSON.stringify(docxBad.slice(0, 4)));
+
+  // ── (b) GSA-CSV parseRecordFields (exported; pure linear loop — confirm no throw) ──
+  const csvIters = 700;
+  const csvBad = [];
+  for (let i = 0; i < csvIters; i++) {
+    const cells = rint(8);
+    const parts = [];
+    for (let c = 0; c < cells; c++) {
+      const kind = rint(6);
+      if (kind === 0) parts.push('"'.repeat(1 + rint(6)));                 // unbalanced quotes
+      else if (kind === 1) parts.push("a".repeat(rint(400)));              // long field
+      else if (kind === 2) parts.push('"' + "x,y\n".repeat(rint(20)));     // delimiters inside a quote
+      else if (kind === 3) parts.push(String.fromCharCode(rint(0x10000))); // random BMP unicode
+      else if (kind === 4) parts.push(",".repeat(rint(30)));              // many delimiters
+      else parts.push("\r\n\r".repeat(rint(10)));                          // stray CR/LF
+    }
+    const line = parts.join(rint(2) ? "," : "");
+    try {
+      const out = parseRecordFields(line, rint(60));
+      if (!out || !Array.isArray(out.fields) || typeof out.inQuotes !== "boolean") csvBad.push({ i, why: "bad-shape" });
+    } catch (e) {
+      csvBad.push({ i, why: "throw:" + String(e && e.message).slice(0, 60) });
+    }
+  }
+  ok(`CSV parseRecordFields fuzz ${csvIters} malformed inputs ⇒ 0 throws, always {fields[],inQuotes}`,
+    csvBad.length === 0, JSON.stringify(csvBad.slice(0, 4)));
+
+  // ── (c) GAO RSS parseFeed via gaoProtestLookup (regex parser — ReDoS/crash guard) ──
+  const feedIters = 300;
+  const feedBad = [];
+  const isFeed = (u) => /gao\.gov\/rss\/reportslegal\.xml/.test(u);
+  let feedXml = "";
+  await withFetch(
+    (u) => (isFeed(u) ? mockResponse({ status: 200, json: feedXml }) : failClosed()()),
+    async () => {
+      for (let i = 0; i < feedIters; i++) {
+        const kind = i % 4;
+        if (kind === 0) { let s = "<rss><channel>"; for (let k = 0; k < rint(15); k++) s += "<item>" + "<title>".repeat(rint(6)) + "b-" + rint(999999) + "</link>".repeat(rint(6)); feedXml = s; } // unbalanced tags
+        else if (kind === 1) feedXml = "<item>".repeat(rint(200));                          // many opens, no close
+        else if (kind === 2) feedXml = "<item>" + "<".repeat(rint(500)) + ">".repeat(rint(500)) + "</item>"; // bracket soup
+        else { let s = ""; for (let k = 0; k < rint(1024); k++) s += String.fromCharCode(rint(128)); feedXml = s; } // ascii noise
+        try {
+          const r = await gaoProtestLookup({ enrich: false, limit: 5 });
+          if (!r || !r.data || !Array.isArray(r.data.decisions)) feedBad.push({ i, why: "bad-shape", kind });
+        } catch (e) {
+          if (!(e && e.toolError)) feedBad.push({ i, why: "unclassified:" + String(e && e.message).slice(0, 60), kind });
+        }
+      }
+    },
+  );
+  ok(`GAO parseFeed fuzz ${feedIters} malformed RSS ⇒ 0 crashes/hangs, decisions[] always`,
+    feedBad.length === 0, JSON.stringify(feedBad.slice(0, 4)));
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4152,6 +4257,7 @@ async function main() {
   await testFederalRegisterHonesty();
   await testPricingHonesty();
   await testGaoHonesty();
+  await testParserFuzz();
 
   // Prove the harness bites.
   await selfCheck();
