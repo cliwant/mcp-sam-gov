@@ -37,6 +37,26 @@ export declare function searchGrants(args: {
 export declare function getGrant(args: {
     opportunityId: string;
 }): Promise<{
+    found: false;
+    opportunityId: string;
+    id?: undefined;
+    opportunityNumber?: undefined;
+    title?: undefined;
+    agency?: undefined;
+    description?: undefined;
+    postingDate?: undefined;
+    responseDate?: undefined;
+    archiveDate?: undefined;
+    awardCeiling?: undefined;
+    awardFloor?: undefined;
+    estimatedFunding?: undefined;
+    expectedNumberOfAwards?: undefined;
+    applicantTypes?: undefined;
+    fundingInstruments?: undefined;
+    fundingCategories?: undefined;
+    cfdaPrograms?: undefined;
+} | {
+    found: true;
     id: number;
     opportunityNumber: string;
     title: string;
@@ -59,5 +79,6 @@ export declare function getGrant(args: {
         number: string;
         title: string;
     }[];
+    opportunityId?: undefined;
 }>;
 //# sourceMappingURL=grants.d.ts.map

@@ -3973,6 +3973,38 @@ async function testGrantsHonesty() {
         threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError));
     },
   );
+
+  // 6. GRANT-1: getGrant of a NONEXISTENT id — Grants.gov returns errorcode:0
+  // ("Webservice Succeeds") + a HOLLOW data object (no id/title/synopsis; live-
+  // verified). The tool must return found:false, NOT a fabricated grant with
+  // id:0 / title:"". NON-VACUITY: the old code mapped the hollow data and
+  // returned {id:0, title:"", ...} with no found flag → this assertion RED.
+  await withFetch(
+    (u) => (isFetch(u) ? mockResponse({ status: 200, json: { errorcode: 0, msg: "Webservice Succeeds", data: { revision: 0, flag2006: "N", cfdas: [], synopsisAttachmentFolders: [] } } }) : failClosed()()),
+    async () => {
+      const res = await getGrant({ opportunityId: "999999999" });
+      ok("grants getGrant nonexistent ⇒ found:false (hollow 200 is NOT a fabricated grant)",
+        res.found === false && res.opportunityId === "999999999" && res.id === undefined && res.title === undefined,
+        JSON.stringify(res));
+    },
+  );
+
+  // 7. getGrant of a REAL id — errorcode:0 + populated data (id + title + synopsis)
+  // ⇒ found:true + mapped fields (happy path intact).
+  await withFetch(
+    (u) => (isFetch(u) ? mockResponse({ status: 200, json: { errorcode: 0, msg: "Webservice Succeeds", data: {
+      id: 332894, opportunityNumber: "W911NF21S0009", opportunityTitle: "LPS Qubit Collaboratory",
+      synopsis: { synopsisDesc: "…", responseDate: "2026-09-01", agencyName: "Army", awardCeiling: 1000000 },
+      cfdas: [{ cfdaNumber: "12.431", programTitle: "Basic Research" }],
+    } } }) : failClosed()()),
+    async () => {
+      const res = await getGrant({ opportunityId: "332894" });
+      ok("grants getGrant real id ⇒ found:true + fields mapped (id/number/title/responseDate/cfda)",
+        res.found === true && res.id === 332894 && res.title === "LPS Qubit Collaboratory" &&
+        res.responseDate === "2026-09-01" && res.awardCeiling === 1000000 && res.cfdaPrograms[0].number === "12.431",
+        JSON.stringify({ f: res.found, id: res.id, t: res.title }));
+    },
+  );
 }
 
 // Federal Register (fed_register_search / fed_register_get_document) — honest-by-

@@ -884,7 +884,7 @@ const TOOLS = [
     },
     {
         name: "grants_get_opportunity",
-        description: "Fetch full detail for a single grant opportunity by id. Returns description, agency, posting/response/archive dates, award_ceiling, award_floor, estimated_funding, expected_number_of_awards, applicant_types, funding_instruments, CFDA programs.",
+        description: "Fetch full detail for a single grant opportunity by id. Returns found:true with description, agency, posting/response/archive dates, award_ceiling, award_floor, estimated_funding, expected_number_of_awards, applicant_types, funding_instruments, CFDA programs. A NONEXISTENT id returns { found:false, opportunityId } — never a fabricated grant with empty fields (Grants.gov answers a bad id with a hollow 200, which this tool detects). Check `found` before reading the other fields.",
         inputSchema: GrantsGetInput,
     },
     // ━━━ Pricing / Wage (3) ━━━
