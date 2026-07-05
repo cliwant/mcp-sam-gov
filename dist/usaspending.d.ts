@@ -414,7 +414,7 @@ export declare function searchSubAgencySpending(args: {
     subAgencies: {
         name: string;
         amount: number;
-        awards: number;
+        awards: number | null;
     }[];
 }>>;
 export declare function getAgencyProfile(toptierCode: string): Promise<{
