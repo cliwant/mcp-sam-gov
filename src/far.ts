@@ -256,6 +256,27 @@ export async function farClauseLookup(args: {
   const isCurrent =
     currency.upToDateAsOf !== null && asOfDate === currency.upToDateAsOf;
 
+  // Guard (Defect 3): a VALID-format asOfDate that is AFTER the latest eCFR
+  // codification has no versioner snapshot — the versioner 404s, and the generic
+  // not-found path below would mislabel it "clause not found (the clause number
+  // may be wrong, reserved, or removed)". That is a LIE about a real, current
+  // clause: the problem is the DATE (past the latest edition), not the clause.
+  // Common trigger: a caller infers asOfDate = today when today > up_to_date_as_of
+  // (observed in dogfood). Fail with an honest, actionable message and
+  // `invalid_input` (fix the date) rather than not_found (clause absent).
+  if (
+    currency.upToDateAsOf !== null &&
+    /^\d{4}-\d{2}-\d{2}$/.test(currency.upToDateAsOf) &&
+    asOfDate > currency.upToDateAsOf
+  ) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `eCFR has no Title 48 codification as of ${asOfDate} — the latest available codification is ${currency.upToDateAsOf}. FAR clause ${clauseNumber} is NOT missing or removed; there is simply no eCFR snapshot for a date past the latest edition. Omit asOfDate to use the latest, or pass a date on or before ${currency.upToDateAsOf}.`,
+      retryable: false,
+      upstreamEndpoint: "ecfr:versioner/v1/full/title-48",
+    });
+  }
+
   // ── Fetch the CLAUSE XML (memoized by URL). ─────────────────────────────
   const clauseUrl = `${ECFR}/versioner/v1/full/${asOfDate}/title-48.xml?section=${clauseNumber}`;
   let xml: string;
