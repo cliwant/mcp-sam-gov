@@ -55,10 +55,24 @@ export async function searchDocuments(args) {
         url.searchParams.set("conditions[effective_date][gte]", args.effectiveDateFrom);
     }
     const json = await fetchJson(url.toString());
-    const totalRecords = json.count ?? 0;
+    // The Federal Register API HARD-CAPS `count` at 10,000 (50 pages × 200) —
+    // LIVE-VERIFIED 2026-07-06: an empty/nonsense term → count 0, but ANY broad term
+    // AND the no-term "all documents ever" query both return exactly 10,000 (the FR
+    // has published FAR more than 10k documents since 1994). So a count of 10,000 is
+    // a SATURATION FLOOR ("≥10,000"), NOT an exact total — reporting it as exact
+    // overstates precision and understates the true count.
+    const FR_COUNT_CAP = 10000;
+    const rawCount = json.count ?? 0;
+    const countSaturated = rawCount >= FR_COUNT_CAP;
     const data = {
-        totalRecords,
+        totalRecords: rawCount,
+        // true ⇒ totalRecords is a FLOOR (≥10,000), not an exact count (API cap).
+        totalRecordsSaturated: countSaturated,
         totalPages: json.total_pages ?? 0,
+        // total_pages ALSO saturates at the API cap (50) for the same broad queries —
+        // flag it so a consumer never estimates the true dataset size from a capped
+        // page count either.
+        totalPagesSaturated: countSaturated,
         documents: (json.results ?? []).map((d) => ({
             documentNumber: d.document_number ?? "",
             title: d.title ?? "",
@@ -75,15 +89,17 @@ export async function searchDocuments(args) {
             })),
         })),
     };
-    // Truthful `_meta` (spec §1.2 A5, §2.3). The Federal Register API DOES
-    // report a match total (`count`), so `totalAvailable` is real and the AI
-    // can tell a hard cap from a complete list. A5: an unknown/misspelled
-    // agency slug is silently ignored by the API and yields zero rows that
-    // look identical to "no matching rules" — call that out so the AI can
-    // re-check the slug against fed_register_list_agencies instead of
-    // concluding no such rule exists.
+    // Truthful `_meta` (spec §1.2 A5, §2.3). The Federal Register API reports a
+    // match total (`count`) — REAL below the 10,000 cap, a saturation FLOOR at it
+    // (handled below). A5: an unknown/misspelled agency slug is silently ignored by
+    // the API and yields zero rows that look identical to "no matching rules" —
+    // call that out so the AI can re-check the slug against fed_register_list_agencies
+    // instead of concluding no such rule exists.
     const returned = data.documents.length;
     const notes = [];
+    if (countSaturated) {
+        notes.push(`The Federal Register API caps its match count at ${FR_COUNT_CAP.toLocaleString()} (and total_pages at 50) — both are FLOORS, not exact totals: this query matches AT LEAST ${FR_COUNT_CAP.toLocaleString()} documents (the true total is unknown and likely higher). totalAvailable is null (not ${FR_COUNT_CAP.toLocaleString()}); narrow with agency/type/publicationDate filters to bring the result set BELOW ${FR_COUNT_CAP.toLocaleString()} for an exact count.`);
+    }
     if ((args.agencySlugs?.length ?? 0) > 0) {
         notes.push(`Filtered by agency slug(s): ${args.agencySlugs.join(", ")}. An unknown or misspelled slug is silently ignored by the API and yields zero results indistinguishable from "no matching documents" — verify slugs via fed_register_list_agencies if the result is unexpectedly empty.`);
     }
@@ -91,8 +107,10 @@ export async function searchDocuments(args) {
         source: "federalregister.gov/api/v1",
         keylessMode: true,
         returned,
-        totalAvailable: totalRecords,
-        truncated: returned < totalRecords,
+        // The REAL total when known; null (unknown exact) when the count saturated at
+        // the FR cap — never a capped number presented as the real total.
+        totalAvailable: countSaturated ? null : rawCount,
+        truncated: countSaturated ? true : returned < rawCount,
         filtersApplied: [],
         filtersDropped: [],
         fieldsUnavailable: [],

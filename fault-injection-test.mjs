@@ -4056,6 +4056,27 @@ async function testFederalRegisterHonesty() {
     },
   );
 
+  // 3b. FEDREG-1: SATURATED count — the FR API HARD-CAPS `count` at 10,000, so any
+  // broad query (incl. the no-term "all documents ever" query — the FR has millions)
+  // returns exactly 10,000. That is a FLOOR (≥10,000), NOT an exact total:
+  // totalAvailable must be null (unknown exact) + a totalRecordsSaturated flag + a
+  // disclosing note — never 10000 presented as the real count. NON-VACUITY: the old
+  // code reported totalAvailable:10000 (as if exact) → this turns RED.
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { count: 10000, total_pages: 50, results: [
+      { document_number: "2026-1", title: "Doc", type: "Notice", publication_date: "2026-01-01", agencies: [] },
+    ] } }) : failClosed()()),
+    async () => {
+      const res = await fedRegSearch({ query: "medicare", perPage: 1 });
+      ok("fedreg saturated count(10000) ⇒ _meta.totalAvailable null (NOT 10000 — capped, unknown exact) + truncated true",
+        res.meta.totalAvailable === null && res.meta.truncated === true, JSON.stringify(res.meta));
+      ok("fedreg saturated ⇒ data.totalRecordsSaturated + totalPagesSaturated true + note discloses BOTH caps (count ≥10,000, pages ≥50)",
+        res.data.totalRecordsSaturated === true && res.data.totalPagesSaturated === true &&
+        res.meta.notes.some((n) => /caps its match count at 10,000/.test(n) && /total_pages at 50/.test(n) && /AT LEAST/.test(n)),
+        JSON.stringify({ sat: res.data.totalRecordsSaturated, pgSat: res.data.totalPagesSaturated, notes: res.meta.notes }));
+    },
+  );
+
   // 4. getDocument 503 ⇒ throws upstream_unavailable (outage, not a hollow record)
   await withFetch(
     (u) => (isDoc(u) ? mockResponse({ status: 503 }) : failClosed()()),
