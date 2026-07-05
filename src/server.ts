@@ -1120,7 +1120,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "grants_get_opportunity",
     description:
-      "Fetch full detail for a single grant opportunity by id. Returns found:true with description, agency, posting/response/archive dates, award_ceiling, award_floor, estimated_funding, expected_number_of_awards, applicant_types, funding_instruments, CFDA programs. A NONEXISTENT id returns { found:false, opportunityId } — never a fabricated grant with empty fields (Grants.gov answers a bad id with a hollow 200, which this tool detects). Check `found` before reading the other fields.",
+      "Fetch full detail for a single grant opportunity by id. Returns found:true with description, agency, posting/response/archive dates, award_ceiling, award_floor, estimated_funding, expected_number_of_awards, applicant_types, funding_instruments, CFDA programs. `agency` is { code, name (the REAL posting/sub-tier agency, e.g. 'Food and Nutrition Service'), department (the top-tier agency, e.g. 'Department of Agriculture'), contactName (the program officer — NOT the agency) } — Grants.gov's raw `agencyName` field is actually the contact person, so this tool sources the real agency from agencyDetails; `name` may be null if the record carries no structured agency. A NONEXISTENT id returns { found:false, opportunityId } — never a fabricated grant with empty fields (Grants.gov answers a bad id with a hollow 200, which this tool detects). Check `found` before reading the other fields.",
     inputSchema: GrantsGetInput,
   },
 

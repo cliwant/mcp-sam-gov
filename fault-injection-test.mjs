@@ -3948,10 +3948,12 @@ async function testGrantsHonesty() {
     },
   );
 
-  // 4. 200 with results ⇒ maps + totalAvailable = hitCount, truncated when returned < total
+  // 4. 200 with results ⇒ maps + totalAvailable = hitCount, truncated when returned < total.
+  // GRANT-2: search2 returns the real agency NAME in `agency` (agencyName is empty),
+  // so agencyName must map from `agency`. The mock mirrors the live shape.
   await withFetch(
     (u) => (isSearch(u) ? mockResponse({ status: 200, json: { errorcode: 0, data: { hitCount: 42, oppHits: [
-      { id: "GR1", number: "DHS-24-001", title: "Flood Mitigation", agencyCode: "DHS-FEMA", agencyName: "FEMA", oppStatus: "posted", cfdaList: ["97.039"] },
+      { id: "GR1", number: "DHS-24-001", title: "Flood Mitigation", agencyCode: "DHS-FEMA", agency: "Federal Emergency Management Agency", oppStatus: "posted", cfdaList: ["97.039"] },
     ] } } }) : failClosed()()),
     async () => {
       const res = await searchGrants({ keyword: "flood", rows: 1 });
@@ -3959,6 +3961,8 @@ async function testGrantsHonesty() {
         res.data.grants.length === 1 && res.data.grants[0].id === "GR1" &&
         res.data.grants[0].opportunityNumber === "DHS-24-001" && res.data.grants[0].cfdaList[0] === "97.039",
         JSON.stringify(res.data.grants[0]));
+      ok("grants search results ⇒ GRANT-2: agencyName from the `agency` field (real name), NOT the empty agencyName",
+        res.data.grants[0].agencyName === "Federal Emergency Management Agency", JSON.stringify(res.data.grants[0].agencyName));
       ok("grants search results ⇒ totalAvailable=42 (real total) + truncated true (1<42)",
         res.meta.totalAvailable === 42 && res.meta.truncated === true, JSON.stringify(res.meta));
     },
@@ -3989,12 +3993,20 @@ async function testGrantsHonesty() {
     },
   );
 
-  // 7. getGrant of a REAL id — errorcode:0 + populated data (id + title + synopsis)
-  // ⇒ found:true + mapped fields (happy path intact).
+  // 7. getGrant of a REAL id — errorcode:0 + populated data ⇒ found:true + mapped
+  // fields. GRANT-2: synopsis.agencyName is the CONTACT PERSON (live-verified); the
+  // real agency is in agencyDetails (subtier) + topAgencyDetails (department). The
+  // mock mirrors that live shape.
   await withFetch(
     (u) => (isFetch(u) ? mockResponse({ status: 200, json: { errorcode: 0, msg: "Webservice Succeeds", data: {
       id: 332894, opportunityNumber: "W911NF21S0009", opportunityTitle: "LPS Qubit Collaboratory",
-      synopsis: { synopsisDesc: "…", responseDate: "2026-09-01", agencyName: "Army", awardCeiling: 1000000 },
+      synopsis: {
+        synopsisDesc: "…", responseDate: "2026-09-01", awardCeiling: 1000000,
+        agencyName: "Andrew Day\nGrants/Agreements Officer", // the CONTACT PERSON (the mislabel)
+        agencyContactName: "Andrew Day\nGrants/Agreements Officer",
+        agencyDetails: { agencyName: "Dept of the Army -- Materiel Command" },
+        topAgencyDetails: { agencyName: "Department of Defense" },
+      },
       cfdas: [{ cfdaNumber: "12.431", programTitle: "Basic Research" }],
     } } }) : failClosed()()),
     async () => {
@@ -4003,6 +4015,31 @@ async function testGrantsHonesty() {
         res.found === true && res.id === 332894 && res.title === "LPS Qubit Collaboratory" &&
         res.responseDate === "2026-09-01" && res.awardCeiling === 1000000 && res.cfdaPrograms[0].number === "12.431",
         JSON.stringify({ f: res.found, id: res.id, t: res.title }));
+      ok("grants getGrant ⇒ GRANT-2: agency.name = REAL agency (subtier), NOT the contact person",
+        res.agency.name === "Dept of the Army -- Materiel Command" && res.agency.name !== "Andrew Day\nGrants/Agreements Officer",
+        JSON.stringify(res.agency));
+      ok("grants getGrant ⇒ GRANT-2: agency.department = top-tier agency; contactName preserves the person the old `name` held (newline collapsed to ' — ')",
+        res.agency.department === "Department of Defense" && res.agency.contactName === "Andrew Day — Grants/Agreements Officer",
+        JSON.stringify(res.agency));
+    },
+  );
+
+  // 8. GRANT-2 (review item 2): a sparse-synopsis record with agencyDetails ONLY at
+  // the TOP level (data.agencyDetails, not synopsis.agencyDetails) — the name must
+  // still resolve from the top-level fallback, NOT null. NON-VACUITY: dropping the
+  // d.agencyDetails fallback makes agency.name null here → RED.
+  await withFetch(
+    (u) => (isFetch(u) ? mockResponse({ status: 200, json: { errorcode: 0, data: {
+      id: 400001, opportunityNumber: "FORECAST-1", opportunityTitle: "Forecasted Program",
+      agencyDetails: { agencyName: "Health Resources and Services Administration" },
+      topAgencyDetails: { agencyName: "Department of Health and Human Services" },
+      synopsis: { synopsisDesc: "forecast" }, // sparse: no agencyDetails under synopsis
+    } } }) : failClosed()()),
+    async () => {
+      const res = await getGrant({ opportunityId: "400001" });
+      ok("grants getGrant ⇒ GRANT-2 top-level fallback: agency.name from data.agencyDetails when synopsis lacks it (NOT null)",
+        res.agency.name === "Health Resources and Services Administration" && res.agency.department === "Department of Health and Human Services",
+        JSON.stringify(res.agency));
     },
   );
 }
