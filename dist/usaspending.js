@@ -63,6 +63,7 @@ import { memoize } from "./cache.js";
 import { withMeta } from "./meta.js";
 const SPENDING_BY_AWARD_SOURCE = "usaspending.gov/api/v2 search/spending_by_award";
 const SPENDING_BY_CATEGORY_RECIPIENT_SOURCE = "usaspending.gov/api/v2 search/spending_by_category/recipient";
+const SPENDING_OVER_TIME_SOURCE = "usaspending.gov/api/v2 search/spending_over_time";
 /**
  * Build the `_meta` for a top-N `spending_by_category/*` aggregate. These
  * category endpoints report no grand total, so `totalAvailable` is always
@@ -1119,20 +1120,83 @@ export async function searchExpiringContracts(args) {
 // ─── Aggregate analysis: time series ──────────────────────────────
 export async function spendingOverTime(args) {
     const filters = buildFilters(args);
+    const group = args.group ?? "fiscal_year";
     const json = await postUsas("search/spending_over_time/", {
-        group: args.group ?? "fiscal_year",
+        group,
         filters,
     });
-    return {
-        group: json.group,
-        timeline: (json.results ?? []).map((r) => ({
-            timePeriod: r.time_period ?? {},
-            total: r.aggregated_amount ?? 0,
-            contractObligations: r.Contract_Obligations ?? 0,
-            grantObligations: r.Grant_Obligations ?? 0,
-            idvObligations: r.Idv_Obligations ?? 0,
-        })),
+    const results = json.results ?? [];
+    const timeline = results.map((r) => ({
+        timePeriod: r.time_period ?? {},
+        // `total` and `contractObligations` are IDENTICAL: buildFilters restricts to
+        // contract award types A/B/C/D, so aggregated_amount IS the contract
+        // obligation (LIVE-VERIFIED: aggregated_amount === Contract_Obligations for
+        // every bucket). The `?? r.aggregated_amount` fallback keeps that identity true
+        // ONLY while buildFilters enforces contracts-only — if this tool ever sends a
+        // wider award-type filter, revisit (aggregated_amount would be a MIXED total,
+        // not the contract figure). `total`'s `?? 0` is a genuine zero (endpoint silent
+        // on a bucket ⇒ no contract spend that period), NOT a masked-out category.
+        total: r.aggregated_amount ?? 0,
+        contractObligations: r.Contract_Obligations ?? r.aggregated_amount ?? 0,
+        // Grant/IDV obligations are EXCLUDED by that contract-only filter — they are
+        // NOT zero. The endpoint returns 0 for them here purely because A/B/C/D omits
+        // grants (award types 02–05) and IDVs (IDV_*); an agency's real grant/IDV
+        // spend can be billions per period (LIVE: DoD grants ~$4.8B in FY2008). Emit
+        // null, never a fabricated 0 that reads as "no grant/IDV spending" (DA-1 class).
+        grantObligations: null,
+        idvObligations: null,
+    }));
+    // spending_over_time returns the FULL timeline for the filter (no cursor/total),
+    // so what we return IS the complete set. Read the span for disclosure. Format
+    // each period label unambiguously per grouping (FY2024 / FY2024-Q1 / FY2024-M10)
+    // so the span note can't be misread ("2024 1" as month-vs-quarter).
+    const fmtPeriod = (p) => {
+        if (!p)
+            return null;
+        const fy = p.fiscal_year ? `FY${p.fiscal_year}` : null;
+        if (p.quarter)
+            return fy ? `${fy}-Q${p.quarter}` : `Q${p.quarter}`;
+        if (p.month)
+            return fy ? `${fy}-M${p.month}` : `M${p.month}`;
+        return fy;
     };
+    const spanStart = fmtPeriod(timeline[0]?.timePeriod);
+    const spanEnd = fmtPeriod(timeline[timeline.length - 1]?.timePeriod);
+    const filtersApplied = ["awardType(contracts A/B/C/D)"];
+    if (args.agency)
+        filtersApplied.push("agency");
+    if (args.naics)
+        filtersApplied.push("naics");
+    if (args.setAside)
+        filtersApplied.push("setAside");
+    const notes = [
+        "This timeline counts CONTRACT obligations only (award types A/B/C/D), matching the other usas_search_*_spending tools — so `total` equals `contractObligations`.",
+        "Grant, IDV, loan, direct, and other obligation types are EXCLUDED by that filter. grantObligations/idvObligations are null (NOT 0) so an agency's real grant/IDV spending — which can run billions per period — is never misread as zero here.",
+        spanStart && spanEnd
+            ? `The timeline spans the full range the endpoint returned for this filter (${spanStart} … ${spanEnd}); a period showing 0 is a genuine zero for CONTRACT obligations in that period.`
+            : "A period showing 0 is a genuine zero for CONTRACT obligations in that period.",
+    ];
+    // Completeness caveat: no-cap is LIVE-VERIFIED only for fiscal_year (19 buckets,
+    // FY2008–2026). spending_over_time carries NO pagination envelope, so a very long
+    // month/quarter series could hit a silent server cap we could not detect — disclose
+    // that rather than assert a completeness we can't prove for those granularities.
+    if (group !== "fiscal_year") {
+        notes.push(`Completeness for group='${group}': this endpoint returns no pagination envelope, and no-truncation is verified only for fiscal_year granularity — a very long ${group} series could in principle be capped server-side without a signal. Confirm the span (${spanStart ?? "?"} … ${spanEnd ?? "?"}) covers your expected range.`);
+    }
+    return withMeta({ group: json.group ?? group, timeline }, {
+        source: SPENDING_OVER_TIME_SOURCE,
+        keylessMode: true,
+        returned: timeline.length,
+        totalAvailable: timeline.length,
+        truncated: false,
+        filtersApplied,
+        filtersDropped: [],
+        fieldsUnavailable: [
+            "grantObligations (excluded by the contract-only A/B/C/D filter — not zero)",
+            "idvObligations (excluded by the contract-only A/B/C/D filter — not zero)",
+        ],
+        notes,
+    });
 }
 // ─── Aggregate analysis: PSC spending ─────────────────────────────
 export async function searchPscSpending(args) {

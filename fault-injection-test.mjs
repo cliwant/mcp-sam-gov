@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes, spendingOverTime } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -5191,6 +5191,98 @@ async function testRecompeteWindowScan() {
   });
 }
 
+// §32: usas_spending_over_time contract-only truthfulness (SOT-1, DA-1 class).
+// buildFilters hardcodes award_type_codes A/B/C/D (contracts), so the endpoint's
+// Grant_Obligations / Idv_Obligations come back 0 for EVERY bucket — not because
+// the agency has no grant/IDV spending (LIVE 2026-07-06: DoD grants ~$4.8B in
+// FY2008), but because grants (02–05) and IDVs (IDV_*) are FILTERED OUT. The old
+// code mapped `?? 0`, emitting grantObligations:0 / idvObligations:0 — a fabricated
+// zero that reads as "this agency has no grant/IDV spending". It also returned NO
+// tool-specific _meta (contract-only scope undisclosed). Fix: null (not 0) for the
+// excluded fields + a contracts-only _meta disclosure. NON-VACUITY: reverting the
+// nulls to `?? 0` makes 32's grant/idv assertions RED.
+async function testSpendingOverTimeContractScope() {
+  section("32. usas_spending_over_time — contract-only scope (SOT-1): grant/IDV obligations null (NOT fabricated 0), _meta discloses the A/B/C/D scope");
+
+  // A VERBATIM-shaped spending_over_time response under the tool's A/B/C/D filter:
+  // Grant/Idv obligations come back 0 (filtered out), aggregated_amount === Contract.
+  const RESP = {
+    group: "fiscal_year",
+    results: [
+      { time_period: { fiscal_year: "2024" }, aggregated_amount: 1000, Contract_Obligations: 1000, Grant_Obligations: 0, Idv_Obligations: 0, Direct_Obligations: 0, Loan_Obligations: 0, Other_Obligations: 0 },
+      { time_period: { fiscal_year: "2025" }, aggregated_amount: 2500, Contract_Obligations: 2500, Grant_Obligations: 0, Idv_Obligations: 0 },
+    ],
+  };
+  await withFetch((u) => {
+    if (!/spending_over_time/.test(u)) return failClosed()();
+    return mockResponse({ status: 200, json: RESP });
+  }, async () => {
+    const res = await spendingOverTime({ agency: "Department of Defense" });
+    const t = res.data.timeline;
+    ok("32 timeline maps every bucket (2)", t.length === 2, JSON.stringify(t.length));
+    ok("32 total === contractObligations (contract-only view; aggregated_amount IS the contract obligation)",
+      t.every((x) => x.total === x.contractObligations), JSON.stringify(t.map((x) => [x.total, x.contractObligations])));
+    ok("32 total is the REAL contract number (1000, 2500 — unchanged)",
+      t[0].total === 1000 && t[1].total === 2500, JSON.stringify(t.map((x) => x.total)));
+    ok("32 grantObligations === null (NOT a fabricated 0 — grants are FILTERED OUT, not zero)",
+      t.every((x) => x.grantObligations === null), JSON.stringify(t.map((x) => x.grantObligations)));
+    ok("32 idvObligations === null (NOT a fabricated 0 — IDVs are FILTERED OUT, not zero)",
+      t.every((x) => x.idvObligations === null), JSON.stringify(t.map((x) => x.idvObligations)));
+    // _meta now exists and DISCLOSES the contract-only scope (was a bare object before).
+    ok("32 _meta.source is spending_over_time", /spending_over_time/.test(res.meta.source ?? ""), JSON.stringify(res.meta.source));
+    ok("32 _meta.fieldsUnavailable flags grant/IDV as EXCLUDED (not zero)",
+      res.meta.fieldsUnavailable.some((f) => /grantObligations/.test(f)) && res.meta.fieldsUnavailable.some((f) => /idvObligations/.test(f)),
+      JSON.stringify(res.meta.fieldsUnavailable));
+    ok("32 _meta.notes discloses CONTRACT-only scope + null-not-0 rationale",
+      res.meta.notes.some((n) => /CONTRACT obligations only/.test(n)) && res.meta.notes.some((n) => /null \(NOT 0\)/.test(n)),
+      JSON.stringify(res.meta.notes));
+    ok("32 _meta.truncated false + totalAvailable = full timeline (endpoint returns the whole series)",
+      res.meta.truncated === false && res.meta.totalAvailable === 2, JSON.stringify({ tr: res.meta.truncated, ta: res.meta.totalAvailable }));
+    ok("32 fiscal_year granularity ⇒ NO month/quarter completeness caveat (no-cap live-verified for FY)",
+      !res.meta.notes.some((n) => /Completeness for group/.test(n)), JSON.stringify(res.meta.notes));
+  });
+
+  // group=month ⇒ completeness caveat present (no-cap verified ONLY for fiscal_year;
+  // the endpoint has no pagination envelope so a long month series could be silently
+  // capped) + the span label is UNAMBIGUOUS (FY2024-M10, not "2024 10"). (Review item 4/5.)
+  const MRESP = {
+    group: "month",
+    results: [
+      { time_period: { fiscal_year: "2024", month: "10" }, aggregated_amount: 5, Contract_Obligations: 5, Grant_Obligations: 0, Idv_Obligations: 0 },
+      { time_period: { fiscal_year: "2024", month: "11" }, aggregated_amount: 7, Contract_Obligations: 7, Grant_Obligations: 0, Idv_Obligations: 0 },
+    ],
+  };
+  await withFetch((u) => {
+    if (!/spending_over_time/.test(u)) return failClosed()();
+    return mockResponse({ status: 200, json: MRESP });
+  }, async () => {
+    const res = await spendingOverTime({ agency: "Department of Defense", group: "month" });
+    ok("32 group=month ⇒ completeness caveat disclosed (silent-cap risk; no pagination envelope)",
+      res.meta.notes.some((n) => /Completeness for group='month'/.test(n)), JSON.stringify(res.meta.notes));
+    ok("32 span note uses UNAMBIGUOUS period labels (FY2024-M10, never '2024 10')",
+      res.meta.notes.some((n) => /FY2024-M10/.test(n)), JSON.stringify(res.meta.notes));
+  });
+
+  // group=quarter ⇒ FY2024-Q1 span label (unambiguous vs month) + caveat present.
+  const QRESP = {
+    group: "quarter",
+    results: [{ time_period: { fiscal_year: "2024", quarter: "1" }, aggregated_amount: 9, Contract_Obligations: 9, Grant_Obligations: 0, Idv_Obligations: 0 }],
+  };
+  await withFetch((u) => (/spending_over_time/.test(u) ? mockResponse({ status: 200, json: QRESP }) : failClosed()()), async () => {
+    const res = await spendingOverTime({ group: "quarter" });
+    ok("32 group=quarter ⇒ FY2024-Q1 span label (Q disambiguated from month) + caveat",
+      res.meta.notes.some((n) => /FY2024-Q1/.test(n)) && res.meta.notes.some((n) => /Completeness for group='quarter'/.test(n)), JSON.stringify(res.meta.notes));
+  });
+
+  // empty results ⇒ empty timeline, generic (no-span) note, totalAvailable 0 — never a crash.
+  await withFetch((u) => (/spending_over_time/.test(u) ? mockResponse({ status: 200, json: { group: "fiscal_year", results: [] } }) : failClosed()()), async () => {
+    const res = await spendingOverTime({ agency: "Nowhere Agency" });
+    ok("32 empty series ⇒ timeline [], totalAvailable 0, truncated false, generic 0-is-genuine note (no crash)",
+      res.data.timeline.length === 0 && res.meta.totalAvailable === 0 && res.meta.truncated === false &&
+      res.meta.notes.some((n) => /genuine zero for CONTRACT obligations/.test(n)), JSON.stringify({ n: res.data.timeline.length, ta: res.meta.totalAvailable }));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -5233,6 +5325,7 @@ async function main() {
   await testUpstreamConcurrencyBounded();
   await testCalcBenchmarkDistribution();
   await testRecompeteWindowScan();
+  await testSpendingOverTimeContractScope();
 
   // Prove the harness bites.
   await selfCheck();
