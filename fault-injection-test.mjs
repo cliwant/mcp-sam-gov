@@ -4919,6 +4919,46 @@ async function testFarFutureAsOfDate() {
   });
 }
 
+// Upstream courtesy (T8): far_compliance_matrix can be asked for up to 25 clauses,
+// but it must NOT fire them all at the eCFR versioner at once — a burst of 25
+// concurrent fetches is rate-limit-risky and looks abusive. It fans out through a
+// bounded worker pool (MATRIX_CONCURRENCY=5). This guards that courtesy invariant:
+// the PEAK number of in-flight eCFR clause fetches during a 12-clause matrix stays
+// ≤ 5 (bounded) while being > 1 (genuinely parallel, not accidentally sequential).
+// A regression that replaced the pool with Promise.all(all clauses) would peak at 12.
+async function testUpstreamConcurrencyBounded() {
+  section("29. upstream courtesy (T8) — far_compliance_matrix bounds eCFR fan-out (≤ MATRIX_CONCURRENCY, never bursts)");
+  _clearCache(); // ensure clause fetches hit the mock (not a memoized prior result)
+  let inFlight = 0;
+  let peak = 0;
+  const CLAUSE_XML =
+    '<?xml version="1.0"?><DIV8 TYPE="SECTION"><HEAD>Test Clause Heading.</HEAD><P>Substantive clause body text that comfortably exceeds twenty characters for the section gate.</P></DIV8>';
+  const handler = (u) => {
+    if (isEcfrTitles(u)) return mockResponse({ status: 200, json: TITLES_JSON });
+    if (isEcfrFull(u)) {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      // Hold the request open briefly (REAL timer — the harness neutralizes the
+      // patched setTimeout) so concurrent workers actually overlap and `peak` is real.
+      return new Promise((resolve) =>
+        REAL_SET_TIMEOUT(() => {
+          inFlight--;
+          resolve(mockResponse({ status: 200, json: CLAUSE_XML }));
+        }, 8),
+      );
+    }
+    return failClosed()();
+  };
+  // 12 distinct valid-format clauses (> the pool of 5, ≤ the 25 cap), in an unused
+  // 52.9xx range so a prior test's cache can't satisfy them.
+  const clauses = Array.from({ length: 12 }, (_, i) => `52.9${String(10 + i).padStart(2, "0")}-9`);
+  await withFetch(handler, async () => {
+    await farComplianceMatrix({ clauses, includePrescription: false, flagGates: false });
+  });
+  ok("far_compliance_matrix(12 clauses) ⇒ 2 ≤ peak concurrent eCFR fetches ≤ MATRIX_CONCURRENCY(5): polite bounded fan-out, never a 12-wide burst",
+    peak >= 2 && peak <= 5, `peak=${peak} concurrent (a Promise.all-all-clauses regression would peak at 12; sequential would be 1)`);
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -4958,6 +4998,7 @@ async function main() {
   await testRealUsasReplay();
   await testSubAgencyAwardsNull();
   await testFarFutureAsOfDate();
+  await testUpstreamConcurrencyBounded();
 
   // Prove the harness bites.
   await selfCheck();
