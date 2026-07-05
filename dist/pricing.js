@@ -249,10 +249,27 @@ function parseScaDocument(doc) {
     for (const line of lines) {
         const m = rateRe.exec(line);
         if (m && m[1] && m[2] && m[3]) {
+            // Real SCA WDs carry a FOOTNOTE column: an occupation with special pay
+            // rules shows "(see N)" between the title and the rate (e.g. Weather
+            // Observers → night/Sunday differential; Computer Employees → FLSA
+            // exemption). The footnote MATERIALLY changes pay, so extract it as a
+            // structured signal and strip it from the title (collapsing the column
+            // whitespace) rather than letting "(see 2)" + a run of spaces pollute the
+            // occupation name. (Synthetic fixtures lacked this; found via real-WD replay.)
+            const footnotes = [];
+            const title = m[2]
+                .replace(/\(see\s*(\d+)\)/gi, (_full, n) => {
+                footnotes.push(Number(n));
+                return " ";
+            })
+                .replace(/\.+$/, "")
+                .replace(/\s+/g, " ")
+                .trim();
             rates.push({
                 code: m[1],
-                title: m[2].trim().replace(/\.+$/, "").trim(),
+                title,
                 baseRate: Number(m[3]),
+                footnotes: footnotes.length ? footnotes : null,
             });
         }
     }
@@ -456,6 +473,9 @@ export async function getWageRates(args) {
                 fieldsUnavailable.push("healthAndWelfarePerHour");
             }
             notes.push("SCA wage determination: `healthAndWelfarePerHour` is a WD-WIDE Health & Welfare rate that applies to ALL listed occupations (it is NOT per-occupation). Each rate row's `baseRate` is the hourly minimum for that occupation code.");
+            if (p.rates.some((r) => r.footnotes && r.footnotes.length)) {
+                notes.push("Some occupations carry `footnotes` (the WD's numbered '(see N)' markers) — these signal MATERIAL extra pay rules (e.g. night/Sunday differential, FLSA exemption) beyond the listed baseRate. The footnote NUMBERS are surfaced per rate row; call again with format:'raw' (or 'both') to read the exact footnote text.");
+            }
         }
         else {
             const p = parseDbaDocument(doc);
