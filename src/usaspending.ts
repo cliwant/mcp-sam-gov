@@ -66,7 +66,7 @@ function buildFilters(args: {
   return filters;
 }
 
-import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
+import { fetchWithRetry, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { memoize } from "./cache.js";
 import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
 
@@ -2054,9 +2054,64 @@ export async function getRecipientProfile(recipientId: string) {
     total_transaction_amount?: number;
     total_transactions?: number;
   };
-  const json = await getUsas<Resp>(
-    `recipient/${encodeURIComponent(recipientId)}/`,
-  );
+  // NOT via getUsas: USAspending signals a NONEXISTENT recipient with HTTP 400 +
+  // `detail: "Recipient ID not found: '...'"` (LIVE-VERIFIED 2026-07-06 — NOT a
+  // 404, and NOT a malformed-input 400). Through fetchWithRetry/errorFromResponse
+  // that 400 becomes `invalid_input` ("Bad request"), telling a caller its
+  // recipient_id was MALFORMED when the recipient simply does not exist. Read the
+  // body to distinguish that not-found from a genuine bad-input 400 and classify
+  // honestly (mirrors getAwardDetail's explicit status handling).
+  let r: Response;
+  try {
+    r = await fetch(`${USAS}/recipient/${encodeURIComponent(recipientId)}/`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (e) {
+    // A network-level fault (DNS/reset/timeout) is an OUTAGE, not a missing
+    // recipient — classify as retryable rather than surfacing the generic `unknown`.
+    if (e instanceof ToolErrorCarrier) throw e;
+    throw new ToolErrorCarrier({
+      kind: "upstream_unavailable",
+      message: `usaspending recipient/{id} fetch failed: ${e instanceof Error ? e.message : String(e)}. This is an outage, not a missing recipient. Retry.`,
+      retryable: true,
+      upstreamEndpoint: `recipient/${recipientId}`,
+    });
+  }
+  if (!r.ok) {
+    let detail = "";
+    try {
+      detail = ((await r.json()) as { detail?: string }).detail ?? "";
+    } catch {
+      /* non-JSON error body → detail stays "" and we fall through to errorFromResponse */
+    }
+    if (
+      r.status === 404 ||
+      (r.status === 400 && /recipient\s*(id\s+)?not found/i.test(detail))
+    ) {
+      throw new ToolErrorCarrier({
+        kind: "not_found",
+        message: `No recipient profile found for recipient_id '${recipientId}' on usaspending.gov${detail ? ` (upstream: ${detail})` : ""}. Resolve a valid recipient_id via usas_search_recipients — each result carries an id. This is a genuine not-found, NOT a malformed input.`,
+        retryable: false,
+        upstreamStatus: r.status,
+        upstreamEndpoint: `recipient/${recipientId}`,
+      });
+    }
+    // Any other non-2xx (a genuine bad-input 400, 429, 5xx) → the shared matrix.
+    throw new ToolErrorCarrier(errorFromResponse(r, `recipient/${recipientId}`));
+  }
+  const json = (await r.json()) as Resp;
+  // Defensive hollow-200 guard (cf. sam_lookup_organization / grants / opportunity):
+  // a real recipient 200 always carries a name and/or recipient_id. A 200 with
+  // NEITHER is a degraded/hollow response (CDN/WAF interstitial, upstream hiccup) —
+  // do NOT map it into a fabricated { name:"" } profile; surface it as schema_drift.
+  if (!json.recipient_id && !json.name) {
+    throw new ToolErrorCarrier({
+      kind: "schema_drift",
+      message: `usaspending recipient/{id} returned a 200 with no recipient_id or name for '${recipientId}' — a hollow/degraded response, not a real profile. Retry, or verify the id via usas_search_recipients.`,
+      retryable: true,
+      upstreamEndpoint: `recipient/${recipientId}`,
+    });
+  }
   return {
     name: json.name ?? "",
     alternateNames: json.alternate_names ?? [],
