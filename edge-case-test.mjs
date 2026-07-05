@@ -598,7 +598,12 @@ const cases = [
         (n) => /not present in the sba size-standards dataset/i.test(n) && /fabricated/i.test(n),
       );
       const caveat = (m.notes ?? []).some((n) => /adjusted periodically/i.test(n));
-      const completeness = m.complete === false;
+      // LEAD-12 (C78): a definitive not-found is a COMPLETE, non-truncated answer.
+      // The machine flags must not falsely imply "paginate for more" — totalAvailable
+      // is 0 (zero records match THIS NAICS), NOT the ~978-row dataset size. (Was
+      // asserting complete===false, which encoded the mislabeling bug.)
+      const completeness =
+        m.complete === true && m.truncated === false && m.totalAvailable === 0;
       return notFound && disclosure && caveat && completeness;
     },
   },
