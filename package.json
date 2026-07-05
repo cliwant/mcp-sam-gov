@@ -78,8 +78,9 @@
     "smoke": "node smoke-test.mjs",
     "test:edge": "node edge-case-test.mjs",
     "test:fault": "node fault-injection-test.mjs",
+    "lint:invariants": "node lint-invariants.mjs",
     "coverage": "c8 node fault-injection-test.mjs",
-    "gate": "npm run build && npm run test:fault && npm run test:edge",
+    "gate": "npm run lint:invariants && npm run build && npm run test:fault && npm run test:edge",
     "prepublishOnly": "npm run build"
   },
   "engines": {

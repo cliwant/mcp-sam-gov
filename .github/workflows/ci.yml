@@ -37,6 +37,20 @@ jobs:
       - name: Fault-injection harness (offline, deterministic — 407+ assertions)
         run: node fault-injection-test.mjs
 
+  lint:
+    # REQUIRED: structural truthfulness invariant (no silent-empty-on-!ok).
+    # Pure source scan — offline, deterministic, no build/install of the tree
+    # needed beyond checkout + node.
+    name: lint — truthfulness invariants (no silent-empty-on-error)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+      - name: Truthfulness invariant lint
+        run: node lint-invariants.mjs
+
   coverage:
     # REQUIRED: c8 coverage of the deterministic fault suite against a floor
     # (.c8rc.json). Deterministic → no flakiness; a PR that adds code without
