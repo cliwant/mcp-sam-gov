@@ -128,7 +128,7 @@ function mockResponse({ status = 200, json = {}, headers = {} } = {}) {
  * `.ok/.status/.headers.get()` surface. `bytes` is a Uint8Array; we hand back a
  * fresh ArrayBuffer sliced to exactly its view (so a subarray fixture is safe).
  */
-function mockBinaryResponse({ status = 200, bytes = new Uint8Array(0), headers = {}, url = undefined } = {}) {
+function mockBinaryResponse({ status = 200, bytes = new Uint8Array(0), headers = {}, url = undefined, redirected = false } = {}) {
   const hdrs = new Map(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
   return {
     ok: status >= 200 && status < 300,
@@ -136,6 +136,8 @@ function mockBinaryResponse({ status = 200, bytes = new Uint8Array(0), headers =
     // res.url = the FINAL url after redirects (for the redirect-host SSRF check).
     // undefined ⇒ the tool treats the (already allow-listed) input host as final.
     url,
+    // res.redirected ⇒ whether a redirect was followed (for the hidden-target guard).
+    redirected,
     headers: { get: (k) => hdrs.get(String(k).toLowerCase()) ?? null },
     arrayBuffer: async () =>
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
@@ -3372,6 +3374,53 @@ async function testFetchAttachmentText() {
       ok("redirect to SAM's S3 store ⇒ ALLOWED, extracts the PDF text (the legit hop is not blocked)",
         r.data.format === "pdf" && typeof r.data.text === "string" && r.data.text.includes("HELLO PDF TEXT"),
         JSON.stringify({ format: r.data.format, textHead: (r.data.text ?? "").slice(0, 20) }));
+    },
+  );
+
+  // ── (redirect S3 LOOK-ALIKE — hardened T5) a host that merely CONTAINS "s3"
+  // (`evil-s3.attacker.amazonaws.com`) is NOT a real `s3` label ⇒ REJECTED. The
+  // prior `includes("s3")` check would have wrongly admitted it.
+  await withFetch(
+    () => mockBinaryResponse({
+      status: 200, bytes: b64ToBytes(TINY_PDF_B64), redirected: true,
+      url: "https://evil-s3.attacker.amazonaws.com/x",
+      headers: { "content-disposition": 'attachment; filename="x.pdf"' },
+    }),
+    async () => {
+      const { threw, error } = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("redirect to look-alike 'evil-s3.attacker.amazonaws.com' ⇒ REJECTED (s3 must be a real label, not a substring)",
+        threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (redirect to a REAL-but-wrong S3 bucket — hardened T5, closes the review's
+  // finding) `attacker-bucket.s3.amazonaws.com` is a genuine, registrable S3
+  // endpoint but NOT SAM's pinned bucket ⇒ REJECTED. (The prior "trust ALL of S3"
+  // logic would have read the attacker-controlled body back as "SAM text".)
+  await withFetch(
+    () => mockBinaryResponse({
+      status: 200, bytes: b64ToBytes(TINY_PDF_B64), redirected: true,
+      url: "https://attacker-bucket.s3.amazonaws.com/x",
+      headers: { "content-disposition": 'attachment; filename="x.pdf"' },
+    }),
+    async () => {
+      const { threw, error } = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("redirect to a REAL non-SAM S3 bucket (attacker-bucket.s3.amazonaws.com) ⇒ REJECTED (bucket pinned, not all-of-S3)",
+        threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // ── (redirect, HIDDEN target — hardened T5) a redirect occurred but the runtime
+  // left res.url empty ⇒ target unverifiable ⇒ REJECT (was blindly trusted before).
+  await withFetch(
+    () => mockBinaryResponse({
+      status: 200, bytes: strToBytes("hidden redirect target body"),
+      url: "", redirected: true, headers: { "content-type": "text/plain" },
+    }),
+    async () => {
+      const { threw, error } = await expectThrow(() => fetchAttachmentText({ url: SAM_ATT_URL }));
+      ok("redirect with hidden final URL (redirected + empty res.url) ⇒ REJECTED (target unverifiable)",
+        threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError));
     },
   );
 

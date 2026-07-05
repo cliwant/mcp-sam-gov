@@ -429,10 +429,23 @@ export async function fetchAttachmentText(args) {
             return "";
         }
     })();
-    const finalHostOk = finalHost === "" || // some runtimes leave res.url empty; the input host was already allow-listed
+    // SAM's attachment endpoint 303-redirects to a SINGLE time-signed S3 bucket
+    // (LIVE-VERIFIED 2026-07-05: `iae-fbo-attachments.s3.amazonaws.com`). Pin THAT
+    // bucket — across S3 host-form/region variants (`<b>.s3.amazonaws.com`,
+    // `<b>.s3.<region>.amazonaws.com`, `<b>.s3-<region>.amazonaws.com`, dualstack)
+    // — rather than trusting ALL of AWS S3: a sam.gov→attacker-owned-bucket redirect
+    // (any `*.s3.amazonaws.com` is registrable) must NOT have its body read back as
+    // "SAM text". Fail-closed: an unknown bucket → rejected with a clear error.
+    const SAM_S3_BUCKETS = ["iae-fbo-attachments"];
+    const isSamS3Host = (h) => h.endsWith(".amazonaws.com") &&
+        SAM_S3_BUCKETS.some((b) => h.startsWith(`${b}.s3.`) || h.startsWith(`${b}.s3-`));
+    const finalHostOk = 
+    // Only trust an EMPTY final host when NO redirect occurred; if `fetch` redirected
+    // but the runtime hid the URL we cannot verify the target → reject (was trusted).
+    (finalHost === "" && !res.redirected) ||
         finalHost === "sam.gov" ||
         finalHost.endsWith(".sam.gov") ||
-        (finalHost.endsWith(".amazonaws.com") && finalHost.includes("s3"));
+        isSamS3Host(finalHost);
     if (!finalHostOk) {
         throw new ToolErrorCarrier({
             kind: "invalid_input",
