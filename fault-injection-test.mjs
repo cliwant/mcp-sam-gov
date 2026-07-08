@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, searchSubawards } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -5846,6 +5846,7 @@ async function main() {
   await testAgencyDetailTools();
   await testSearchSubawardsMapping();
   await testTeamingMostRecentAwardDate();
+  await testNaicsHierarchy();
 
   // Prove the harness bites.
   await selfCheck();
@@ -5859,6 +5860,59 @@ async function main() {
   globalThis.fetch = REAL_FETCH;
   globalThis.setTimeout = REAL_SET_TIMEOUT;
   process.exit(FAIL === 0 ? 0 : 1);
+}
+
+// §38: usas_naics_hierarchy drill-down (VQ-4). The tool must use the PATH form
+// references/naics/{code}/ (node + its children), NOT ?filter= (a keyword search
+// that fuzzy-matched sectors 32/45/48/54 and left hasChildren always false). The
+// mock serves BOTH endpoint forms distinctly, so reverting to ?filter= yields the
+// fuzzy 2-digit set and the drill-down assertions go RED (non-vacuity for the fix).
+async function testNaicsHierarchy() {
+  section("38. usas_naics_hierarchy — drill-down via path param (VQ-4): children, leaf, not-found");
+  const node54 = {
+    naics: "54", naics_description: "Professional, Scientific, and Technical Services", count: 52,
+    children: [
+      { naics: "5411", naics_description: "Legal Services", count: 4 },
+      { naics: "5415", naics_description: "Computer Systems Design and Related Services", count: 30 },
+    ],
+  };
+  const fuzzy = { results: [ { naics: "32", naics_description: "Manufacturing", count: 1 }, { naics: "45", naics_description: "Retail Trade", count: 1 }, { naics: "54", naics_description: "Prof/Sci/Tech", count: 1 } ] };
+  await withFetch((u) => {
+    if (/references\/naics\/54\//.test(u)) return mockResponse({ status: 200, json: { results: [node54] } }); // correct PATH form
+    if (/references\/naics\/\?filter=54/.test(u)) return mockResponse({ status: 200, json: fuzzy });          // old ?filter= keyword search
+    return failClosed()();
+  }, async () => {
+    const res = await naicsHierarchy({ naicsFilter: "54" });
+    const codes = res.data.hierarchy.map((h) => h.code);
+    ok("38 drill-down 54 ⇒ hierarchy is the CHILDREN (5411/5415), NOT the ?filter fuzzy 2-digit set (32/45/54); parent=54",
+      codes.includes("5411") && codes.includes("5415") && !codes.includes("54") && !codes.includes("32") && res.data.parent?.code === "54",
+      JSON.stringify({ codes, parent: res.data.parent?.code }));
+    ok("38 hasChildren by code length ⇒ 4-digit children are drill-able (hasChildren:true), never a blanket false",
+      res.data.hierarchy.length === 2 && res.data.hierarchy.every((h) => h.hasChildren === true),
+      JSON.stringify(res.data.hierarchy.map((h) => [h.code, h.hasChildren])));
+  });
+  // Leaf: 6-digit node with no children ⇒ empty hierarchy + parent + honest leaf note.
+  await withFetch((u) => (/references\/naics\/541512\//.test(u) ? mockResponse({ status: 200, json: { results: [{ naics: "541512", naics_description: "Computer Systems Design Services", count: 12 }] } }) : failClosed()()), async () => {
+    const res = await naicsHierarchy({ naicsFilter: "541512" });
+    ok("38 leaf (6-digit) ⇒ hierarchy empty + parent=541512 + found:true + honest 'leaf' note (never fabricated children)",
+      res.data.hierarchy.length === 0 && res.data.parent?.code === "541512" && res.data.found === true && (res.meta.notes || []).some((n) => /leaf/i.test(n)),
+      JSON.stringify({ h: res.data.hierarchy.length, p: res.data.parent?.code, found: res.data.found }));
+  });
+  // Not found: valid-format but nonexistent code ⇒ empty results ⇒ honest not-found note.
+  await withFetch((u) => (/references\/naics\/999999\//.test(u) ? mockResponse({ status: 200, json: { results: [] } }) : failClosed()()), async () => {
+    const res = await naicsHierarchy({ naicsFilter: "999999" });
+    ok("38 nonexistent code ⇒ empty hierarchy + parent null + found:false (distinguishes not-found from leaf) + honest note",
+      res.data.hierarchy.length === 0 && res.data.parent === null && res.data.found === false && (res.meta.notes || []).some((n) => /not found/i.test(n)),
+      JSON.stringify({ parent: res.data.parent, found: res.data.found }));
+  });
+  // Unfiltered ⇒ top-level 2-digit sectors (references/naics/ exact), parent null,
+  // each sector hasChildren:true (2-digit), a drill-in note.
+  await withFetch((u) => (/references\/naics\/(\?|$)/.test(u) ? mockResponse({ status: 200, json: { results: [ { naics: "54", naics_description: "Prof/Sci/Tech", count: 52 }, { naics: "23", naics_description: "Construction", count: 10 } ] } }) : failClosed()()), async () => {
+    const res = await naicsHierarchy({});
+    ok("38 unfiltered ⇒ top-level sectors (2-digit, hasChildren:true) + parent null + drill note",
+      res.data.hierarchy.length === 2 && res.data.parent === null && res.data.hierarchy.every((h) => h.code.length === 2 && h.hasChildren === true) && (res.meta.notes || []).some((n) => /drill/i.test(n)),
+      JSON.stringify(res.data.hierarchy.map((h) => h.code)));
+  });
 }
 
 main().catch((e) => {

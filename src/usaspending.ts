@@ -2307,41 +2307,77 @@ export async function autocompleteRecipient(args: {
 
 export async function naicsHierarchy(args: { naicsFilter?: string }) {
   return memoize(`usas:naics-hierarchy:${args.naicsFilter ?? ""}`, async () => {
-    type Resp = {
-      results?: {
-        naics?: string;
-        naics_description?: string;
-        count?: number;
-        children?: unknown[];
-      }[];
+    type NaicsNode = {
+      naics?: string;
+      naics_description?: string;
+      count?: number;
+      children?: NaicsNode[];
     };
+    type Resp = { results?: NaicsNode[] };
+    // VQ-4 (C81 dogfooding): DRILL-DOWN is the PATH param references/naics/{code}/
+    // (returns the node WITH its `children`), NOT `?filter=` — `filter` is a keyword
+    // search (live: filter=54 fuzzy-matched sectors 32/45/48/54, and the top-level
+    // response omits `children` so hasChildren was ALWAYS false). Unfiltered returns
+    // the top-level 2-digit sectors.
     const path = args.naicsFilter
-      ? `references/naics/?filter=${encodeURIComponent(args.naicsFilter)}`
+      ? `references/naics/${encodeURIComponent(args.naicsFilter)}/`
       : "references/naics/";
     const json = await getUsas<Resp>(path);
     const results = json.results ?? [];
+    // NAICS levels are 2→4→6 digit (USAspending skips 3/5); only a 6-digit code is a
+    // leaf. The top-level response carries no `children`, so hasChildren is derived
+    // from code length — an honest structural signal, never a blanket false.
+    const toRow = (r: NaicsNode) => ({
+      code: r.naics ?? "",
+      description: r.naics_description ?? "",
+      count: r.count ?? 0,
+      hasChildren: (r.naics ?? "").length < 6,
+    });
+    // Filtered: results[0] is the requested node; its `children` are the drill-down
+    // level. Unfiltered: results ARE the top-level sectors.
+    const node = args.naicsFilter ? results[0] : undefined;
+    const level = args.naicsFilter ? (node?.children ?? []) : results;
+    const notes: string[] = [];
+    if (args.naicsFilter && !node) {
+      notes.push(
+        `NAICS '${args.naicsFilter}' was NOT found in the USAspending reference dataset — no hierarchy returned (nothing fabricated). Confirm it is a current 2/4/6-digit NAICS code.`,
+      );
+    } else if (args.naicsFilter && node && level.length === 0) {
+      // Adversarial review F2: derive the digit count instead of hardcoding "6-digit"
+      // (a 4-digit code with no children in USAspending's data would else mislabel).
+      const digits = (node.naics ?? args.naicsFilter).length;
+      notes.push(
+        `NAICS ${node.naics ?? args.naicsFilter} is a leaf (${digits}-digit — no child codes in USAspending's reference). The node's own row is in \`parent\`.`,
+      );
+    } else {
+      notes.push(
+        "Drill into any row with hasChildren:true by calling again with its `code` as naicsFilter. Levels are 2→4→6 digit (USAspending skips 3/5-digit).",
+      );
+    }
     const data = {
-      hierarchy: results.map((r) => ({
-        code: r.naics ?? "",
-        description: r.naics_description ?? "",
-        count: r.count ?? 0,
-        hasChildren: !!(r.children && r.children.length > 0),
-      })),
+      filter: args.naicsFilter ?? null,
+      // Adversarial review F3: structured found signal — a leaf (found, no children)
+      // and a nonexistent code both yield hierarchy:[], so `returned` alone can't
+      // distinguish them. found:true/false disambiguates; null when unfiltered.
+      found: args.naicsFilter ? node !== undefined : null,
+      parent: node
+        ? { code: node.naics ?? "", description: node.naics_description ?? "", count: node.count ?? 0 }
+        : null,
+      hierarchy: level.map(toRow),
     };
-    // references/naics has NO limit param and NO total (verified 2026-07-03:
-    // returns the full level — 24 sectors unfiltered, or the filter's matches).
-    // So this response IS complete for the requested level; nodes with
-    // hasChildren can be expanded by passing that code as naicsFilter.
-    return withMeta(data, referenceMeta({
-      source: "usaspending.gov/api/v2 references/naics",
-      returned: results.length,
-      limit: results.length, // no limit param → returned count is the whole set
-      totalAvailable: results.length,
-      limitHonored: false,
-      extraNotes: [
-        "This is the NAICS hierarchy level for the requested filter (complete); drill into a node by calling again with its code as naicsFilter.",
-      ],
-    }));
+    // references/naics has NO limit param and NO total — the returned level IS the
+    // complete set for that node.
+    return withMeta(data, {
+      ...referenceMeta({
+        source: "usaspending.gov/api/v2 references/naics",
+        returned: data.hierarchy.length,
+        limit: data.hierarchy.length,
+        totalAvailable: data.hierarchy.length,
+        limitHonored: false,
+        extraNotes: notes,
+      }),
+      filtersApplied: args.naicsFilter ? ["naicsFilter(direct-children)"] : [],
+    });
   });
 }
 
