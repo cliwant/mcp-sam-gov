@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, searchSubawards } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, searchSubawards } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -5602,6 +5602,31 @@ async function testAgencyDetailTools() {
     const { threw, error } = await expectThrow(() => getAgencyBudgetFunction({ toptierCode: "999", fiscalYear: 2024 }));
     ok("35d getAgencyBudgetFunction nonexistent code ⇒ not_found (not a fabricated empty budget)",
       threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // 35e VQ-2 (C80 dogfooding): getAgencyAwardsSummary `obligations` spans ALL award
+  // types (contracts+grants+direct benefit payments+loans), so a benefit-heavy
+  // agency's total is dominated by benefits, NOT procurement. The _meta MUST disclose
+  // this scope + point to the contracts-only figure, else an agent misreads it as the
+  // contract/procurement market (live: VA FY2024 $238B all-awards vs $67B contracts).
+  const isAwards = (u) => /\/agency\/[^/]+\/awards\//.test(u);
+  await withFetch((u) => (isAwards(u) ? mockResponse({ status: 200, json: { fiscal_year: 2024, toptier_code: "036", transaction_count: 547752, obligations: 238398048248.85, latest_action_date: "2024-09-30T00:00:00" } }) : failClosed()()), async () => {
+    const res = await getAgencyAwardsSummary({ toptierCode: "036", fiscalYear: 2024 });
+    ok("35e getAgencyAwardsSummary ⇒ obligations mapped + returned:1 (not a bare-object returned:0) + filtersApplied declares toptierCode+fiscalYear (URL-param filters, FILT-1 consistency)",
+      res.data.obligations === 238398048248.85 && res.meta.returned === 1 &&
+      (res.meta.filtersApplied || []).includes("toptierCode") && (res.meta.filtersApplied || []).includes("fiscalYear"),
+      JSON.stringify({ o: res.data.obligations, r: res.meta.returned, fa: res.meta.filtersApplied }));
+    ok("35e VQ-2 ⇒ _meta discloses obligations spans ALL award types (NOT procurement only) + points to contractObligations",
+      (res.meta.notes || []).some((n) => /ALL award types/i.test(n) && /(NOT|not)\b/.test(n) && /procurement|contracts only/i.test(n) && /contractObligations/.test(n)),
+      JSON.stringify(res.meta.notes));
+  });
+  // 35e-2: sparse response + default fiscalYear ⇒ absent count/obligations default
+  // to 0 (never undefined/NaN), and the scope disclosure still fires.
+  await withFetch((u) => (isAwards(u) ? mockResponse({ status: 200, json: { toptier_code: "036" } }) : failClosed()()), async () => {
+    const res = await getAgencyAwardsSummary({ toptierCode: "036" });
+    ok("35e-2 sparse response + no fiscalYear ⇒ transactionCount/obligations default to 0 (not undefined) + scope note still present",
+      res.data.transactionCount === 0 && res.data.obligations === 0 && (res.meta.notes || []).some((n) => /ALL award types/i.test(n)),
+      JSON.stringify({ tc: res.data.transactionCount, o: res.data.obligations, notes: (res.meta.notes || []).length }));
   });
 }
 

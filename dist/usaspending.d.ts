@@ -430,13 +430,13 @@ export declare function getAgencyProfile(toptierCode: string): Promise<{
 export declare function getAgencyAwardsSummary(args: {
     toptierCode: string;
     fiscalYear?: number;
-}): Promise<{
+}): Promise<MetaBundle<{
     fiscalYear: number | undefined;
     toptierCode: string | undefined;
     transactionCount: number;
     obligations: number;
     latestActionDate: string | undefined;
-}>;
+}>>;
 export declare function getAgencyBudgetFunction(args: {
     toptierCode: string;
     fiscalYear?: number;

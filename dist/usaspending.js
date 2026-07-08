@@ -1414,13 +1414,29 @@ export async function getAgencyProfile(toptierCode) {
 export async function getAgencyAwardsSummary(args) {
     const fy = args.fiscalYear ?? new Date().getUTCFullYear();
     const json = await getUsas(`agency/${args.toptierCode}/awards/?fiscal_year=${fy}`);
-    return {
+    const data = {
         fiscalYear: json.fiscal_year,
         toptierCode: json.toptier_code,
         transactionCount: json.transaction_count ?? 0,
         obligations: json.obligations ?? 0,
         latestActionDate: json.latest_action_date,
     };
+    // VQ-2 (C80 dogfooding): `obligations`/`transactionCount` from agency/{code}/awards
+    // span ALL award types, NOT contracts only. Disclose scope so an agent doesn't
+    // misread it as the procurement market (live: VA FY2024 = $238B all-awards vs
+    // $66.9B contracts — a benefit-heavy agency's figure is dominated by direct
+    // benefit payments, not procurement).
+    return withMeta(data, {
+        source: "usaspending.gov/api/v2 agency/{code}/awards",
+        keylessMode: true,
+        returned: 1,
+        // FILT-1 consistency (adversarial review): this tool filters by URL params, not
+        // buildFilters, so filtersAppliedFromFilters can't reach it — declare them here.
+        filtersApplied: ["toptierCode", "fiscalYear"],
+        notes: [
+            "SCOPE: `obligations` and `transactionCount` cover ALL award types (contracts, grants, direct payments incl. benefits, loans) for this agency — NOT prime contracts only. For a benefit-heavy agency (VA/SSA/HHS) direct benefit payments DOMINATE this figure (VA FY2024: ~$238B all-awards vs ~$67B prime contract awards A/B/C/D); for a procurement-heavy agency (DoD/DHS) obligations closely tracks contract spending. For the CONTRACTS-only obligation use usas_spending_over_time (contractObligations) or usas_search_*_spending — those filter by the agency's canonical NAME, so first resolve it from this toptierCode via usas_get_agency_profile (→ name).",
+        ],
+    });
 }
 export async function getAgencyBudgetFunction(args) {
     const fy = args.fiscalYear ?? new Date().getUTCFullYear();
