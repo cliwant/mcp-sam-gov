@@ -66,6 +66,43 @@ function buildFilters(args: {
   return filters;
 }
 
+/**
+ * VQ-6 (C79 dogfooding): derive the honest `_meta.filtersApplied` labels from the
+ * ACTUAL filter object sent upstream. Reading the built `filters` (not the args)
+ * means it can NEVER drift from what was really applied. `award_type_codes` is
+ * always present (contracts-only A/B/C/D). Every buildFilters-based tool previously
+ * reported `filtersApplied:[]` even when naics/agency/fiscalYear WAS applied — an
+ * agent verifying via `_meta` could not confirm its filter took effect.
+ */
+function filtersAppliedFromFilters(f: UsasFilters): string[] {
+  // UsasFilters is Record<string, unknown>, so narrow each value to a non-empty
+  // array before treating it as "applied".
+  const has = (k: string): boolean => {
+    const v = f[k];
+    return Array.isArray(v) && v.length > 0;
+  };
+  const applied: string[] = [];
+  // Label the ACTUAL award-type scope. A/B/C/D = contracts; 02/03/04/05 = grants
+  // (searchCfdaSpending). Adversarial-review SHIP-BLOCKER: a value-blind label
+  // made the grants tool falsely claim "contracts A/B/C/D".
+  const atc = f["award_type_codes"];
+  if (Array.isArray(atc) && atc.length > 0) {
+    const codes = atc.map(String);
+    applied.push(
+      codes.includes("A")
+        ? "awardType(contracts A/B/C/D)"
+        : `awardType(${codes.join("/")})`,
+    );
+  }
+  if (has("agencies")) applied.push("agency");
+  if (has("naics_codes")) applied.push("naics");
+  if (has("time_period")) applied.push("fiscalYear");
+  if (has("set_aside_type_codes")) applied.push("setAside");
+  if (has("psc_codes")) applied.push("pscCodes");
+  if (has("recipient_search_text")) applied.push("recipientSearchText");
+  return applied;
+}
+
 import { fetchWithRetry, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { memoize } from "./cache.js";
 import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
@@ -105,6 +142,7 @@ function categoryAggregateMeta(opts: {
   hasNext?: boolean;
   fieldsUnavailable?: string[];
   extraNotes?: string[];
+  filters?: UsasFilters;
 }): Partial<ResponseMeta> {
   const truncated = opts.hasNext ?? opts.returned >= opts.limit;
   const notes: string[] = [];
@@ -127,7 +165,7 @@ function categoryAggregateMeta(opts: {
       nextOffset: truncated ? opts.returned : null,
       hasMore: truncated,
     },
-    filtersApplied: [],
+    filtersApplied: opts.filters ? filtersAppliedFromFilters(opts.filters) : [],
     filtersDropped: [],
     fieldsUnavailable: opts.fieldsUnavailable ?? [],
     notes,
@@ -306,7 +344,7 @@ export async function searchAwards(args: {
     // `limit` and the category endpoint reports no grand total → unknown.
     totalAvailable: null,
     truncated: results.length >= limit,
-    filtersApplied: [],
+    filtersApplied: filtersAppliedFromFilters(filters),
     filtersDropped: [],
     fieldsUnavailable: ["awards", "totalAwards"],
     notes: [
@@ -403,7 +441,7 @@ export async function searchIndividualAwards(args: {
       total,
       json.page_metadata?.hasNext ?? false,
     ),
-    filtersApplied: [],
+    filtersApplied: filtersAppliedFromFilters(filters),
     filtersDropped: [],
     // Set-aside is not a `spending_by_award` output field; PoP city is often a
     // numeric code (or null) rather than a name. Both live in detail.
@@ -519,7 +557,7 @@ export async function searchAwardsByRecipient(args: {
       total,
       json.page_metadata?.hasNext ?? false,
     ),
-    filtersApplied: [],
+    filtersApplied: filtersAppliedFromFilters(filters),
     filtersDropped: [],
     fieldsUnavailable: ["setAside", "setAsideDescription"],
     notes: [
@@ -601,7 +639,7 @@ export async function searchSubawards(args: {
       total,
       json.page_metadata?.hasNext ?? false,
     ),
-    filtersApplied: [],
+    filtersApplied: filtersAppliedFromFilters(filters),
     filtersDropped: [],
     fieldsUnavailable: [],
     notes: [
@@ -1620,6 +1658,7 @@ export async function searchPscSpending(args: {
       returned: results.length,
       limit,
       hasNext: json.page_metadata?.hasNext,
+      filters,
     }),
   );
 }
@@ -1658,6 +1697,7 @@ export async function searchStateSpending(args: {
       returned: results.length,
       limit,
       hasNext: json.page_metadata?.hasNext,
+      filters,
       extraNotes: [
         "There are ~59 U.S. states/territories total; a capped result is a top-N by amount, not all places that received funding.",
       ],
@@ -1713,6 +1753,7 @@ export async function searchCfdaSpending(args: {
       returned: results.length,
       limit,
       hasNext: json.page_metadata?.hasNext,
+      filters,
       extraNotes: [
         "This is a grants view (award types 02/03/04/05); contracts are excluded.",
       ],
@@ -1754,6 +1795,7 @@ export async function searchFederalAccountSpending(args: {
       returned: results.length,
       limit,
       hasNext: json.page_metadata?.hasNext,
+      filters,
     }),
   );
 }
@@ -1798,6 +1840,7 @@ export async function searchAgencySpending(args: {
       returned: results.length,
       limit,
       hasNext: json.page_metadata?.hasNext,
+      filters,
     }),
   );
 }
@@ -1840,6 +1883,7 @@ export async function searchSubAgencySpending(args: {
       returned: results.length,
       limit,
       hasNext: json.page_metadata?.hasNext,
+      filters,
       fieldsUnavailable: ["awards"],
       extraNotes: [
         "Per-subagency award COUNTS are not returned by this endpoint — the `awards` field is null for every row (unavailable, NOT a real count and NOT 0). Use amount for ranking; do not report `awards` as a contract count.",

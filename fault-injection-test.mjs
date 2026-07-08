@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, searchSubawards } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, searchSubawards } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -4742,7 +4742,36 @@ async function testUsasPaginationTruthfulness() {
       meta.totalAvailable === null && meta.fieldsUnavailable.includes("awards") && meta.fieldsUnavailable.includes("totalAwards"), JSON.stringify(meta.fieldsUnavailable));
     ok("usas share-of-wallet ⇒ full page (returned 10 ≥ limit 10) ⇒ truncated:true (more recipients may exist)",
       meta.returned === 10 && meta.truncated === true, JSON.stringify({ r: meta.returned, tr: meta.truncated }));
+    // VQ-6 (C79 dogfooding): _meta.filtersApplied must reflect the ACTUAL filters
+    // sent upstream so an agent can confirm its filter took effect. Every
+    // buildFilters-based tool previously reported filtersApplied:[] even when the
+    // filter was applied. Derived from the real filters object (drift-proof).
+    const filtered = finalize(await searchAwards({ agency: "DOD", naics: "541512", fiscalYear: 2024 }));
+    ok("VQ-6 usas_search_awards ⇒ filtersApplied REFLECTS the real filters (awardType+agency+naics+fiscalYear, not [])",
+      filtered.filtersApplied.includes("awardType(contracts A/B/C/D)") && filtered.filtersApplied.includes("agency") &&
+      filtered.filtersApplied.includes("naics") && filtered.filtersApplied.includes("fiscalYear"),
+      JSON.stringify(filtered.filtersApplied));
+    const noFilter = finalize(await searchAwards({}));
+    ok("VQ-6 no-filter call ⇒ filtersApplied is the awardType baseline ONLY (never claims naics/agency when none applied)",
+      noFilter.filtersApplied.length === 1 && noFilter.filtersApplied[0] === "awardType(contracts A/B/C/D)",
+      JSON.stringify(noFilter.filtersApplied));
   });
+  // VQ-6 + adversarial-review SHIP-BLOCKER: usas_search_cfda_spending is GRANTS
+  // (award_type_codes 02/03/04/05), so filtersApplied must label the REAL scope —
+  // a value-blind label falsely claimed "contracts A/B/C/D" on a grants tool.
+  await withFetch(
+    (u) => (/spending_by_category\/cfda/.test(u)
+      ? mockResponse({ status: 200, json: { results: [{ code: "93.778", name: "Medicaid", amount: 5e9 }], page_metadata: { hasNext: false } } })
+      : failClosed()()),
+    async () => {
+      const cfda = finalize(await searchCfdaSpending({ agency: "HHS" }));
+      ok("VQ-6 cfda (GRANTS) ⇒ filtersApplied labels the real award scope 'awardType(02/03/04/05)', NEVER 'contracts A/B/C/D'",
+        cfda.filtersApplied.includes("awardType(02/03/04/05)") &&
+        !cfda.filtersApplied.some((x) => /contracts/.test(x)) &&
+        cfda.filtersApplied.includes("agency"),
+        JSON.stringify(cfda.filtersApplied));
+    },
+  );
 }
 
 // Error-taxonomy contract (the CENTRAL classifier `toToolError`, which the server's
@@ -4991,6 +5020,11 @@ async function testSubAgencyAwardsNull() {
         subs[0].amount === 5e9 && subs[1].amount === 3e9, JSON.stringify(subs.map((s) => s.amount)));
       ok("subagency ⇒ _meta.fieldsUnavailable declares 'awards' + a note says null/NOT a count (belt-and-suspenders with the null value)",
         (res.meta.fieldsUnavailable || []).includes("awards") && (res.meta.notes || []).some((n) => /awards.*null.*(NOT|not).*count/i.test(n)), JSON.stringify(res.meta.fieldsUnavailable));
+      // VQ-6 (C79): category-aggregate path (via categoryAggregateMeta) must also
+      // reflect the real filters — was filtersApplied:[] despite agency+fiscalYear.
+      ok("VQ-6 subagency (categoryAggregateMeta path) ⇒ filtersApplied reflects awardType+agency+fiscalYear, not []",
+        (res.meta.filtersApplied || []).includes("awardType(contracts A/B/C/D)") && (res.meta.filtersApplied || []).includes("agency") && (res.meta.filtersApplied || []).includes("fiscalYear"),
+        JSON.stringify(res.meta.filtersApplied));
     },
   );
 }
