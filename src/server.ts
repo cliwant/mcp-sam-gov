@@ -1034,7 +1034,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "usas_naics_hierarchy",
     description:
-      "Navigate the NAICS hierarchy (2-digit → 4-digit → 6-digit). Returns parent/child relationships + active-contract count per code. Use to explore market scope ('what's under NAICS 541' = 'Professional, Scientific, and Technical Services').",
+      "Navigate the NAICS hierarchy (2→4→6 digit) + active-contract count per code. No naicsFilter ⇒ the top-level 2-digit sectors. With naicsFilter=<code> ⇒ that node is in `parent` and its DIRECT children are in `hierarchy` (drill into any row where hasChildren:true by re-calling with its code). A 6-digit leaf returns hierarchy:[] with the node in `parent` (found:true); a nonexistent code returns hierarchy:[] with parent:null (found:false). Use to explore market scope (e.g. what's under NAICS 54 = Professional, Scientific, and Technical Services).",
     inputSchema: UsasNaicsHierarchyInput,
   },
   {
