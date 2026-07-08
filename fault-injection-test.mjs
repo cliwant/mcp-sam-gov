@@ -3987,6 +3987,32 @@ async function testGrantsHonesty() {
         res.data.grants[0].agencyName === "Federal Emergency Management Agency", JSON.stringify(res.data.grants[0].agencyName));
       ok("grants search results ⇒ totalAvailable=42 (real total) + truncated true (1<42)",
         res.meta.totalAvailable === 42 && res.meta.truncated === true, JSON.stringify(res.meta));
+      // VQ-1 (C82 dogfooding): Grants.gov OR-tokenizes multi-word keywords (broadens,
+      // not narrows). Disclose it so an agent doesn't read a broad set as "no grants".
+      const multi = await searchGrants({ keyword: "cybersecurity information technology", rows: 1 });
+      ok("VQ-1 multi-word keyword ⇒ _meta discloses Grants.gov OR-matches (BROADENS) + pass ONE specific term + phrase-quote returns 0",
+        (multi.meta.notes || []).some((n) => /OR-matches multi-word/i.test(n) && /BROADEN/i.test(n) && /ONE specific/i.test(n)),
+        JSON.stringify(multi.meta.notes));
+      const single = await searchGrants({ keyword: "cybersecurity", rows: 1 });
+      ok("VQ-1 single-word keyword ⇒ NO OR-match broadening note (fires only for multi-word)",
+        !(single.meta.notes || []).some((n) => /OR-matches multi-word/i.test(n)),
+        JSON.stringify(single.meta.notes));
+    },
+  );
+  // VQ-1 F1/F2 (adversarial review, result-aware): a multi-word keyword that returns 0
+  // must NOT say "broad set ≠ no grants" (there is no set); a quote-wrapped keyword (0
+  // because Grants.gov has no phrase quoting) must say "remove the quotes", not "broadens".
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { errorcode: 0, data: { hitCount: 0, oppHits: [] } } }) : failClosed()()),
+    async () => {
+      const zero = await searchGrants({ keyword: "aardvark zzznonexistent", rows: 1 });
+      ok("VQ-1 F2: multi-word keyword with 0 results ⇒ '0 results / try terms separately' guidance, NOT the 'broadens' note",
+        (zero.meta.notes || []).some((n) => /returned 0 results/i.test(n) && /separately/i.test(n)) && !(zero.meta.notes || []).some((n) => /BROADEN/i.test(n)),
+        JSON.stringify(zero.meta.notes));
+      const quoted = await searchGrants({ keyword: '"cybersecurity information technology"', rows: 1 });
+      ok("VQ-1 F1: quote-wrapped keyword returning 0 ⇒ 'REMOVE the quotes' hint, no self-contradicting 'broadens'",
+        (quoted.meta.notes || []).some((n) => /REMOVE the quotes/i.test(n)) && !(quoted.meta.notes || []).some((n) => /BROADEN/i.test(n)),
+        JSON.stringify(quoted.meta.notes));
     },
   );
 

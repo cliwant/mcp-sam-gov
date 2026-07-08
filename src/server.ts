@@ -1114,7 +1114,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "grants_search",
     description:
-      "Search Grants.gov federal grant opportunities (financial assistance, distinct from contracts on SAM.gov). Filter by keyword / CFDA / agency / opportunity number. Default status = forecasted + posted.",
+      "Search Grants.gov federal grant opportunities (financial assistance, distinct from contracts on SAM.gov). Filter by keyword / CFDA / agency / opportunity number. Default status = forecasted + posted. KEYWORD: Grants.gov OR-matches multi-word keywords (returns grants containing ANY word), so a multi-word keyword BROADENS results — pass ONE specific term for relevance (phrase quoting returns 0); narrow with cfda/agency/oppStatuses.",
     inputSchema: GrantsSearchInput,
   },
   {
