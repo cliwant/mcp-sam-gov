@@ -128,6 +128,32 @@ export async function searchGrants(args: {
       "Grants.gov silently ignores an unknown agency code or CFDA number (it returns the UNFILTERED result set instead of an error) and does not confirm which filters were honored — if the result count looks too broad, verify the agency/CFDA value.",
     );
   }
+  // VQ-1 (C82 dogfooding): Grants.gov OR-tokenizes multi-word keywords (matches ANY
+  // word) and does NOT support phrase quoting (a quoted "..." keyword returns 0). Live:
+  // "cybersecurity information technology" → 926 broad hits (State-Dept program
+  // statements top) vs 280 focused for "cybersecurity". The note is RESULT-AWARE
+  // (adversarial review F1/F2): "broad set ≠ no grants" only holds when there ARE
+  // results; a 0-result multi-word query needs the opposite advice. Quotes are stripped
+  // for the word count so a quote-wrapped phrase is still detected as multi-word.
+  const rawKw = args.keyword ?? "";
+  const looksQuoted = /^\s*["'][\s\S]*["']\s*$/.test(rawKw);
+  const kwWords = rawKw
+    .trim()
+    .replace(/^["']+|["']+$/g, "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (kwWords.length > 1) {
+    if (totalRecords > 0) {
+      notes.push(
+        `Grants.gov OR-matches multi-word keywords: it returns opportunities containing ANY of these ${kwWords.length} words, so this keyword may BROADEN results if any word is a common term ("information"/"technology"/"program" match many unrelated grants) — a broad, poorly-ranked set here does NOT mean "no relevant grants". For focused results pass ONE specific term (e.g. "cybersecurity"); Grants.gov does NOT support phrase quoting (a quoted "..." keyword returns 0). Narrow with cfda / agency / oppStatuses instead.`,
+      );
+    } else {
+      notes.push(
+        `This ${kwWords.length}-word keyword returned 0 results. Grants.gov OR-matches keywords and does NOT support phrase quoting${looksQuoted ? ' — your keyword appears quote-wrapped, so REMOVE the quotes (a quoted "..." keyword always returns 0)' : ' (a quoted "..." keyword returns 0)'}. A 0 here means even the OR of these words has no match — try each word separately, or narrow with cfda/agency/oppStatuses, to isolate.`,
+      );
+    }
+  }
   return withMeta(data, {
     source: "grants.gov/api (search2)",
     keylessMode: true,
