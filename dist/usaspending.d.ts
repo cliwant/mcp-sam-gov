@@ -519,6 +519,13 @@ export declare function autocompleteRecipient(args: {
 export declare function naicsHierarchy(args: {
     naicsFilter?: string;
 }): Promise<MetaBundle<{
+    filter: string | null;
+    found: boolean | null;
+    parent: {
+        code: string;
+        description: string;
+        count: number;
+    } | null;
     hierarchy: {
         code: string;
         description: string;

@@ -312,8 +312,10 @@ const tests = [
   },
   {
     name: "usas_naics_hierarchy",
-    args: { naicsFilter: "541512" },
-    verify: (r) => Array.isArray(r.hierarchy) && r.hierarchy.length > 0,
+    // Drill into 54 (Prof/Sci/Tech) ⇒ its 4-digit children (5411, 5412, …). A
+    // 6-digit code like 541512 is a LEAF (empty children) — use a non-leaf here.
+    args: { naicsFilter: "54" },
+    verify: (r) => Array.isArray(r.hierarchy) && r.hierarchy.length > 0 && r.parent?.code === "54",
   },
   {
     name: "usas_glossary",
