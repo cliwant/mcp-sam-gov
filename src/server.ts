@@ -994,7 +994,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "usas_get_agency_awards_summary",
     description:
-      "High-level award activity for a fiscal year — transaction_count + obligations + latest_action_date. Snapshot of agency volume.",
+      "High-level award activity for a fiscal year — transaction_count + obligations + latest_action_date. SCOPE: obligations/transaction_count span ALL award types (contracts, grants, direct payments incl. benefits, loans) — NOT prime contracts only. For benefit-heavy agencies (VA/SSA/HHS) this is dominated by direct benefit payments (e.g. VA FY2024 ~$238B all-awards vs ~$67B prime contracts), so do NOT read it as the contract/procurement market; for procurement-heavy agencies (DoD/DHS) it closely tracks contract spending. For contracts-only obligations use usas_spending_over_time (contractObligations) — it takes the agency canonical NAME, so resolve it from this toptierCode via usas_get_agency_profile first.",
     inputSchema: UsasAgencyAwardsInput,
   },
   {
