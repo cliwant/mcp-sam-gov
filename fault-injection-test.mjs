@@ -5873,6 +5873,7 @@ async function main() {
   await testSearchSubawardsMapping();
   await testTeamingMostRecentAwardDate();
   await testNaicsHierarchy();
+  await testRegistryDispatchHonesty();
 
   // Prove the harness bites.
   await selfCheck();
@@ -5938,6 +5939,282 @@ async function testNaicsHierarchy() {
     ok("38 unfiltered ⇒ top-level sectors (2-digit, hasChildren:true) + parent null + drill note",
       res.data.hierarchy.length === 2 && res.data.parent === null && res.data.hierarchy.every((h) => h.code.length === 2 && h.hasChildren === true) && (res.meta.notes || []).some((n) => /drill/i.test(n)),
       JSON.stringify(res.data.hierarchy.map((h) => h.code)));
+  });
+}
+
+// §39: R1 REGISTRY DISPATCH honesty (post-slice-2 migration). The R1 refactor moved
+// 34 tools out of the legacy `switch` and into TOOLS[] `handler` arrows dispatched by
+// the exported runTool(name, args, sam) — but the rest of this harness exercises the
+// underlying MODULE functions DIRECTLY (imported from dist/usaspending.js, etc.), so
+// those co-located handler arrows were never entered offline. This section drives a
+// broad set of the migrated tools END-TO-END through the REAL registry path
+// (entry.inputSchema.parse(args) → entry.handler(input,{sam}) → module fn), asserting
+// the SAME honesty invariants survive the dispatch wrapper:
+//   • an upstream OUTAGE (503) throws a classified retryable error — never a
+//     fabricated empty/zero result;
+//   • a genuine category aggregate discloses an UNKNOWN total (totalAvailable:null,
+//     NOT the returned page size — spec §3.3);
+//   • an absent field is null (NOT a fabricated 0 that reads as "zero");
+//   • a not-found (404 / hollow-200) is distinct from an outage.
+// NON-VACUITY: every assertion pins a specific honest value that FLIPS if the
+// invariant were broken (totalAvailable===null, grantObligations===null, found===false,
+// a specific error kind) — proven by the harness-wide self-check discipline (a broken
+// expectation goes RED, see selfCheck()).
+async function testRegistryDispatchHonesty() {
+  section("39. R1 registry dispatch (runTool) — migrated TOOLS[] handlers preserve outage/absence/total honesty end-to-end");
+  const sam = new SamGovClient({});
+  // Clear the 5-min reference cache so the memoized ref tools (naics/glossary/toptier/
+  // autocomplete/titles/sba) hit THESE mocks — deterministic + non-vacuous, never a
+  // value warmed by an earlier section (e.g. §38's 541512, §6's naics.json).
+  _clearCache();
+
+  // ── usas_spending_over_time — contract-only scope: grant/IDV obligations are null
+  //    (FILTERED OUT), NEVER a fabricated 0. Routed through runTool. Plus 503 ⇒ throws.
+  const SOT = { group: "fiscal_year", results: [
+    { time_period: { fiscal_year: "2024" }, aggregated_amount: 1000, Contract_Obligations: 1000, Grant_Obligations: 0, Idv_Obligations: 0 },
+    { time_period: { fiscal_year: "2025" }, aggregated_amount: 2500, Contract_Obligations: 2500, Grant_Obligations: 0, Idv_Obligations: 0 },
+  ] };
+  await withFetch((u) => (/spending_over_time/.test(u) ? mockResponse({ status: 200, json: SOT }) : failClosed()()), async () => {
+    const res = await runTool("usas_spending_over_time", { agency: "Department of Defense" }, sam);
+    ok("39 usas_spending_over_time (runTool) ⇒ real contract totals preserved (1000/2500) + grant/IDV obligations null (NOT fabricated 0)",
+      res.data.timeline.length === 2 && res.data.timeline[0].total === 1000 &&
+      res.data.timeline.every((x) => x.grantObligations === null && x.idvObligations === null),
+      JSON.stringify(res.data.timeline.map((x) => [x.total, x.grantObligations])));
+    ok("39 usas_spending_over_time (runTool) ⇒ _meta discloses CONTRACT-only scope (A/B/C/D)",
+      (res.meta.notes || []).some((n) => /CONTRACT obligations only/.test(n)), JSON.stringify(res.meta.notes));
+  });
+  await withFetch((u) => (/spending_over_time/.test(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("usas_spending_over_time", { agency: "Department of Defense" }, sam));
+    ok("39 usas_spending_over_time (runTool) 503 ⇒ throws upstream_unavailable (NOT a fabricated empty timeline)",
+      threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // ── category aggregates (psc/state/cfda/federal_account/awarding_agency): the
+  //    spending_by_category/* endpoints expose NO grand total, so a full page must
+  //    disclose totalAvailable:null (NEVER the returned row count) + truncated:true.
+  const catPage = (rows) => mockResponse({ status: 200, json: { results: rows, page_metadata: { hasNext: true } } });
+
+  await withFetch((u) => (/spending_by_category\/psc/.test(u) ? catPage([{ code: "R425", name: "Engineering Support", amount: 5e9 }, { code: "D307", name: "IT Systems", amount: 3e9 }]) : failClosed()()), async () => {
+    const res = await runTool("usas_search_psc_spending", { agency: "Department of Defense", naics: "541512", limit: 2 }, sam);
+    ok("39 usas_search_psc_spending (runTool) ⇒ maps PSC rows (code/name/amount) with real $ preserved",
+      res.data.psc.length === 2 && res.data.psc[0].pscCode === "R425" && res.data.psc[0].amount === 5e9, JSON.stringify(res.data.psc[0]));
+    ok("39 usas_search_psc_spending (runTool) ⇒ totalAvailable NULL (NOT the 2 returned rows) + truncated true + note 'null, NOT the returned count'",
+      res.meta.totalAvailable === null && res.meta.truncated === true && (res.meta.notes || []).some((n) => /totalAvailable is null, NOT the returned count/.test(n)),
+      JSON.stringify({ ta: res.meta.totalAvailable, tr: res.meta.truncated }));
+  });
+  await withFetch((u) => (/spending_by_category\/psc/.test(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("usas_search_psc_spending", { agency: "Department of Defense", limit: 2 }, sam));
+    ok("39 usas_search_psc_spending (runTool) 503 ⇒ throws upstream_unavailable (NOT a fabricated empty PSC breakdown)",
+      threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+
+  await withFetch((u) => (/spending_by_category\/state_territory/.test(u) ? catPage([{ code: "VA", name: "Virginia", amount: 128e9 }, { code: "MD", name: "Maryland", amount: 66e9 }]) : failClosed()()), async () => {
+    const res = await runTool("usas_search_state_spending", { naics: "541512", limit: 2 }, sam);
+    ok("39 usas_search_state_spending (runTool) ⇒ maps states (code/name/$) + totalAvailable null + discloses 'top-N by amount, not all places'",
+      res.data.states[0].stateCode === "VA" && res.data.states[0].amount === 128e9 && res.meta.totalAvailable === null &&
+      (res.meta.notes || []).some((n) => /top-N by amount, not all places/.test(n)),
+      JSON.stringify({ s: res.data.states[0], ta: res.meta.totalAvailable }));
+  });
+
+  await withFetch((u) => (/spending_by_category\/cfda/.test(u) ? catPage([{ code: "93.778", name: "Medical Assistance Program", amount: 500e9 }]) : failClosed()()), async () => {
+    const res = await runTool("usas_search_cfda_spending", { agency: "Department of Health and Human Services", limit: 1 }, sam);
+    ok("39 usas_search_cfda_spending (runTool) ⇒ maps grant programs + discloses GRANTS-view scope (contracts excluded) + totalAvailable null",
+      res.data.programs[0].cfdaCode === "93.778" && res.meta.totalAvailable === null &&
+      (res.meta.notes || []).some((n) => /grants view/i.test(n) && /contracts are excluded/i.test(n)),
+      JSON.stringify({ p: res.data.programs[0], notes: res.meta.notes }));
+  });
+  await withFetch((u) => (/spending_by_category\/cfda/.test(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("usas_search_cfda_spending", { agency: "X", limit: 1 }, sam));
+    ok("39 usas_search_cfda_spending (runTool) 503 ⇒ throws upstream_unavailable (NOT a fabricated empty grants breakdown)",
+      threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+
+  await withFetch((u) => (/spending_by_category\/federal_account/.test(u) ? catPage([{ code: "036-0167", name: "IT Systems, VA", amount: 12e9 }]) : failClosed()()), async () => {
+    const res = await runTool("usas_search_federal_account_spending", { agency: "Department of Veterans Affairs", limit: 1 }, sam);
+    ok("39 usas_search_federal_account_spending (runTool) ⇒ maps TAS accounts + totalAvailable null (endpoint reports no grand total)",
+      res.data.accounts[0].tasCode === "036-0167" && res.data.accounts[0].amount === 12e9 && res.meta.totalAvailable === null,
+      JSON.stringify({ a: res.data.accounts[0], ta: res.meta.totalAvailable }));
+  });
+
+  await withFetch((u) => (/spending_by_category\/awarding_agency/.test(u) ? catPage([{ code: "097", name: "Department of Defense", amount: 400e9, agency_slug: "dod" }]) : failClosed()()), async () => {
+    const res = await runTool("usas_search_agency_spending", { naics: "541512", limit: 1 }, sam);
+    ok("39 usas_search_agency_spending (runTool) ⇒ maps agencies (name/$) + totalAvailable null (endpoint reports no grand total)",
+      res.data.agencies[0].name === "Department of Defense" && res.data.agencies[0].amount === 400e9 && res.meta.totalAvailable === null,
+      JSON.stringify({ a: res.data.agencies[0], ta: res.meta.totalAvailable }));
+  });
+
+  // ── usas_search_subagency_spending — awarding_subagency rows carry `amount` but NO
+  //    `count`, so every row's `awards` must be null (unavailable), NEVER a fake 0.
+  await withFetch((u) => (/spending_by_category\/awarding_subagency/.test(u) ? mockResponse({ status: 200, json: { results: [{ name: "Department of the Army", amount: 5e9 }, { name: "Department of the Navy", amount: 3e9 }], page_metadata: { hasNext: false } } }) : failClosed()()), async () => {
+    const res = await runTool("usas_search_subagency_spending", { agency: "Department of Defense", fiscalYear: 2025 }, sam);
+    const subs = res.data.subAgencies;
+    ok("39 usas_search_subagency_spending (runTool) ⇒ every row's `awards` null (unavailable), NEVER a fabricated 0 + amount preserved + fieldsUnavailable declares 'awards'",
+      subs.length === 2 && subs.every((s) => s.awards === null) && subs[0].amount === 5e9 && (res.meta.fieldsUnavailable || []).includes("awards"),
+      JSON.stringify(subs.map((s) => ({ n: s.name, a: s.awards }))));
+  });
+
+  // ── usas_get_agency_profile — a nonexistent toptier code (404) is a not_found, NOT a
+  //    fabricated empty profile (and NOT mislabeled as an outage).
+  const isProfile = (u) => /\/agency\/[^/]+\/?(\?|$)/.test(u) && !/budget_function|\/awards/.test(u);
+  const isBudget = (u) => /\/agency\/[^/]+\/budget_function\//.test(u);
+  const isAwards = (u) => /\/agency\/[^/]+\/awards\//.test(u);
+  await withFetch((u) => (isProfile(u) ? mockResponse({ status: 404, json: { detail: "Agency with a toptier code of '999' does not exist" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("usas_get_agency_profile", { toptierCode: "999" }, sam));
+    ok("39 usas_get_agency_profile (runTool) 404 ⇒ throws not_found (NOT a fabricated empty profile, NOT an outage)",
+      threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // ── usas_get_agency_budget_function — totalAvailable is the REAL FY total from
+  //    page_metadata.total, NOT the returned row count.
+  await withFetch((u) => (isBudget(u) ? mockResponse({ status: 200, json: {
+    toptier_code: "097", fiscal_year: 2026,
+    results: [
+      { name: "National Defense", children: [{ name: "Dept of the Army", obligated_amount: 1035482198021.19, gross_outlay_amount: 900000000000 }] },
+      { name: "Income Security", children: [{ name: "Military retirement", obligated_amount: 50000000000, gross_outlay_amount: 48000000000 }] },
+    ],
+    page_metadata: { page: 1, total: 6, hasNext: true },
+  } }) : failClosed()()), async () => {
+    const res = await runTool("usas_get_agency_budget_function", { toptierCode: "097", fiscalYear: 2026, limit: 2 }, sam);
+    ok("39 usas_get_agency_budget_function (runTool) ⇒ maps functions/programs + totalAvailable = REAL FY total (6), NOT the 2 returned rows + truncated true",
+      res.data.functions.length === 2 && res.data.functions[0].programs[0].obligated === 1035482198021.19 &&
+      res.meta.totalAvailable === 6 && res.meta.truncated === true,
+      JSON.stringify({ ta: res.meta.totalAvailable, tr: res.meta.truncated }));
+  });
+
+  // ── usas_get_agency_awards_summary — VQ-2: `obligations` spans ALL award types
+  //    (contracts+grants+direct benefits+loans), so the _meta MUST disclose that scope,
+  //    not let an agent misread it as the procurement/contract market.
+  await withFetch((u) => (isAwards(u) ? mockResponse({ status: 200, json: { fiscal_year: 2024, toptier_code: "036", transaction_count: 547752, obligations: 238398048248.85, latest_action_date: "2024-09-30T00:00:00" } }) : failClosed()()), async () => {
+    const res = await runTool("usas_get_agency_awards_summary", { toptierCode: "036", fiscalYear: 2024 }, sam);
+    ok("39 usas_get_agency_awards_summary (runTool) ⇒ obligations mapped + _meta discloses ALL-award-types scope (NOT procurement only) + points to contractObligations",
+      res.data.obligations === 238398048248.85 &&
+      (res.meta.notes || []).some((n) => /ALL award types/i.test(n) && /procurement|contracts only/i.test(n) && /contractObligations/.test(n)),
+      JSON.stringify(res.meta.notes));
+  });
+
+  // ── usas_naics_hierarchy — a 6-digit leaf returns hierarchy:[] with found:true + an
+  //    honest 'leaf' note; it must NOT fabricate children.
+  await withFetch((u) => (/references\/naics\/561210\//.test(u) ? mockResponse({ status: 200, json: { results: [{ naics: "561210", naics_description: "Facilities Support Services", count: 7 }] } }) : failClosed()()), async () => {
+    const res = await runTool("usas_naics_hierarchy", { naicsFilter: "561210" }, sam);
+    ok("39 usas_naics_hierarchy (runTool) leaf ⇒ hierarchy empty + found:true + parent=561210 + honest 'leaf' note (never fabricated children)",
+      res.data.hierarchy.length === 0 && res.data.found === true && res.data.parent?.code === "561210" && (res.meta.notes || []).some((n) => /leaf/i.test(n)),
+      JSON.stringify({ h: res.data.hierarchy.length, found: res.data.found, p: res.data.parent?.code }));
+  });
+
+  // ── usas_glossary — reports a REAL grand total in page_metadata.count, so
+  //    totalAvailable is that real number (an AI can tell a top-N slice from the full set).
+  await withFetch((u) => (/references\/glossary/.test(u) ? mockResponse({ status: 200, json: { page_metadata: { count: 151 }, results: [{ term: "Obligation", slug: "obligation", plain: "A binding agreement that will result in outlays." }] } }) : failClosed()()), async () => {
+    const res = await runTool("usas_glossary", { search: "obligation", limit: 5 }, sam);
+    ok("39 usas_glossary (runTool) ⇒ maps terms + totalAvailable = REAL grand total (151), NOT the 1 returned row",
+      res.data.terms[0].term === "Obligation" && res.data.totalRecords === 151 && res.meta.totalAvailable === 151,
+      JSON.stringify({ t: res.data.terms[0].term, ta: res.meta.totalAvailable }));
+  });
+
+  // ── usas_list_toptier_agencies — the endpoint IGNORES `limit` and returns the
+  //    complete set, so a returned-count above the asked limit must NOT be mislabeled
+  //    truncated (truncated:false, complete list).
+  await withFetch((u) => (/references\/toptier_agencies/.test(u) ? mockResponse({ status: 200, json: { results: [
+    { agency_name: "Department of Defense", abbreviation: "DOD", toptier_code: "097", obligated_amount: 1e12 },
+    { agency_name: "Department of Veterans Affairs", abbreviation: "VA", toptier_code: "036", obligated_amount: 3e11 },
+    { agency_name: "Department of Homeland Security", abbreviation: "DHS", toptier_code: "070", obligated_amount: 2e11 },
+  ] } }) : failClosed()()), async () => {
+    const res = await runTool("usas_list_toptier_agencies", { limit: 2 }, sam);
+    ok("39 usas_list_toptier_agencies (runTool) ⇒ complete set returned (3) despite limit:2 ⇒ truncated:false + totalAvailable=3 (limit ignored upstream, NOT a false 'more exist')",
+      res.data.agencies.length === 3 && res.meta.truncated === false && res.meta.totalAvailable === 3,
+      JSON.stringify({ n: res.data.agencies.length, tr: res.meta.truncated, ta: res.meta.totalAvailable }));
+  });
+
+  // ── usas_autocomplete_naics — the autocomplete endpoint returns only {results} with
+  //    NO total, so totalAvailable must be null (never the page size as a fake total).
+  await withFetch((u) => (/autocomplete\/naics/.test(u) ? mockResponse({ status: 200, json: { results: [{ naics: "541512", naics_description: "Computer Systems Design Services", year_retired: null }] } }) : failClosed()()), async () => {
+    const res = await runTool("usas_autocomplete_naics", { searchText: "computer systems design", limit: 5 }, sam);
+    ok("39 usas_autocomplete_naics (runTool) ⇒ returns matches (541512) + totalAvailable null (no upstream total — never a page-size-as-total)",
+      res.data.naics[0].code === "541512" && res.data.naics[0].retired === false && res.meta.totalAvailable === null,
+      JSON.stringify({ c: res.data.naics[0], ta: res.meta.totalAvailable }));
+  });
+
+  // ── fed_register_search_documents — a 503 outage throws (never a fake "no rules"); a
+  //    genuine count:0 is an HONEST empty (totalAvailable:0, truncated:false) distinct
+  //    from the outage.
+  const isFrSearch = (u) => /federalregister\.gov\/api\/v1\/documents\.json/.test(u);
+  const isFrDoc = (u) => /federalregister\.gov\/api\/v1\/documents\/[^/]+\.json/.test(u);
+  await withFetch((u) => (isFrSearch(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fed_register_search_documents", { query: "acquisition" }, sam));
+    ok("39 fed_register_search_documents (runTool) 503 ⇒ throws upstream_unavailable (NOT a fake empty 'no documents')",
+      threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+  await withFetch((u) => (isFrSearch(u) ? mockResponse({ status: 200, json: { count: 0, total_pages: 0, results: [] } }) : failClosed()()), async () => {
+    const res = await runTool("fed_register_search_documents", { query: "zzznotarealrule" }, sam);
+    ok("39 fed_register_search_documents (runTool) genuine-zero ⇒ honest empty (totalAvailable 0, truncated false) — distinct from the outage above",
+      res.data.documents.length === 0 && res.meta.totalAvailable === 0 && res.meta.truncated === false,
+      JSON.stringify(res.meta));
+  });
+  // ── fed_register_get_document — a 404 is a genuine not_found (distinct from an outage).
+  await withFetch((u) => (isFrDoc(u) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fed_register_get_document", { documentNumber: "0000-00000" }, sam));
+    ok("39 fed_register_get_document (runTool) 404 ⇒ throws not_found (genuine miss, distinct from an outage)",
+      threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // ── ecfr_search — reports a real meta.total_count, so totalAvailable is that real hit
+  //    count (top-N vs full set is knowable); the scope note echoes the applied title.
+  await withFetch((u) => (/\/search\/v1\/results/.test(u) ? mockResponse({ status: 200, json: {
+    results: [{ type: "Section", hierarchy: { title: "48", chapter: "1", part: "52", section: "52.219-14" }, hierarchy_headings: { section: "Limitations on Subcontracting" }, full_text_excerpt: "…limitations on subcontracting…", score: 9.9, starts_on: "2024-01-01", ends_on: null }],
+    meta: { total_count: 57, total_pages: 12 },
+  } }) : failClosed()()), async () => {
+    const res = await runTool("ecfr_search", { query: "limitations on subcontracting", titleNumber: 48, perPage: 1 }, sam);
+    ok("39 ecfr_search (runTool) ⇒ maps section (48/52.219-14) + totalAvailable = REAL hit count (57), NOT the 1 returned row + scope note echoes Title 48 (FAR)",
+      res.data.results[0].section === "52.219-14" && res.meta.totalAvailable === 57 &&
+      (res.meta.notes || []).some((n) => /Title 48 \(FAR/.test(n)),
+      JSON.stringify({ s: res.data.results[0].section, ta: res.meta.totalAvailable, notes: res.meta.notes }));
+  });
+
+  // ── ecfr_list_titles — a RESERVED title must be surfaced as reserved:true (an honest
+  //    structural flag), never dropped or presented as a normal title.
+  await withFetch((u) => (/\/versioner\/v1\/titles\.json/.test(u) ? mockResponse({ status: 200, json: { titles: [
+    { number: 48, name: "Federal Acquisition Regulations System", latest_amended_on: "2026-05-07", reserved: false },
+    { number: 35, name: "Reserved", latest_amended_on: null, reserved: true },
+  ] } }) : failClosed()()), async () => {
+    const res = await runTool("ecfr_list_titles", {}, sam);
+    ok("39 ecfr_list_titles (runTool) ⇒ maps titles + a RESERVED title is surfaced as reserved:true (honest flag, not dropped/faked)",
+      res.titles.length === 2 && res.titles[0].number === 48 && res.titles[0].reserved === false && res.titles[1].reserved === true,
+      JSON.stringify(res.titles.map((t) => [t.number, t.reserved])));
+  });
+
+  // ── grants_search — a 503 throws (never a fake "no grants"); a genuine hitCount:0 is
+  //    an honest empty (totalAvailable:0) distinct from the outage.
+  const isGrSearch = (u) => /api\.grants\.gov\/.*search2/.test(u);
+  const isGrFetch = (u) => /api\.grants\.gov\/.*fetchOpportunity/.test(u);
+  await withFetch((u) => (isGrSearch(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("grants_search", { keyword: "flood" }, sam));
+    ok("39 grants_search (runTool) 503 ⇒ throws upstream_unavailable (NOT a fake empty 'no grants')",
+      threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+  await withFetch((u) => (isGrSearch(u) ? mockResponse({ status: 200, json: { errorcode: 0, data: { hitCount: 0, oppHits: [] } } }) : failClosed()()), async () => {
+    const res = await runTool("grants_search", { keyword: "zzznotarealprogram" }, sam);
+    ok("39 grants_search (runTool) genuine-zero ⇒ honest empty grants[] + totalAvailable 0 + truncated false (a real no-match, distinct from the outage)",
+      res.data.grants.length === 0 && res.meta.totalAvailable === 0 && res.meta.truncated === false, JSON.stringify(res.meta));
+  });
+  // ── grants_get_opportunity — a nonexistent id gets a HOLLOW 200 from Grants.gov; the
+  //    tool must return found:false, NOT a fabricated grant with empty fields.
+  await withFetch((u) => (isGrFetch(u) ? mockResponse({ status: 200, json: { errorcode: 0, msg: "Webservice Succeeds", data: { revision: 0, flag2006: "N", cfdas: [], synopsisAttachmentFolders: [] } } }) : failClosed()()), async () => {
+    const res = await runTool("grants_get_opportunity", { opportunityId: "999999999" }, sam);
+    ok("39 grants_get_opportunity (runTool) nonexistent ⇒ found:false (hollow 200 is NOT a fabricated grant) + id echoed + no fake title",
+      res.found === false && res.opportunityId === "999999999" && res.id === undefined && res.title === undefined, JSON.stringify(res));
+  });
+
+  // ── sba_size_standard — a found NAICS returns the real standard; an UNKNOWN NAICS
+  //    returns found:false (never a fabricated standard). One cached naics.json serves both.
+  const NAICS_JSON = [
+    { id: "541512", description: "Computer Systems Design Services", sectorDescription: "P", subsectorDescription: "P", revenueLimit: 34, assetLimit: null, employeeCountLimit: null, footnote: null },
+  ];
+  await withFetch((u) => (u.includes("naics.json") ? mockResponse({ status: 200, json: NAICS_JSON }) : failClosed()()), async () => {
+    const found = await runTool("sba_size_standard", { naics: "541512" }, sam);
+    ok("39 sba_size_standard (runTool) found ⇒ real receipts standard ($34M ×1e6), found:true (a genuine answer)",
+      found.data.found === true && found.data.standardType === "receipts" && found.data.threshold === 34_000_000, JSON.stringify(found.data));
+    const missing = await runTool("sba_size_standard", { naics: "999999" }, sam);
+    ok("39 sba_size_standard (runTool) unknown NAICS ⇒ found:false + threshold null + standardType 'unknown' (NEVER a fabricated standard)",
+      missing.data.found === false && missing.data.threshold === null && missing.data.standardType === "unknown", JSON.stringify(missing.data));
   });
 }
 
