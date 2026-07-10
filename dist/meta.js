@@ -81,6 +81,10 @@ export function buildMeta(partial = {}) {
         meta.degraded = degraded;
     if (pagination)
         meta.pagination = pagination;
+    // Conditional passthrough (like enrichedCount/pagination): only surfaced when
+    // the tool provides it, so existing tools' `_meta` output stays byte-identical.
+    if (partial.totalIsLowerBound !== undefined)
+        meta.totalIsLowerBound = partial.totalIsLowerBound;
     return meta;
 }
 /**
