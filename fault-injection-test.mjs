@@ -57,6 +57,7 @@ import { searchWageDeterminations, getWageRates, benchmarkLaborRates } from "./d
 import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
+import { num as treasuryNum } from "./dist/treasury.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
 import {
   SamGovClient,
@@ -5824,6 +5825,133 @@ async function testTeamingMostRecentAwardDate() {
   });
 }
 
+// §40: US Treasury Fiscal Data source (ADR-0002) — TRUTHFULNESS under fault +
+// the num()/pagination/summary-row honesty contract. All OFFLINE (mock fetch),
+// deterministic, non-vacuous: every assertion pins a specific value and the
+// comments name the exact mutation that turns it RED.
+//   (a) 503 outage ⇒ throws upstream_unavailable, never a fake data:[] empty.
+//   (b) genuine-empty (total-count:0 NUMBER, data:[]) ⇒ honest complete:true /
+//       totalAvailable:0 — distinct from the outage.
+//   (c) totalAvailable = the NUMBER total-count (8345), NOT data.length (1) —
+//       reading data.length here would be RED.
+//   (d) offset pagination (mid + last page) — offset/hasMore/nextOffset.
+//   (e) num() coercion — the HONESTY-CRITICAL "" (Number('') is 0!) / "null" /
+//       "(-)" ⇒ null (never 0); numeric strings + numbers pass through.
+//   (f) MTS summary-row exclusion (F4): excludeSummaryRows sends the server-side
+//       filter; an included parent row maps to null amounts (never 0).
+//   (g) total-count as a STRING (schema drift) ⇒ throws schema_drift (F1 guard).
+async function testTreasuryHonesty() {
+  section("40. US Treasury Fiscal Data — outage/empty/pagination/num()/summary-row honesty (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  // A debt_to_penny row fixture (value fields are STRINGS on the wire — F2).
+  const debtRow = (d = "2026-07-08") => ({
+    record_date: d,
+    tot_pub_debt_out_amt: "39394977645639.05",
+    debt_held_public_amt: "31695882336712.26",
+    intragov_hold_amt: "7699095308926.79",
+  });
+  const env = (rows, totalCount) => ({
+    data: rows,
+    meta: { count: rows.length, "total-count": totalCount, "total-pages": Math.max(1, Math.ceil(totalCount / Math.max(1, rows.length || 1))) },
+  });
+
+  // (a) OUTAGE — every attempt 503s ⇒ fetchWithRetry throws upstream_unavailable.
+  // A masquerade that swallowed the error into {data:{records:[]}} turns this RED.
+  await withFetch(() => mockResponse({ status: 503 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
+    ok("40a treasury_debt_to_penny 503 ⇒ throws upstream_unavailable (NOT a fake empty records[])",
+      threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // (b) GENUINE EMPTY — total-count:0 (NUMBER), data:[] ⇒ honest complete:true,
+  // totalAvailable:0, truncated:false — a real no-match, distinct from the outage.
+  await withFetch(() => mockResponse({ status: 200, json: env([], 0) }), async () => {
+    const r = await runTool("treasury_debt_to_penny", { latest: false, startDate: "1900-01-01", endDate: "1900-12-31" }, sam);
+    const m = buildMeta(r.meta);
+    ok("40b genuine-empty ⇒ records:[] + totalAvailable:0 + complete:true + truncated:false (honest empty, not an outage)",
+      r.data.records.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false, JSON.stringify(m));
+  });
+
+  // (c) totalAvailable = the NUMBER total-count (8345), NOT the page length (1).
+  // NON-VACUITY: sourcing totalAvailable from env.data.length turns this RED (1≠8345).
+  await withFetch(() => mockResponse({ status: 200, json: env([debtRow()], 8345) }), async () => {
+    const r = await runTool("treasury_debt_to_penny", { latest: true }, sam);
+    const m = buildMeta(r.meta);
+    ok("40c totalAvailable === total-count 8345 (NUMBER), NOT data.length 1 (reading data.length ⇒ RED)",
+      m.totalAvailable === 8345 && m.returned === 1, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    ok("40c page(1)<total(8345) ⇒ truncated + hasMore + nextOffset:1 + complete:false",
+      m.truncated === true && m.pagination.hasMore === true && m.pagination.nextOffset === 1 && m.complete === false, JSON.stringify(m.pagination));
+    // The amount string coerces to a NUMBER (F2/F3), never left as a string.
+    ok("40c amount string coerced to number (F2/F3): tot_pub_debt_out_amt '…05' ⇒ 39394977645639.05",
+      r.data.records[0].totalPublicDebtOutstanding === 39394977645639.05, JSON.stringify(r.data.records[0]));
+  });
+
+  // (d) PAGINATION — mid page then last page. page[size]=100, total-count 8345.
+  const rows = (n) => Array.from({ length: n }, (_, i) => debtRow(`2026-01-${String((i % 28) + 1).padStart(2, "0")}`));
+  await withFetch(() => mockResponse({ status: 200, json: env(rows(100), 8345) }), async () => {
+    const r = await runTool("treasury_query_dataset", { dataset: "debt_to_penny", pageNumber: 2, pageSize: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("40d MID page (pageNumber 2, size 100) ⇒ offset 100, hasMore true, nextOffset 200, returned 100",
+      m.pagination.offset === 100 && m.pagination.hasMore === true && m.pagination.nextOffset === 200 && m.returned === 100, JSON.stringify(m.pagination));
+  });
+  await withFetch(() => mockResponse({ status: 200, json: env(rows(45), 8345) }), async () => {
+    const r = await runTool("treasury_query_dataset", { dataset: "debt_to_penny", pageNumber: 84, pageSize: 100 }, sam);
+    const m = buildMeta(r.meta);
+    // offset 8300 + returned 45 === 8345 === total ⇒ end of pages (hasMore false,
+    // nextOffset null). complete stays FALSE (one page of 45 ≠ all 8345 records).
+    ok("40d LAST page (pageNumber 84) ⇒ offset 8300, hasMore false, nextOffset null (end of pages)",
+      m.pagination.offset === 8300 && m.pagination.hasMore === false && m.pagination.nextOffset === null, JSON.stringify(m.pagination));
+  });
+
+  // (e) num() — the HONESTY-CRITICAL coercion (F3). "" is the trap: Number("") is 0.
+  eq('40e num("null") ⇒ null (not 0)', treasuryNum("null"), null);
+  eq('40e num("") ⇒ null (CRITICAL: Number("") is 0, so this MUST be caught)', treasuryNum(""), null);
+  eq('40e num("(-)") ⇒ null (Treasury "not applicable" placeholder)', treasuryNum("(-)"), null);
+  eq('40e num(null) ⇒ null', treasuryNum(null), null);
+  eq('40e num("37637553494935.61") ⇒ 37637553494935.61 (numeric string parses)', treasuryNum("37637553494935.61"), 37637553494935.61);
+  ok('40e num(78400.0) ⇒ 78400 (finite number passes through)', treasuryNum(78400.0) === 78400.0, String(treasuryNum(78400.0)));
+  eq('40e num("  ") ⇒ null (whitespace trims to "" ⇒ null, not 0)', treasuryNum("  "), null);
+  eq('40e num("abc") ⇒ null (non-numeric string, never NaN/0)', treasuryNum("abc"), null);
+
+  // (f) MTS summary-row exclusion (F4). excludeSummaryRows:true sends the
+  // server-side filter current_month_gross_outly_amt:gt:0; :false does not, and
+  // an included parent/summary row maps to null amounts (never 0).
+  const mtsEnv = env([{ record_date: "2026-05-31", classification_desc: "June", parent_id: "58528532", line_code_nbr: "100", current_month_gross_rcpt_amt: "526445351756.97", current_month_gross_outly_amt: "499435701746.96", current_month_dfct_sur_amt: "-27009650010.01" }], 100);
+  await withFetch(() => mockResponse({ status: 200, json: mtsEnv }), async (calls) => {
+    await runTool("treasury_monthly_statement", { startDate: "2026-01-31", excludeSummaryRows: true, pageSize: 5 }, sam);
+    const url = decodeURIComponent(calls[0].url);
+    ok("40f MTS excludeSummaryRows:true ⇒ server-side filter current_month_gross_outly_amt:gt:0 is sent (F4)",
+      url.includes("current_month_gross_outly_amt:gt:0"), url);
+  });
+  await withFetch(() => mockResponse({ status: 200, json: mtsEnv }), async (calls) => {
+    await runTool("treasury_monthly_statement", { startDate: "2026-01-31", excludeSummaryRows: false, pageSize: 5 }, sam);
+    const url = decodeURIComponent(calls[0].url);
+    ok("40f MTS excludeSummaryRows:false ⇒ NO outlay>0 filter (non-vacuity for the default's presence)",
+      !url.includes("current_month_gross_outly_amt:gt:0"), url);
+  });
+  const mtsWithParent = env([
+    { record_date: "2026-05-31", classification_desc: "FY 2025", parent_id: "null", line_code_nbr: "10", current_month_gross_rcpt_amt: "null", current_month_gross_outly_amt: "null", current_month_dfct_sur_amt: "null" },
+    { record_date: "2026-05-31", classification_desc: "June", parent_id: "58528532", line_code_nbr: "100", current_month_gross_rcpt_amt: "526445351756.97", current_month_gross_outly_amt: "499435701746.96", current_month_dfct_sur_amt: "-27009650010.01" },
+  ], 2);
+  await withFetch(() => mockResponse({ status: 200, json: mtsWithParent }), async () => {
+    const r = await runTool("treasury_monthly_statement", { startDate: "2026-05-01", excludeSummaryRows: false, pageSize: 5 }, sam);
+    const summary = r.data.records[0];
+    const child = r.data.records[1];
+    ok("40f included summary row ⇒ all amounts null (NOT 0) — data-absence honesty (F3/F4)",
+      summary.grossOutlays === null && summary.grossReceipts === null && summary.deficitSurplus === null, JSON.stringify(summary));
+    ok("40f child row ⇒ real numbers incl. negative deficit (non-vacuity: mapper doesn't null everything)",
+      child.grossOutlays === 499435701746.96 && child.deficitSurplus === -27009650010.01, JSON.stringify(child));
+  });
+
+  // (g) SCHEMA DRIFT — total-count as a STRING (F1 says it's a NUMBER) ⇒ the
+  // getTreasury guard throws schema_drift rather than silently mis-deriving meta.
+  await withFetch(() => mockResponse({ status: 200, json: { data: [], meta: { count: "0", "total-count": "0", "total-pages": "0" } } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
+    ok("40g total-count as STRING (drift) ⇒ throws schema_drift (F1 number-typing guard, not a silent mis-parse)",
+      threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -5874,6 +6002,7 @@ async function main() {
   await testTeamingMostRecentAwardDate();
   await testNaicsHierarchy();
   await testRegistryDispatchHonesty();
+  await testTreasuryHonesty();
 
   // Prove the harness bites.
   await selfCheck();

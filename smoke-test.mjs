@@ -572,6 +572,63 @@ const tests = [
           d.decisionUrl.includes("gao.gov/products"),
       ),
   },
+  // ━━━ US Treasury — Fiscal Data (keyless) (ADR-0002)
+  {
+    // Debt to the Penny, latest day. One record; amounts coerced to numbers
+    // (num()), never left as the upstream string and never 0.
+    name: "treasury_debt_to_penny",
+    args: { latest: true },
+    verify: (r) =>
+      Array.isArray(r.records) &&
+      r.records.length === 1 &&
+      typeof r.records[0].recordDate === "string" &&
+      typeof r.records[0].totalPublicDebtOutstanding === "number" &&
+      r.records[0].totalPublicDebtOutstanding > 0,
+  },
+  {
+    // Avg interest rates, latest month's full breakdown across security types.
+    // Each row carries a securityType and a numeric (or null) percent — never 0
+    // for a missing value.
+    name: "treasury_avg_interest_rates",
+    args: { latest: true },
+    verify: (r) =>
+      Array.isArray(r.records) &&
+      r.records.length >= 1 &&
+      r.records.every(
+        (x) =>
+          typeof x.securityType === "string" &&
+          (x.avgInterestRatePercent === null ||
+            typeof x.avgInterestRatePercent === "number"),
+      ) &&
+      r.records.some((x) => typeof x.avgInterestRatePercent === "number"),
+  },
+  {
+    // MTS receipts/outlays/deficit. Default excludeSummaryRows drops the
+    // null-amount fiscal-year parent rows (F4) server-side, so every returned
+    // child row has a positive numeric grossOutlays.
+    name: "treasury_monthly_statement",
+    args: { startDate: "2026-01-31", pageSize: 5 },
+    verify: (r) =>
+      Array.isArray(r.records) &&
+      r.records.length >= 1 &&
+      r.records.every(
+        (x) =>
+          typeof x.grossOutlays === "number" &&
+          x.grossOutlays > 0 &&
+          (x.deficitSurplus === null || typeof x.deficitSurplus === "number"),
+      ),
+  },
+  {
+    // Generic escape hatch over the enum'd datasets (here rates_of_exchange).
+    // Raw rows pass through; the dataset key is echoed back.
+    name: "treasury_query_dataset",
+    args: { dataset: "rates_of_exchange", sort: "-record_date", pageSize: 3 },
+    verify: (r) =>
+      r.dataset === "rates_of_exchange" &&
+      Array.isArray(r.rows) &&
+      r.rows.length >= 1 &&
+      r.rows.every((row) => typeof row.country_currency_desc === "string"),
+  },
 ];
 
 function pickPath(obj, path) {
