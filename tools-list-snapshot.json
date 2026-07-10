@@ -824,6 +824,109 @@
     }
   },
   {
+    "name": "socrata_discover_datasets",
+    "description": "Find Socrata dataset 4x4 ids by keyword via the Socrata catalog (keyless, api.us.socrata.com). Input `q` (e.g. 'procurement', 'vendor payments'), optional `domain` (scope to one allowlisted portal; omit to search the whole allowlist), `limit` (≤100, def 20). Returns [{ id, name, description, domain, updatedAt, link }] + totalAvailable = the catalog resultSetSize. Feed a result's `id` to socrata_query as `datasetId`. NOTE: the federated catalog does not index every allowlisted host (e.g. USAC E-rate) — those stay queryable via socrata_query with a known 4x4.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "q": {
+          "type": "string",
+          "description": "Keyword(s) to find datasets, e.g. 'procurement', 'vendor payments', 'checkbook'."
+        },
+        "domain": {
+          "type": "string",
+          "enum": [
+            "data.ny.gov",
+            "data.colorado.gov",
+            "data.ct.gov",
+            "data.texas.gov",
+            "data.wa.gov",
+            "opendata.maryland.gov",
+            "data.vermont.gov",
+            "data.nj.gov",
+            "data.oregon.gov",
+            "data.pa.gov",
+            "data.mo.gov",
+            "data.delaware.gov",
+            "opendata.usac.org"
+          ],
+          "description": "Optional: scope discovery to ONE allowlisted portal. Omit to search the whole allowlist. NOTE: the federated catalog does not index every host (e.g. USAC E-rate returns 0) — those remain queryable via socrata_query with a known 4x4."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max datasets to return, 1..100, default 20."
+        }
+      },
+      "required": [
+        "q"
+      ]
+    }
+  },
+  {
+    "name": "socrata_query",
+    "description": "Query rows from an allowlisted Socrata/SODA open-data portal (keyless; ~a dozen US state portals + USAC E-rate on one identical API — state spend/checkbook/contract/vendor-payment datasets). Input `domain` (curated allowlist enum — the SSRF host guard), `datasetId` (4x4, from socrata_discover_datasets), optional SoQL `select`/`where`/`order`/`q`, `limit` (≤1000, def 100), `offset`, `withTotal` (def true). HONESTY: SODA's row response has no total, so a count(*) companion supplies an exact totalAvailable; if it fails the rows still return with totalAvailable:null + a note (hasMore is then inferred from page-fill, never a false complete). Genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). Value fields are strings.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string",
+          "enum": [
+            "data.ny.gov",
+            "data.colorado.gov",
+            "data.ct.gov",
+            "data.texas.gov",
+            "data.wa.gov",
+            "opendata.maryland.gov",
+            "data.vermont.gov",
+            "data.nj.gov",
+            "data.oregon.gov",
+            "data.pa.gov",
+            "data.mo.gov",
+            "data.delaware.gov",
+            "opendata.usac.org"
+          ],
+          "description": "Which allowlisted Socrata portal to query (curated .gov hosts + USAC E-rate .org; the SSRF host allowlist — no free host). e.g. data.ny.gov, data.texas.gov, data.wa.gov, opendata.usac.org."
+        },
+        "datasetId": {
+          "type": "string",
+          "description": "The dataset's Socrata 4x4 id, e.g. 'kwxv-fwze' (from socrata_discover_datasets). Exactly [a-z0-9]{4}-[a-z0-9]{4} (9 chars; no surrounding whitespace)."
+        },
+        "select": {
+          "type": "string",
+          "description": "Optional SoQL $select (column projection / aggregate), e.g. 'agency,SUM(amount)'."
+        },
+        "where": {
+          "type": "string",
+          "description": "Optional SoQL $where filter, e.g. \"fiscal_year='2024' AND amount>1000\". A bad column ⇒ upstream HTTP 400 ⇒ invalid_input (surfaced, never silent)."
+        },
+        "order": {
+          "type": "string",
+          "description": "Optional SoQL $order, e.g. 'amount DESC'."
+        },
+        "q": {
+          "type": "string",
+          "description": "Optional SoQL $q full-text search across the row."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page ($limit), 1..1000, default 100."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset ($offset) for pagination, default 0."
+        },
+        "withTotal": {
+          "type": "boolean",
+          "description": "true (default) ⇒ issue a count(*) companion query so totalAvailable is exact. false ⇒ skip it (one fewer request); totalAvailable is null and a note discloses results may be truncated at $limit."
+        }
+      },
+      "required": [
+        "domain",
+        "datasetId"
+      ]
+    }
+  },
+  {
     "name": "treasury_avg_interest_rates",
     "description": "Average interest rate the US Treasury pays by security type/description (keyless Treasury Fiscal Data). Returns record_date, securityType, securityDescription, avgInterestRatePercent (percent, number|null). `latest` (default true) returns the most-recent month's full breakdown across security types (pinned to the latest record_date, memoized 5 min); set latest=false with startDate/endDate for a range. Optional `securityType` narrows by exact security_type_desc (e.g. 'Marketable', 'Non-marketable').",
     "inputSchema": {
