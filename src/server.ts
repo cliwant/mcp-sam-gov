@@ -905,24 +905,27 @@ const TOOLS: ToolDef[] = [
   },
 
   // ━━━ USAspending — Awards & Recipients (10) ━━━
-  {
+  defineTool({
     name: "usas_search_awards",
     description:
       "Aggregate share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns top recipients by total $ + count. Use for competitive landscape ('who wins at VA in 541512?').",
     inputSchema: UsasFiltersBase,
-  },
-  {
+    handler: (input) => usas.searchAwards(input),
+  }),
+  defineTool({
     name: "usas_search_individual_awards",
     description:
       "Line-item federal contracts on USAspending. Returns specific awards (recipient + $ + sub-agency + state + description). Use AFTER usas_search_awards when the user wants 'show me the actual contracts'. Each result includes a generatedInternalId for usas_get_award_detail follow-ups.",
     inputSchema: UsasIndividualAwardsInput,
-  },
-  {
+    handler: (input) => usas.searchIndividualAwards(input),
+  }),
+  defineTool({
     name: "usas_search_subagency_spending",
     description:
       "Break down a parent agency's spending by sub-agency / office. Surfaces which office holds the budget (e.g. VA OI&T vs VHA, DoD vs Army vs DISA).",
     inputSchema: UsasSubAgencyInput,
-  },
+    handler: (input) => usas.searchSubAgencySpending(input),
+  }),
   defineTool({
     name: "usas_lookup_agency",
     description:
@@ -930,30 +933,34 @@ const TOOLS: ToolDef[] = [
     inputSchema: UsasLookupAgencyInput,
     handler: (input) => usas.lookupAgency(input.searchText),
   }),
-  {
+  defineTool({
     name: "usas_search_awards_by_recipient",
     description:
       "Pull every contract a specific recipient has won within an agency × NAICS slice. Use when the user asks 'show me Booz Allen wins at VA last year' — returns line items + naicsCode + description, not aggregates.",
     inputSchema: UsasRecipientAwardsInput,
-  },
-  {
+    handler: (input) => usas.searchAwardsByRecipient(input),
+  }),
+  defineTool({
     name: "usas_search_subawards",
     description:
       "Enumerate subcontracts on prime awards. Use for 'who teams with Leidos at DISA' or 'show small-business subs on Accenture's DHS contracts' — surfaces the prime/sub network for teaming-map artifacts.",
     inputSchema: UsasSubawardsInput,
-  },
-  {
+    handler: (input) => usas.searchSubawards(input),
+  }),
+  defineTool({
     name: "usas_search_recompetes",
     description:
       "Recompete radar — federal contracts whose CURRENT period of performance ends inside a window around today (default -90d .. +18mo), sorted soonest-first. Use for 'what VA 541512 contracts are up for recompete in the next 18 months'. Reads the current PoP end date directly from spending_by_award (no per-award enrichment), counts (never drops) rows with missing end dates, and flags in _meta when the scan budget truncates the window (totalAvailable becomes null). Filter by agency/naics/pscCodes/setAside/minAwardValue; set includePotentialEnd for option-inclusive end dates. Public signals only — no CPARS/protest/option-intent, no composite vulnerability score.",
     inputSchema: UsasRecompetesInput,
-  },
-  {
+    handler: (input) => usas.searchRecompetes(input),
+  }),
+  defineTool({
     name: "usas_search_expiring_contracts",
     description:
       "DEPRECATED — use usas_search_recompetes. Thin backward-compatible alias: finds contracts at agency × NAICS expiring within N months and returns the legacy { contracts, searchedCount } shape. New callers should use usas_search_recompetes for the full window/pagination controls and truthful completeness metadata.",
     inputSchema: UsasExpiringInput,
-  },
+    handler: (input) => usas.searchExpiringContracts(input),
+  }),
   defineTool({
     name: "usas_get_award_detail",
     description:
@@ -961,12 +968,13 @@ const TOOLS: ToolDef[] = [
     inputSchema: UsasAwardDetailInput,
     handler: (input) => usas.getAwardDetail(input.generatedInternalId),
   }),
-  {
+  defineTool({
     name: "usas_analyze_incumbent",
     description:
       "Per-award incumbent + PUBLIC recompete-pressure analysis for ONE award (generatedInternalId). Assembles the incumbent identity, the vehicle/IDV linkage, and individual PUBLIC pressure SIGNALS — obligated-vs-ceiling consumption (pctConsumed), modification count (lower-bounded), competition extent + number of offers, set-aside, days to the current PoP end, and option-extendable days — plus, optionally, the incumbent's other awards in the same agency×NAICS. Bounded & keyless: at most 3 upstream calls (detail + 1 transactions page + 1 recipient search), no per-record fan-out. Emits pressureHints ('single_offer', 'ceiling_nearly_exhausted', 'hard_stop_no_options') as HINTS, NEVER a composite vulnerability score — CPARS/past-performance, protest history, and option-exercise intent are not public (declared in _meta.fieldsUnavailable).",
     inputSchema: UsasAnalyzeIncumbentInput,
-  },
+    handler: (input) => usas.analyzeIncumbent(input),
+  }),
 
   // ━━━ USAspending — Aggregate Analysis (6) ━━━
   {
@@ -1854,30 +1862,6 @@ export async function runTool(
     case "sam_lookup_notice_fields":
       return await gsaCsv.lookupNoticeFields(
         SamLookupNoticeFieldsInput.parse(args),
-      );
-
-    // USAspending — Awards & Recipients
-    case "usas_search_awards":
-      return await usas.searchAwards(UsasFiltersBase.parse(args));
-    case "usas_search_individual_awards":
-      return await usas.searchIndividualAwards(
-        UsasIndividualAwardsInput.parse(args),
-      );
-    case "usas_search_subagency_spending":
-      return await usas.searchSubAgencySpending(UsasSubAgencyInput.parse(args));
-    case "usas_search_awards_by_recipient":
-      return await usas.searchAwardsByRecipient(
-        UsasRecipientAwardsInput.parse(args),
-      );
-    case "usas_search_subawards":
-      return await usas.searchSubawards(UsasSubawardsInput.parse(args));
-    case "usas_search_recompetes":
-      return await usas.searchRecompetes(UsasRecompetesInput.parse(args));
-    case "usas_search_expiring_contracts":
-      return await usas.searchExpiringContracts(UsasExpiringInput.parse(args));
-    case "usas_analyze_incumbent":
-      return await usas.analyzeIncumbent(
-        UsasAnalyzeIncumbentInput.parse(args),
       );
 
     // USAspending — Aggregate
