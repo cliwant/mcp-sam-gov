@@ -855,30 +855,452 @@ function defineTool<I>(d: {
 
 const TOOLS: ToolDef[] = [
   // ━━━ SAM.gov (8) ━━━
-  {
+  defineTool({
     name: "sam_search_opportunities",
     description:
       "Search SAM.gov federal contracting opportunities (keyless HAL). Returns up to 50 active notices with title, agency, NAICS, noticeId. Use for discovery — narrow with NAICS / agency / set-aside / state.",
     inputSchema: SamSearchInput,
-  },
-  {
+    handler: async (input, { sam }) => {
+      const r = await sam.searchOpportunities({
+        ...input,
+        setAside: input.setAside as SamSetAside[] | undefined,
+      });
+      // OUTAGE HONESTY (C19). r.degraded is set ONLY when EVERY access tier
+      // threw (HAL down / network / 5xx-after-retry) — a total outage, NOT a
+      // confirmed zero. searchOpportunities otherwise returns the real result
+      // (incl. a genuine 0). Emit an explicitly-incomplete `_meta`: we do NOT
+      // know the count (totalAvailable:null, NEVER 0), the source is flagged
+      // degraded, the data count is null (not a fake 0 that reads as a real
+      // count), and a note tells the AI to retry rather than conclude "no
+      // matching notices". The genuine-zero + healthy paths below are UNCHANGED.
+      if (r.degraded) {
+        return withMeta(
+          {
+            totalRecords: null,
+            returned: 0,
+            opportunities: [],
+          },
+          {
+            source:
+              "sam.gov/sgs/v1 (keyless HAL) (DEGRADED — search backend unavailable)",
+            keylessMode: sam.isKeyless,
+            complete: false,
+            totalAvailable: null,
+            returned: 0,
+            filtersApplied: [],
+            filtersDropped: [],
+            fieldsUnavailable: [],
+            notes: [
+              r.degraded.reason +
+                " This is a service outage, not a confirmed zero — retry.",
+            ],
+          },
+        );
+      }
+      const data = {
+        totalRecords: r.totalRecords,
+        returned: r.opportunitiesData.length,
+        opportunities: r.opportunitiesData.map((o) => ({
+          noticeId: o.noticeId,
+          title: o.title,
+          agency: o.fullParentPathName,
+          solicitationNumber: o.solicitationNumber,
+          responseDeadline: o.responseDeadLine,
+          naics: o.naicsCode,
+          setAside: o.typeOfSetAside,
+          uiLink: o.uiLink,
+        })),
+      };
+      // A1 — filter honesty. Contrary to the earlier assumption, the keyless
+      // HAL list endpoint DOES honor the structured facets server-side —
+      // VERIFIED LIVE (2026-07): `naics`, `set_aside`, `pop_state` and `q` each
+      // narrow the result set AND every returned notice's detail matches the
+      // filter (the earlier "ignores facets" reading tested the WRONG param
+      // name `ncode`, which is silently dropped; the real param is `naics`).
+      // The one facet with no keyless param is organization-name (ignored).
+      // Separately, the list PAYLOAD still omits each notice's
+      // naics/set-aside/place-of-performance VALUES (null even when the filter
+      // applied), so filtering is real but reading those field values needs
+      // sam_get_opportunity. See spec §1.2 A1, §2.4.
+      if (sam.isKeyless) {
+        // NOTE: these truthiness checks must mirror EXACTLY the conditions under
+        // which client.searchPublic() actually appends each param (it uses
+        // `if (filters.x)` / `filters.setAside?.length`). Using `!== undefined`
+        // here would over-report: an empty-string facet is not sent by the
+        // client, so it must not appear in filtersApplied.
+        const filtersApplied: string[] = [];
+        if (input.query) filtersApplied.push("query");
+        if (input.ncode) filtersApplied.push("ncode");
+        if ((input.setAside?.length ?? 0) > 0) filtersApplied.push("setAside");
+        if (input.state) filtersApplied.push("state");
+        // organization-name is the only requested facet the keyless endpoint
+        // cannot honor — flag it dropped so results aren't read as org-filtered.
+        const filtersDropped = input.organizationName
+          ? ["organizationName"]
+          : [];
+
+        // ── GSA-CSV inline enrichment (opt-in, non-blocking) ──────────────
+        // The keyless HAL list payload nulls each row's naics/setAside/PoP/
+        // deadline/type. When the GSA-CSV backbone is ENABLED and its index is
+        // already warm, fill those nulls from today's snapshot in ONE lookup —
+        // instead of N sam_get_opportunity detail calls. HARD guarantees:
+        //   - DISABLED (default) → resolveCsvConfig().enabled is false, so we
+        //     never enter this branch: `data`, fieldsUnavailable and notes are
+        //     byte-for-byte the pre-enrichment behavior, and ZERO network hits
+        //     the CSV.
+        //   - NON-BLOCKING → tryGetReadyIndex returns the already-loaded index
+        //     or null immediately (kicking a background warm); a cold CSV NEVER
+        //     stalls the search on a 225 MB download.
+        //   - A CSV error can't fail the search: tryGetReadyIndex swallows and
+        //     returns null → we degrade to the un-enriched page + a note.
+        const csvCfg = gsaCsv.resolveCsvConfig();
+        // Widen the opportunities element type so the enriched rows (which may
+        // carry the added type/placeOfPerformance keys) are assignable; the
+        // original `data` (narrower) widens into this cleanly.
+        let enrichedData: {
+          totalRecords: number;
+          returned: number;
+          opportunities: gsaCsv.SearchOppRow[];
+        } = data;
+        // The fields still null after enrichment (rebuilt truthfully below).
+        let fieldsUnavailable = ["naics", "setAside", "placeOfPerformance"];
+        const enrichmentNotes: string[] = [];
+        let source = "sam.gov/sgs/v1 (keyless HAL)";
+        let freshness: unknown = undefined;
+
+        if (csvCfg.enabled) {
+          const ready = data.returned > 0 ? gsaCsv.tryGetReadyIndex(csvCfg) : null;
+          if (ready) {
+            const outcome = gsaCsv.enrichSearchOpportunities(
+              enrichedData.opportunities,
+              ready,
+            );
+            enrichedData = { ...data, opportunities: outcome.opportunities };
+            freshness = outcome.freshness;
+            source = "sam.gov/sgs/v1 (keyless HAL) + gsa-csv (daily bulk CSV snapshot)";
+
+            // Rebuild fieldsUnavailable: a field is only "unavailable" if it was
+            // NOT filled on the whole page. Fields filled from the CSV drop off.
+            // (naics/setAside/placeOfPerformance are the originally-null trio.)
+            fieldsUnavailable = ["naics", "setAside", "placeOfPerformance"].filter(
+              (f) => !outcome.fieldsFilled.has(f),
+            );
+
+            const filledList = [...outcome.fieldsFilled];
+            if (filledList.length > 0) {
+              enrichmentNotes.push(
+                `naics/set-aside/place-of-performance for results present in today's GSA CSV snapshot were enriched from the GSA daily bulk CSV (source: gsa-csv) — filled fields this page: ${filledList.join(", ")}. set-aside here is the CSV short code (e.g. 'SBA') that matches sam_get_opportunity's setAside. Confirm real-time values (e.g. a just-amended deadline) with sam_get_opportunity.`,
+              );
+            } else {
+              enrichmentNotes.push(
+                "GSA-CSV enrichment ran but filled no fields on this page (the matched snapshot rows carried no non-empty naics/set-aside/place-of-performance) — values remain null; fetch sam_get_opportunity.",
+              );
+            }
+            if (outcome.missingCount > 0) {
+              enrichmentNotes.push(
+                `${outcome.missingCount} of ${data.returned} results were not in the current CSV snapshot (too new or archived) — their naics/set-aside/PoP remain null; fetch sam_get_opportunity for those noticeIds.`,
+              );
+            }
+            enrichmentNotes.push(
+              `GSA CSV freshness — snapshot last-modified: ${outcome.freshness.csvLastModified ?? "unknown"}; index built: ${outcome.freshness.indexBuiltAt}; index age: ${outcome.freshness.indexAgeHours ?? "unknown"}h. The snapshot can lag the live HAL by up to ~24h.`,
+            );
+          } else if (data.returned > 0) {
+            // Enabled, rows exist that COULD be enriched, but the index isn't
+            // warm yet (cold cache / background refresh in flight). Return the
+            // normal HAL page un-enriched and disclose the pending warm — never
+            // block on the download. Gated on returned>0: on a genuinely-empty
+            // (returned===0) page there are NO rows to enrich, so a "retry for an
+            // enriched page" note would be misleading — a retry cannot add rows.
+            // That case falls through with the plain un-enriched source/notes
+            // (the empty page is a complete, honest result).
+            source = "sam.gov/sgs/v1 (keyless HAL) + gsa-csv (index warming)";
+            enrichmentNotes.push(
+              "GSA-CSV enrichment pending — the CSV index is warming (a background download/build was kicked off); naics/set-aside/place-of-performance were NOT enriched this call. Retry shortly for an enriched page, or fetch sam_get_opportunity now.",
+            );
+          }
+        }
+
+        const notes: string[] = [];
+        if (filtersApplied.length > 0) {
+          notes.push(
+            "Keyless SAM search filtered server-side by the applied facets (NAICS/set-aside/place-of-performance state/keyword) — the result count reflects them. But the keyless list payload OMITS each notice's naics/setAside/placeOfPerformance VALUES (null here); call sam_get_opportunity on a noticeId to read those values.",
+          );
+        } else {
+          notes.push(
+            "naics/setAside/placeOfPerformance are null because the keyless list endpoint omits those values — call sam_get_opportunity for a notice to obtain them.",
+          );
+        }
+        if (filtersDropped.length > 0) {
+          notes.push(
+            "The organization-name filter is NOT supported by the keyless endpoint and was ignored (results are unfiltered on organization). Set SAM_GOV_API_KEY to filter by organization, or filter client-side on the returned `agency` field.",
+          );
+        }
+        notes.push(...enrichmentNotes);
+
+        // freshness is surfaced structurally in `data` (the ResponseMeta type
+        // has no typed freshness field, mirroring sam_lookup_notice_fields) —
+        // present only when enrichment actually ran.
+        const dataOut =
+          freshness !== undefined
+            ? { ...enrichedData, freshness }
+            : enrichedData;
+
+        return withMeta(dataOut, {
+          source,
+          keylessMode: true,
+          truncated: r.totalRecords > data.returned,
+          returned: data.returned,
+          totalAvailable: r.totalRecords,
+          filtersApplied,
+          filtersDropped,
+          fieldsUnavailable,
+          notes,
+        });
+      }
+      // Keyed path: api.sam.gov honors the structured filters and populates
+      // the fields, so nothing is dropped or unavailable.
+      return withMeta(data, {
+        source: "api.sam.gov/opportunities/v2 (keyed)",
+        keylessMode: false,
+        truncated: r.totalRecords > data.returned,
+        returned: data.returned,
+        totalAvailable: r.totalRecords,
+        filtersApplied: [],
+        filtersDropped: [],
+        fieldsUnavailable: [],
+      });
+    },
+  }),
+  defineTool({
     name: "sam_search_shaping",
     description:
       "PRE-SOLICITATION shaping radar (keyless HAL). Surfaces Sources Sought / Presolicitation / Special Notices BEFORE the RFP exists — the free, real-time analogue of paid agency-forecast feeds. Closes the pre-solicitation lifecycle gap: catch a requirement while it's still shapeable (submit capabilities, influence NAICS/set-aside/PWS). Defaults to noticeType ['r','p','s']; opt into k/i/u for combined-synopsis / intent-to-bundle / J&A tells. Each notice carries noticeTypeCode (rank r/p over s), postedDate, responseDeadline + daysUntilResponse (null when no deadline — counted, not hidden), and a uiLink. HONEST KEYLESS LIMITS: naics/setAside/placeOfPerformance are null in the list rows (call sam_get_opportunity(noticeId) for those); and a responseDeadlineFrom/To window is applied CLIENT-SIDE over the fetched page (the feed ignores rdlfrom/rdlto) and disclosed in _meta. data.totalRecords is the TRUE server-side count for the type+facet filter.",
     inputSchema: SamSearchShapingInput,
-  },
-  {
+    handler: async (input, { sam }) => {
+      // Default shaping window = Sources Sought + Presolicitation + Special
+      // Notice. These are the notice types that exist BEFORE an RFP — the
+      // whole point of the radar.
+      const noticeType = input.noticeType ?? ["r", "p", "s"];
+      const wantWindow =
+        input.responseDeadlineFrom !== undefined ||
+        input.responseDeadlineTo !== undefined;
+
+      // Map noticeType → filters.ptype so the client sends the keyless
+      // `notice_type` facet (server-side filter, VERIFIED LIVE). We deliberately
+      // do NOT pass responseDeadlineFrom/To to the client — the keyless feed
+      // IGNORES rdlfrom/rdlto, so the window is applied client-side below and
+      // disclosed. activeOnly is honored by searchPublic's is_active=true.
+      const r = await sam.searchOpportunities({
+        query: input.query,
+        ncode: input.ncode,
+        organizationName: input.organizationName,
+        state: input.state,
+        setAside: input.setAside as SamSetAside[] | undefined,
+        ptype: noticeType as SamProcurementType[],
+        limit: input.limit ?? 25,
+      });
+
+      // OUTAGE HONESTY (C19). r.degraded ⇒ the keyless feed was totally down
+      // (all tiers threw), NOT a genuine "no shaping notices". Emit an
+      // explicitly-incomplete `_meta` (complete:false, totalAvailable:null,
+      // degraded source, retry note) and a null data count instead of the
+      // silent "0 pre-solicitation notices, complete" lie. noticeTypesRequested
+      // is still echoed so the caller knows what was attempted. The genuine-zero
+      // path + the client-side response-deadline window disclosure below are
+      // UNCHANGED.
+      if (r.degraded) {
+        return withMeta(
+          {
+            totalRecords: null,
+            returned: 0,
+            noticeTypesRequested: noticeType,
+            notices: [],
+          },
+          {
+            source:
+              "sam.gov/api/prod/sgs/v1/search (keyless HAL, notice_type filter) (DEGRADED — search backend unavailable)",
+            keylessMode: true,
+            complete: false,
+            totalAvailable: null,
+            returned: 0,
+            filtersApplied: [],
+            filtersDropped: [],
+            fieldsUnavailable: [],
+            notes: [
+              r.degraded.reason +
+                " This is a service outage, not a confirmed zero — retry.",
+            ],
+          },
+        );
+      }
+
+      // Shape each keyless list row. naics/setAside/PoP are NULL in the keyless
+      // list payload (fieldsUnavailable) — NOT fabricated. noticeTypeCode
+      // (type.code) lets the AI rank r/p over s; daysUntilResponse is a whole-day
+      // count (null when no deadline — counted, not hidden).
+      const now = new Date();
+      const allNotices = r.opportunitiesData.map((o) => ({
+        noticeId: o.noticeId,
+        title: o.title,
+        noticeType: o.type ?? null, // type.value (human label)
+        noticeTypeCode: o.baseType ?? null, // type.code (r/p/s/…)
+        agency: o.fullParentPathName,
+        solicitationNumber: o.solicitationNumber,
+        postedDate: o.postedDate,
+        responseDeadline: o.responseDeadLine ?? null,
+        daysUntilResponse: daysUntilResponse(o.responseDeadLine, now),
+        naics: o.naicsCode, // null in keyless list rows
+        setAside: o.typeOfSetAside, // null in keyless list rows
+        uiLink: o.uiLink,
+      }));
+
+      // Response-deadline WINDOW — CLIENT-SIDE over the fetched page (the feed
+      // ignores rdlfrom/rdlto). A notice with no deadline is excluded from a
+      // windowed query. Disclosed via filtersDropped + a note below.
+      const notices = wantWindow
+        ? applyResponseDeadlineWindow(
+            allNotices,
+            input.responseDeadlineFrom,
+            input.responseDeadlineTo,
+          )
+        : allNotices;
+
+      const data = {
+        totalRecords: r.totalRecords, // TRUE server-side count for type+facets
+        returned: notices.length,
+        noticeTypesRequested: noticeType,
+        notices,
+      };
+
+      // _meta honesty. filtersApplied lists what the FEED honored server-side
+      // (mirror EXACTLY searchPublic's append conditions). Always: noticeType.
+      const filtersApplied: string[] = ["noticeType"];
+      if (input.query) filtersApplied.push("query");
+      if (input.ncode) filtersApplied.push("ncode");
+      if ((input.setAside?.length ?? 0) > 0) filtersApplied.push("setAside");
+      if (input.state) filtersApplied.push("state");
+
+      // filtersDropped: organization-name has NO keyless param (ignored), and a
+      // requested response-deadline window is applied client-side (feed ignores
+      // rdlfrom/rdlto) — both must be disclosed so the AI never treats the page
+      // as server-filtered on them.
+      const filtersDropped: string[] = [];
+      if (input.organizationName) filtersDropped.push("organizationName");
+      if (wantWindow) filtersDropped.push("responseDeadline");
+
+      const notes: string[] = [
+        "Pre-solicitation shaping radar: notice_type is filtered SERVER-SIDE by the keyless feed (r=Sources Sought, p=Presolicitation, s=Special Notice by default; k/i/u opt-in). totalRecords is the TRUE server-side count for the type+facet filter.",
+      ];
+      if (wantWindow) {
+        notes.push(
+          "response-deadline window applied client-side over the fetched page (the keyless feed ignores rdlfrom/rdlto); widen limit or narrow via NAICS/agency for completeness. Notices with no deadline are excluded from a windowed query.",
+        );
+      }
+      if (input.organizationName) {
+        notes.push(
+          "The organization-name filter is NOT supported by the keyless endpoint and was ignored (results are unfiltered on organization). Filter client-side on the returned `agency`, or set SAM_GOV_API_KEY.",
+        );
+      }
+      notes.push(
+        "naics/setAside/placeOfPerformance are null in the keyless list rows — call sam_get_opportunity(noticeId) for per-notice NAICS/set-aside/place-of-performance.",
+      );
+
+      // truncated when the server has more than we returned OR a client-side
+      // deadline window trimmed the page (either way the caller isn't seeing the
+      // complete in-scope set).
+      const truncated =
+        r.totalRecords > data.returned ||
+        (wantWindow && allNotices.length !== notices.length);
+
+      return withMeta(data, {
+        source:
+          "sam.gov/api/prod/sgs/v1/search (keyless HAL, notice_type filter)",
+        keylessMode: true,
+        truncated,
+        returned: data.returned,
+        totalAvailable: r.totalRecords,
+        filtersApplied,
+        filtersDropped,
+        fieldsUnavailable: ["naics", "setAside", "placeOfPerformance"],
+        notes,
+      });
+    },
+  }),
+  defineTool({
     name: "sam_get_opportunity",
     description:
       "Fetch full detail for a single SAM.gov notice by 32-char hex noticeId. Returns title, agency, solicitation #, POCs, response deadline, attachments (with download URLs), inline description body. Call BEFORE drafting bid/no-bid or compliance work.",
     inputSchema: SamGetOpportunityInput,
-  },
-  {
+    handler: async (input, { sam }) => {
+      const { noticeId } = input;
+      const o = await sam.getOpportunity(noticeId);
+      if (!o) return { found: false, noticeId };
+      const data = {
+        found: true,
+        noticeId: o.noticeId,
+        title: o.title,
+        agency: o.fullParentPathName,
+        solicitationNumber: o.solicitationNumber,
+        responseDeadline: o.responseDeadLine,
+        type: o.type,
+        naics: o.naicsCode,
+        setAside: o.typeOfSetAside,
+        placeOfPerformance: o.placeOfPerformance,
+        pointsOfContact: o.pointOfContact ?? [],
+        description: o.description,
+        attachments: (o.resourceLinks ?? []).map((url, idx) => ({
+          index: idx,
+          url,
+        })),
+        uiLink: o.uiLink,
+      };
+      // A HEALTHY notice returns EXACTLY as before (plain object → the server
+      // synthesizes a default complete:true `_meta`) — no crying wolf. ONLY
+      // when an enrichment sub-fetch DEGRADED (an outage, not a genuine empty)
+      // do we attach a degraded `_meta` disclosing that the empty field is
+      // UNKNOWN, not confirmed-absent. One failing sub-fetch does not flag the
+      // other: notes carry exactly one entry per degraded bucket.
+      if (o.enrichmentDegraded?.length) {
+        const notes = o.enrichmentDegraded.map((bucket) =>
+          bucket === "attachments"
+            ? "The attachment list could not be fetched (a service issue) — this notice MAY have attachments not shown here; retry. This is NOT a confirmation it has none."
+            : "The awarding-organization path could not be resolved (a service issue) — it is unavailable here, not absent.",
+        );
+        return withMeta(data, {
+          source: sam.isKeyless ? "sam.gov (keyless)" : "api.sam.gov (keyed)",
+          keylessMode: sam.isKeyless,
+          complete: false,
+          degraded: {
+            attempted: o.enrichmentDegraded.length,
+            succeeded: 0,
+            failed: o.enrichmentDegraded.length,
+          },
+          notes,
+        });
+      }
+      return data;
+    },
+  }),
+  defineTool({
     name: "sam_fetch_description",
     description:
       "Return the full description / RFP body text for a notice as plain text. Useful when sam_get_opportunity returned a description URL instead of inline body, or for an LLM-friendly text dump.",
     inputSchema: SamFetchDescriptionInput,
-  },
+    handler: async (input, { sam }) => {
+      const { noticeId } = input;
+      const o = await sam.getOpportunity(noticeId);
+      if (!o) return { found: false, noticeId };
+      const text = o.description
+        ? await sam.fetchOpportunityDescription(o.description)
+        : "";
+      return {
+        found: true,
+        noticeId,
+        descriptionLength: text.length,
+        description: text || "(no description body available)",
+      };
+    },
+  }),
   defineTool({
     name: "sam_attachment_url",
     description:
@@ -895,12 +1317,93 @@ const TOOLS: ToolDef[] = [
     inputSchema: SamFetchAttachmentTextInput,
     handler: (input) => fetchAttachmentText(input),
   }),
-  {
+  defineTool({
     name: "sam_lookup_organization",
     description:
       "Resolve a SAM.gov federal-organization id to its canonical fullParentPathName (e.g. 'VETERANS AFFAIRS, DEPARTMENT OF.VETERANS AFFAIRS, DEPARTMENT OF.245-NETWORK CONTRACT OFFICE 5'). Use when sam_get_opportunity returned only an organizationId.",
     inputSchema: SamLookupOrgInput,
-  },
+    handler: async (input, { sam }) => {
+      const { organizationId } = input;
+      // SamGovClient internal method — exposed via direct fetch since
+      // it's not on the public surface. Use the public sam.gov endpoint
+      // directly (already keyless).
+      const orgUrl = `https://sam.gov/api/prod/federalorganizations/v1/organizations/${encodeURIComponent(organizationId)}`;
+      let r: Response;
+      try {
+        r = await fetch(orgUrl, {
+          headers: { Accept: "application/hal+json" },
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch (e) {
+        // A network-level fault (DNS, connection reset, timeout) is an OUTAGE, not
+        // absence — classify as retryable rather than letting it surface as the
+        // generic `unknown` (which an agent won't retry).
+        if (e instanceof ToolErrorCarrier) throw e;
+        throw new ToolErrorCarrier({
+          kind: "upstream_unavailable",
+          message: `SAM federalorganizations lookup for '${organizationId}' failed: ${(e as Error).message}. This is an outage, not a missing organization. Retry.`,
+          retryable: true,
+          retryAfterSeconds: 30,
+          upstreamEndpoint: "sam:federalorganizations",
+        });
+      }
+      if (!r.ok) {
+        // 404 = the organization genuinely does not exist → a real negative (the
+        // tool's found:false contract), NOT an error.
+        if (r.status === 404) {
+          return { found: false, organizationId, status: 404 };
+        }
+        // Every OTHER non-2xx is an upstream fault, not absence — classify via the
+        // shared errorFromResponse matrix (400/403→invalid_input non-retryable,
+        // 429→rate_limited with Retry-After, 5xx→upstream_unavailable retryable;
+        // carries upstreamStatus) so a down/blocking service is NEVER read as "org
+        // not found" (the fetch-failure-as-absent masquerade).
+        throw new ToolErrorCarrier(errorFromResponse(r, "sam:federalorganizations"));
+      }
+      // This endpoint signals a NONEXISTENT org id with a 200 + EMPTY body
+      // (live-verified 2026-07-06) — a genuine absence. Read text first so an
+      // empty/degraded body never crashes `r.json()` into a mislabeled `unknown`.
+      const orgText = await r.text();
+      if (!orgText.trim()) {
+        return { found: false, organizationId, status: 200 };
+      }
+      type Resp = {
+        _embedded?: {
+          org?: {
+            fullParentPathName?: string;
+            agencyName?: string;
+            name?: string;
+            type?: string;
+            level?: number;
+          };
+        }[];
+      };
+      let orgJson: Resp;
+      try {
+        orgJson = JSON.parse(orgText) as Resp;
+      } catch {
+        // A non-empty, non-JSON 200 (e.g. an HTML error/interstitial page from the
+        // CDN/WAF) is a DEGRADED response — do NOT fabricate found:false on garbage;
+        // surface it as schema_drift so the caller knows it's unconfirmed, not absent.
+        throw new ToolErrorCarrier({
+          kind: "schema_drift",
+          message: `SAM federalorganizations returned a 200 with a non-JSON body for '${organizationId}' — unexpected shape; cannot confirm whether the organization exists.`,
+          retryable: false,
+          upstreamEndpoint: "sam:federalorganizations",
+        });
+      }
+      const org = orgJson._embedded?.[0]?.org;
+      return {
+        found: !!org,
+        organizationId,
+        fullParentPathName: org?.fullParentPathName ?? "",
+        agencyName: org?.agencyName ?? "",
+        name: org?.name ?? "",
+        type: org?.type,
+        level: org?.level,
+      };
+    },
+  }),
   defineTool({
     name: "sam_lookup_notice_fields",
     description:
@@ -1369,528 +1872,18 @@ export async function runTool(
   args: Record<string, unknown>,
   sam: SamGovClient,
 ): Promise<unknown> {
-  // R1 (ADR-0001) — registry dispatch. If the tool's TOOLS[] entry carries a
-  // co-located `handler`, route through it: parse `args` with the entry's own
-  // schema, then call the handler. Its return value flows into CallTool's
-  // existing envelope logic (isMetaBundle? buildMeta : synthesizeDefaultMeta)
-  // byte-identically. Tools not yet migrated have no handler and fall through
-  // to the legacy `switch` below unchanged.
+  // R1 (ADR-0001) — registry dispatch. Every tool's TOOLS[] entry carries a
+  // co-located `handler`: route through it by parsing `args` with the entry's
+  // own schema, then calling the handler. Its return value flows into
+  // CallTool's existing envelope logic (isMetaBundle? buildMeta :
+  // synthesizeDefaultMeta) byte-identically. The legacy dispatch `switch` is
+  // gone (all 52 tools migrated) — an unknown name has no entry and throws.
   const entry = TOOLS.find((t) => t.name === name);
   if (entry?.handler) {
     const input = entry.inputSchema.parse(args);
     return await entry.handler(input, { sam });
   }
-  switch (name) {
-    // SAM.gov
-    case "sam_search_opportunities": {
-      const input = SamSearchInput.parse(args);
-      const r = await sam.searchOpportunities({
-        ...input,
-        setAside: input.setAside as SamSetAside[] | undefined,
-      });
-      // OUTAGE HONESTY (C19). r.degraded is set ONLY when EVERY access tier
-      // threw (HAL down / network / 5xx-after-retry) — a total outage, NOT a
-      // confirmed zero. searchOpportunities otherwise returns the real result
-      // (incl. a genuine 0). Emit an explicitly-incomplete `_meta`: we do NOT
-      // know the count (totalAvailable:null, NEVER 0), the source is flagged
-      // degraded, the data count is null (not a fake 0 that reads as a real
-      // count), and a note tells the AI to retry rather than conclude "no
-      // matching notices". The genuine-zero + healthy paths below are UNCHANGED.
-      if (r.degraded) {
-        return withMeta(
-          {
-            totalRecords: null,
-            returned: 0,
-            opportunities: [],
-          },
-          {
-            source:
-              "sam.gov/sgs/v1 (keyless HAL) (DEGRADED — search backend unavailable)",
-            keylessMode: sam.isKeyless,
-            complete: false,
-            totalAvailable: null,
-            returned: 0,
-            filtersApplied: [],
-            filtersDropped: [],
-            fieldsUnavailable: [],
-            notes: [
-              r.degraded.reason +
-                " This is a service outage, not a confirmed zero — retry.",
-            ],
-          },
-        );
-      }
-      const data = {
-        totalRecords: r.totalRecords,
-        returned: r.opportunitiesData.length,
-        opportunities: r.opportunitiesData.map((o) => ({
-          noticeId: o.noticeId,
-          title: o.title,
-          agency: o.fullParentPathName,
-          solicitationNumber: o.solicitationNumber,
-          responseDeadline: o.responseDeadLine,
-          naics: o.naicsCode,
-          setAside: o.typeOfSetAside,
-          uiLink: o.uiLink,
-        })),
-      };
-      // A1 — filter honesty. Contrary to the earlier assumption, the keyless
-      // HAL list endpoint DOES honor the structured facets server-side —
-      // VERIFIED LIVE (2026-07): `naics`, `set_aside`, `pop_state` and `q` each
-      // narrow the result set AND every returned notice's detail matches the
-      // filter (the earlier "ignores facets" reading tested the WRONG param
-      // name `ncode`, which is silently dropped; the real param is `naics`).
-      // The one facet with no keyless param is organization-name (ignored).
-      // Separately, the list PAYLOAD still omits each notice's
-      // naics/set-aside/place-of-performance VALUES (null even when the filter
-      // applied), so filtering is real but reading those field values needs
-      // sam_get_opportunity. See spec §1.2 A1, §2.4.
-      if (sam.isKeyless) {
-        // NOTE: these truthiness checks must mirror EXACTLY the conditions under
-        // which client.searchPublic() actually appends each param (it uses
-        // `if (filters.x)` / `filters.setAside?.length`). Using `!== undefined`
-        // here would over-report: an empty-string facet is not sent by the
-        // client, so it must not appear in filtersApplied.
-        const filtersApplied: string[] = [];
-        if (input.query) filtersApplied.push("query");
-        if (input.ncode) filtersApplied.push("ncode");
-        if ((input.setAside?.length ?? 0) > 0) filtersApplied.push("setAside");
-        if (input.state) filtersApplied.push("state");
-        // organization-name is the only requested facet the keyless endpoint
-        // cannot honor — flag it dropped so results aren't read as org-filtered.
-        const filtersDropped = input.organizationName
-          ? ["organizationName"]
-          : [];
-
-        // ── GSA-CSV inline enrichment (opt-in, non-blocking) ──────────────
-        // The keyless HAL list payload nulls each row's naics/setAside/PoP/
-        // deadline/type. When the GSA-CSV backbone is ENABLED and its index is
-        // already warm, fill those nulls from today's snapshot in ONE lookup —
-        // instead of N sam_get_opportunity detail calls. HARD guarantees:
-        //   - DISABLED (default) → resolveCsvConfig().enabled is false, so we
-        //     never enter this branch: `data`, fieldsUnavailable and notes are
-        //     byte-for-byte the pre-enrichment behavior, and ZERO network hits
-        //     the CSV.
-        //   - NON-BLOCKING → tryGetReadyIndex returns the already-loaded index
-        //     or null immediately (kicking a background warm); a cold CSV NEVER
-        //     stalls the search on a 225 MB download.
-        //   - A CSV error can't fail the search: tryGetReadyIndex swallows and
-        //     returns null → we degrade to the un-enriched page + a note.
-        const csvCfg = gsaCsv.resolveCsvConfig();
-        // Widen the opportunities element type so the enriched rows (which may
-        // carry the added type/placeOfPerformance keys) are assignable; the
-        // original `data` (narrower) widens into this cleanly.
-        let enrichedData: {
-          totalRecords: number;
-          returned: number;
-          opportunities: gsaCsv.SearchOppRow[];
-        } = data;
-        // The fields still null after enrichment (rebuilt truthfully below).
-        let fieldsUnavailable = ["naics", "setAside", "placeOfPerformance"];
-        const enrichmentNotes: string[] = [];
-        let source = "sam.gov/sgs/v1 (keyless HAL)";
-        let freshness: unknown = undefined;
-
-        if (csvCfg.enabled) {
-          const ready = data.returned > 0 ? gsaCsv.tryGetReadyIndex(csvCfg) : null;
-          if (ready) {
-            const outcome = gsaCsv.enrichSearchOpportunities(
-              enrichedData.opportunities,
-              ready,
-            );
-            enrichedData = { ...data, opportunities: outcome.opportunities };
-            freshness = outcome.freshness;
-            source = "sam.gov/sgs/v1 (keyless HAL) + gsa-csv (daily bulk CSV snapshot)";
-
-            // Rebuild fieldsUnavailable: a field is only "unavailable" if it was
-            // NOT filled on the whole page. Fields filled from the CSV drop off.
-            // (naics/setAside/placeOfPerformance are the originally-null trio.)
-            fieldsUnavailable = ["naics", "setAside", "placeOfPerformance"].filter(
-              (f) => !outcome.fieldsFilled.has(f),
-            );
-
-            const filledList = [...outcome.fieldsFilled];
-            if (filledList.length > 0) {
-              enrichmentNotes.push(
-                `naics/set-aside/place-of-performance for results present in today's GSA CSV snapshot were enriched from the GSA daily bulk CSV (source: gsa-csv) — filled fields this page: ${filledList.join(", ")}. set-aside here is the CSV short code (e.g. 'SBA') that matches sam_get_opportunity's setAside. Confirm real-time values (e.g. a just-amended deadline) with sam_get_opportunity.`,
-              );
-            } else {
-              enrichmentNotes.push(
-                "GSA-CSV enrichment ran but filled no fields on this page (the matched snapshot rows carried no non-empty naics/set-aside/place-of-performance) — values remain null; fetch sam_get_opportunity.",
-              );
-            }
-            if (outcome.missingCount > 0) {
-              enrichmentNotes.push(
-                `${outcome.missingCount} of ${data.returned} results were not in the current CSV snapshot (too new or archived) — their naics/set-aside/PoP remain null; fetch sam_get_opportunity for those noticeIds.`,
-              );
-            }
-            enrichmentNotes.push(
-              `GSA CSV freshness — snapshot last-modified: ${outcome.freshness.csvLastModified ?? "unknown"}; index built: ${outcome.freshness.indexBuiltAt}; index age: ${outcome.freshness.indexAgeHours ?? "unknown"}h. The snapshot can lag the live HAL by up to ~24h.`,
-            );
-          } else if (data.returned > 0) {
-            // Enabled, rows exist that COULD be enriched, but the index isn't
-            // warm yet (cold cache / background refresh in flight). Return the
-            // normal HAL page un-enriched and disclose the pending warm — never
-            // block on the download. Gated on returned>0: on a genuinely-empty
-            // (returned===0) page there are NO rows to enrich, so a "retry for an
-            // enriched page" note would be misleading — a retry cannot add rows.
-            // That case falls through with the plain un-enriched source/notes
-            // (the empty page is a complete, honest result).
-            source = "sam.gov/sgs/v1 (keyless HAL) + gsa-csv (index warming)";
-            enrichmentNotes.push(
-              "GSA-CSV enrichment pending — the CSV index is warming (a background download/build was kicked off); naics/set-aside/place-of-performance were NOT enriched this call. Retry shortly for an enriched page, or fetch sam_get_opportunity now.",
-            );
-          }
-        }
-
-        const notes: string[] = [];
-        if (filtersApplied.length > 0) {
-          notes.push(
-            "Keyless SAM search filtered server-side by the applied facets (NAICS/set-aside/place-of-performance state/keyword) — the result count reflects them. But the keyless list payload OMITS each notice's naics/setAside/placeOfPerformance VALUES (null here); call sam_get_opportunity on a noticeId to read those values.",
-          );
-        } else {
-          notes.push(
-            "naics/setAside/placeOfPerformance are null because the keyless list endpoint omits those values — call sam_get_opportunity for a notice to obtain them.",
-          );
-        }
-        if (filtersDropped.length > 0) {
-          notes.push(
-            "The organization-name filter is NOT supported by the keyless endpoint and was ignored (results are unfiltered on organization). Set SAM_GOV_API_KEY to filter by organization, or filter client-side on the returned `agency` field.",
-          );
-        }
-        notes.push(...enrichmentNotes);
-
-        // freshness is surfaced structurally in `data` (the ResponseMeta type
-        // has no typed freshness field, mirroring sam_lookup_notice_fields) —
-        // present only when enrichment actually ran.
-        const dataOut =
-          freshness !== undefined
-            ? { ...enrichedData, freshness }
-            : enrichedData;
-
-        return withMeta(dataOut, {
-          source,
-          keylessMode: true,
-          truncated: r.totalRecords > data.returned,
-          returned: data.returned,
-          totalAvailable: r.totalRecords,
-          filtersApplied,
-          filtersDropped,
-          fieldsUnavailable,
-          notes,
-        });
-      }
-      // Keyed path: api.sam.gov honors the structured filters and populates
-      // the fields, so nothing is dropped or unavailable.
-      return withMeta(data, {
-        source: "api.sam.gov/opportunities/v2 (keyed)",
-        keylessMode: false,
-        truncated: r.totalRecords > data.returned,
-        returned: data.returned,
-        totalAvailable: r.totalRecords,
-        filtersApplied: [],
-        filtersDropped: [],
-        fieldsUnavailable: [],
-      });
-    }
-    case "sam_search_shaping": {
-      const input = SamSearchShapingInput.parse(args);
-      // Default shaping window = Sources Sought + Presolicitation + Special
-      // Notice. These are the notice types that exist BEFORE an RFP — the
-      // whole point of the radar.
-      const noticeType = input.noticeType ?? ["r", "p", "s"];
-      const wantWindow =
-        input.responseDeadlineFrom !== undefined ||
-        input.responseDeadlineTo !== undefined;
-
-      // Map noticeType → filters.ptype so the client sends the keyless
-      // `notice_type` facet (server-side filter, VERIFIED LIVE). We deliberately
-      // do NOT pass responseDeadlineFrom/To to the client — the keyless feed
-      // IGNORES rdlfrom/rdlto, so the window is applied client-side below and
-      // disclosed. activeOnly is honored by searchPublic's is_active=true.
-      const r = await sam.searchOpportunities({
-        query: input.query,
-        ncode: input.ncode,
-        organizationName: input.organizationName,
-        state: input.state,
-        setAside: input.setAside as SamSetAside[] | undefined,
-        ptype: noticeType as SamProcurementType[],
-        limit: input.limit ?? 25,
-      });
-
-      // OUTAGE HONESTY (C19). r.degraded ⇒ the keyless feed was totally down
-      // (all tiers threw), NOT a genuine "no shaping notices". Emit an
-      // explicitly-incomplete `_meta` (complete:false, totalAvailable:null,
-      // degraded source, retry note) and a null data count instead of the
-      // silent "0 pre-solicitation notices, complete" lie. noticeTypesRequested
-      // is still echoed so the caller knows what was attempted. The genuine-zero
-      // path + the client-side response-deadline window disclosure below are
-      // UNCHANGED.
-      if (r.degraded) {
-        return withMeta(
-          {
-            totalRecords: null,
-            returned: 0,
-            noticeTypesRequested: noticeType,
-            notices: [],
-          },
-          {
-            source:
-              "sam.gov/api/prod/sgs/v1/search (keyless HAL, notice_type filter) (DEGRADED — search backend unavailable)",
-            keylessMode: true,
-            complete: false,
-            totalAvailable: null,
-            returned: 0,
-            filtersApplied: [],
-            filtersDropped: [],
-            fieldsUnavailable: [],
-            notes: [
-              r.degraded.reason +
-                " This is a service outage, not a confirmed zero — retry.",
-            ],
-          },
-        );
-      }
-
-      // Shape each keyless list row. naics/setAside/PoP are NULL in the keyless
-      // list payload (fieldsUnavailable) — NOT fabricated. noticeTypeCode
-      // (type.code) lets the AI rank r/p over s; daysUntilResponse is a whole-day
-      // count (null when no deadline — counted, not hidden).
-      const now = new Date();
-      const allNotices = r.opportunitiesData.map((o) => ({
-        noticeId: o.noticeId,
-        title: o.title,
-        noticeType: o.type ?? null, // type.value (human label)
-        noticeTypeCode: o.baseType ?? null, // type.code (r/p/s/…)
-        agency: o.fullParentPathName,
-        solicitationNumber: o.solicitationNumber,
-        postedDate: o.postedDate,
-        responseDeadline: o.responseDeadLine ?? null,
-        daysUntilResponse: daysUntilResponse(o.responseDeadLine, now),
-        naics: o.naicsCode, // null in keyless list rows
-        setAside: o.typeOfSetAside, // null in keyless list rows
-        uiLink: o.uiLink,
-      }));
-
-      // Response-deadline WINDOW — CLIENT-SIDE over the fetched page (the feed
-      // ignores rdlfrom/rdlto). A notice with no deadline is excluded from a
-      // windowed query. Disclosed via filtersDropped + a note below.
-      const notices = wantWindow
-        ? applyResponseDeadlineWindow(
-            allNotices,
-            input.responseDeadlineFrom,
-            input.responseDeadlineTo,
-          )
-        : allNotices;
-
-      const data = {
-        totalRecords: r.totalRecords, // TRUE server-side count for type+facets
-        returned: notices.length,
-        noticeTypesRequested: noticeType,
-        notices,
-      };
-
-      // _meta honesty. filtersApplied lists what the FEED honored server-side
-      // (mirror EXACTLY searchPublic's append conditions). Always: noticeType.
-      const filtersApplied: string[] = ["noticeType"];
-      if (input.query) filtersApplied.push("query");
-      if (input.ncode) filtersApplied.push("ncode");
-      if ((input.setAside?.length ?? 0) > 0) filtersApplied.push("setAside");
-      if (input.state) filtersApplied.push("state");
-
-      // filtersDropped: organization-name has NO keyless param (ignored), and a
-      // requested response-deadline window is applied client-side (feed ignores
-      // rdlfrom/rdlto) — both must be disclosed so the AI never treats the page
-      // as server-filtered on them.
-      const filtersDropped: string[] = [];
-      if (input.organizationName) filtersDropped.push("organizationName");
-      if (wantWindow) filtersDropped.push("responseDeadline");
-
-      const notes: string[] = [
-        "Pre-solicitation shaping radar: notice_type is filtered SERVER-SIDE by the keyless feed (r=Sources Sought, p=Presolicitation, s=Special Notice by default; k/i/u opt-in). totalRecords is the TRUE server-side count for the type+facet filter.",
-      ];
-      if (wantWindow) {
-        notes.push(
-          "response-deadline window applied client-side over the fetched page (the keyless feed ignores rdlfrom/rdlto); widen limit or narrow via NAICS/agency for completeness. Notices with no deadline are excluded from a windowed query.",
-        );
-      }
-      if (input.organizationName) {
-        notes.push(
-          "The organization-name filter is NOT supported by the keyless endpoint and was ignored (results are unfiltered on organization). Filter client-side on the returned `agency`, or set SAM_GOV_API_KEY.",
-        );
-      }
-      notes.push(
-        "naics/setAside/placeOfPerformance are null in the keyless list rows — call sam_get_opportunity(noticeId) for per-notice NAICS/set-aside/place-of-performance.",
-      );
-
-      // truncated when the server has more than we returned OR a client-side
-      // deadline window trimmed the page (either way the caller isn't seeing the
-      // complete in-scope set).
-      const truncated =
-        r.totalRecords > data.returned ||
-        (wantWindow && allNotices.length !== notices.length);
-
-      return withMeta(data, {
-        source:
-          "sam.gov/api/prod/sgs/v1/search (keyless HAL, notice_type filter)",
-        keylessMode: true,
-        truncated,
-        returned: data.returned,
-        totalAvailable: r.totalRecords,
-        filtersApplied,
-        filtersDropped,
-        fieldsUnavailable: ["naics", "setAside", "placeOfPerformance"],
-        notes,
-      });
-    }
-    case "sam_get_opportunity": {
-      const { noticeId } = SamGetOpportunityInput.parse(args);
-      const o = await sam.getOpportunity(noticeId);
-      if (!o) return { found: false, noticeId };
-      const data = {
-        found: true,
-        noticeId: o.noticeId,
-        title: o.title,
-        agency: o.fullParentPathName,
-        solicitationNumber: o.solicitationNumber,
-        responseDeadline: o.responseDeadLine,
-        type: o.type,
-        naics: o.naicsCode,
-        setAside: o.typeOfSetAside,
-        placeOfPerformance: o.placeOfPerformance,
-        pointsOfContact: o.pointOfContact ?? [],
-        description: o.description,
-        attachments: (o.resourceLinks ?? []).map((url, idx) => ({
-          index: idx,
-          url,
-        })),
-        uiLink: o.uiLink,
-      };
-      // A HEALTHY notice returns EXACTLY as before (plain object → the server
-      // synthesizes a default complete:true `_meta`) — no crying wolf. ONLY
-      // when an enrichment sub-fetch DEGRADED (an outage, not a genuine empty)
-      // do we attach a degraded `_meta` disclosing that the empty field is
-      // UNKNOWN, not confirmed-absent. One failing sub-fetch does not flag the
-      // other: notes carry exactly one entry per degraded bucket.
-      if (o.enrichmentDegraded?.length) {
-        const notes = o.enrichmentDegraded.map((bucket) =>
-          bucket === "attachments"
-            ? "The attachment list could not be fetched (a service issue) — this notice MAY have attachments not shown here; retry. This is NOT a confirmation it has none."
-            : "The awarding-organization path could not be resolved (a service issue) — it is unavailable here, not absent.",
-        );
-        return withMeta(data, {
-          source: sam.isKeyless ? "sam.gov (keyless)" : "api.sam.gov (keyed)",
-          keylessMode: sam.isKeyless,
-          complete: false,
-          degraded: {
-            attempted: o.enrichmentDegraded.length,
-            succeeded: 0,
-            failed: o.enrichmentDegraded.length,
-          },
-          notes,
-        });
-      }
-      return data;
-    }
-    case "sam_fetch_description": {
-      const { noticeId } = SamFetchDescriptionInput.parse(args);
-      const o = await sam.getOpportunity(noticeId);
-      if (!o) return { found: false, noticeId };
-      const text = o.description
-        ? await sam.fetchOpportunityDescription(o.description)
-        : "";
-      return {
-        found: true,
-        noticeId,
-        descriptionLength: text.length,
-        description: text || "(no description body available)",
-      };
-    }
-    case "sam_lookup_organization": {
-      const { organizationId } = SamLookupOrgInput.parse(args);
-      // SamGovClient internal method — exposed via direct fetch since
-      // it's not on the public surface. Use the public sam.gov endpoint
-      // directly (already keyless).
-      const orgUrl = `https://sam.gov/api/prod/federalorganizations/v1/organizations/${encodeURIComponent(organizationId)}`;
-      let r: Response;
-      try {
-        r = await fetch(orgUrl, {
-          headers: { Accept: "application/hal+json" },
-          signal: AbortSignal.timeout(10_000),
-        });
-      } catch (e) {
-        // A network-level fault (DNS, connection reset, timeout) is an OUTAGE, not
-        // absence — classify as retryable rather than letting it surface as the
-        // generic `unknown` (which an agent won't retry).
-        if (e instanceof ToolErrorCarrier) throw e;
-        throw new ToolErrorCarrier({
-          kind: "upstream_unavailable",
-          message: `SAM federalorganizations lookup for '${organizationId}' failed: ${(e as Error).message}. This is an outage, not a missing organization. Retry.`,
-          retryable: true,
-          retryAfterSeconds: 30,
-          upstreamEndpoint: "sam:federalorganizations",
-        });
-      }
-      if (!r.ok) {
-        // 404 = the organization genuinely does not exist → a real negative (the
-        // tool's found:false contract), NOT an error.
-        if (r.status === 404) {
-          return { found: false, organizationId, status: 404 };
-        }
-        // Every OTHER non-2xx is an upstream fault, not absence — classify via the
-        // shared errorFromResponse matrix (400/403→invalid_input non-retryable,
-        // 429→rate_limited with Retry-After, 5xx→upstream_unavailable retryable;
-        // carries upstreamStatus) so a down/blocking service is NEVER read as "org
-        // not found" (the fetch-failure-as-absent masquerade).
-        throw new ToolErrorCarrier(errorFromResponse(r, "sam:federalorganizations"));
-      }
-      // This endpoint signals a NONEXISTENT org id with a 200 + EMPTY body
-      // (live-verified 2026-07-06) — a genuine absence. Read text first so an
-      // empty/degraded body never crashes `r.json()` into a mislabeled `unknown`.
-      const orgText = await r.text();
-      if (!orgText.trim()) {
-        return { found: false, organizationId, status: 200 };
-      }
-      type Resp = {
-        _embedded?: {
-          org?: {
-            fullParentPathName?: string;
-            agencyName?: string;
-            name?: string;
-            type?: string;
-            level?: number;
-          };
-        }[];
-      };
-      let orgJson: Resp;
-      try {
-        orgJson = JSON.parse(orgText) as Resp;
-      } catch {
-        // A non-empty, non-JSON 200 (e.g. an HTML error/interstitial page from the
-        // CDN/WAF) is a DEGRADED response — do NOT fabricate found:false on garbage;
-        // surface it as schema_drift so the caller knows it's unconfirmed, not absent.
-        throw new ToolErrorCarrier({
-          kind: "schema_drift",
-          message: `SAM federalorganizations returned a 200 with a non-JSON body for '${organizationId}' — unexpected shape; cannot confirm whether the organization exists.`,
-          retryable: false,
-          upstreamEndpoint: "sam:federalorganizations",
-        });
-      }
-      const org = orgJson._embedded?.[0]?.org;
-      return {
-        found: !!org,
-        organizationId,
-        fullParentPathName: org?.fullParentPathName ?? "",
-        agencyName: org?.agencyName ?? "",
-        name: org?.name ?? "",
-        type: org?.type,
-        level: org?.level,
-      };
-    }
-
-    default:
-      throw new Error(`Unknown tool: ${name}`);
-  }
+  throw new Error(`Unknown tool: ${name}`);
 }
 
 /**
