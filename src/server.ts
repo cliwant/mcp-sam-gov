@@ -42,6 +42,7 @@ import * as gao from "./gao.js";
 import * as gsaCsv from "./gsa-csv.js";
 import * as sba from "./sba.js";
 import * as treasury from "./treasury.js";
+import * as edgar from "./edgar.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
@@ -931,6 +932,100 @@ const TreasuryAvgInterestRatesInput = z.object({
   endDate: z.string().optional().describe("Range mode only: ISO YYYY-MM-DD upper bound on record_date (inclusive)."),
   pageSize: z.number().int().min(1).max(500).default(100).describe("Range mode: rows per page, 1..500, default 100."),
   pageNumber: z.number().int().min(1).default(1).describe("Range mode: 1-based page number, default 1."),
+});
+
+// ─── SEC EDGAR (keyless) — input schemas ─────────────────────────
+// ADR-0003. Keyless capital-markets source over data.sec.gov / efts.sec.gov.
+// The join key is the 10-digit SEC CIK (NOT SAM UEI/DUNS — see edgar.ts caveat).
+const EdgarLookupCikInput = z.object({
+  query: z
+    .string()
+    .min(1)
+    .describe(
+      "Company ticker (exact, case-insensitive) or a company-name substring to resolve to a 10-digit SEC CIK via company_tickers.json. e.g. 'AAPL' or 'apple'. Returns up to 50 matches (found:false on none).",
+    ),
+});
+
+const EdgarCompanyFilingsInput = z.object({
+  cikOrTicker: z
+    .string()
+    .min(1)
+    .describe(
+      "A 10-digit (or unpadded) SEC CIK, or a ticker/company-name resolvable via company_tickers.json (e.g. '320193', 'CIK0000320193', 'AAPL').",
+    ),
+  forms: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Optional form-type filter (e.g. ['10-K','10-Q','8-K']); case-insensitive exact match on the filing's form. Omit for all forms.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(20)
+    .describe("Max filings to return, 1..100, default 20 (offset pagination over the recent window)."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe("0-based offset into the (form-filtered) recent filings, default 0."),
+});
+
+const EdgarCompanyFactsInput = z.object({
+  cikOrTicker: z
+    .string()
+    .min(1)
+    .describe(
+      "A 10-digit (or unpadded) SEC CIK, or a ticker/company-name resolvable via company_tickers.json (e.g. '320193', 'AAPL').",
+    ),
+  concepts: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Optional XBRL us-gaap/dei concept tags to extract (e.g. ['Assets','NetIncomeLoss']). Default: the 6 curated USD concepts (Revenues/RevenueFromContractWithCustomerExcludingAssessedTax, Assets, Liabilities, StockholdersEquity, NetIncomeLoss, CashAndCashEquivalentsAtCarryingValue). A concept absent for the filer is OMITTED (never 0).",
+    ),
+  unit: z
+    .string()
+    .default("USD")
+    .describe(
+      "XBRL unit to extract, default 'USD'. A concept present only in another unit (e.g. EarningsPerShareBasic in 'USD/shares') is reported under wrongUnit with a note — never a silent 0.",
+    ),
+  latest: z
+    .boolean()
+    .default(false)
+    .describe("true ⇒ reduce each concept to its single most-recent data point (by period end). false (default) ⇒ the full reported time series."),
+});
+
+const EdgarFullTextSearchInput = z.object({
+  q: z
+    .string()
+    .min(1)
+    .describe(
+      "Full-text query over EDGAR filings (2001-present). Wrap a phrase in double quotes for an exact match (e.g. '\"climate risk\"').",
+    ),
+  forms: z
+    .array(z.string())
+    .optional()
+    .describe("Optional form-type filter (e.g. ['10-K','8-K'])."),
+  startdt: z
+    .string()
+    .optional()
+    .describe("Optional ISO YYYY-MM-DD filing-date lower bound (sets dateRange=custom)."),
+  enddt: z
+    .string()
+    .optional()
+    .describe("Optional ISO YYYY-MM-DD filing-date upper bound (sets dateRange=custom)."),
+  from: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe(
+      "0-based result offset for pagination; page size is FIXED at 100 (there is no size param). Must be < 9900 (from+100 ≤ 10000 upstream window); a larger from is rejected as invalid_input.",
+    ),
 });
 
 // ─── Tool catalog ────────────────────────────────────────────────
@@ -1878,6 +1973,35 @@ const TOOLS: ToolDef[] = [
       "Average interest rate the US Treasury pays by security type/description (keyless Treasury Fiscal Data). Returns record_date, securityType, securityDescription, avgInterestRatePercent (percent, number|null). `latest` (default true) returns the most-recent month's full breakdown across security types (pinned to the latest record_date, memoized 5 min); set latest=false with startDate/endDate for a range. Optional `securityType` narrows by exact security_type_desc (e.g. 'Marketable', 'Non-marketable').",
     inputSchema: TreasuryAvgInterestRatesInput,
     handler: (input) => treasury.avgInterestRates(input),
+  }),
+  // ━━━ SEC EDGAR — filings / XBRL facts / CIK / full-text (keyless) (4) ━━━ ADR-0003
+  defineTool({
+    name: "edgar_lookup_cik",
+    description:
+      "Resolve a company ticker or name to its 10-digit SEC CIK (keyless, via SEC company_tickers.json). Input `query` (exact ticker or a title substring) ⇒ up to 50 { cik, ticker, title } matches; found:false on none. The CIK is the join key for edgar_company_filings/edgar_company_facts. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS — there is no authoritative CIK↔UEI join.",
+    inputSchema: EdgarLookupCikInput,
+    handler: (input) => edgar.lookupCik(input),
+  }),
+  defineTool({
+    name: "edgar_company_filings",
+    description:
+      "A company's recent SEC filings (keyless, from data.sec.gov submissions). Input `cikOrTicker` (CIK or resolvable ticker/name), optional `forms` (e.g. ['10-K','8-K']), `limit` (≤100, default 20), `offset`. Returns filings with the REAL primary-document archive URL. HONESTY: complete only when no older shards exist; otherwise totalAvailable = recent + Σ older-shard counts, hasMore:true, and a note discloses only the ~1000 most-recent filings were searched.",
+    inputSchema: EdgarCompanyFilingsInput,
+    handler: (input) => edgar.companyFilings(input),
+  }),
+  defineTool({
+    name: "edgar_company_facts",
+    description:
+      "Curated XBRL financial facts for a filer (keyless, from data.sec.gov companyfacts). Input `cikOrTicker`, optional `concepts` (default: 6 curated USD concepts — Revenues/RevenueFromContractWithCustomerExcludingAssessedTax, Assets, Liabilities, StockholdersEquity, NetIncomeLoss, CashAndCashEquivalentsAtCarryingValue), `unit` (default USD), `latest`. A concept absent for the filer is OMITTED (never 0); a concept present only in another unit (e.g. EPS in USD/shares) is reported under wrongUnit with a note.",
+    inputSchema: EdgarCompanyFactsInput,
+    handler: (input) => edgar.companyFacts(input),
+  }),
+  defineTool({
+    name: "edgar_full_text_search",
+    description:
+      "Full-text search across EDGAR filings, 2001-present (keyless, efts.sec.gov). Input `q` (phrase in double-quotes for exact), optional `forms`, `startdt`/`enddt` (ISO), `from` (offset; page size FIXED at 100 — no size param). Returns { accession, form, filingDate, entityNames, ciks, filingIndexUrl }. HONESTY: totalAvailable = the true match count, or a LOWER BOUND (totalIsLowerBound:true) when SEC reports ≥10000; from ≥ 9900 is rejected (10000-result window).",
+    inputSchema: EdgarFullTextSearchInput,
+    handler: (input) => edgar.fullTextSearch(input),
   }),
 ];
 

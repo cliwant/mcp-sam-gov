@@ -47,6 +47,15 @@ export type ResponseMeta = {
     returned: number;
     /** Upstream's total match count; null when the endpoint doesn't report it. */
     totalAvailable: number | null;
+    /**
+     * Present (and true) when `totalAvailable` is a KNOWN LOWER BOUND rather than
+     * an exact count — i.e. the upstream reported the total as "≥ N" (e.g. SEC
+     * EDGAR full-text search returns `hits.total.relation: "gte"` with the value
+     * pinned at 10000). The true total is UNKNOWN and ≥ `totalAvailable`. Absent
+     * on endpoints that report an exact total (do NOT read absence as `false`
+     * meaning "exact" for tools that never set it — it is simply not applicable).
+     */
+    totalIsLowerBound?: boolean;
     /** Request filters the upstream verifiably honored. */
     filtersApplied: string[];
     /** Request filters sent but NOT honored (results are unfiltered on these). */
