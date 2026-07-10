@@ -711,6 +711,140 @@
     }
   },
   {
+    "name": "treasury_avg_interest_rates",
+    "description": "Average interest rate the US Treasury pays by security type/description (keyless Treasury Fiscal Data). Returns record_date, securityType, securityDescription, avgInterestRatePercent (percent, number|null). `latest` (default true) returns the most-recent month's full breakdown across security types (pinned to the latest record_date, memoized 5 min); set latest=false with startDate/endDate for a range. Optional `securityType` narrows by exact security_type_desc (e.g. 'Marketable', 'Non-marketable').",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "securityType": {
+          "type": "string",
+          "description": "Optional exact security_type_desc filter (e.g. 'Marketable', 'Non-marketable', 'Interest-bearing Debt')."
+        },
+        "latest": {
+          "type": "boolean",
+          "description": "true (default) ⇒ the most-recent month's full breakdown across security types (pinned to the latest record_date, memoized). false ⇒ the startDate/endDate range."
+        },
+        "startDate": {
+          "type": "string",
+          "description": "Range mode only: ISO YYYY-MM-DD lower bound on record_date (inclusive)."
+        },
+        "endDate": {
+          "type": "string",
+          "description": "Range mode only: ISO YYYY-MM-DD upper bound on record_date (inclusive)."
+        },
+        "pageSize": {
+          "type": "number",
+          "description": "Range mode: rows per page, 1..500, default 100."
+        },
+        "pageNumber": {
+          "type": "number",
+          "description": "Range mode: 1-based page number, default 1."
+        }
+      }
+    }
+  },
+  {
+    "name": "treasury_debt_to_penny",
+    "description": "Daily total US public debt outstanding ('Debt to the Penny', keyless Treasury Fiscal Data). Returns record_date + totalPublicDebtOutstanding, debtHeldByPublic, intragovernmentalHoldings (USD). `latest` (default true) ⇒ the single most-recent day; set latest=false with startDate/endDate (ISO YYYY-MM-DD) for a date range, newest-first. Amounts are coerced to number|null (a null amount is 'no value reported', never 0).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "latest": {
+          "type": "boolean",
+          "description": "true (default) ⇒ only the single most-recent day (page[size]=1). false ⇒ the startDate/endDate range, newest-first."
+        },
+        "startDate": {
+          "type": "string",
+          "description": "Range mode only: ISO YYYY-MM-DD lower bound on record_date (inclusive)."
+        },
+        "endDate": {
+          "type": "string",
+          "description": "Range mode only: ISO YYYY-MM-DD upper bound on record_date (inclusive)."
+        },
+        "pageSize": {
+          "type": "number",
+          "description": "Range mode: rows per page, 1..500, default 100."
+        },
+        "pageNumber": {
+          "type": "number",
+          "description": "Range mode: 1-based page number, default 1."
+        }
+      }
+    }
+  },
+  {
+    "name": "treasury_monthly_statement",
+    "description": "Monthly Treasury Statement (MTS table 1, keyless): federal receipts, outlays, and deficit/surplus by month. Returns record_date, classification, grossReceipts, grossOutlays, deficitSurplus (USD, number|null). `startDate`/`endDate` (ISO YYYY-MM-DD) filter record_date (default: trailing ~12 months). By default excludeSummaryRows=true drops the fiscal-year parent/summary header rows (whose amounts are all null) via a server-side filter, so totalAvailable and rows reflect real child line-items only; set excludeSummaryRows=false to include them. Highest-value budget-analysis tool.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "startDate": {
+          "type": "string",
+          "description": "ISO YYYY-MM-DD lower bound on record_date (inclusive). Default: trailing ~12 months."
+        },
+        "endDate": {
+          "type": "string",
+          "description": "ISO YYYY-MM-DD upper bound on record_date (inclusive)."
+        },
+        "excludeSummaryRows": {
+          "type": "boolean",
+          "description": "true (default) excludes fiscal-year PARENT/SUMMARY rows (parent_id/amounts all null) via the server-side filter current_month_gross_outly_amt:gt:0, so only real child line-items (and totalAvailable) remain. false includes the null-amount summary rows."
+        },
+        "pageSize": {
+          "type": "number",
+          "description": "Rows per page, 1..500, default 100."
+        },
+        "pageNumber": {
+          "type": "number",
+          "description": "1-based page number, default 1."
+        }
+      }
+    }
+  },
+  {
+    "name": "treasury_query_dataset",
+    "description": "Escape-hatch query over 5 confirmed US Treasury Fiscal Data datasets (keyless): debt_to_penny, avg_interest_rates, mts_table_1 (Monthly Treasury Statement), rates_of_exchange, debt_outstanding. Choose `dataset` (enum — no free path), and optionally project `fields` (CSV), `filter` (CSV 'col:op:val', ops lt|lte|gt|gte|eq|in, AND-combined), and `sort` (CSV, '-' = desc), with page[size]/page[number] pagination. Returns raw rows plus a truthful `_meta` (totalAvailable = upstream total-count, offset pagination). Value/amount fields are raw upstream strings — the string \"null\"/empty means 'no value', never 0. Covers rates_of_exchange + debt_outstanding without a dedicated tool.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dataset": {
+          "type": "string",
+          "enum": [
+            "debt_to_penny",
+            "avg_interest_rates",
+            "mts_table_1",
+            "rates_of_exchange",
+            "debt_outstanding"
+          ],
+          "description": "Which confirmed Treasury Fiscal Data dataset to query: debt_to_penny (daily total public debt), avg_interest_rates (avg rate by security type), mts_table_1 (Monthly Treasury Statement receipts/outlays/deficit), rates_of_exchange (quarterly FX by currency), debt_outstanding (historical fiscal-year-end debt)."
+        },
+        "fields": {
+          "type": "string",
+          "description": "Optional CSV column projection (e.g. 'record_date,exchange_rate'). An unknown column ⇒ upstream HTTP 400 ⇒ invalid_input (surfaced as an error, never silently dropped)."
+        },
+        "filter": {
+          "type": "string",
+          "description": "Optional CSV of upstream filters 'col:op:val' (ops: lt|lte|gt|gte|eq|in), AND-combined — e.g. 'record_date:gte:2024-01-01,country_currency_desc:eq:Canada-Dollar'."
+        },
+        "sort": {
+          "type": "string",
+          "description": "Optional CSV sort columns; prefix '-' for descending (e.g. '-record_date')."
+        },
+        "pageSize": {
+          "type": "number",
+          "description": "Rows per page (upstream page[size]); 1..500, default 100."
+        },
+        "pageNumber": {
+          "type": "number",
+          "description": "1-based page number (upstream page[number]); default 1."
+        }
+      },
+      "required": [
+        "dataset"
+      ]
+    }
+  },
+  {
     "name": "usas_analyze_incumbent",
     "description": "Per-award incumbent + PUBLIC recompete-pressure analysis for ONE award (generatedInternalId). Assembles the incumbent identity, the vehicle/IDV linkage, and individual PUBLIC pressure SIGNALS — obligated-vs-ceiling consumption (pctConsumed), modification count (lower-bounded), competition extent + number of offers, set-aside, days to the current PoP end, and option-extendable days — plus, optionally, the incumbent's other awards in the same agency×NAICS. Bounded & keyless: at most 3 upstream calls (detail + 1 transactions page + 1 recipient search), no per-record fan-out. Emits pressureHints ('single_offer', 'ceiling_nearly_exhausted', 'hard_stop_no_options') as HINTS, NEVER a composite vulnerability score — CPARS/past-performance, protest history, and option-exercise intent are not public (declared in _meta.fieldsUnavailable).",
     "inputSchema": {

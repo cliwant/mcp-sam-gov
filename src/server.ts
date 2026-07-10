@@ -41,6 +41,7 @@ import * as integrity from "./integrity.js";
 import * as gao from "./gao.js";
 import * as gsaCsv from "./gsa-csv.js";
 import * as sba from "./sba.js";
+import * as treasury from "./treasury.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
@@ -823,6 +824,113 @@ const SamLookupNoticeFieldsInput = z.object({
     .describe(
       "1..100 32-char hex noticeIds (the ids returned by sam_search_opportunities) to enrich in ONE batch. Completes a whole search page's null naics/setAside/place-of-performance/deadline/type from the cached GSA daily CSV. OFF BY DEFAULT — enable by setting SAM_GOV_CSV_CACHE (a cache dir) or SAM_GOV_ENABLE_CSV=1.",
     ),
+});
+
+// ─── US Treasury Fiscal Data (keyless) — input schemas ───────────
+// ADR-0002. `dataset` is an ENUM of the 5 live-confirmed paths (F5: no free
+// path → no SSRF surface). pageSize max 500 (upstream page[size] ceiling).
+const TreasuryDatasetEnum = z
+  .enum([
+    "debt_to_penny",
+    "avg_interest_rates",
+    "mts_table_1",
+    "rates_of_exchange",
+    "debt_outstanding",
+  ])
+  .describe(
+    "Which confirmed Treasury Fiscal Data dataset to query: debt_to_penny (daily total public debt), avg_interest_rates (avg rate by security type), mts_table_1 (Monthly Treasury Statement receipts/outlays/deficit), rates_of_exchange (quarterly FX by currency), debt_outstanding (historical fiscal-year-end debt).",
+  );
+
+const TreasuryQueryDatasetInput = z.object({
+  dataset: TreasuryDatasetEnum,
+  fields: z
+    .string()
+    .optional()
+    .describe(
+      "Optional CSV column projection (e.g. 'record_date,exchange_rate'). An unknown column ⇒ upstream HTTP 400 ⇒ invalid_input (surfaced as an error, never silently dropped).",
+    ),
+  filter: z
+    .string()
+    .optional()
+    .describe(
+      "Optional CSV of upstream filters 'col:op:val' (ops: lt|lte|gt|gte|eq|in), AND-combined — e.g. 'record_date:gte:2024-01-01,country_currency_desc:eq:Canada-Dollar'.",
+    ),
+  sort: z
+    .string()
+    .optional()
+    .describe(
+      "Optional CSV sort columns; prefix '-' for descending (e.g. '-record_date').",
+    ),
+  pageSize: z
+    .number()
+    .int()
+    .min(1)
+    .max(500)
+    .default(100)
+    .describe("Rows per page (upstream page[size]); 1..500, default 100."),
+  pageNumber: z
+    .number()
+    .int()
+    .min(1)
+    .default(1)
+    .describe("1-based page number (upstream page[number]); default 1."),
+});
+
+const TreasuryDebtToPennyInput = z.object({
+  latest: z
+    .boolean()
+    .default(true)
+    .describe(
+      "true (default) ⇒ only the single most-recent day (page[size]=1). false ⇒ the startDate/endDate range, newest-first.",
+    ),
+  startDate: z
+    .string()
+    .optional()
+    .describe("Range mode only: ISO YYYY-MM-DD lower bound on record_date (inclusive)."),
+  endDate: z
+    .string()
+    .optional()
+    .describe("Range mode only: ISO YYYY-MM-DD upper bound on record_date (inclusive)."),
+  pageSize: z.number().int().min(1).max(500).default(100).describe("Range mode: rows per page, 1..500, default 100."),
+  pageNumber: z.number().int().min(1).default(1).describe("Range mode: 1-based page number, default 1."),
+});
+
+const TreasuryMonthlyStatementInput = z.object({
+  startDate: z
+    .string()
+    .optional()
+    .describe("ISO YYYY-MM-DD lower bound on record_date (inclusive). Default: trailing ~12 months."),
+  endDate: z
+    .string()
+    .optional()
+    .describe("ISO YYYY-MM-DD upper bound on record_date (inclusive)."),
+  excludeSummaryRows: z
+    .boolean()
+    .default(true)
+    .describe(
+      "true (default) excludes fiscal-year PARENT/SUMMARY rows (parent_id/amounts all null) via the server-side filter current_month_gross_outly_amt:gt:0, so only real child line-items (and totalAvailable) remain. false includes the null-amount summary rows.",
+    ),
+  pageSize: z.number().int().min(1).max(500).default(100).describe("Rows per page, 1..500, default 100."),
+  pageNumber: z.number().int().min(1).default(1).describe("1-based page number, default 1."),
+});
+
+const TreasuryAvgInterestRatesInput = z.object({
+  securityType: z
+    .string()
+    .optional()
+    .describe(
+      "Optional exact security_type_desc filter (e.g. 'Marketable', 'Non-marketable', 'Interest-bearing Debt').",
+    ),
+  latest: z
+    .boolean()
+    .default(true)
+    .describe(
+      "true (default) ⇒ the most-recent month's full breakdown across security types (pinned to the latest record_date, memoized). false ⇒ the startDate/endDate range.",
+    ),
+  startDate: z.string().optional().describe("Range mode only: ISO YYYY-MM-DD lower bound on record_date (inclusive)."),
+  endDate: z.string().optional().describe("Range mode only: ISO YYYY-MM-DD upper bound on record_date (inclusive)."),
+  pageSize: z.number().int().min(1).max(500).default(100).describe("Range mode: rows per page, 1..500, default 100."),
+  pageNumber: z.number().int().min(1).default(1).describe("Range mode: 1-based page number, default 1."),
 });
 
 // ─── Tool catalog ────────────────────────────────────────────────
@@ -1741,6 +1849,35 @@ const TOOLS: ToolDef[] = [
       "Recent GAO (Comptroller General) bid-protest decisions from the public Legal-Products RSS feed, enriched from each decision page (protester, contracting agency, decision date, outcome sustained/denied/dismissed/withdrawn, solicitation #, decision PDF). Filter client-side by agency/protester/solicitation/outcome, or pull one decision directly by bNumber. HONEST SCOPE: keyless covers only the RECENT feed window (~25 items) — GAO's faceted historical protest search (all years, by protester/agency/outcome/date) is WAF-blocked to bots and available only via a paid third-party API, so results are ALWAYS marked complete:false and are NOT the full protest history (see the accessNote).",
     inputSchema: GaoProtestInput,
     handler: (input) => gao.gaoProtestLookup(input),
+  }),
+  // ━━━ US Treasury — Fiscal Data (keyless) (4) ━━━ ADR-0002
+  defineTool({
+    name: "treasury_query_dataset",
+    description:
+      "Escape-hatch query over 5 confirmed US Treasury Fiscal Data datasets (keyless): debt_to_penny, avg_interest_rates, mts_table_1 (Monthly Treasury Statement), rates_of_exchange, debt_outstanding. Choose `dataset` (enum — no free path), and optionally project `fields` (CSV), `filter` (CSV 'col:op:val', ops lt|lte|gt|gte|eq|in, AND-combined), and `sort` (CSV, '-' = desc), with page[size]/page[number] pagination. Returns raw rows plus a truthful `_meta` (totalAvailable = upstream total-count, offset pagination). Value/amount fields are raw upstream strings — the string \"null\"/empty means 'no value', never 0. Covers rates_of_exchange + debt_outstanding without a dedicated tool.",
+    inputSchema: TreasuryQueryDatasetInput,
+    handler: (input) => treasury.queryDataset(input),
+  }),
+  defineTool({
+    name: "treasury_debt_to_penny",
+    description:
+      "Daily total US public debt outstanding ('Debt to the Penny', keyless Treasury Fiscal Data). Returns record_date + totalPublicDebtOutstanding, debtHeldByPublic, intragovernmentalHoldings (USD). `latest` (default true) ⇒ the single most-recent day; set latest=false with startDate/endDate (ISO YYYY-MM-DD) for a date range, newest-first. Amounts are coerced to number|null (a null amount is 'no value reported', never 0).",
+    inputSchema: TreasuryDebtToPennyInput,
+    handler: (input) => treasury.debtToPenny(input),
+  }),
+  defineTool({
+    name: "treasury_monthly_statement",
+    description:
+      "Monthly Treasury Statement (MTS table 1, keyless): federal receipts, outlays, and deficit/surplus by month. Returns record_date, classification, grossReceipts, grossOutlays, deficitSurplus (USD, number|null). `startDate`/`endDate` (ISO YYYY-MM-DD) filter record_date (default: trailing ~12 months). By default excludeSummaryRows=true drops the fiscal-year parent/summary header rows (whose amounts are all null) via a server-side filter, so totalAvailable and rows reflect real child line-items only; set excludeSummaryRows=false to include them. Highest-value budget-analysis tool.",
+    inputSchema: TreasuryMonthlyStatementInput,
+    handler: (input) => treasury.monthlyStatement(input),
+  }),
+  defineTool({
+    name: "treasury_avg_interest_rates",
+    description:
+      "Average interest rate the US Treasury pays by security type/description (keyless Treasury Fiscal Data). Returns record_date, securityType, securityDescription, avgInterestRatePercent (percent, number|null). `latest` (default true) returns the most-recent month's full breakdown across security types (pinned to the latest record_date, memoized 5 min); set latest=false with startDate/endDate for a range. Optional `securityType` narrows by exact security_type_desc (e.g. 'Marketable', 'Non-marketable').",
+    inputSchema: TreasuryAvgInterestRatesInput,
+    handler: (input) => treasury.avgInterestRates(input),
   }),
 ];
 
