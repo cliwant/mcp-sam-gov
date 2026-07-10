@@ -854,7 +854,7 @@ function defineTool<I>(d: {
 }
 
 const TOOLS: ToolDef[] = [
-  // ━━━ SAM.gov (7) ━━━
+  // ━━━ SAM.gov (8) ━━━
   {
     name: "sam_search_opportunities",
     description:
@@ -879,30 +879,35 @@ const TOOLS: ToolDef[] = [
       "Return the full description / RFP body text for a notice as plain text. Useful when sam_get_opportunity returned a description URL instead of inline body, or for an LLM-friendly text dump.",
     inputSchema: SamFetchDescriptionInput,
   },
-  {
+  defineTool({
     name: "sam_attachment_url",
     description:
       "Build the public download URL for an attachment resourceId. The URL returns a 303 redirect to a signed S3 URL — fetch with redirect:'follow' to get the file bytes.",
     inputSchema: SamAttachmentUrlInput,
-  },
-  {
+    handler: async (input, { sam }) => ({
+      downloadUrl: sam.publicDownloadUrl(input.resourceId),
+    }),
+  }),
+  defineTool({
     name: "sam_fetch_attachment_text",
     description:
       "Extract the TEXT of a SAM notice attachment (the actual RFP / SOW / Q&A / wage tables) by its download URL — so an AI can read the real solicitation, not just its metadata. Give it a sam_get_opportunity attachments[].url (resourceLinks). Keyless. Handles PDF (via pdfjs) + text/HTML; returns { format, text, pages, filename, sizeBytes, truncated, extracted }. HONEST: a DOCX / binary that can't be read keyless returns text:null + a note (never fabricated); a corrupt/encrypted PDF returns text:null + an extractionError note (never a crash); a DOWN fetch throws a retryable upstream_unavailable (never empty text); a 404 throws not_found. Only sam.gov / api.sam.gov URLs are fetched (SSRF hygiene). maxChars caps the text (default 200000) and truncation is disclosed.",
     inputSchema: SamFetchAttachmentTextInput,
-  },
+    handler: (input) => fetchAttachmentText(input),
+  }),
   {
     name: "sam_lookup_organization",
     description:
       "Resolve a SAM.gov federal-organization id to its canonical fullParentPathName (e.g. 'VETERANS AFFAIRS, DEPARTMENT OF.VETERANS AFFAIRS, DEPARTMENT OF.245-NETWORK CONTRACT OFFICE 5'). Use when sam_get_opportunity returned only an organizationId.",
     inputSchema: SamLookupOrgInput,
   },
-  {
+  defineTool({
     name: "sam_lookup_notice_fields",
     description:
       "BATCH-complete a sam_search_opportunities page in ONE call from the GSA daily bulk CSV (keyless). The keyless HAL list endpoint NULLS each result's naics/setAside/place-of-performance/responseDeadline/type; this tool returns those fields for 1..100 noticeIds at once (naicsCode, setAside + setAsideCode, popState/popCity/popZip/popCountry, responseDeadline, type, active, title) from a cached on-disk CSV index, instead of one sam_get_opportunity detail call per notice. OFF BY DEFAULT (no forced 226 MB download): enable by setting SAM_GOV_CSV_CACHE (a cache dir) or SAM_GOV_ENABLE_CSV=1 — when disabled the tool returns data.enabled:false + a structured 'how to enable' note (never fake data, no network). HONEST: _meta carries the CSV last-modified + index build time (freshness), a noticeId absent from the current snapshot returns found:false + nulls with an explicit 'not in current CSV snapshot' disclosure (never faked), a cold first call discloses 'index warming', and a download/parse failure is a structured retryable error (never a silent empty). setAsideCode (e.g. 'SBA') matches sam_get_opportunity's setAside; the snapshot can lag live by up to ~24h — confirm real-time-critical fields with sam_get_opportunity.",
     inputSchema: SamLookupNoticeFieldsInput,
-  },
+    handler: (input) => gsaCsv.lookupNoticeFields(input),
+  }),
 
   // ━━━ USAspending — Awards & Recipients (10) ━━━
   defineTool({
@@ -977,42 +982,48 @@ const TOOLS: ToolDef[] = [
   }),
 
   // ━━━ USAspending — Aggregate Analysis (6) ━━━
-  {
+  defineTool({
     name: "usas_spending_over_time",
     description:
       "Time-series aggregation of federal CONTRACT spending (award types A/B/C/D — grants, IDVs, loans, and other obligation types are EXCLUDED, matching the other usas_search_*_spending tools; disclosed in _meta). Group by fiscal_year / quarter / month, filter by agency / NAICS / set-aside. Use for 'how has VA 541512 contract spending trended over the past 5 years' — returns yearly/quarterly/monthly $ rollups of contract obligations (grantObligations/idvObligations are null, NOT 0, to avoid implying an agency has no grant/IDV spending).",
     inputSchema: UsasSpendingOverTimeInput,
-  },
-  {
+    handler: (input) => usas.spendingOverTime(input),
+  }),
+  defineTool({
     name: "usas_search_psc_spending",
     description:
       "Spending broken down by Product Service Code (PSC). Use for 'what PSC categories see the most $ at DoD' — surfaces market structure beyond NAICS (e.g. PSC R425 = engineering support services).",
     inputSchema: UsasCategorySpendingInput,
-  },
-  {
+    handler: (input) => usas.searchPscSpending(input),
+  }),
+  defineTool({
     name: "usas_search_state_spending",
     description:
       "Spending broken down by state / territory. Use for 'where is the most federal $ flowing for NAICS 541512' — answers like 'VA $128B, MD $66B, DC $58B'.",
     inputSchema: UsasCategorySpendingInput,
-  },
-  {
+    handler: (input) => usas.searchStateSpending(input),
+  }),
+  defineTool({
     name: "usas_search_cfda_spending",
     description:
       "Spending broken down by CFDA grant program code. Use for grant analysis — 'top federal grant programs by $'. Note: CFDA is grants (award_type 02-05), not contracts. Use usas_search_psc_spending for contract market analysis.",
     inputSchema: UsasCfdaInput,
-  },
-  {
+    handler: (input) => usas.searchCfdaSpending(input),
+  }),
+  defineTool({
     name: "usas_search_federal_account_spending",
     description:
       "Spending broken down by federal account / Treasury Account Symbol (TAS). Use to map money to the actual budget line item (e.g. '036-0167 = Information Technology Systems, VA').",
     inputSchema: UsasCategorySpendingInput,
-  },
-  {
+    handler: (input) => usas.searchFederalAccountSpending(input),
+  }),
+  defineTool({
     name: "usas_search_agency_spending",
     description:
       "Spending broken down by awarding agency. Use for 'which agencies spend the most on NAICS 541512' — top buyers by $.",
     inputSchema: UsasAgencySpendingInput,
-  },
+    handler: (input) => usas.searchAgencySpending(input),
+  }),
 
   // ━━━ USAspending — Agency Profile (3) ━━━
   defineTool({
@@ -1022,26 +1033,29 @@ const TOOLS: ToolDef[] = [
     inputSchema: UsasAgencyProfileInput,
     handler: (input) => usas.getAgencyProfile(input.toptierCode),
   }),
-  {
+  defineTool({
     name: "usas_get_agency_awards_summary",
     description:
       "High-level award activity for a fiscal year — transaction_count + obligations + latest_action_date. SCOPE: obligations/transaction_count span ALL award types (contracts, grants, direct payments incl. benefits, loans) — NOT prime contracts only. For benefit-heavy agencies (VA/SSA/HHS) this is dominated by direct benefit payments (e.g. VA FY2024 ~$238B all-awards vs ~$67B prime contracts), so do NOT read it as the contract/procurement market; for procurement-heavy agencies (DoD/DHS) it closely tracks contract spending. For contracts-only obligations use usas_spending_over_time (contractObligations) — it takes the agency canonical NAME, so resolve it from this toptierCode via usas_get_agency_profile first.",
     inputSchema: UsasAgencyAwardsInput,
-  },
-  {
+    handler: (input) => usas.getAgencyAwardsSummary(input),
+  }),
+  defineTool({
     name: "usas_get_agency_budget_function",
     description:
       "Budget function breakdown for an agency × fiscal year. Returns the agency's spending by program area (e.g. VA: 'Income security for veterans' $204B, 'Hospital and medical care for veterans' $126B).",
     inputSchema: UsasAgencyBudgetInput,
-  },
+    handler: (input) => usas.getAgencyBudgetFunction(input),
+  }),
 
   // ━━━ USAspending — Recipient Profile (2) ━━━
-  {
+  defineTool({
     name: "usas_search_recipients",
     description:
       "Search USAspending recipient list with parent/child/recipient hierarchy. Returns recipients with id, duns, uei, level (P=parent, C=child, R=recipient), total_amount. Use for 'find the recipient_id for Booz Allen' before usas_get_recipient_profile.",
     inputSchema: UsasSearchRecipientsInput,
-  },
+    handler: (input) => usas.searchRecipients(input),
+  }),
   defineTool({
     name: "usas_get_recipient_profile",
     description:
@@ -1050,65 +1064,74 @@ const TOOLS: ToolDef[] = [
     handler: (input) => usas.getRecipientProfile(input.recipientId),
   }),
 
-  // ━━━ USAspending — Reference / Autocomplete (4) ━━━
-  {
+  // ━━━ USAspending — Reference / Autocomplete (5) ━━━
+  defineTool({
     name: "usas_autocomplete_naics",
     description:
       "Autocomplete NAICS codes by free-text. ANTI-HALLUCINATION GUARD — call this when the user mentions a NAICS theme but no specific code (e.g. 'computer systems design' → 541512). Avoids inventing NAICS codes.",
     inputSchema: UsasAutocompleteInput,
-  },
-  {
+    handler: (input) => usas.autocompleteNaics(input),
+  }),
+  defineTool({
     name: "usas_autocomplete_recipient",
     description:
       "Autocomplete recipient names. ANTI-HALLUCINATION — confirm a recipient's exact USAspending-canonical legal name before searching by name. Returns up to 10 fuzzy matches with UEI/DUNS where available.",
     inputSchema: UsasAutocompleteInput,
-  },
-  {
+    handler: (input) => usas.autocompleteRecipient(input),
+  }),
+  defineTool({
     name: "usas_naics_hierarchy",
     description:
       "Navigate the NAICS hierarchy (2→4→6 digit) + active-contract count per code. No naicsFilter ⇒ the top-level 2-digit sectors. With naicsFilter=<code> ⇒ that node is in `parent` and its DIRECT children are in `hierarchy` (drill into any row where hasChildren:true by re-calling with its code). A 6-digit leaf returns hierarchy:[] with the node in `parent` (found:true); a nonexistent code returns hierarchy:[] with parent:null (found:false). Use to explore market scope (e.g. what's under NAICS 54 = Professional, Scientific, and Technical Services).",
     inputSchema: UsasNaicsHierarchyInput,
-  },
-  {
+    handler: (input) => usas.naicsHierarchy(input),
+  }),
+  defineTool({
     name: "usas_glossary",
     description:
       "USAspending glossary of 151 federal-spending terms. Use to confirm terminology ('what's a TAS?', 'what's an obligation vs outlay?') before answering compliance/budget questions.",
     inputSchema: UsasGlossaryInput,
-  },
-  {
+    handler: (input) => usas.glossary(input),
+  }),
+  defineTool({
     name: "usas_list_toptier_agencies",
     description:
       "List all toptier federal agencies with toptier_code, abbreviation, slug, current-FY obligations. Use for 'show me every cabinet department + their FY26 spending' or to find a toptier_code for usas_get_agency_*.",
     inputSchema: UsasListAgenciesInput,
-  },
+    handler: (input) => usas.listToptierAgencies(input),
+  }),
 
   // ━━━ Federal Register (3) ━━━
-  {
+  defineTool({
     name: "fed_register_search_documents",
     description:
       "Search Federal Register documents (proposed rules, final rules, notices, presidential documents) by query / agency / type / date range. Use for regulatory-context queries ('what new VA cybersecurity rules came out this quarter?').",
     inputSchema: FedRegSearchInput,
-  },
-  {
+    handler: (input) => fedreg.searchDocuments(input),
+  }),
+  defineTool({
     name: "fed_register_get_document",
     description:
       "Fetch full detail for a Federal Register document by number. Returns title, abstract, citation, publication_date, effective_on, raw_text_url (for the full body), CFR references — everything needed to ground a regulation citation.",
     inputSchema: FedRegGetDocInput,
-  },
-  {
+    handler: (input) => fedreg.getDocument(input.documentNumber),
+  }),
+  defineTool({
     name: "fed_register_list_agencies",
     description:
       "List all Federal Register agencies with slugs (needed for fed_register_search_documents). Use to resolve 'what's the FedReg slug for Veterans Affairs?'",
     inputSchema: FedRegListAgenciesInput,
-  },
+    handler: (input) => fedreg.listAgencies(input),
+  }),
 
-  // ━━━ eCFR (4) ━━━
-  {
+  // ━━━ eCFR (5) ━━━
+  defineTool({
     name: "ecfr_search",
     description:
       "Full-text search across the entire CFR (Code of Federal Regulations). Use for compliance questions — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns excerpt + section path + ecfrUrl.",
     inputSchema: EcfrSearchInput,
-  },
+    handler: (input) => ecfr.search(input),
+  }),
   defineTool({
     name: "ecfr_list_titles",
     description:
@@ -1116,93 +1139,106 @@ const TOOLS: ToolDef[] = [
     inputSchema: EcfrListTitlesInput,
     handler: () => ecfr.listTitles(),
   }),
-  {
+  defineTool({
     name: "far_clause_lookup",
     description:
       "Authoritative FAR/DFARS clause text + its PRESCRIPTION (the 'As prescribed in …' rule for when the clause applies), from the eCFR versioner-full endpoint (Title 48). Use this — NOT ecfr_search — for an EXACT clause number: full-text search mis-ranks '52.212-4' (returns GSAM 552.212-4 above the real FAR clause). Returns heading, revision date, clause/provision kind, regulation (FAR/DFARS/GSAM), full text, the prescribing section, and ecfrUrl. Every response carries farOverhaulRisk — a structural currency caveat that eCFR reflects only the CODIFIED FAR, so a clause may be superseded by a Revolutionary-FAR-Overhaul agency class deviation not shown here. A genuinely-absent clause returns a not_found error (never a fake empty clause). Keyless.",
     inputSchema: FarClauseLookupInput,
-  },
-  {
+    handler: (input) => far.farClauseLookup(input),
+  }),
+  defineTool({
     name: "far_compliance_matrix",
     description:
       "Turn a solicitation's cited FAR/DFARS clause list into a proposal-ready compliance matrix (for a Section L/M response). COMPOSES far_clause_lookup over 1–25 clauses (deduped case-insensitively): each resolved row carries the clause text + prescription + regulation + a gate flag marking pass/fail award-eligibility GATES (Section 889 52.204-24/25/26, limitations on subcontracting 52.219-14, DFARS cyber 252.204-7012/7020/7021 incl. CMMC) + the farOverhaulRisk currency caveat. TRUTHFUL by construction: a clause that genuinely isn't in Title 48 (HTTP 404) goes to `unresolved`, while a clause that couldn't be fetched (eCFR down/5xx/rate-limited) goes to a SEPARATE `errored` bucket — a DOWN service is never reported as 'clause doesn't exist'; `summary.total` proves no clause is dropped. Does NOT parse the PDF solicitation to extract the clause list, and gives NO legal advice or compliance verdict. Keyless.",
     inputSchema: FarComplianceMatrixInput,
-  },
-  {
+    handler: (input) => far.farComplianceMatrix(input),
+  }),
+  defineTool({
     name: "far_search",
     description:
       "FAR/DFARS-scoped semantic search — the 'which clauses touch topic X' front-door that feeds far_clause_lookup. COMPOSES ecfr_search but fixes its two compliance flaws: (1) it filters to FAR (Title 48 chapter 1) or DFARS (chapter 2), EXCLUDING GSAM/agency supplements (so 'limitations on subcontracting' no longer mis-ranks GSAM 552.x over FAR 52.x), and (2) it collapses eCFR's ~5-versions-per-section HISTORICAL duplicates to the CURRENT in-force version (endsOn==null). scope: far (default) | dfars | both. dedupeVersions (default true; false shows all historical rows). partsOnly restricts to given parts (e.g. [52] clause text). Returns distinct sections with regulation/section/headingPath/excerpt/score/ecfrUrl/effectiveOn/endsOn/isCurrent, distinctSections, and the farOverhaulRisk caveat. TRUTHFUL: dedupe never drops a distinct section (the raw→distinct collapse is disclosed); a kept-historical row is marked isCurrent:false; a search-endpoint outage THROWS (never a fake 0 results); totalAvailable is null (a deduped view has no clean upstream count). Keyless.",
     inputSchema: FarSearchInput,
-  },
+    handler: (input) => far.farSearch(input),
+  }),
 
   // ━━━ SBA — Size Standards (1) ━━━
-  {
+  defineTool({
     name: "sba_size_standard",
     description:
       "SBA small-business size standard for a 6-digit NAICS (keyless sba.gov naics.json). Answers 'is a firm SMALL for this NAICS?' — the gate for set-aside eligibility and for vetting a usas_search_teaming_partners candidate. Returns standardType (receipts | employees | assets [financial institutions] | receipts+assets), a normalized threshold (receipts/assets in DOLLARS — the dataset's $millions figure ×1,000,000; employees as a count), the unit, and any SBA footnote. HONESTY: the dataset carries no effective-date field, so the value is 'as published as of retrieval' (asOf) and _meta.notes flags that SBA adjusts standards periodically — re-verify at sba.gov for high-stakes eligibility. An unknown NAICS returns found:false (never a fabricated standard).",
     inputSchema: SbaSizeStandardInput,
-  },
+    handler: (input) => sba.sizeStandard(input),
+  }),
 
   // ━━━ Grants.gov (2) ━━━
-  {
+  defineTool({
     name: "grants_search",
     description:
       "Search Grants.gov federal grant opportunities (financial assistance, distinct from contracts on SAM.gov). Filter by keyword / CFDA / agency / opportunity number. Default status = forecasted + posted. KEYWORD: Grants.gov OR-matches multi-word keywords (returns grants containing ANY word), so a multi-word keyword BROADENS results — pass ONE specific term for relevance (phrase quoting returns 0); narrow with cfda/agency/oppStatuses.",
     inputSchema: GrantsSearchInput,
-  },
-  {
+    handler: (input) => grants.searchGrants(input),
+  }),
+  defineTool({
     name: "grants_get_opportunity",
     description:
       "Fetch full detail for a single grant opportunity by id. Returns found:true with description, agency, posting/response/archive dates, award_ceiling, award_floor, estimated_funding, expected_number_of_awards, applicant_types, funding_instruments, CFDA programs. `agency` is { code, name (the REAL posting/sub-tier agency, e.g. 'Food and Nutrition Service'), department (the top-tier agency, e.g. 'Department of Agriculture'), contactName (the program officer — NOT the agency) } — Grants.gov's raw `agencyName` field is actually the contact person, so this tool sources the real agency from agencyDetails; `name` may be null if the record carries no structured agency. A NONEXISTENT id returns { found:false, opportunityId } — never a fabricated grant with empty fields (Grants.gov answers a bad id with a hollow 200, which this tool detects). Check `found` before reading the other fields.",
     inputSchema: GrantsGetInput,
-  },
+    handler: (input) => grants.getGrant(input),
+  }),
 
   // ━━━ Pricing / Wage (3) ━━━
-  {
+  defineTool({
     name: "sam_search_wage_determinations",
     description:
       "Find the Service Contract Act (SCA) or Davis-Bacon (DBA) wage determination(s) governing a locality (keyless SAM SGS). Filter by coverage (sca|dba), state (2-letter, server-side), county (client-side), or WD number/title. Returns the structured WD list; follow with sam_get_wage_rates to read the rate table. NOTE: `query` matches WD number/title only, NOT occupation.",
     inputSchema: WageSearchInput,
-  },
-  {
+    handler: (input) => pricing.searchWageDeterminations(input),
+  }),
+  defineTool({
     name: "sam_get_wage_rates",
     description:
       "Return the prevailing-wage + fringe/H&W rate table for a specific wage determination, PARSED from its plain-text document (SAM exposes no structured rate JSON), plus the Executive-Order minimum-wage floor. Distinguishes SCA (WD-wide Health & Welfare) vs DBA (per-craft fringe). Always returns parseConfidence and supports format:'parsed'|'raw'|'both' so you can read the raw text when parsing is low-confidence. Resolves the latest active revision via /history when `revision` is omitted.",
     inputSchema: WageRatesInput,
-  },
-  {
+    handler: (input) => pricing.getWageRates(input),
+  }),
+  defineTool({
     name: "gsa_benchmark_labor_rates",
     description:
       "GSA CALC awarded ceiling-rate market band for a labor category (keyless). Returns a DISTRIBUTION (currentRate min/median/max + escalated medians) over a fetched sample, NOT a single price. CALC rates are CEILING/catalog and FULLY BURDENED (do not re-add wrap); the match count SATURATES at 10000 for broad queries (totalAvailable null then). Filter by businessSize/educationLevel(code)/experience/sin/priceRange to narrow.",
     inputSchema: BenchmarkLaborInput,
-  },
+    handler: (input) => pricing.benchmarkLaborRates(input),
+  }),
 
   // ━━━ Integrity / Teaming (3) ━━━
-  {
+  defineTool({
     name: "sam_check_exclusions",
     description:
       "Keyless SAM debarment/exclusion screening. Screen a firm or individual by name (query) and/or UEI/CAGE against the SAM exclusions index (FAPIIS). Returns excluded (true iff ≥1 ACTIVE matching record), matchCount, and per-record { name, classification, uei, cage, excludingAgency, exclusionType, exclusionProgram, isActive, activation/terminationDate, samFapiisUrl }. CRITICAL: an EMPTY result means 'no matching exclusion under these terms' — it is NOT proof of general responsibility (stated in _meta.notes). A name match is not identity-proof; verify the UEI/CAGE + dates against the FAPIIS record. Requires at least one of query/uei/cage.",
     inputSchema: CheckExclusionsInput,
-  },
-  {
+    handler: (input) => integrity.checkExclusions(input),
+  }),
+  defineTool({
     name: "sam_integrity_lookup",
     description:
       "Keyless ONE-CALL integrity screen — 'any integrity red flags on this entity?'. Composes the keyless government-wide EXCLUSION verdict (via sam_check_exclusions) with an honest pointer to the FAPIIS / Responsibility-Qualification record. Requires at least one of uei/cage/name (uei preferred; name maps to the exclusions text search). Returns { entity, exclusions:{excluded,activeCount,records}, fapiisRecords, fapiisUrl, integrityFlag }. integrityFlag is 'excluded' when ≥1 ACTIVE matching exclusion is found, else 'review_fapiis' — it NEVER returns 'clear' keylessly, because FAPIIS records (terminations for default/cause, non-responsibility determinations, self-reported criminal/civil/administrative proceedings) have NO keyless machine API, so absence of an exclusion is NOT proof of integrity. fapiisRecords is ALWAYS null (never faked; record-level retrieval needs an optional SAM Entity key) with _meta.fieldsUnavailable:['fapiisRecords']; fapiisUrl deep-links the viewable SAM page. An upstream exclusions failure surfaces as the classified error, never a fake clearance.",
     inputSchema: IntegrityLookupInput,
-  },
-  {
+    handler: (input) => integrity.integrityLookup(input),
+  }),
+  defineTool({
     name: "usas_search_teaming_partners",
     description:
       "Small-business teaming-partner discovery by socioeconomic certification + NAICS + agency award history (keyless USAspending proxy), integrity-screened. Given a cert (enum-validated), optional naics/agency/subagency, and a lookback window, aggregates federal awardees by recipient and returns candidates ranked by agencyObligated with agencyAwardCount, mostRecentAwardDate, and sampleAwards; optionally screens the top candidates via sam_check_exclusions and drops active exclusions (excludeDebarred, default true). HONESTY: cert is AWARD-DERIVED (recorded on the firm's federal awards), NOT the SBA certification of record (which needs a keyed SAM Entity call) — verify active certification in SAM/SBS before teaming (stated in _meta). A bogus cert is rejected as invalid_input (the endpoint would silently return 0).",
     inputSchema: TeamingPartnersInput,
-  },
+    handler: (input) => integrity.searchTeamingPartners(input),
+  }),
   // ━━━ GAO — Bid Protests (1) ━━━
-  {
+  defineTool({
     name: "gao_protest_lookup",
     description:
       "Recent GAO (Comptroller General) bid-protest decisions from the public Legal-Products RSS feed, enriched from each decision page (protester, contracting agency, decision date, outcome sustained/denied/dismissed/withdrawn, solicitation #, decision PDF). Filter client-side by agency/protester/solicitation/outcome, or pull one decision directly by bNumber. HONEST SCOPE: keyless covers only the RECENT feed window (~25 items) — GAO's faceted historical protest search (all years, by protester/agency/outcome/date) is WAF-blocked to bots and available only via a paid third-party API, so results are ALWAYS marked complete:false and are NOT the full protest history (see the accessNote).",
     inputSchema: GaoProtestInput,
-  },
+    handler: (input) => gao.gaoProtestLookup(input),
+  }),
 ];
 
 // ─── Server bootstrap ────────────────────────────────────────────
@@ -1770,14 +1806,6 @@ export async function runTool(
         description: text || "(no description body available)",
       };
     }
-    case "sam_attachment_url": {
-      const { resourceId } = SamAttachmentUrlInput.parse(args);
-      return { downloadUrl: sam.publicDownloadUrl(resourceId) };
-    }
-    case "sam_fetch_attachment_text": {
-      const input = SamFetchAttachmentTextInput.parse(args);
-      return await fetchAttachmentText(input);
-    }
     case "sam_lookup_organization": {
       const { organizationId } = SamLookupOrgInput.parse(args);
       // SamGovClient internal method — exposed via direct fetch since
@@ -1859,116 +1887,6 @@ export async function runTool(
         level: org?.level,
       };
     }
-    case "sam_lookup_notice_fields":
-      return await gsaCsv.lookupNoticeFields(
-        SamLookupNoticeFieldsInput.parse(args),
-      );
-
-    // USAspending — Aggregate
-    case "usas_spending_over_time":
-      return await usas.spendingOverTime(
-        UsasSpendingOverTimeInput.parse(args),
-      );
-    case "usas_search_psc_spending":
-      return await usas.searchPscSpending(
-        UsasCategorySpendingInput.parse(args),
-      );
-    case "usas_search_state_spending":
-      return await usas.searchStateSpending(
-        UsasCategorySpendingInput.parse(args),
-      );
-    case "usas_search_cfda_spending":
-      return await usas.searchCfdaSpending(UsasCfdaInput.parse(args));
-    case "usas_search_federal_account_spending":
-      return await usas.searchFederalAccountSpending(
-        UsasCategorySpendingInput.parse(args),
-      );
-    case "usas_search_agency_spending":
-      return await usas.searchAgencySpending(
-        UsasAgencySpendingInput.parse(args),
-      );
-
-    // USAspending — Agency Profile
-    case "usas_get_agency_awards_summary":
-      return await usas.getAgencyAwardsSummary(
-        UsasAgencyAwardsInput.parse(args),
-      );
-    case "usas_get_agency_budget_function":
-      return await usas.getAgencyBudgetFunction(
-        UsasAgencyBudgetInput.parse(args),
-      );
-
-    // USAspending — Recipient Profile
-    case "usas_search_recipients":
-      return await usas.searchRecipients(UsasSearchRecipientsInput.parse(args));
-
-    // USAspending — Reference / Autocomplete
-    case "usas_autocomplete_naics":
-      return await usas.autocompleteNaics(UsasAutocompleteInput.parse(args));
-    case "usas_autocomplete_recipient":
-      return await usas.autocompleteRecipient(
-        UsasAutocompleteInput.parse(args),
-      );
-    case "usas_naics_hierarchy":
-      return await usas.naicsHierarchy(UsasNaicsHierarchyInput.parse(args));
-    case "usas_glossary":
-      return await usas.glossary(UsasGlossaryInput.parse(args));
-    case "usas_list_toptier_agencies":
-      return await usas.listToptierAgencies(UsasListAgenciesInput.parse(args));
-
-    // Federal Register
-    case "fed_register_search_documents":
-      return await fedreg.searchDocuments(FedRegSearchInput.parse(args));
-    case "fed_register_get_document":
-      return await fedreg.getDocument(
-        FedRegGetDocInput.parse(args).documentNumber,
-      );
-    case "fed_register_list_agencies":
-      return await fedreg.listAgencies(FedRegListAgenciesInput.parse(args));
-
-    // eCFR
-    case "ecfr_search":
-      return await ecfr.search(EcfrSearchInput.parse(args));
-    case "far_clause_lookup":
-      return await far.farClauseLookup(FarClauseLookupInput.parse(args));
-    case "far_compliance_matrix":
-      return await far.farComplianceMatrix(
-        FarComplianceMatrixInput.parse(args),
-      );
-    case "far_search":
-      return await far.farSearch(FarSearchInput.parse(args));
-
-    // SBA — Size Standards
-    case "sba_size_standard":
-      return await sba.sizeStandard(SbaSizeStandardInput.parse(args));
-
-    // Grants.gov
-    case "grants_search":
-      return await grants.searchGrants(GrantsSearchInput.parse(args));
-    case "grants_get_opportunity":
-      return await grants.getGrant(GrantsGetInput.parse(args));
-
-    // Pricing / Wage
-    case "sam_search_wage_determinations":
-      return await pricing.searchWageDeterminations(WageSearchInput.parse(args));
-    case "sam_get_wage_rates":
-      return await pricing.getWageRates(WageRatesInput.parse(args));
-    case "gsa_benchmark_labor_rates":
-      return await pricing.benchmarkLaborRates(BenchmarkLaborInput.parse(args));
-
-    // Integrity / Teaming
-    case "sam_check_exclusions":
-      return await integrity.checkExclusions(CheckExclusionsInput.parse(args));
-    case "sam_integrity_lookup":
-      return await integrity.integrityLookup(IntegrityLookupInput.parse(args));
-    case "usas_search_teaming_partners":
-      return await integrity.searchTeamingPartners(
-        TeamingPartnersInput.parse(args),
-      );
-
-    // GAO — Bid Protests
-    case "gao_protest_lookup":
-      return await gao.gaoProtestLookup(GaoProtestInput.parse(args));
 
     default:
       throw new Error(`Unknown tool: ${name}`);
