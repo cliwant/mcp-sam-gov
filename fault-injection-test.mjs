@@ -58,6 +58,7 @@ import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
+import { padCik as edgarPadCik } from "./dist/edgar.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
 import {
   SamGovClient,
@@ -5952,6 +5953,217 @@ async function testTreasuryHonesty() {
   });
 }
 
+// §41: SEC EDGAR source (ADR-0003) — TRUTHFULNESS under fault + the F1–F8 review
+// fixes. All OFFLINE (mock fetch), deterministic, non-vacuous: every assertion
+// pins a specific value and names the exact mutation that turns it RED. The
+// tools are exercised through the REAL runTool dispatch over a mocked fetch, so
+// a regression in getEdgar / the mappers / the meta wiring turns RED end-to-end.
+//   (a) 403 automated ⇒ invalid_input throws (bad UA, F6); 403 rate-block ⇒
+//       rate_limited/600 throws — NEVER a fake empty.
+//   (b) unknown CIK 404 ⇒ found:false (honest, not fabricated), for filings+facts.
+//   (c) outage 5xx ⇒ throws upstream_unavailable, never a fake empty.
+//   (d) submissions COLUMNAR zip alignment + real primaryDocument archive URL.
+//   (e) submissions files[] shards ⇒ hasMore:true + totalAvailable=recent+Σshards
+//       + a disclosure note (never "recent" presented as full history).
+//   (f) companyfacts absent concept ⇒ OMITTED + note, never 0 (F3); a concept in
+//       the wrong unit (EPS in USD/shares) ⇒ wrongUnit + note, never 0 (F4).
+//   (g) FTS totalAvailable = hits.total.value (NOT hits.length — mutate ⇒ RED);
+//       relation "gte" ⇒ totalIsLowerBound:true (F5); genuine 0 ⇒ complete:true;
+//       F7 filingIndexUrl built from adsh (no fabricated doc filename).
+//   (h) FTS window overflow: from ≥ 9900 ⇒ invalid_input BEFORE any fetch (F3);
+//       HTTP 200 + {message:...} (no hits.hits) ⇒ schema_drift, not a crash (F8).
+//   (i) padCik.
+const isEdgarTickers = (u) => /www\.sec\.gov\/files\/company_tickers\.json/.test(u);
+const isEdgarSubmissions = (u) => /data\.sec\.gov\/submissions\/CIK\d{10}\.json/.test(u);
+const isEdgarFacts = (u) => /data\.sec\.gov\/api\/xbrl\/companyfacts\/CIK\d{10}\.json/.test(u);
+const isEdgarFts = (u) => /efts\.sec\.gov\/LATEST\/search-index/.test(u);
+
+async function testEdgarHonesty() {
+  section("41. SEC EDGAR — 403/404/5xx honesty, columnar zip, absent-concept, FTS total/gte/window (F1–F8, OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache(); // isolate from the memoized ticker/facts maps of any prior run.
+
+  // (i) padCik — digits → 10-padded; strips CIK prefix / already-padded pass-through.
+  eq("41i padCik(320193) ⇒ '0000320193'", edgarPadCik(320193), "0000320193");
+  eq("41i padCik('320193') ⇒ '0000320193' (numeric string)", edgarPadCik("320193"), "0000320193");
+  eq("41i padCik('CIK0000320193') ⇒ '0000320193' (strips non-digits, stays 10)", edgarPadCik("CIK0000320193"), "0000320193");
+  eq("41i padCik(1045810) ⇒ '0001045810'", edgarPadCik(1045810), "0001045810");
+
+  // Submissions fixtures (COLUMNAR filings.recent; value 'isXBRL' is 1/0 on the wire).
+  const recent2 = {
+    accessionNumber: ["0000320193-24-000123", "0000320193-24-000045"],
+    filingDate: ["2024-11-01", "2024-08-02"],
+    reportDate: ["2024-09-28", "2024-06-29"],
+    form: ["10-K", "10-Q"],
+    primaryDocument: ["aapl-20240928.htm", "aapl-20240629.htm"],
+    primaryDocDescription: ["10-K annual report", "10-Q quarterly report"],
+    isXBRL: [1, 1],
+  };
+  const submEnv = (recent, files = []) => ({ name: "Apple Inc.", cik: 320193, filings: { recent, files } });
+
+  // (a) 403 "automated" body ⇒ invalid_input (bad UA, don't retry) — F6. A masquerade
+  // that swallowed this into found:false/empty turns RED.
+  await withFetch((u) => (isEdgarSubmissions(u) ? mockResponse({ status: 403, json: "Request denied — your request appears to be automated. Declare a User-Agent." }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_company_filings", { cikOrTicker: "320193" }, sam));
+    ok("41a 403 'automated' body ⇒ throws invalid_input (bad UA, F6) — NOT a fake found:false/empty",
+      threw && error?.toolError?.kind === "invalid_input" && error?.toolError?.retryable === false, JSON.stringify(error?.toolError));
+  });
+  // 403 without automated/undeclared ⇒ rate_limited, retryable, retryAfter 600 (F6).
+  await withFetch((u) => (isEdgarSubmissions(u) ? mockResponse({ status: 403, json: { error: "forbidden" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_company_filings", { cikOrTicker: "320193" }, sam));
+    ok("41a 403 non-automated body ⇒ throws rate_limited retryable retryAfter 600 (the ~10-min block, F6)",
+      threw && error?.toolError?.kind === "rate_limited" && error?.toolError?.retryable === true && error?.toolError?.retryAfterSeconds === 600, JSON.stringify(error?.toolError));
+  });
+
+  // (b) unknown CIK ⇒ 404 on submissions AND companyfacts ⇒ honest found:false (not fabricated).
+  await withFetch((u) => ((isEdgarSubmissions(u) || isEdgarFacts(u)) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
+    const rf = await runTool("edgar_company_filings", { cikOrTicker: "9999999999" }, sam);
+    ok("41b filings unknown CIK 404 ⇒ found:false (honest not-found, NOT a thrown outage, NOT a fabricated filing)",
+      rf.data.found === false && Array.isArray(rf.data.filings ?? []) , JSON.stringify(rf.data));
+    const rc = await runTool("edgar_company_facts", { cikOrTicker: "9999999999" }, sam);
+    ok("41b facts unknown CIK 404 ⇒ found:false (honest not-found)",
+      rc.data.found === false, JSON.stringify(rc.data));
+  });
+
+  // (c) outage 5xx ⇒ getEdgar (via fetchWithRetry) throws upstream_unavailable, never a fake empty.
+  await withFetch((u) => (isEdgarSubmissions(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_company_filings", { cikOrTicker: "320193" }, sam));
+    ok("41c submissions 503 ⇒ throws upstream_unavailable (NOT a fake empty filings[])",
+      threw && error?.toolError?.kind === "upstream_unavailable" && error?.toolError?.retryable === true, JSON.stringify(error?.toolError?.kind));
+  });
+
+  // (d) COLUMNAR zip alignment + real primaryDocument archive URL. files:[] ⇒ complete.
+  await withFetch((u) => (isEdgarSubmissions(u) ? mockResponse({ status: 200, json: submEnv(recent2, []) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_filings", { cikOrTicker: "320193", limit: 20 }, sam);
+    const m = buildMeta(r.meta);
+    const f0 = r.data.filings[0];
+    const f1 = r.data.filings[1];
+    ok("41d columnar zip: index 0 ⇒ 10-K/2024-11-01/accession[0] (parallel arrays aligned by index; a shift ⇒ RED)",
+      f0.form === "10-K" && f0.filingDate === "2024-11-01" && f0.accession === "0000320193-24-000123" && f0.reportDate === "2024-09-28", JSON.stringify(f0));
+    ok("41d columnar zip: index 1 ⇒ 10-Q/2024-08-02/accession[1] (non-vacuity: distinct row)",
+      f1.form === "10-Q" && f1.filingDate === "2024-08-02" && f1.accession === "0000320193-24-000045", JSON.stringify(f1));
+    ok("41d primaryDocUrl = real archive URL from unpadded CIK + accession-no-dashes + primaryDocument (F: not fabricated)",
+      f0.primaryDocUrl === "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm", JSON.stringify(f0.primaryDocUrl));
+    ok("41d files[]===[] ⇒ complete:true + totalAvailable=returned (full recent history)",
+      m.complete === true && m.truncated === false && m.totalAvailable === 2 && m.returned === 2, JSON.stringify(m));
+    ok("41d CIK↔UEI caveat in notes + fieldsUnavailable (join-honesty on EVERY tool)",
+      m.notes.some((n) => /CIK/.test(n) && /UEI/.test(n)) && JSON.stringify(m.fieldsUnavailable) === JSON.stringify(["uei", "duns", "sam_recipient_id"]), JSON.stringify(m.fieldsUnavailable));
+  });
+
+  // (e) files[] shards present ⇒ INCOMPLETE: hasMore:true, totalAvailable = recent + Σ shard counts,
+  // and a note discloses only the recent window was searched. Presenting recent as full ⇒ RED.
+  const shards = [{ name: "CIK0000320193-submissions-001.json", filingCount: 1236, filingFrom: "1994-01-26", filingTo: "2015-05-27" }];
+  await withFetch((u) => (isEdgarSubmissions(u) ? mockResponse({ status: 200, json: submEnv(recent2, shards) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_filings", { cikOrTicker: "320193" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41e files[] non-empty ⇒ totalAvailable = recentCount(2) + Σshards(1236) = 1238 (NOT the 2 fetched)",
+      m.totalAvailable === 1238, JSON.stringify(m.totalAvailable));
+    ok("41e files[] non-empty ⇒ hasMore:true + truncated:true + complete:false (older shards not fetched)",
+      m.pagination.hasMore === true && m.truncated === true && m.complete === false, JSON.stringify(m));
+    ok("41e files[] non-empty ⇒ a note discloses the older shards / incomplete history (never silent)",
+      m.notes.some((n) => /INCOMPLETE|shard/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // (f) companyfacts: absent concept OMITTED + note (never 0, F3); wrong-unit concept ⇒ wrongUnit + note (never 0, F4).
+  const factsDoc = {
+    cik: 320193, entityName: "Apple Inc.",
+    facts: {
+      "us-gaap": {
+        Assets: { label: "Assets", units: { USD: [
+          { end: "2023-09-30", val: 352583000000, accn: "a1", fy: 2023, fp: "FY", form: "10-K", filed: "2023-11-03" },
+          { end: "2024-09-28", val: 364980000000, accn: "a2", fy: 2024, fp: "FY", form: "10-K", filed: "2024-11-01" },
+        ] } },
+        NetIncomeLoss: { label: "Net Income (Loss)", units: { USD: [
+          { end: "2024-09-28", val: 93736000000, accn: "a3", fy: 2024, fp: "FY", form: "10-K", filed: "2024-11-01" },
+        ] } },
+        EarningsPerShareBasic: { label: "EPS Basic", units: { "USD/shares": [
+          { end: "2024-09-28", val: 6.11, accn: "a4", fy: 2024, fp: "FY", form: "10-K", filed: "2024-11-01" },
+        ] } },
+      },
+    },
+  };
+  await withFetch((u) => (isEdgarFacts(u) ? mockResponse({ status: 200, json: factsDoc }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_facts", { cikOrTicker: "320193" }, sam); // default 6 concepts, unit USD
+    const byName = Object.fromEntries(r.data.concepts.map((c) => [c.concept, c]));
+    ok("41f default concepts: Assets present with REAL values (full series, latest point 364,980,000,000)",
+      byName.Assets && byName.Assets.points.length === 2 && byName.Assets.points.some((p) => p.val === 364980000000), JSON.stringify(byName.Assets));
+    ok("41f absent concepts (Liabilities/StockholdersEquity/Cash…/Revenues) are OMITTED from concepts[] (never fabricated as 0)",
+      byName.Liabilities === undefined && byName.StockholdersEquity === undefined && byName.CashAndCashEquivalentsAtCarryingValue === undefined, JSON.stringify(Object.keys(byName)));
+    ok("41f absent concepts listed in `absent` + a note (data-absence disclosed, NOT 0)",
+      r.data.absent.includes("Liabilities") && r.data.absent.includes("StockholdersEquity") && buildMeta(r.meta).notes.some((n) => /not reported|OMITTED/i.test(n)), JSON.stringify(r.data.absent));
+    // F4 — EPS requested in USD (default) exists only in USD/shares ⇒ wrongUnit, never a silent 0.
+    const rEps = await runTool("edgar_company_facts", { cikOrTicker: "320193", concepts: ["EarningsPerShareBasic"], unit: "USD" }, sam);
+    ok("41f EPS requested unit USD but present only in USD/shares ⇒ wrongUnit (F4), concepts empty, NOT a 0",
+      rEps.data.concepts.length === 0 && rEps.data.wrongUnit.length === 1 && rEps.data.wrongUnit[0].concept === "EarningsPerShareBasic" && rEps.data.wrongUnit[0].availableUnits.includes("USD/shares"), JSON.stringify(rEps.data.wrongUnit));
+    ok("41f EPS wrong-unit ⇒ a note names the available unit (never a fabricated 0)",
+      buildMeta(rEps.meta).notes.some((n) => /USD\/shares/.test(n)), JSON.stringify(buildMeta(rEps.meta).notes));
+    // latest=true ⇒ single most-recent point per concept.
+    const rLatest = await runTool("edgar_company_facts", { cikOrTicker: "320193", concepts: ["Assets"], latest: true }, sam);
+    ok("41f latest=true ⇒ Assets reduced to its single most-recent point (end 2024-09-28)",
+      rLatest.data.concepts[0].points.length === 1 && rLatest.data.concepts[0].points[0].end === "2024-09-28", JSON.stringify(rLatest.data.concepts[0].points));
+  });
+
+  // (g) FTS — totalAvailable = hits.total.value (NOT hits.length); F7 filingIndexUrl from adsh.
+  const ftsEnv = (totalValue, relation, hits) => ({ hits: { total: { value: totalValue, relation }, hits } });
+  const ftsHit = { _id: "0000320193-24-000123:aapl.htm", _source: { ciks: ["0000320193"], display_names: ["Apple Inc. (AAPL) (CIK 0000320193)"], form: "10-K", file_date: "2024-11-01", adsh: "0000320193-24-000123" } };
+  await withFetch((u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: ftsEnv(8412, "eq", [ftsHit, ftsHit]) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_full_text_search", { q: "\"climate risk\"" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41g FTS totalAvailable === hits.total.value 8412 (NOT hits.length 2 — reading hits.length ⇒ RED)",
+      m.totalAvailable === 8412 && m.returned === 2, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    ok("41g FTS relation 'eq' ⇒ NO totalIsLowerBound flag (exact count)",
+      m.totalIsLowerBound === undefined, JSON.stringify(m.totalIsLowerBound));
+    const h0 = r.data.results[0];
+    ok("41g F7 filingIndexUrl = archive INDEX dir from adsh (no fabricated doc filename; ends with '/')",
+      h0.filingIndexUrl === "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/" && !/\.htm$/.test(h0.filingIndexUrl), JSON.stringify(h0.filingIndexUrl));
+    ok("41g FTS hit maps form/filingDate/entityNames/ciks",
+      h0.form === "10-K" && h0.filingDate === "2024-11-01" && h0.ciks[0] === "0000320193" && h0.entityNames[0].includes("Apple"), JSON.stringify(h0));
+  });
+
+  // (g2) relation "gte" ⇒ totalIsLowerBound:true (F5) + a lower-bound note + truncated.
+  await withFetch((u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: ftsEnv(10000, "gte", [ftsHit, ftsHit, ftsHit]) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_full_text_search", { q: "the" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41g2 FTS relation 'gte' ⇒ totalIsLowerBound:true (F5, machine-readable) + totalAvailable 10000 + complete:false",
+      m.totalIsLowerBound === true && m.totalAvailable === 10000 && m.complete === false && m.truncated === true, JSON.stringify({ lb: m.totalIsLowerBound, ta: m.totalAvailable, c: m.complete }));
+    ok("41g2 FTS gte ⇒ a note discloses the count is a LOWER BOUND (≥)",
+      m.notes.some((n) => /LOWER BOUND|≥/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // (g3) genuine 0 hits (relation 'eq', value 0) ⇒ honest complete:true / totalAvailable:0 — distinct from an outage.
+  await withFetch((u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: ftsEnv(0, "eq", []) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_full_text_search", { q: "zzznotarealphrase12345" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41g3 FTS genuine 0 ⇒ results:[] + totalAvailable:0 + complete:true + truncated:false (real no-match, not an outage)",
+      r.data.results.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false, JSON.stringify(m));
+  });
+
+  // (h) FTS window overflow. from ≥ 9900 ⇒ invalid_input BEFORE any fetch (F3 input guard);
+  // HTTP 200 + {message:...} (no hits.hits) ⇒ schema_drift, not a crash (F8).
+  await withFetch(failClosed(), async (calls) => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_full_text_search", { q: "x", from: 9900 }, sam));
+    ok("41h from=9900 ⇒ invalid_input BEFORE any fetch (window guard, F3) — NO network call made",
+      threw && error?.toolError?.kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: error?.toolError?.kind, calls: calls.length }));
+  });
+  await withFetch((u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: { message: "Internal server error" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_full_text_search", { q: "x", from: 5000 }, sam));
+    ok("41h HTTP 200 + {message:...} (no hits.hits) ⇒ schema_drift (F8) — mapper does NOT crash on d.hits.hits",
+      threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // (j) lookup_cik — exact ticker ⇒ 10-padded CIK; no match ⇒ found:false (never fabricated).
+  const tickersDoc = { "0": { cik_str: 320193, ticker: "AAPL", title: "Apple Inc." }, "1": { cik_str: 1045810, ticker: "NVDA", title: "NVIDIA CORP" } };
+  await withFetch((u) => (isEdgarTickers(u) ? mockResponse({ status: 200, json: tickersDoc }) : failClosed()()), async () => {
+    const r = await runTool("edgar_lookup_cik", { query: "AAPL" }, sam);
+    ok("41j lookup 'AAPL' ⇒ found:true, cik padded to '0000320193' (padCik applied to the integer cik_str)",
+      r.data.found === true && r.data.results[0].cik === "0000320193" && r.data.results[0].ticker === "AAPL", JSON.stringify(r.data.results[0]));
+    const rn = await runTool("edgar_lookup_cik", { query: "zzznotacompany" }, sam);
+    const mn = buildMeta(rn.meta);
+    ok("41j lookup no-match ⇒ found:false + results:[] + totalAvailable:0 + complete:true (honest empty)",
+      rn.data.found === false && rn.data.results.length === 0 && mn.totalAvailable === 0 && mn.complete === true, JSON.stringify({ f: rn.data.found, m: mn.totalAvailable }));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -6003,6 +6215,7 @@ async function main() {
   await testNaicsHierarchy();
   await testRegistryDispatchHonesty();
   await testTreasuryHonesty();
+  await testEdgarHonesty();
 
   // Prove the harness bites.
   await selfCheck();

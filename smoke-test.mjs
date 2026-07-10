@@ -629,6 +629,66 @@ const tests = [
       r.rows.length >= 1 &&
       r.rows.every((row) => typeof row.country_currency_desc === "string"),
   },
+
+  // ━━━ SEC EDGAR — filings / XBRL facts / CIK / full-text (keyless) (ADR-0003)
+  {
+    // Ticker → 10-digit CIK via company_tickers.json. Apple resolves to the
+    // canonical padded CIK 0000320193 (padCik on the integer cik_str).
+    name: "edgar_lookup_cik",
+    args: { query: "AAPL" },
+    verify: (r) =>
+      r.found === true &&
+      Array.isArray(r.results) &&
+      r.results.some((x) => x.cik === "0000320193" && x.ticker === "AAPL"),
+  },
+  {
+    // Recent 10-K filings for Apple. Each carries a real archive primaryDocUrl
+    // built from accession + primaryDocument (F7 uses the real doc for filings).
+    name: "edgar_company_filings",
+    args: { cikOrTicker: "AAPL", forms: ["10-K"], limit: 3 },
+    verify: (r) =>
+      typeof r.cik === "string" &&
+      Array.isArray(r.filings) &&
+      r.filings.length >= 1 &&
+      r.filings.every(
+        (f) =>
+          f.form === "10-K" &&
+          typeof f.accession === "string" &&
+          typeof f.primaryDocUrl === "string" &&
+          f.primaryDocUrl.startsWith("https://www.sec.gov/Archives/edgar/data/"),
+      ),
+  },
+  {
+    // Curated XBRL facts. Assets in USD, latest point only — a real positive
+    // number (num()), never 0 for a present fact.
+    name: "edgar_company_facts",
+    args: { cikOrTicker: "AAPL", concepts: ["Assets"], latest: true },
+    verify: (r) =>
+      Array.isArray(r.concepts) &&
+      r.concepts.length === 1 &&
+      r.concepts[0].concept === "Assets" &&
+      r.concepts[0].points.length === 1 &&
+      typeof r.concepts[0].points[0].val === "number" &&
+      r.concepts[0].points[0].val > 0,
+  },
+  {
+    // Full-text search (2001-present). Each hit carries a constructed archive
+    // INDEX url from adsh (F7 — no fabricated doc filename); totalAvailable is
+    // the true count (or a ≥ lower bound; _meta.totalIsLowerBound discloses it).
+    name: "edgar_full_text_search",
+    args: { q: "\"artificial intelligence\"", forms: ["10-K"] },
+    verify: (r) =>
+      Array.isArray(r.results) &&
+      r.results.length >= 1 &&
+      r.results.every(
+        (h) =>
+          typeof h.accession === "string" &&
+          Array.isArray(h.ciks) &&
+          (h.filingIndexUrl === null ||
+            (typeof h.filingIndexUrl === "string" &&
+              h.filingIndexUrl.endsWith("/"))),
+      ),
+  },
 ];
 
 function pickPath(obj, path) {

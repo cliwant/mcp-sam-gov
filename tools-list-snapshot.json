@@ -30,6 +30,119 @@
     }
   },
   {
+    "name": "edgar_company_facts",
+    "description": "Curated XBRL financial facts for a filer (keyless, from data.sec.gov companyfacts). Input `cikOrTicker`, optional `concepts` (default: 6 curated USD concepts — Revenues/RevenueFromContractWithCustomerExcludingAssessedTax, Assets, Liabilities, StockholdersEquity, NetIncomeLoss, CashAndCashEquivalentsAtCarryingValue), `unit` (default USD), `latest`. A concept absent for the filer is OMITTED (never 0); a concept present only in another unit (e.g. EPS in USD/shares) is reported under wrongUnit with a note.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "cikOrTicker": {
+          "type": "string",
+          "description": "A 10-digit (or unpadded) SEC CIK, or a ticker/company-name resolvable via company_tickers.json (e.g. '320193', 'AAPL')."
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional XBRL us-gaap/dei concept tags to extract (e.g. ['Assets','NetIncomeLoss']). Default: the 6 curated USD concepts (Revenues/RevenueFromContractWithCustomerExcludingAssessedTax, Assets, Liabilities, StockholdersEquity, NetIncomeLoss, CashAndCashEquivalentsAtCarryingValue). A concept absent for the filer is OMITTED (never 0)."
+        },
+        "unit": {
+          "type": "string",
+          "description": "XBRL unit to extract, default 'USD'. A concept present only in another unit (e.g. EarningsPerShareBasic in 'USD/shares') is reported under wrongUnit with a note — never a silent 0."
+        },
+        "latest": {
+          "type": "boolean",
+          "description": "true ⇒ reduce each concept to its single most-recent data point (by period end). false (default) ⇒ the full reported time series."
+        }
+      },
+      "required": [
+        "cikOrTicker"
+      ]
+    }
+  },
+  {
+    "name": "edgar_company_filings",
+    "description": "A company's recent SEC filings (keyless, from data.sec.gov submissions). Input `cikOrTicker` (CIK or resolvable ticker/name), optional `forms` (e.g. ['10-K','8-K']), `limit` (≤100, default 20), `offset`. Returns filings with the REAL primary-document archive URL. HONESTY: complete only when no older shards exist; otherwise totalAvailable = recent + Σ older-shard counts, hasMore:true, and a note discloses only the ~1000 most-recent filings were searched.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "cikOrTicker": {
+          "type": "string",
+          "description": "A 10-digit (or unpadded) SEC CIK, or a ticker/company-name resolvable via company_tickers.json (e.g. '320193', 'CIK0000320193', 'AAPL')."
+        },
+        "forms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional form-type filter (e.g. ['10-K','10-Q','8-K']); case-insensitive exact match on the filing's form. Omit for all forms."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max filings to return, 1..100, default 20 (offset pagination over the recent window)."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based offset into the (form-filtered) recent filings, default 0."
+        }
+      },
+      "required": [
+        "cikOrTicker"
+      ]
+    }
+  },
+  {
+    "name": "edgar_full_text_search",
+    "description": "Full-text search across EDGAR filings, 2001-present (keyless, efts.sec.gov). Input `q` (phrase in double-quotes for exact), optional `forms`, `startdt`/`enddt` (ISO), `from` (offset; page size FIXED at 100 — no size param). Returns { accession, form, filingDate, entityNames, ciks, filingIndexUrl }. HONESTY: totalAvailable = the true match count, or a LOWER BOUND (totalIsLowerBound:true) when SEC reports ≥10000; from ≥ 9900 is rejected (10000-result window).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "q": {
+          "type": "string",
+          "description": "Full-text query over EDGAR filings (2001-present). Wrap a phrase in double quotes for an exact match (e.g. '\"climate risk\"')."
+        },
+        "forms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional form-type filter (e.g. ['10-K','8-K'])."
+        },
+        "startdt": {
+          "type": "string",
+          "description": "Optional ISO YYYY-MM-DD filing-date lower bound (sets dateRange=custom)."
+        },
+        "enddt": {
+          "type": "string",
+          "description": "Optional ISO YYYY-MM-DD filing-date upper bound (sets dateRange=custom)."
+        },
+        "from": {
+          "type": "number",
+          "description": "0-based result offset for pagination; page size is FIXED at 100 (there is no size param). Must be < 9900 (from+100 ≤ 10000 upstream window); a larger from is rejected as invalid_input."
+        }
+      },
+      "required": [
+        "q"
+      ]
+    }
+  },
+  {
+    "name": "edgar_lookup_cik",
+    "description": "Resolve a company ticker or name to its 10-digit SEC CIK (keyless, via SEC company_tickers.json). Input `query` (exact ticker or a title substring) ⇒ up to 50 { cik, ticker, title } matches; found:false on none. The CIK is the join key for edgar_company_filings/edgar_company_facts. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS — there is no authoritative CIK↔UEI join.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Company ticker (exact, case-insensitive) or a company-name substring to resolve to a 10-digit SEC CIK via company_tickers.json. e.g. 'AAPL' or 'apple'. Returns up to 50 matches (found:false on none)."
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
     "name": "far_clause_lookup",
     "description": "Authoritative FAR/DFARS clause text + its PRESCRIPTION (the 'As prescribed in …' rule for when the clause applies), from the eCFR versioner-full endpoint (Title 48). Use this — NOT ecfr_search — for an EXACT clause number: full-text search mis-ranks '52.212-4' (returns GSAM 552.212-4 above the real FAR clause). Returns heading, revision date, clause/provision kind, regulation (FAR/DFARS/GSAM), full text, the prescribing section, and ecfrUrl. Every response carries farOverhaulRisk — a structural currency caveat that eCFR reflects only the CODIFIED FAR, so a clause may be superseded by a Revolutionary-FAR-Overhaul agency class deviation not shown here. A genuinely-absent clause returns a not_found error (never a fake empty clause). Keyless.",
     "inputSchema": {
