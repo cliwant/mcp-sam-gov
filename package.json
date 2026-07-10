@@ -78,6 +78,7 @@
     "smoke": "node smoke-test.mjs",
     "test:edge": "node edge-case-test.mjs",
     "test:fault": "node fault-injection-test.mjs",
+    "test:snapshot": "node registry-snapshot-test.mjs",
     "lint:invariants": "node lint-invariants.mjs",
     "coverage": "c8 node fault-injection-test.mjs",
     "perf": "node --expose-gc perf-test.mjs",

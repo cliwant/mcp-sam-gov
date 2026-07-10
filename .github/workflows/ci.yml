@@ -39,6 +39,8 @@ jobs:
       - run: npm ci
       - name: Build (tsc; also catches src/dist drift)
         run: npm run build
+      - name: tools/list snapshot parity (deterministic, offline — byte-identical gate)
+        run: npm run test:snapshot
       - name: Fault-injection harness (offline, deterministic — 407+ assertions)
         run: node fault-injection-test.mjs
 

@@ -1,0 +1,9 @@
+# Pin the tools/list snapshot gate to LF. registry-snapshot-test.mjs emits the
+# canonical form with `\n` (JSON.stringify), so the committed fixture and the
+# harness must materialize as LF on every OS — otherwise core.autocrlf on the
+# windows-latest `gate` leg checks the fixture out as CRLF and the byte-identical
+# comparison fails on `\r` alone (content is identical). The git blobs are already
+# LF; this only normalizes the working-tree copy so the blocking gate is
+# deterministic cross-OS.
+tools-list-snapshot.json text eol=lf
+registry-snapshot-test.mjs text eol=lf
