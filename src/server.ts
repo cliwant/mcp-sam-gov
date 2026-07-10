@@ -831,7 +831,27 @@ type ToolDef = {
   name: string;
   description: string;
   inputSchema: z.ZodTypeAny;
+  // R1 (ADR-0001) — optional co-located dispatch handler. When present,
+  // runTool routes through it (parse with `inputSchema`, then call) BEFORE the
+  // legacy `switch`; entries without a handler still fall through to the switch.
+  // The handler may return a raw domain object OR a MetaBundle (via `withMeta`)
+  // — CallTool's envelope logic unwraps both identically. Typed `any` here and
+  // type-checked against the schema's inferred input by `defineTool`.
+  handler?: (input: any, ctx: { sam: SamGovClient }) => Promise<unknown>;
 };
+
+// Build a ToolDef whose `handler` is type-checked against the schema's inferred
+// input `I` at the call site (e.g. `input.searchText` is known-present). The
+// `I` binding is erased to `any` in the ToolDef[] array, so entries without a
+// handler need not use this helper.
+function defineTool<I>(d: {
+  name: string;
+  description: string;
+  inputSchema: z.ZodType<I>;
+  handler?: (input: I, ctx: { sam: SamGovClient }) => Promise<unknown>;
+}): ToolDef {
+  return d as ToolDef;
+}
 
 const TOOLS: ToolDef[] = [
   // ━━━ SAM.gov (7) ━━━
@@ -903,12 +923,13 @@ const TOOLS: ToolDef[] = [
       "Break down a parent agency's spending by sub-agency / office. Surfaces which office holds the budget (e.g. VA OI&T vs VHA, DoD vs Army vs DISA).",
     inputSchema: UsasSubAgencyInput,
   },
-  {
+  defineTool({
     name: "usas_lookup_agency",
     description:
       "Resolve a user-friendly agency reference ('VA', 'Veterans Affairs', 'DHS') to USAspending's canonical toptier name + 4-digit code. ALWAYS call this FIRST if the user uses an abbreviation — other USAspending tools require the canonical name.",
     inputSchema: UsasLookupAgencyInput,
-  },
+    handler: (input) => usas.lookupAgency(input.searchText),
+  }),
   {
     name: "usas_search_awards_by_recipient",
     description:
@@ -933,12 +954,13 @@ const TOOLS: ToolDef[] = [
       "DEPRECATED — use usas_search_recompetes. Thin backward-compatible alias: finds contracts at agency × NAICS expiring within N months and returns the legacy { contracts, searchedCount } shape. New callers should use usas_search_recompetes for the full window/pagination controls and truthful completeness metadata.",
     inputSchema: UsasExpiringInput,
   },
-  {
+  defineTool({
     name: "usas_get_award_detail",
     description:
       "Fetch full detail for a single award by generatedInternalId (from usas_search_individual_awards). Returns period_of_performance (start/end/potential_end), base_and_all_options, set-aside type, competition extent, number_of_offers — the per-award fields the search endpoint omits.",
     inputSchema: UsasAwardDetailInput,
-  },
+    handler: (input) => usas.getAwardDetail(input.generatedInternalId),
+  }),
   {
     name: "usas_analyze_incumbent",
     description:
@@ -985,12 +1007,13 @@ const TOOLS: ToolDef[] = [
   },
 
   // ━━━ USAspending — Agency Profile (3) ━━━
-  {
+  defineTool({
     name: "usas_get_agency_profile",
     description:
       "Get full agency profile by toptier code (3-4 digits, from usas_lookup_agency). Returns mission, abbreviation, website, subtier_agency_count, congressional_justification_url.",
     inputSchema: UsasAgencyProfileInput,
-  },
+    handler: (input) => usas.getAgencyProfile(input.toptierCode),
+  }),
   {
     name: "usas_get_agency_awards_summary",
     description:
@@ -1011,12 +1034,13 @@ const TOOLS: ToolDef[] = [
       "Search USAspending recipient list with parent/child/recipient hierarchy. Returns recipients with id, duns, uei, level (P=parent, C=child, R=recipient), total_amount. Use for 'find the recipient_id for Booz Allen' before usas_get_recipient_profile.",
     inputSchema: UsasSearchRecipientsInput,
   },
-  {
+  defineTool({
     name: "usas_get_recipient_profile",
     description:
       "Full recipient detail by recipient_id (from usas_search_recipients). Returns alternate_names (M&A history), DUNS, UEI, parent linkage, business_types, location, total_amount, total_transactions.",
     inputSchema: UsasGetRecipientInput,
-  },
+    handler: (input) => usas.getRecipientProfile(input.recipientId),
+  }),
 
   // ━━━ USAspending — Reference / Autocomplete (4) ━━━
   {
@@ -1077,12 +1101,13 @@ const TOOLS: ToolDef[] = [
       "Full-text search across the entire CFR (Code of Federal Regulations). Use for compliance questions — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns excerpt + section path + ecfrUrl.",
     inputSchema: EcfrSearchInput,
   },
-  {
+  defineTool({
     name: "ecfr_list_titles",
     description:
       "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
     inputSchema: EcfrListTitlesInput,
-  },
+    handler: () => ecfr.listTitles(),
+  }),
   {
     name: "far_clause_lookup",
     description:
@@ -1300,6 +1325,17 @@ export async function runTool(
   args: Record<string, unknown>,
   sam: SamGovClient,
 ): Promise<unknown> {
+  // R1 (ADR-0001) — registry dispatch. If the tool's TOOLS[] entry carries a
+  // co-located `handler`, route through it: parse `args` with the entry's own
+  // schema, then call the handler. Its return value flows into CallTool's
+  // existing envelope logic (isMetaBundle? buildMeta : synthesizeDefaultMeta)
+  // byte-identically. Tools not yet migrated have no handler and fall through
+  // to the legacy `switch` below unchanged.
+  const entry = TOOLS.find((t) => t.name === name);
+  if (entry?.handler) {
+    const input = entry.inputSchema.parse(args);
+    return await entry.handler(input, { sam });
+  }
   switch (name) {
     // SAM.gov
     case "sam_search_opportunities": {
@@ -1829,10 +1865,6 @@ export async function runTool(
       );
     case "usas_search_subagency_spending":
       return await usas.searchSubAgencySpending(UsasSubAgencyInput.parse(args));
-    case "usas_lookup_agency":
-      return await usas.lookupAgency(
-        UsasLookupAgencyInput.parse(args).searchText,
-      );
     case "usas_search_awards_by_recipient":
       return await usas.searchAwardsByRecipient(
         UsasRecipientAwardsInput.parse(args),
@@ -1843,10 +1875,6 @@ export async function runTool(
       return await usas.searchRecompetes(UsasRecompetesInput.parse(args));
     case "usas_search_expiring_contracts":
       return await usas.searchExpiringContracts(UsasExpiringInput.parse(args));
-    case "usas_get_award_detail":
-      return await usas.getAwardDetail(
-        UsasAwardDetailInput.parse(args).generatedInternalId,
-      );
     case "usas_analyze_incumbent":
       return await usas.analyzeIncumbent(
         UsasAnalyzeIncumbentInput.parse(args),
@@ -1877,10 +1905,6 @@ export async function runTool(
       );
 
     // USAspending — Agency Profile
-    case "usas_get_agency_profile":
-      return await usas.getAgencyProfile(
-        UsasAgencyProfileInput.parse(args).toptierCode,
-      );
     case "usas_get_agency_awards_summary":
       return await usas.getAgencyAwardsSummary(
         UsasAgencyAwardsInput.parse(args),
@@ -1893,10 +1917,6 @@ export async function runTool(
     // USAspending — Recipient Profile
     case "usas_search_recipients":
       return await usas.searchRecipients(UsasSearchRecipientsInput.parse(args));
-    case "usas_get_recipient_profile":
-      return await usas.getRecipientProfile(
-        UsasGetRecipientInput.parse(args).recipientId,
-      );
 
     // USAspending — Reference / Autocomplete
     case "usas_autocomplete_naics":
@@ -1925,8 +1945,6 @@ export async function runTool(
     // eCFR
     case "ecfr_search":
       return await ecfr.search(EcfrSearchInput.parse(args));
-    case "ecfr_list_titles":
-      return await ecfr.listTitles();
     case "far_clause_lookup":
       return await far.farClauseLookup(FarClauseLookupInput.parse(args));
     case "far_compliance_matrix":

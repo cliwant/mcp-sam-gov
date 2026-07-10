@@ -1,0 +1,1392 @@
+[
+  {
+    "name": "ecfr_list_titles",
+    "description": "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "ecfr_search",
+    "description": "Full-text search across the entire CFR (Code of Federal Regulations). Use for compliance questions — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns excerpt + section path + ecfrUrl.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "titleNumber": {
+          "type": "number",
+          "description": "CFR title (1-50). e.g. 48 = FAR (Federal Acquisition Regulation), 2 = Federal financial assistance."
+        },
+        "perPage": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
+    "name": "far_clause_lookup",
+    "description": "Authoritative FAR/DFARS clause text + its PRESCRIPTION (the 'As prescribed in …' rule for when the clause applies), from the eCFR versioner-full endpoint (Title 48). Use this — NOT ecfr_search — for an EXACT clause number: full-text search mis-ranks '52.212-4' (returns GSAM 552.212-4 above the real FAR clause). Returns heading, revision date, clause/provision kind, regulation (FAR/DFARS/GSAM), full text, the prescribing section, and ecfrUrl. Every response carries farOverhaulRisk — a structural currency caveat that eCFR reflects only the CODIFIED FAR, so a clause may be superseded by a Revolutionary-FAR-Overhaul agency class deviation not shown here. A genuinely-absent clause returns a not_found error (never a fake empty clause). Keyless.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "clauseNumber": {
+          "type": "string",
+          "description": "FAR or DFARS clause/provision number, e.g. '52.212-4', '252.204-7012', '52.204-25'. An optional 'FAR '/'DFARS ' prefix is stripped."
+        },
+        "includePrescription": {
+          "type": "boolean",
+          "description": "Also fetch the prescribing section parsed from the clause's 'As prescribed in …' opener (the rule for WHEN the clause applies). Default true."
+        },
+        "asOfDate": {
+          "type": "string",
+          "description": "Point-in-time codification date (YYYY-MM-DD). Defaults to Title 48's current up_to_date_as_of."
+        }
+      },
+      "required": [
+        "clauseNumber"
+      ]
+    }
+  },
+  {
+    "name": "far_compliance_matrix",
+    "description": "Turn a solicitation's cited FAR/DFARS clause list into a proposal-ready compliance matrix (for a Section L/M response). COMPOSES far_clause_lookup over 1–25 clauses (deduped case-insensitively): each resolved row carries the clause text + prescription + regulation + a gate flag marking pass/fail award-eligibility GATES (Section 889 52.204-24/25/26, limitations on subcontracting 52.219-14, DFARS cyber 252.204-7012/7020/7021 incl. CMMC) + the farOverhaulRisk currency caveat. TRUTHFUL by construction: a clause that genuinely isn't in Title 48 (HTTP 404) goes to `unresolved`, while a clause that couldn't be fetched (eCFR down/5xx/rate-limited) goes to a SEPARATE `errored` bucket — a DOWN service is never reported as 'clause doesn't exist'; `summary.total` proves no clause is dropped. Does NOT parse the PDF solicitation to extract the clause list, and gives NO legal advice or compliance verdict. Keyless.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "clauses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The FAR/DFARS clause numbers a solicitation cites (e.g. from its 52.252-2 'Clauses Incorporated by Reference' list), 1–25. Deduped case-insensitively. e.g. ['52.212-4','52.204-25','252.204-7012']."
+        },
+        "asOfDate": {
+          "type": "string",
+          "description": "Point-in-time codification date (YYYY-MM-DD) — typically the solicitation issue date. Defaults to Title 48's current up_to_date_as_of."
+        },
+        "includePrescription": {
+          "type": "boolean",
+          "description": "Also fetch each clause's prescribing section (the 'As prescribed in …' rule for WHEN it applies). Default true."
+        },
+        "flagGates": {
+          "type": "boolean",
+          "description": "Tag resolved rows that are pass/fail award-eligibility gates (Section 889, CMMC, limitations on subcontracting) with a gate label; others get gate:null. Default true. false ⇒ all gate:null."
+        }
+      },
+      "required": [
+        "clauses"
+      ]
+    }
+  },
+  {
+    "name": "far_search",
+    "description": "FAR/DFARS-scoped semantic search — the 'which clauses touch topic X' front-door that feeds far_clause_lookup. COMPOSES ecfr_search but fixes its two compliance flaws: (1) it filters to FAR (Title 48 chapter 1) or DFARS (chapter 2), EXCLUDING GSAM/agency supplements (so 'limitations on subcontracting' no longer mis-ranks GSAM 552.x over FAR 52.x), and (2) it collapses eCFR's ~5-versions-per-section HISTORICAL duplicates to the CURRENT in-force version (endsOn==null). scope: far (default) | dfars | both. dedupeVersions (default true; false shows all historical rows). partsOnly restricts to given parts (e.g. [52] clause text). Returns distinct sections with regulation/section/headingPath/excerpt/score/ecfrUrl/effectiveOn/endsOn/isCurrent, distinctSections, and the farOverhaulRisk caveat. TRUTHFUL: dedupe never drops a distinct section (the raw→distinct collapse is disclosed); a kept-historical row is marked isCurrent:false; a search-endpoint outage THROWS (never a fake 0 results); totalAvailable is null (a deduped view has no clean upstream count). Keyless.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "What to search FAR/DFARS text for, e.g. 'limitations on subcontracting', 'covered defense information', 'commercial item'."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "far",
+            "dfars",
+            "both"
+          ],
+          "description": "Which corpus to search: 'far' (Title 48 chapter 1, the default), 'dfars' (chapter 2), or 'both'. Excludes GSAM/agency supplements."
+        },
+        "dedupeVersions": {
+          "type": "boolean",
+          "description": "Collapse each section's historical versions to the current (in-force) one. Default true. false ⇒ return all raw rows incl. historical."
+        },
+        "partsOnly": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Restrict results to these FAR/DFARS parts, e.g. [52] for clause text only, [12] for commercial-item policy."
+        },
+        "perPage": {
+          "type": "number",
+          "description": "Number of DISTINCT sections to return (1–20). Default 5."
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
+    "name": "fed_register_get_document",
+    "description": "Fetch full detail for a Federal Register document by number. Returns title, abstract, citation, publication_date, effective_on, raw_text_url (for the full body), CFR references — everything needed to ground a regulation citation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "documentNumber": {
+          "type": "string",
+          "description": "Federal Register document number, e.g. '2026-08333'"
+        }
+      },
+      "required": [
+        "documentNumber"
+      ]
+    }
+  },
+  {
+    "name": "fed_register_list_agencies",
+    "description": "List all Federal Register agencies with slugs (needed for fed_register_search_documents). Use to resolve 'what's the FedReg slug for Veterans Affairs?'",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "perPage": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "fed_register_search_documents",
+    "description": "Search Federal Register documents (proposed rules, final rules, notices, presidential documents) by query / agency / type / date range. Use for regulatory-context queries ('what new VA cybersecurity rules came out this quarter?').",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "agencySlugs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Federal Register agency slugs, e.g. ['veterans-affairs-department']. Use fed_register_list_agencies to resolve."
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "RULE",
+            "PRORULE",
+            "NOTICE",
+            "PRESDOCU"
+          ],
+          "description": "Document type"
+        },
+        "publicationDateFrom": {
+          "type": "string",
+          "description": "YYYY-MM-DD"
+        },
+        "publicationDateTo": {
+          "type": "string",
+          "description": "YYYY-MM-DD"
+        },
+        "effectiveDateFrom": {
+          "type": "string",
+          "description": "YYYY-MM-DD"
+        },
+        "perPage": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "gao_protest_lookup",
+    "description": "Recent GAO (Comptroller General) bid-protest decisions from the public Legal-Products RSS feed, enriched from each decision page (protester, contracting agency, decision date, outcome sustained/denied/dismissed/withdrawn, solicitation #, decision PDF). Filter client-side by agency/protester/solicitation/outcome, or pull one decision directly by bNumber. HONEST SCOPE: keyless covers only the RECENT feed window (~25 items) — GAO's faceted historical protest search (all years, by protester/agency/outcome/date) is WAF-blocked to bots and available only via a paid third-party API, so results are ALWAYS marked complete:false and are NOT the full protest history (see the accessNote).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string",
+          "description": "Client-side substring filter on the recent-protest feed (matched against the decision title + description). NOTE: filters the RECENT feed window only — not a historical agency search."
+        },
+        "protester": {
+          "type": "string",
+          "description": "Client-side substring filter on the protester name (feed title/description)."
+        },
+        "solicitationNumber": {
+          "type": "string",
+          "description": "Client-side substring filter on the solicitation number (matched in the feed description)."
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "sustained",
+            "denied",
+            "dismissed",
+            "withdrawn",
+            "any"
+          ],
+          "description": "Filter by protest disposition (default 'any'). Determined from each decision page, so it applies only when enrich is true."
+        },
+        "bNumber": {
+          "type": "string",
+          "description": "Fetch ONE specific decision directly by GAO B-number (e.g. 'B-424377' or 'b-424249.2'), bypassing the feed. Use to pull a decision that has aged out of the recent feed window."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max decisions to return (default 20, max 50). The feed itself carries ~25 recent legal products."
+        },
+        "enrich": {
+          "type": "boolean",
+          "description": "Fetch each decision's page to fill agency/outcome/solicitation/PDF (default true). Set false for a fast feed-only list (those fields will be null)."
+        }
+      }
+    }
+  },
+  {
+    "name": "grants_get_opportunity",
+    "description": "Fetch full detail for a single grant opportunity by id. Returns found:true with description, agency, posting/response/archive dates, award_ceiling, award_floor, estimated_funding, expected_number_of_awards, applicant_types, funding_instruments, CFDA programs. `agency` is { code, name (the REAL posting/sub-tier agency, e.g. 'Food and Nutrition Service'), department (the top-tier agency, e.g. 'Department of Agriculture'), contactName (the program officer — NOT the agency) } — Grants.gov's raw `agencyName` field is actually the contact person, so this tool sources the real agency from agencyDetails; `name` may be null if the record carries no structured agency. A NONEXISTENT id returns { found:false, opportunityId } — never a fabricated grant with empty fields (Grants.gov answers a bad id with a hollow 200, which this tool detects). Check `found` before reading the other fields.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "opportunityId": {
+          "type": "string",
+          "description": "Grants.gov opportunity id (numeric string)"
+        }
+      },
+      "required": [
+        "opportunityId"
+      ]
+    }
+  },
+  {
+    "name": "grants_search",
+    "description": "Search Grants.gov federal grant opportunities (financial assistance, distinct from contracts on SAM.gov). Filter by keyword / CFDA / agency / opportunity number. Default status = forecasted + posted. KEYWORD: Grants.gov OR-matches multi-word keywords (returns grants containing ANY word), so a multi-word keyword BROADENS results — pass ONE specific term for relevance (phrase quoting returns 0); narrow with cfda/agency/oppStatuses.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "keyword": {
+          "type": "string"
+        },
+        "cfda": {
+          "type": "string",
+          "description": "CFDA program number, e.g. '10.500'"
+        },
+        "agency": {
+          "type": "string",
+          "description": "Grants.gov agency code, e.g. 'DHS-FEMA'"
+        },
+        "oppNum": {
+          "type": "string",
+          "description": "Specific opportunity number"
+        },
+        "oppStatuses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "forecasted",
+              "posted",
+              "closed",
+              "archived"
+            ]
+          },
+          "description": "Defaults to forecasted+posted"
+        },
+        "rows": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "gsa_benchmark_labor_rates",
+    "description": "GSA CALC awarded ceiling-rate market band for a labor category (keyless). Returns a DISTRIBUTION (currentRate min/median/max + escalated medians) over a fetched sample, NOT a single price. CALC rates are CEILING/catalog and FULLY BURDENED (do not re-add wrap); the match count SATURATES at 10000 for broad queries (totalAvailable null then). Filter by businessSize/educationLevel(code)/experience/sin/priceRange to narrow.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "laborCategory": {
+          "type": "string",
+          "description": "Labor category to benchmark (e.g. 'Program Manager', 'Software Engineer'). Matched exactly against CALC's labor_category."
+        },
+        "businessSize": {
+          "type": "string",
+          "enum": [
+            "S",
+            "O"
+          ],
+          "description": "Business size filter: 'S' (small) or 'O' (other-than-small)."
+        },
+        "educationLevel": {
+          "type": "string",
+          "description": "Education filter — use CALC's SHORT CODES (e.g. 'HS','AA','BA','MA','PHD'); the displayed education_level field may show full words."
+        },
+        "minYearsExperience": {
+          "type": "number",
+          "description": "Minimum years of experience filter."
+        },
+        "experienceRange": {
+          "type": "string",
+          "description": "Experience range as 'min,max' (e.g. '5,10')."
+        },
+        "sin": {
+          "type": "string",
+          "description": "Schedule SIN filter (e.g. '54151S')."
+        },
+        "priceRange": {
+          "type": "string",
+          "description": "Ceiling-price range as 'min,max' (e.g. '50,150')."
+        },
+        "maxSamplePages": {
+          "type": "number",
+          "description": "How many 20-row pages to sample for the distribution (default 3, max 10)."
+        }
+      },
+      "required": [
+        "laborCategory"
+      ]
+    }
+  },
+  {
+    "name": "sam_attachment_url",
+    "description": "Build the public download URL for an attachment resourceId. The URL returns a 303 redirect to a signed S3 URL — fetch with redirect:'follow' to get the file bytes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "resourceId": {
+          "type": "string",
+          "description": "Resource id from sam_get_opportunity → resourceLinks (URL-tail hex)"
+        }
+      },
+      "required": [
+        "resourceId"
+      ]
+    }
+  },
+  {
+    "name": "sam_check_exclusions",
+    "description": "Keyless SAM debarment/exclusion screening. Screen a firm or individual by name (query) and/or UEI/CAGE against the SAM exclusions index (FAPIIS). Returns excluded (true iff ≥1 ACTIVE matching record), matchCount, and per-record { name, classification, uei, cage, excludingAgency, exclusionType, exclusionProgram, isActive, activation/terminationDate, samFapiisUrl }. CRITICAL: an EMPTY result means 'no matching exclusion under these terms' — it is NOT proof of general responsibility (stated in _meta.notes). A name match is not identity-proof; verify the UEI/CAGE + dates against the FAPIIS record. Requires at least one of query/uei/cage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Firm or individual name to screen (drives the server-side exclusions text search). Provide at least one of query/uei/cage."
+        },
+        "uei": {
+          "type": "string",
+          "description": "SAM UEI to match. Used as the text query when it is the sole selector; post-filtered against results when combined with a name query."
+        },
+        "cage": {
+          "type": "string",
+          "description": "CAGE code to match (post-filtered against results, or used as the text query when sole)."
+        },
+        "activeOnly": {
+          "type": "boolean",
+          "description": "Only currently-active exclusions (default true). false includes terminated exclusions."
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "Firm",
+            "Individual",
+            "Special Entity Designation",
+            "any"
+          ],
+          "description": "Filter by excluded-party classification (default 'any')."
+        },
+        "page": {
+          "type": "number",
+          "description": "0-based page index (default 0)."
+        },
+        "size": {
+          "type": "number",
+          "description": "Page size (default 25, max 100)."
+        }
+      }
+    }
+  },
+  {
+    "name": "sam_fetch_attachment_text",
+    "description": "Extract the TEXT of a SAM notice attachment (the actual RFP / SOW / Q&A / wage tables) by its download URL — so an AI can read the real solicitation, not just its metadata. Give it a sam_get_opportunity attachments[].url (resourceLinks). Keyless. Handles PDF (via pdfjs) + text/HTML; returns { format, text, pages, filename, sizeBytes, truncated, extracted }. HONEST: a DOCX / binary that can't be read keyless returns text:null + a note (never fabricated); a corrupt/encrypted PDF returns text:null + an extractionError note (never a crash); a DOWN fetch throws a retryable upstream_unavailable (never empty text); a 404 throws not_found. Only sam.gov / api.sam.gov URLs are fetched (SSRF hygiene). maxChars caps the text (default 200000) and truncation is disclosed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "SAM attachment download URL from sam_get_opportunity → attachments[].url / resourceLinks (https://sam.gov/api/prod/opps/v3/opportunities/resources/files/{id}/download). Must be a sam.gov / api.sam.gov host."
+        },
+        "maxChars": {
+          "type": "number",
+          "description": "Cap on returned text characters (default 200000, max 500000). Truncation is disclosed in _meta (truncated:true)."
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "sam_fetch_description",
+    "description": "Return the full description / RFP body text for a notice as plain text. Useful when sam_get_opportunity returned a description URL instead of inline body, or for an LLM-friendly text dump.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "noticeId": {
+          "type": "string",
+          "description": "32-char hex notice id"
+        }
+      },
+      "required": [
+        "noticeId"
+      ]
+    }
+  },
+  {
+    "name": "sam_get_opportunity",
+    "description": "Fetch full detail for a single SAM.gov notice by 32-char hex noticeId. Returns title, agency, solicitation #, POCs, response deadline, attachments (with download URLs), inline description body. Call BEFORE drafting bid/no-bid or compliance work.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "noticeId": {
+          "type": "string",
+          "description": "32-char hex notice id"
+        }
+      },
+      "required": [
+        "noticeId"
+      ]
+    }
+  },
+  {
+    "name": "sam_get_wage_rates",
+    "description": "Return the prevailing-wage + fringe/H&W rate table for a specific wage determination, PARSED from its plain-text document (SAM exposes no structured rate JSON), plus the Executive-Order minimum-wage floor. Distinguishes SCA (WD-wide Health & Welfare) vs DBA (per-craft fringe). Always returns parseConfidence and supports format:'parsed'|'raw'|'both' so you can read the raw text when parsing is low-confidence. Resolves the latest active revision via /history when `revision` is omitted.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "reference": {
+          "type": "string",
+          "description": "fullReferenceNumber of the wage determination (e.g. '2015-4093' for SCA, 'IA20260028' for DBA) from sam_search_wage_determinations."
+        },
+        "revision": {
+          "type": "number",
+          "description": "Revision number. Omit to resolve the latest ACTIVE revision via /history."
+        },
+        "coverage": {
+          "type": "string",
+          "enum": [
+            "sca",
+            "dba"
+          ],
+          "description": "Optional hint (sca|dba) to disambiguate the parser; inferred otherwise."
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "parsed",
+            "raw",
+            "both"
+          ],
+          "description": "'parsed' (structured rates, default), 'raw' (the full document text), or 'both'. Use 'raw'/'both' when parseConfidence is low."
+        }
+      },
+      "required": [
+        "reference"
+      ]
+    }
+  },
+  {
+    "name": "sam_integrity_lookup",
+    "description": "Keyless ONE-CALL integrity screen — 'any integrity red flags on this entity?'. Composes the keyless government-wide EXCLUSION verdict (via sam_check_exclusions) with an honest pointer to the FAPIIS / Responsibility-Qualification record. Requires at least one of uei/cage/name (uei preferred; name maps to the exclusions text search). Returns { entity, exclusions:{excluded,activeCount,records}, fapiisRecords, fapiisUrl, integrityFlag }. integrityFlag is 'excluded' when ≥1 ACTIVE matching exclusion is found, else 'review_fapiis' — it NEVER returns 'clear' keylessly, because FAPIIS records (terminations for default/cause, non-responsibility determinations, self-reported criminal/civil/administrative proceedings) have NO keyless machine API, so absence of an exclusion is NOT proof of integrity. fapiisRecords is ALWAYS null (never faked; record-level retrieval needs an optional SAM Entity key) with _meta.fieldsUnavailable:['fapiisRecords']; fapiisUrl deep-links the viewable SAM page. An upstream exclusions failure surfaces as the classified error, never a fake clearance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "uei": {
+          "type": "string",
+          "description": "SAM UEI of the entity to screen (PREFERRED — most precise). Provide at least one of uei/cage/name."
+        },
+        "cage": {
+          "type": "string",
+          "description": "CAGE code of the entity to screen."
+        },
+        "name": {
+          "type": "string",
+          "description": "Legal entity name to screen (drives the keyless exclusions text search; normalized-name gated). Provide at least one of uei/cage/name."
+        }
+      }
+    }
+  },
+  {
+    "name": "sam_lookup_notice_fields",
+    "description": "BATCH-complete a sam_search_opportunities page in ONE call from the GSA daily bulk CSV (keyless). The keyless HAL list endpoint NULLS each result's naics/setAside/place-of-performance/responseDeadline/type; this tool returns those fields for 1..100 noticeIds at once (naicsCode, setAside + setAsideCode, popState/popCity/popZip/popCountry, responseDeadline, type, active, title) from a cached on-disk CSV index, instead of one sam_get_opportunity detail call per notice. OFF BY DEFAULT (no forced 226 MB download): enable by setting SAM_GOV_CSV_CACHE (a cache dir) or SAM_GOV_ENABLE_CSV=1 — when disabled the tool returns data.enabled:false + a structured 'how to enable' note (never fake data, no network). HONEST: _meta carries the CSV last-modified + index build time (freshness), a noticeId absent from the current snapshot returns found:false + nulls with an explicit 'not in current CSV snapshot' disclosure (never faked), a cold first call discloses 'index warming', and a download/parse failure is a structured retryable error (never a silent empty). setAsideCode (e.g. 'SBA') matches sam_get_opportunity's setAside; the snapshot can lag live by up to ~24h — confirm real-time-critical fields with sam_get_opportunity.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "noticeIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "1..100 32-char hex noticeIds (the ids returned by sam_search_opportunities) to enrich in ONE batch. Completes a whole search page's null naics/setAside/place-of-performance/deadline/type from the cached GSA daily CSV. OFF BY DEFAULT — enable by setting SAM_GOV_CSV_CACHE (a cache dir) or SAM_GOV_ENABLE_CSV=1."
+        }
+      },
+      "required": [
+        "noticeIds"
+      ]
+    }
+  },
+  {
+    "name": "sam_lookup_organization",
+    "description": "Resolve a SAM.gov federal-organization id to its canonical fullParentPathName (e.g. 'VETERANS AFFAIRS, DEPARTMENT OF.VETERANS AFFAIRS, DEPARTMENT OF.245-NETWORK CONTRACT OFFICE 5'). Use when sam_get_opportunity returned only an organizationId.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "organizationId": {
+          "type": "string",
+          "description": "SAM.gov federal-organization id (numeric)"
+        }
+      },
+      "required": [
+        "organizationId"
+      ]
+    }
+  },
+  {
+    "name": "sam_search_opportunities",
+    "description": "Search SAM.gov federal contracting opportunities (keyless HAL). Returns up to 50 active notices with title, agency, NAICS, noticeId. Use for discovery — narrow with NAICS / agency / set-aside / state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Free-text title query"
+        },
+        "ncode": {
+          "type": "string",
+          "description": "NAICS code, e.g. '541512'"
+        },
+        "organizationName": {
+          "type": "string",
+          "description": "Issuing agency canonical name (e.g. 'Department of Veterans Affairs'). Use sam_lookup_organization or usas_lookup_agency to resolve abbreviations."
+        },
+        "state": {
+          "type": "string",
+          "description": "Place-of-performance state, 2-letter, e.g. 'MD'"
+        },
+        "setAside": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Set-aside codes: SBA, 8A, HZS, SDVOSBC, WOSB, EDWOSB, VSA, VSS"
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "sam_search_shaping",
+    "description": "PRE-SOLICITATION shaping radar (keyless HAL). Surfaces Sources Sought / Presolicitation / Special Notices BEFORE the RFP exists — the free, real-time analogue of paid agency-forecast feeds. Closes the pre-solicitation lifecycle gap: catch a requirement while it's still shapeable (submit capabilities, influence NAICS/set-aside/PWS). Defaults to noticeType ['r','p','s']; opt into k/i/u for combined-synopsis / intent-to-bundle / J&A tells. Each notice carries noticeTypeCode (rank r/p over s), postedDate, responseDeadline + daysUntilResponse (null when no deadline — counted, not hidden), and a uiLink. HONEST KEYLESS LIMITS: naics/setAside/placeOfPerformance are null in the list rows (call sam_get_opportunity(noticeId) for those); and a responseDeadlineFrom/To window is applied CLIENT-SIDE over the fetched page (the feed ignores rdlfrom/rdlto) and disclosed in _meta. data.totalRecords is the TRUE server-side count for the type+facet filter.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Free-text title query"
+        },
+        "ncode": {
+          "type": "string",
+          "description": "NAICS code, e.g. '541512'"
+        },
+        "organizationName": {
+          "type": "string",
+          "description": "Issuing agency canonical name (e.g. 'Department of Veterans Affairs'). NOTE: the keyless endpoint has NO organization-name filter — it is sent best-effort and flagged in _meta.filtersDropped; filter client-side on the returned `agency`."
+        },
+        "state": {
+          "type": "string",
+          "description": "Place-of-performance state, 2-letter, e.g. 'MD'"
+        },
+        "setAside": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Set-aside codes: SBA, 8A, HZS, SDVOSBC, WOSB, EDWOSB, VSA, VSS"
+        },
+        "noticeType": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "r",
+              "p",
+              "s",
+              "k",
+              "i",
+              "u"
+            ]
+          },
+          "description": "Pre-solicitation notice-type codes to include. r=Sources Sought, p=Presolicitation, s=Special Notice (the DEFAULT shaping window = ['r','p','s']); k=Combined Synopsis/Solicitation, i=Intent to Bundle, u=Justification (J&A) are opt-in adjacency/incumbent tells. Ranked r/p over s via noticeTypeCode."
+        },
+        "responseDeadlineFrom": {
+          "type": "string",
+          "description": "ISO date lower bound for responseDeadline. APPLIED CLIENT-SIDE over the fetched page (the keyless feed ignores rdlfrom/rdlto) — disclosed in _meta.filtersDropped. A notice with no deadline is excluded from a windowed query."
+        },
+        "responseDeadlineTo": {
+          "type": "string",
+          "description": "ISO date upper bound for responseDeadline. APPLIED CLIENT-SIDE over the fetched page (see responseDeadlineFrom)."
+        },
+        "activeOnly": {
+          "type": "boolean",
+          "description": "Only currently-active notices (default true)."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Page size (default 25, max 50)."
+        }
+      }
+    }
+  },
+  {
+    "name": "sam_search_wage_determinations",
+    "description": "Find the Service Contract Act (SCA) or Davis-Bacon (DBA) wage determination(s) governing a locality (keyless SAM SGS). Filter by coverage (sca|dba), state (2-letter, server-side), county (client-side), or WD number/title. Returns the structured WD list; follow with sam_get_wage_rates to read the rate table. NOTE: `query` matches WD number/title only, NOT occupation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "coverage": {
+          "type": "string",
+          "enum": [
+            "sca",
+            "dba"
+          ],
+          "description": "Which wage-determination law: 'sca' (Service Contract Act — services) or 'dba' (Davis-Bacon Act — construction). 'dba' is normalized to the API's 'dbra' index."
+        },
+        "state": {
+          "type": "string",
+          "description": "2-letter USPS state code (e.g. 'VA'), applied SERVER-SIDE. A full name is applied client-side instead."
+        },
+        "county": {
+          "type": "string",
+          "description": "County name (substring match), applied CLIENT-SIDE over the fetched page only (the API has no county filter)."
+        },
+        "query": {
+          "type": "string",
+          "description": "Matches the WD NUMBER/TITLE only — NOT occupation/job title (q=guard returns 0)."
+        },
+        "activeOnly": {
+          "type": "boolean",
+          "description": "Only currently-active WDs (default true)."
+        },
+        "standardOnly": {
+          "type": "boolean",
+          "description": "Only standard (non-non-standard) WDs (default true)."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Page size (default 20, max 50)."
+        },
+        "page": {
+          "type": "number",
+          "description": "0-based page index (default 0)."
+        }
+      },
+      "required": [
+        "coverage"
+      ]
+    }
+  },
+  {
+    "name": "sba_size_standard",
+    "description": "SBA small-business size standard for a 6-digit NAICS (keyless sba.gov naics.json). Answers 'is a firm SMALL for this NAICS?' — the gate for set-aside eligibility and for vetting a usas_search_teaming_partners candidate. Returns standardType (receipts | employees | assets [financial institutions] | receipts+assets), a normalized threshold (receipts/assets in DOLLARS — the dataset's $millions figure ×1,000,000; employees as a count), the unit, and any SBA footnote. HONESTY: the dataset carries no effective-date field, so the value is 'as published as of retrieval' (asOf) and _meta.notes flags that SBA adjusts standards periodically — re-verify at sba.gov for high-stakes eligibility. An unknown NAICS returns found:false (never a fabricated standard).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "naics": {
+          "type": "string",
+          "description": "6-digit NAICS code to look up the SBA small-business size standard for (e.g. '541512')."
+        }
+      },
+      "required": [
+        "naics"
+      ]
+    }
+  },
+  {
+    "name": "usas_analyze_incumbent",
+    "description": "Per-award incumbent + PUBLIC recompete-pressure analysis for ONE award (generatedInternalId). Assembles the incumbent identity, the vehicle/IDV linkage, and individual PUBLIC pressure SIGNALS — obligated-vs-ceiling consumption (pctConsumed), modification count (lower-bounded), competition extent + number of offers, set-aside, days to the current PoP end, and option-extendable days — plus, optionally, the incumbent's other awards in the same agency×NAICS. Bounded & keyless: at most 3 upstream calls (detail + 1 transactions page + 1 recipient search), no per-record fan-out. Emits pressureHints ('single_offer', 'ceiling_nearly_exhausted', 'hard_stop_no_options') as HINTS, NEVER a composite vulnerability score — CPARS/past-performance, protest history, and option-exercise intent are not public (declared in _meta.fieldsUnavailable).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "generatedInternalId": {
+          "type": "string",
+          "description": "The ONE award to analyze — generatedInternalId from usas_search_individual_awards / usas_search_awards_by_recipient / usas_search_recompetes (e.g. CONT_AWD_*)."
+        },
+        "includeOtherAwards": {
+          "type": "boolean",
+          "description": "Also return the incumbent's other awards in the same agency×NAICS via one bounded recipient search (default true)."
+        },
+        "otherAwardsLimit": {
+          "type": "number",
+          "description": "Cap on incumbentOtherAwards (default 15, max 50)."
+        }
+      },
+      "required": [
+        "generatedInternalId"
+      ]
+    }
+  },
+  {
+    "name": "usas_autocomplete_naics",
+    "description": "Autocomplete NAICS codes by free-text. ANTI-HALLUCINATION GUARD — call this when the user mentions a NAICS theme but no specific code (e.g. 'computer systems design' → 541512). Avoids inventing NAICS codes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchText": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "searchText"
+      ]
+    }
+  },
+  {
+    "name": "usas_autocomplete_recipient",
+    "description": "Autocomplete recipient names. ANTI-HALLUCINATION — confirm a recipient's exact USAspending-canonical legal name before searching by name. Returns up to 10 fuzzy matches with UEI/DUNS where available.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchText": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "searchText"
+      ]
+    }
+  },
+  {
+    "name": "usas_get_agency_awards_summary",
+    "description": "High-level award activity for a fiscal year — transaction_count + obligations + latest_action_date. SCOPE: obligations/transaction_count span ALL award types (contracts, grants, direct payments incl. benefits, loans) — NOT prime contracts only. For benefit-heavy agencies (VA/SSA/HHS) this is dominated by direct benefit payments (e.g. VA FY2024 ~$238B all-awards vs ~$67B prime contracts), so do NOT read it as the contract/procurement market; for procurement-heavy agencies (DoD/DHS) it closely tracks contract spending. For contracts-only obligations use usas_spending_over_time (contractObligations) — it takes the agency canonical NAME, so resolve it from this toptierCode via usas_get_agency_profile first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "toptierCode": {
+          "type": "string",
+          "description": "3-4 digit toptier code from usas_lookup_agency (e.g. '036' for VA)"
+        },
+        "fiscalYear": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "toptierCode"
+      ]
+    }
+  },
+  {
+    "name": "usas_get_agency_budget_function",
+    "description": "Budget function breakdown for an agency × fiscal year. Returns the agency's spending by program area (e.g. VA: 'Income security for veterans' $204B, 'Hospital and medical care for veterans' $126B).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "toptierCode": {
+          "type": "string",
+          "description": "3-4 digit toptier code from usas_lookup_agency (e.g. '036' for VA)"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "toptierCode"
+      ]
+    }
+  },
+  {
+    "name": "usas_get_agency_profile",
+    "description": "Get full agency profile by toptier code (3-4 digits, from usas_lookup_agency). Returns mission, abbreviation, website, subtier_agency_count, congressional_justification_url.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "toptierCode": {
+          "type": "string",
+          "description": "3-4 digit toptier code from usas_lookup_agency (e.g. '036' for VA)"
+        }
+      },
+      "required": [
+        "toptierCode"
+      ]
+    }
+  },
+  {
+    "name": "usas_get_award_detail",
+    "description": "Fetch full detail for a single award by generatedInternalId (from usas_search_individual_awards). Returns period_of_performance (start/end/potential_end), base_and_all_options, set-aside type, competition extent, number_of_offers — the per-award fields the search endpoint omits.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "generatedInternalId": {
+          "type": "string",
+          "description": "From spending_by_award results — e.g. CONT_AWD_*"
+        }
+      },
+      "required": [
+        "generatedInternalId"
+      ]
+    }
+  },
+  {
+    "name": "usas_get_recipient_profile",
+    "description": "Full recipient detail by recipient_id (from usas_search_recipients). Returns alternate_names (M&A history), DUNS, UEI, parent linkage, business_types, location, total_amount, total_transactions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "recipientId": {
+          "type": "string",
+          "description": "From usas_search_recipients — e.g. 'ed02855e-...-P'"
+        }
+      },
+      "required": [
+        "recipientId"
+      ]
+    }
+  },
+  {
+    "name": "usas_glossary",
+    "description": "USAspending glossary of 151 federal-spending terms. Use to confirm terminology ('what's a TAS?', 'what's an obligation vs outlay?') before answering compliance/budget questions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "search": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_list_toptier_agencies",
+    "description": "List all toptier federal agencies with toptier_code, abbreviation, slug, current-FY obligations. Use for 'show me every cabinet department + their FY26 spending' or to find a toptier_code for usas_get_agency_*.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_lookup_agency",
+    "description": "Resolve a user-friendly agency reference ('VA', 'Veterans Affairs', 'DHS') to USAspending's canonical toptier name + 4-digit code. ALWAYS call this FIRST if the user uses an abbreviation — other USAspending tools require the canonical name.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchText": {
+          "type": "string",
+          "description": "Agency name or abbreviation"
+        }
+      },
+      "required": [
+        "searchText"
+      ]
+    }
+  },
+  {
+    "name": "usas_naics_hierarchy",
+    "description": "Navigate the NAICS hierarchy (2→4→6 digit) + active-contract count per code. No naicsFilter ⇒ the top-level 2-digit sectors. With naicsFilter=<code> ⇒ that node is in `parent` and its DIRECT children are in `hierarchy` (drill into any row where hasChildren:true by re-calling with its code). A 6-digit leaf returns hierarchy:[] with the node in `parent` (found:true); a nonexistent code returns hierarchy:[] with parent:null (found:false). Use to explore market scope (e.g. what's under NAICS 54 = Professional, Scientific, and Technical Services).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "naicsFilter": {
+          "type": "string",
+          "description": "Filter to a specific NAICS code subtree, e.g. '541512'"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_agency_spending",
+    "description": "Spending broken down by awarding agency. Use for 'which agencies spend the most on NAICS 541512' — top buyers by $.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "naics": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "setAside": {
+          "type": "string",
+          "enum": [
+            "SBA",
+            "8A",
+            "HZS",
+            "SDVOSBC",
+            "WOSB",
+            "EDWOSB",
+            "VSA",
+            "VSS"
+          ]
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_awards",
+    "description": "Aggregate share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns top recipients by total $ + count. Use for competitive landscape ('who wins at VA in 541512?').",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string",
+          "description": "Canonical agency name"
+        },
+        "naics": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "setAside": {
+          "type": "string",
+          "enum": [
+            "SBA",
+            "8A",
+            "HZS",
+            "SDVOSBC",
+            "WOSB",
+            "EDWOSB",
+            "VSA",
+            "VSS"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_awards_by_recipient",
+    "description": "Pull every contract a specific recipient has won within an agency × NAICS slice. Use when the user asks 'show me Booz Allen wins at VA last year' — returns line items + naicsCode + description, not aggregates.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "recipientName": {
+          "type": "string"
+        },
+        "agency": {
+          "type": "string"
+        },
+        "naics": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "recipientName"
+      ]
+    }
+  },
+  {
+    "name": "usas_search_cfda_spending",
+    "description": "Spending broken down by CFDA grant program code. Use for grant analysis — 'top federal grant programs by $'. Note: CFDA is grants (award_type 02-05), not contracts. Use usas_search_psc_spending for contract market analysis.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_expiring_contracts",
+    "description": "DEPRECATED — use usas_search_recompetes. Thin backward-compatible alias: finds contracts at agency × NAICS expiring within N months and returns the legacy { contracts, searchedCount } shape. New callers should use usas_search_recompetes for the full window/pagination controls and truthful completeness metadata.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string"
+        },
+        "naics": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "monthsUntilExpiry": {
+          "type": "number"
+        },
+        "minAwardValue": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_federal_account_spending",
+    "description": "Spending broken down by federal account / Treasury Account Symbol (TAS). Use to map money to the actual budget line item (e.g. '036-0167 = Information Technology Systems, VA').",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string"
+        },
+        "naics": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_individual_awards",
+    "description": "Line-item federal contracts on USAspending. Returns specific awards (recipient + $ + sub-agency + state + description). Use AFTER usas_search_awards when the user wants 'show me the actual contracts'. Each result includes a generatedInternalId for usas_get_award_detail follow-ups.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string",
+          "description": "Canonical agency name"
+        },
+        "naics": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "setAside": {
+          "type": "string",
+          "enum": [
+            "SBA",
+            "8A",
+            "HZS",
+            "SDVOSBC",
+            "WOSB",
+            "EDWOSB",
+            "VSA",
+            "VSS"
+          ]
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_psc_spending",
+    "description": "Spending broken down by Product Service Code (PSC). Use for 'what PSC categories see the most $ at DoD' — surfaces market structure beyond NAICS (e.g. PSC R425 = engineering support services).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string"
+        },
+        "naics": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_recipients",
+    "description": "Search USAspending recipient list with parent/child/recipient hierarchy. Returns recipients with id, duns, uei, level (P=parent, C=child, R=recipient), total_amount. Use for 'find the recipient_id for Booz Allen' before usas_get_recipient_profile.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "keyword": {
+          "type": "string"
+        },
+        "recipientLevel": {
+          "type": "string",
+          "enum": [
+            "P",
+            "C",
+            "R"
+          ],
+          "description": "P=parent, C=child, R=recipient"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "keyword"
+      ]
+    }
+  },
+  {
+    "name": "usas_search_recompetes",
+    "description": "Recompete radar — federal contracts whose CURRENT period of performance ends inside a window around today (default -90d .. +18mo), sorted soonest-first. Use for 'what VA 541512 contracts are up for recompete in the next 18 months'. Reads the current PoP end date directly from spending_by_award (no per-award enrichment), counts (never drops) rows with missing end dates, and flags in _meta when the scan budget truncates the window (totalAvailable becomes null). Filter by agency/naics/pscCodes/setAside/minAwardValue; set includePotentialEnd for option-inclusive end dates. Public signals only — no CPARS/protest/option-intent, no composite vulnerability score.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string",
+          "description": "Canonical awarding toptier agency name (use usas_lookup_agency)"
+        },
+        "naics": {
+          "type": "string",
+          "description": "6-digit NAICS code, e.g. '541512'"
+        },
+        "pscCodes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Product/Service Codes to filter on, e.g. ['DA01','R425']"
+        },
+        "setAside": {
+          "type": "string",
+          "enum": [
+            "SBA",
+            "8A",
+            "HZS",
+            "SDVOSBC",
+            "WOSB",
+            "EDWOSB",
+            "VSA",
+            "VSS"
+          ],
+          "description": "USAspending set_aside_type_code (honored server-side)"
+        },
+        "windowStartDays": {
+          "type": "number",
+          "description": "Lower edge of the recompete window in days from today (default -90 = include contracts that ended up to 90 days ago)."
+        },
+        "windowEndDays": {
+          "type": "number",
+          "description": "Upper edge of the window in days from today (default 548 ≈ 18 months)."
+        },
+        "minAwardValue": {
+          "type": "number",
+          "description": "Minimum Award Amount ($) to include (default 0)."
+        },
+        "includePotentialEnd": {
+          "type": "boolean",
+          "description": "Also return the potential (option-inclusive) PoP end date + extendableDays (default false)."
+        },
+        "actionDateLookbackYears": {
+          "type": "number",
+          "description": "action_date lower bound in years (default 3). Contracts with no recorded action in this span are excluded — this bound makes the End-Date sort reach the window."
+        },
+        "page": {
+          "type": "number",
+          "description": "1-based page (default 1)."
+        },
+        "pageSize": {
+          "type": "number",
+          "description": "Rows per page (default 25, max 100)."
+        },
+        "scanBudgetPages": {
+          "type": "number",
+          "description": "Max 100-row pages to scan before giving up (default 8). If exhausted before the window ends, results are a lower bound and totalAvailable is null."
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_state_spending",
+    "description": "Spending broken down by state / territory. Use for 'where is the most federal $ flowing for NAICS 541512' — answers like 'VA $128B, MD $66B, DC $58B'.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string"
+        },
+        "naics": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_subagency_spending",
+    "description": "Break down a parent agency's spending by sub-agency / office. Surfaces which office holds the budget (e.g. VA OI&T vs VHA, DoD vs Army vs DISA).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agency": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "agency"
+      ]
+    }
+  },
+  {
+    "name": "usas_search_subawards",
+    "description": "Enumerate subcontracts on prime awards. Use for 'who teams with Leidos at DISA' or 'show small-business subs on Accenture's DHS contracts' — surfaces the prime/sub network for teaming-map artifacts.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "primeRecipientName": {
+          "type": "string"
+        },
+        "agency": {
+          "type": "string"
+        },
+        "naics": {
+          "type": "string"
+        },
+        "fiscalYear": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "usas_search_teaming_partners",
+    "description": "Small-business teaming-partner discovery by socioeconomic certification + NAICS + agency award history (keyless USAspending proxy), integrity-screened. Given a cert (enum-validated), optional naics/agency/subagency, and a lookback window, aggregates federal awardees by recipient and returns candidates ranked by agencyObligated with agencyAwardCount, mostRecentAwardDate, and sampleAwards; optionally screens the top candidates via sam_check_exclusions and drops active exclusions (excludeDebarred, default true). HONESTY: cert is AWARD-DERIVED (recorded on the firm's federal awards), NOT the SBA certification of record (which needs a keyed SAM Entity call) — verify active certification in SAM/SBS before teaming (stated in _meta). A bogus cert is rejected as invalid_input (the endpoint would silently return 0).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "cert": {
+          "type": "string",
+          "enum": [
+            "small_business",
+            "8a_program_participant",
+            "woman_owned_business",
+            "women_owned_small_business",
+            "economically_disadvantaged_women_owned_small_business",
+            "service_disabled_veteran_owned_business",
+            "veteran_owned_business",
+            "historically_underutilized_business_firm"
+          ],
+          "description": "Socioeconomic certification (award-derived, NOT the SBA registry of record). One of: small_business, 8a_program_participant, woman_owned_business, women_owned_small_business, economically_disadvantaged_women_owned_small_business, service_disabled_veteran_owned_business, veteran_owned_business, historically_underutilized_business_firm (HUBZone)."
+        },
+        "naics": {
+          "type": "string",
+          "description": "NAICS code to scope the search (e.g. '541512')."
+        },
+        "agency": {
+          "type": "string",
+          "description": "Awarding agency canonical toptier name (e.g. 'Department of Veterans Affairs'). Use usas_lookup_agency to resolve abbreviations."
+        },
+        "subagency": {
+          "type": "string",
+          "description": "Awarding sub-agency name. Requires `agency` to also be set (a subagency alone is dropped)."
+        },
+        "lookbackYears": {
+          "type": "number",
+          "description": "Action-date lookback window in years (default 3)."
+        },
+        "excludeDebarred": {
+          "type": "boolean",
+          "description": "Screen the top-ranked candidates via sam_check_exclusions and drop active exclusions (default true; bounded + disclosed in _meta)."
+        },
+        "minAwards": {
+          "type": "number",
+          "description": "Minimum scanned award count for a firm to be listed (default 1)."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Candidates per page (default 25, max 50)."
+        },
+        "page": {
+          "type": "number",
+          "description": "1-based page index (default 1)."
+        },
+        "screenCap": {
+          "type": "number",
+          "description": "Max candidates to exclusion-screen per page (default 10, max 25)."
+        },
+        "scanPages": {
+          "type": "number",
+          "description": "Award-value-sorted pages (100 rows each) to scan before aggregating by recipient (default 4, max 10)."
+        }
+      },
+      "required": [
+        "cert"
+      ]
+    }
+  },
+  {
+    "name": "usas_spending_over_time",
+    "description": "Time-series aggregation of federal CONTRACT spending (award types A/B/C/D — grants, IDVs, loans, and other obligation types are EXCLUDED, matching the other usas_search_*_spending tools; disclosed in _meta). Group by fiscal_year / quarter / month, filter by agency / NAICS / set-aside. Use for 'how has VA 541512 contract spending trended over the past 5 years' — returns yearly/quarterly/monthly $ rollups of contract obligations (grantObligations/idvObligations are null, NOT 0, to avoid implying an agency has no grant/IDV spending).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "group": {
+          "type": "string",
+          "enum": [
+            "fiscal_year",
+            "quarter",
+            "month"
+          ]
+        },
+        "agency": {
+          "type": "string"
+        },
+        "naics": {
+          "type": "string"
+        },
+        "setAside": {
+          "type": "string",
+          "enum": [
+            "SBA",
+            "8A",
+            "HZS",
+            "SDVOSBC",
+            "WOSB",
+            "EDWOSB",
+            "VSA",
+            "VSS"
+          ]
+        }
+      }
+    }
+  }
+]
