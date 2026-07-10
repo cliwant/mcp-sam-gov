@@ -831,9 +831,9 @@ type ToolDef = {
   name: string;
   description: string;
   inputSchema: z.ZodTypeAny;
-  // R1 (ADR-0001) — optional co-located dispatch handler. When present,
-  // runTool routes through it (parse with `inputSchema`, then call) BEFORE the
-  // legacy `switch`; entries without a handler still fall through to the switch.
+  // R1 (ADR-0001) — co-located dispatch handler. runTool routes every tool
+  // through its handler (parse with `inputSchema`, then call); all 52 tools
+  // now define one and the dispatch `switch` is gone (unknown ⇒ throws).
   // The handler may return a raw domain object OR a MetaBundle (via `withMeta`)
   // — CallTool's envelope logic unwraps both identically. Typed `any` here and
   // type-checked against the schema's inferred input by `defineTool`.
