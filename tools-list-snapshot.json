@@ -587,6 +587,13 @@
     }
   },
   {
+    "name": "fpds_search_awards",
+    "description": "Search FPDS-NG federal contract AWARD ACTIONS (keyless ATOM) — the AUTHORITATIVE system-of-record for contract actions (each modification is its own transaction), the source USAspending.gov derives from (and lags 1-2 days). Structured filters ONLY, AND-combined (NO raw query — a typo'd FPDS field name is a SILENT ZERO, so the tool builds the fielded q): naics (PRINCIPAL_NAICS_CODE), vendorName, piid, departmentId, contractingAgencyName, signedDate range (from/to ISO), lastModified range, keyword. At least one filter is REQUIRED. Returns award/IDV rows { piid, modNumber, parentIdvPiid, actionType, signedDate, vendorName, vendorUei, ultimateParentUei, obligatedAmount, totalObligatedAmount, naics, psc, placeOfPerformanceState, extentCompeted, setAside, businessSize, socioeconomic, … } (content root is award OR IDV — both parse). HONESTY: page size is FIXED at 10; for >10 results totalAvailable is a LOWER BOUND (totalIsLowerBound:true; true count ∈ [total, total+9]) and you MUST paginate by pagination.hasMore (page-fullness), NEVER by totalAvailable (keyless deep-paging is capped ~200K far below the advertised total). Genuine-empty (offset 0) ⇒ complete:true/total:0 + a silent-zero disclosure; an empty page at offset>0 ⇒ totalAvailable:null/complete:false (deep-paging ceiling, ambiguous); an HTML/non-feed body or an all-null-piid page ⇒ schema_drift (never a fake empty); an outage/5xx/timeout THROWS. Amounts are number|null (a 0.00 obligation and negative de-obligations are REAL, absent ⇒ null). Prefer usas_* tools for spending rollups / sub-award graphs.",
+    "inputSchema": {
+      "type": "string"
+    }
+  },
+  {
     "name": "gao_protest_lookup",
     "description": "Recent GAO (Comptroller General) bid-protest decisions from the public Legal-Products RSS feed, enriched from each decision page (protester, contracting agency, decision date, outcome sustained/denied/dismissed/withdrawn, solicitation #, decision PDF). Filter client-side by agency/protester/solicitation/outcome, or pull one decision directly by bNumber. HONEST SCOPE: keyless covers only the RECENT feed window (~25 items) — GAO's faceted historical protest search (all years, by protester/agency/outcome/date) is WAF-blocked to bots and available only via a paid third-party API, so results are ALWAYS marked complete:false and are NOT the full protest history (see the accessNote).",
     "inputSchema": {
