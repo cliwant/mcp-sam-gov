@@ -101,9 +101,16 @@
  * logged, never placed in `_meta` or an error (see m7 at the fetch call site).
  */
 
-import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
+import { ToolErrorCarrier } from "./errors.js";
+import { getJson, driftError } from "./datasource.js";
+import { num, str } from "./coerce.js";
 import { memoize } from "./cache.js";
 import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
+
+// Re-export the shared honesty coercion (single audited copy now lives in
+// ./coerce.js — ADR-0005 v2 FIX-C) so existing importers and the fault suite's
+// num-parity guard keep resolving `num` from this module.
+export { num };
 
 // ─── Curated allowlist (SSRF core) ────────────────────────────────
 // A frozen list of live-verified (2026-07-10) Socrata SODA hosts. The Zod
@@ -138,35 +145,10 @@ const CATALOG_URL = `https://${CATALOG_HOST}/api/catalog/v1`;
 // regex `$` alone would admit ("abcd-1234\n" passes /…$/ in JS).
 const DATASET_ID_RE = /^[a-z0-9]{4}-[a-z0-9]{4}$/;
 
-const REQUEST_TIMEOUT_MS = 15_000;
-
-// ─── num(): the HONESTY-CRITICAL coercion (null, never 0, for absent) ──
-/**
- * Coerce a SODA value (the count string, or any curated numeric projection) to
- * `number | null`. Returns **null (NEVER 0)** for absent values so a missing
- * amount is an honest "unknown", never a fabricated zero (the project's
- * forbidden failure class): null/undefined, the literal "null", ""/whitespace
- * (Number("") is 0 — MUST be caught), and the "(-)"/"-" placeholders. Numeric
- * strings parse; numbers pass through (non-finite → null).
- */
-export function num(x: unknown): number | null {
-  if (x === null || x === undefined) return null;
-  if (typeof x === "number") return Number.isFinite(x) ? x : null;
-  if (typeof x === "string") {
-    const s = x.trim();
-    if (s === "" || s === "null" || s === "(-)" || s === "-") return null;
-    const n = Number(s);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
-}
-
-/** null for absent (null/undefined/""/"null"), else the trimmed string. */
-function str(x: unknown): string | null {
-  if (x === null || x === undefined) return null;
-  const s = String(x).trim();
-  return s === "" || s === "null" ? null : s;
-}
+// ─── HONESTY-CRITICAL coercions (null, never 0, for absent) ───────
+// `num`/`str` are the shared, audited null-never-0 coercions in ./coerce.js
+// (imported above, `num` re-exported): null/undefined, the literal "null",
+// ""/whitespace (Number("") is 0!), and "(-)"/"-" all become null (never 0).
 
 /**
  * The optional app-token header (keyless-first). Present ONLY when
@@ -224,21 +206,19 @@ async function getSocrataResource(
       retryable: false,
     });
   }
-  const r = await fetchWithRetry(
-    url,
-    {
-      headers: appTokenHeader(),
-      // B1 — a 3xx off an allowlisted host is anomalous for a direct-JSON SODA
-      // endpoint; error out rather than silently follow it off-allowlist (cf.
-      // attachments.ts finalHost precedent). errors.ts forwards init to fetch.
-      redirect: "error",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    },
-    // m7 — the label must NEVER include the app-token value: it surfaces verbatim
-    // in ToolError.upstreamEndpoint to the MCP caller. Label is host-only.
-    "socrata:" + domain,
-  );
-  return r.json();
+  // Shared fetch envelope (ADR-0005): init === { headers, redirect, signal } —
+  // byte-identical to the prior hand-rolled fetch.
+  //   B1 — redirect:"error": a 3xx off an allowlisted host is anomalous for a
+  //   direct-JSON SODA endpoint; error out rather than silently follow it
+  //   off-allowlist (cf. attachments.ts finalHost precedent).
+  //   m7 — the label is host-only; it surfaces verbatim in
+  //   ToolError.upstreamEndpoint to the MCP caller and must NEVER include the
+  //   app-token value.
+  return getJson(url, {
+    label: "socrata:" + domain,
+    headers: appTokenHeader(),
+    redirect: "error",
+  });
 }
 
 /**
@@ -255,17 +235,13 @@ async function getCatalog(params: URLSearchParams): Promise<unknown> {
       retryable: false,
     });
   }
-  const r = await fetchWithRetry(
-    url,
-    {
-      headers: appTokenHeader(),
-      redirect: "error", // B1 — as above.
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    },
-    // m7 — host-only label, never the token.
-    "socrata:catalog",
-  );
-  return r.json();
+  // Shared fetch envelope (ADR-0005) — same redirect:"error" (B1) + host-only
+  // label (m7, never the token) as getSocrataResource.
+  return getJson(url, {
+    label: "socrata:catalog",
+    headers: appTokenHeader(),
+    redirect: "error",
+  });
 }
 
 // ─── map + meta helpers ───────────────────────────────────────────
@@ -355,12 +331,10 @@ export async function query(args: {
   rowParams.set("$offset", String(offset));
   const body = await getSocrataResource(args.domain, args.datasetId, rowParams);
   if (!Array.isArray(body)) {
-    throw new ToolErrorCarrier({
-      kind: "schema_drift",
-      message: `socrata:${args.domain}/${args.datasetId} returned an unexpected shape (SODA /resource/{4x4}.json must be a JSON array of rows).`,
-      retryable: false,
-      upstreamEndpoint: "socrata:" + args.domain,
-    });
+    throw driftError(
+      "socrata:" + args.domain,
+      `socrata:${args.domain}/${args.datasetId} returned an unexpected shape (SODA /resource/{4x4}.json must be a JSON array of rows).`,
+    );
   }
   const rows = body as SocrataRow[];
   const returned = rows.length;
@@ -490,14 +464,13 @@ export async function discoverDatasets(args: {
       const body = await getCatalog(params);
       const b = (body ?? {}) as { results?: unknown; resultSetSize?: unknown };
       // m3 — hard drift on the PRIMARY response (contrast the best-effort count).
+      // The check stays INSIDE the memoize callback so a bad shape is never
+      // cached as a success (ADR-0005 v2 test 2).
       if (typeof b.resultSetSize !== "number") {
-        throw new ToolErrorCarrier({
-          kind: "schema_drift",
-          message:
-            "socrata:catalog returned an unexpected shape (resultSetSize must be a number).",
-          retryable: false,
-          upstreamEndpoint: "socrata:catalog",
-        });
+        throw driftError(
+          "socrata:catalog",
+          "socrata:catalog returned an unexpected shape (resultSetSize must be a number).",
+        );
       }
       const total = num(b.resultSetSize);
       const rows = Array.isArray(b.results) ? b.results.map(mapCatalogRow) : [];

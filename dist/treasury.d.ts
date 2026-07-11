@@ -35,7 +35,9 @@
  *   F5    — `queryDataset` accepts only an ENUM of 5 confirmed paths (no free
  *           path) — removes the SSRF surface for this slice.
  */
+import { num } from "./coerce.js";
 import { type MetaBundle } from "./meta.js";
+export { num };
 export declare const TREASURY_DATASETS: {
     readonly debt_to_penny: "/v2/accounting/od/debt_to_penny";
     readonly avg_interest_rates: "/v2/accounting/od/avg_interest_rates";
@@ -68,19 +70,6 @@ export type TreasuryEnvelope<Row = TreasuryRow> = {
         last?: string;
     };
 };
-/**
- * Coerce an inconsistently-typed Treasury value field to `number | null`.
- *
- * Returns **null (NEVER 0)** for absent values so a missing amount is an honest
- * "unknown", never a fabricated zero (the project's forbidden failure class):
- *   - `null` / `undefined`
- *   - the literal string `"null"` (common: early history + MTS parent rows)
- *   - `""` / whitespace  ← CRITICAL: `Number("")` is 0, so this MUST be caught
- *     explicitly or an empty string would masquerade as a real zero.
- *   - the parenthetical placeholder `(-)` (Treasury's "not applicable")
- * Numeric strings parse; numbers pass through (a non-finite number → null).
- */
-export declare function num(x: unknown): number | null;
 /**
  * Generic escape hatch over the 5 confirmed datasets (covers debt_outstanding +
  * rates_of_exchange without a dedicated tool). Rows are passed through RAW
