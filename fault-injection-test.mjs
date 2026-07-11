@@ -64,7 +64,7 @@ import { num as ckanNum } from "./dist/ckan.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
 import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
-import { getJson, driftError } from "./dist/datasource.js";
+import { getJson, driftError, throughGate } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
 import {
@@ -6588,6 +6588,113 @@ async function testDataSourcePortParity() {
   }
 }
 
+// §48: throughGate — the shared per-key min-interval gate primitive on the
+// DataSource port (ADR-0011 orchestrator v6 cycle 15; the ADR-0005 R2 deferred
+// slice). This is the generalization of EDGAR's former module-singleton gate;
+// `throughGate("edgar",110,fn)` must reproduce its behavior EXACTLY. All OFFLINE
+// + deterministic + NON-VACUOUS: a controllable FAKE CLOCK (patched Date.now) +
+// a timer patch that ADVANCES that clock by the requested delay and fires
+// instantly (offline). The gate reads the global Date.now and calls the bare
+// global setTimeout — so patching both here reproduces edgar's timer semantics
+// with zero real waits, and an import-based-timer mutation would go RED (the
+// fake clock never advances → spacing assertions fail).
+//   (a) two rapid same-key calls: serialized (submission order) + START-to-START
+//       spacing ≥ minIntervalMs; each call returns its own real result.
+//   (b) lastAt stamped BEFORE fn(): a fn that consumes fake time still leaves the
+//       next same-key call spaced minInterval from the 1st call's START (not end).
+//   (c) different keys are independent chains — a first call on a new key never
+//       waits on another key's chain; a same-key follow-up DOES wait (control).
+//   (d) a throwing fn REJECTS that caller with the real error, but the chain
+//       CONTINUES (a subsequent same-key call still runs) — the swallow-in-chain.
+//   Non-vacuity (verified by the maker out-of-band, reverted): drop the interval
+//   wait ⇒ (a)/(b) spacing RED; swap to node:timers/promises setTimeout ⇒ the
+//   patched-timer fake clock never advances ⇒ spacing RED.
+async function testThroughGate() {
+  section("48. throughGate — shared per-key min-interval gate (serialized chain, lastAt-before-fn, bare setTimeout, offline-instant) [ADR-0011 R2 slice]");
+
+  const realDateNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  let clock = 1_000_000; // arbitrary fake-clock base
+  const waits = []; // every positive delay the gate asked setTimeout to wait
+  try {
+    Date.now = () => clock;
+    // Advance the FAKE clock by the requested delay, then fire immediately (the
+    // gate uses the BARE global setTimeout — an import-timer mutation escapes this
+    // patch, the clock never advances, and the spacing assertions go RED).
+    globalThis.setTimeout = (cb, ms, ...rest) => {
+      const delay = typeof ms === "number" && ms > 0 ? ms : 0;
+      if (delay > 0) waits.push(delay);
+      clock += delay;
+      return realSetTimeout(cb, 0, ...rest);
+    };
+
+    // (a) serialized ordering + START-to-START spacing ≥ minInterval, real results.
+    {
+      const order = [];
+      const starts = [];
+      const kA = "unit-gate-A";
+      const pA1 = throughGate(kA, 110, async () => { order.push("a1"); starts.push(clock); return "a1"; });
+      const pA2 = throughGate(kA, 110, async () => { order.push("a2"); starts.push(clock); return "a2"; });
+      const [r1, r2] = await Promise.all([pA1, pA2]);
+      ok("48a throughGate returns each caller's OWN real result (a1/a2, not swapped/swallowed)", r1 === "a1" && r2 === "a2", `${r1},${r2}`);
+      eq("48a same-key calls run in submission order (single serialized chain)", order, ["a1", "a2"]);
+      ok("48a 2nd same-key call spaced ≥ minInterval (110) from the 1st, START-to-START (drop the wait ⇒ RED)",
+        starts[1] - starts[0] >= 110, `spacing=${starts[1] - starts[0]}`);
+      eq("48a spacing is EXACTLY minInterval for instantaneous fns (110)", starts[1] - starts[0], 110);
+    }
+
+    // (b) lastAt stamped BEFORE fn() — the load-bearing edgar L97-98 semantics.
+    // fn1 consumes 40 units of fake time AFTER lastAt is stamped; b2 must still
+    // start minInterval(100) after b1's START (=100), NOT after its end (=140).
+    {
+      const startsB = [];
+      const kB = "unit-gate-B";
+      const pB1 = throughGate(kB, 100, async () => {
+        startsB.push(clock);
+        await new Promise((res) => setTimeout(res, 40)); // fn work → fake clock += 40
+        return "b1";
+      });
+      const pB2 = throughGate(kB, 100, async () => { startsB.push(clock); return "b2"; });
+      await Promise.all([pB1, pB2]);
+      eq("48b lastAt stamped BEFORE fn ⇒ 2nd start is minInterval(100) after the 1st START, not after its end(140) (stamp-after-fn ⇒ RED)",
+        startsB[1] - startsB[0], 100);
+    }
+
+    // (c) different keys are independent chains (no cross-key blocking).
+    {
+      // Prime kX so its chain has a recent lastAt (a SAME-key call would now wait).
+      await throughGate("unit-gate-X", 500, async () => "xprime");
+      waits.length = 0;
+      const clockBeforeY = clock;
+      await throughGate("unit-gate-Y", 500, async () => "y"); // brand-new key
+      ok("48c a call on a DIFFERENT/new key does NOT wait on another key's chain (0 waits, clock unmoved)",
+        waits.length === 0 && clock === clockBeforeY, `waits=${JSON.stringify(waits)} clockΔ=${clock - clockBeforeY}`);
+      // Control: a SAME-key follow-up on kX DOES wait ~minInterval (proves the
+      // gate isn't trivially always-no-wait; also a 2nd drop-the-wait RED trigger).
+      waits.length = 0;
+      await throughGate("unit-gate-X", 500, async () => "x2");
+      ok("48c control: a SAME-key follow-up DOES wait ~minInterval (one positive wait; drop the wait ⇒ RED)",
+        waits.length === 1 && waits[0] === 500, JSON.stringify(waits));
+    }
+
+    // (d) a throwing fn rejects THAT caller but the chain keeps flowing.
+    {
+      const kE = "unit-gate-E";
+      const boom = new Error("gate-fn-boom");
+      const errCaught = await expectThrow(() => throughGate(kE, 50, async () => { throw boom; }));
+      ok("48d a throwing fn REJECTS that caller with the REAL error (not swallowed on the returned promise)",
+        errCaught.threw && errCaught.error === boom, String(errCaught.error));
+      let ranAfter = false;
+      const after = await throughGate(kE, 50, async () => { ranAfter = true; return "ok"; });
+      ok("48d the chain CONTINUES after a rejected step (subsequent same-key call still runs — queue not broken)",
+        ranAfter === true && after === "ok", `ranAfter=${ranAfter} after=${after}`);
+    }
+  } finally {
+    Date.now = realDateNow;
+    globalThis.setTimeout = realSetTimeout;
+  }
+}
+
 // §44: CKAN datastore_search source (ADR-0006) — the FIRST source on the R2 port.
 // SSRF (allowlist enum, 36-char lowercase-UUID regex + runtime M1 recheck,
 // redirect:"error") + honesty (EXACT vs ESTIMATE total, the B1 anti-livelock
@@ -7893,6 +8000,7 @@ async function main() {
   await testEdgarHonesty();
   await testSocrataHonesty();
   await testDataSourcePortParity();
+  await testThroughGate();
   await testCkanHonesty();
   await testDatagovHonesty();
   await testEchoHonesty();
