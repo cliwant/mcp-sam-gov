@@ -35,7 +35,8 @@
  *     outcome ("We deny/sustain/dismiss the protest"), a solicitation number
  *     when present, and a decision-PDF link (/assets/.../NNNNNN.pdf).
  */
-import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
+import { ToolErrorCarrier } from "./errors.js";
+import { getText as getTextPort } from "./datasource.js";
 import { withMeta } from "./meta.js";
 // ─── Shared HTTP ─────────────────────────────────────────────────
 // GAO's edge (Cloudflare/WAF) will 403 a bare client — always send a realistic
@@ -50,15 +51,20 @@ const SOURCE = "gao.gov Legal Products RSS + decision pages (keyless)";
  * in `data` and inside `_meta.notes` so no consumer can miss the scope boundary.
  */
 const ACCESS_NOTE = "Keyless GAO access covers only RECENT decisions from the public Legal-Products RSS feed (a rolling ~25-item window). GAO's faceted historical protest search (by protester/agency/outcome/date across all years) is WAF-blocked to automated clients and available only via a paid third-party API. Do NOT treat these results as the complete protest history.";
+// Thin LOCAL wrapper (ADR-0013) that injects GAO's WAF-friendly UA + RSS Accept
+// for the tool's two call sites, then delegates to the shared `getText` port
+// (retry defaults true → fetchWithRetry, byte-identical to the former
+// hand-rolled fetcher). `timeoutMs` is preserved as a param default (never
+// overridden at either call site) and passed through explicitly.
 async function getText(url, label, timeoutMs = 15_000) {
-    const r = await fetchWithRetry(url, {
+    return getTextPort(url, {
+        label,
         headers: {
             "User-Agent": GAO_UA,
             Accept: "application/rss+xml, application/xml, text/html;q=0.9, */*;q=0.8",
         },
-        signal: AbortSignal.timeout(timeoutMs),
-    }, label);
-    return await r.text();
+        timeoutMs,
+    });
 }
 // ─── RSS parse (no dependency — string/regex) ─────────────────────
 /** Decode the handful of XML/HTML entities that appear in GAO titles/desc. */

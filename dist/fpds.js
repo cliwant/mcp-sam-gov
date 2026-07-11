@@ -32,8 +32,8 @@
  * advertised total, and a typo'd field name is a SILENT ZERO. All disclosed via
  * totalIsLowerBound + _meta.notes; hasMore is page-fullness (never offset<total).
  */
-import { errorFromResponse, ToolErrorCarrier, } from "./errors.js";
-import { driftError } from "./datasource.js";
+import { ToolErrorCarrier } from "./errors.js";
+import { driftError, getText } from "./datasource.js";
 import { num } from "./coerce.js";
 import { withMeta } from "./meta.js";
 // Re-export the shared honesty coercion (single audited copy in ./coerce.js) so
@@ -69,67 +69,19 @@ const FIELDS_UNAVAILABLE = [
     "generatedUniqueAwardId",
 ];
 // ═══════════════════════════════════════════════════════════════════
-// Fetch — a LOCAL single-attempt getText (the redirect must be caught on
-// attempt 1; see below). Reuses errors.ts (errorFromResponse/ToolErrorCarrier)
-// + datasource.driftError.
+// Fetch — delegated to the shared `getText` port (ADR-0013) with retry:false
+// (the SINGLE-attempt m-redirect strategy) + redirect:"error" + the preserved
+// redirect disclosure below. `isRedirectError` now lives in datasource.ts: the
+// port catches the redirect:"error" TypeError on the sole attempt and classifies
+// it as a NON-retryable schema_drift there (never routed through the retrying
+// fetchWithRetry, which m-redirect forbids). A 5xx/429/404/timeout is classified
+// + THROWS (never a fake empty). The XML parser / SSRF guard / _meta stay here.
 // ═══════════════════════════════════════════════════════════════════
-/** Is a thrown error the redirect:"error" TypeError (undici: cause "unexpected
- *  redirect")? The live search.do→sam.gov 301 is the concrete case (§1a). */
-function isRedirectError(e) {
-    if (!(e instanceof TypeError))
-        return false;
-    const causeMsg = e.cause && typeof e.cause.message === "string"
-        ? (e.cause.message)
-        : "";
-    return /redirect/i.test(causeMsg) || /redirect/i.test(e.message);
-}
-/**
- * GET the ATOM feed as text. SINGLE attempt on purpose (m-redirect): a
- * redirect:"error" fault throws a TypeError which — if routed through the shared
- * fetchWithRetry — would be retried 3× and surfaced as a retryable
- * upstream_unavailable, exactly what m-redirect forbids. So we do the fetch here
- * and classify: an off-host redirect (the search.do→sam.gov 301) is a
- * NON-RETRYABLE schema_drift naming the redirect; a 5xx/429/404/timeout is
- * classified via errorFromResponse / a network ToolError and THROWS (never a fake
- * empty). fetchWithRetry is imported for parity/reference but not used on the
- * redirect path for this reason.
- */
-async function getText(url, label) {
-    const init = {
-        headers: {
-            "User-Agent": FPDS_UA,
-            Accept: "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
-        },
-        redirect: "error",
-        signal: AbortSignal.timeout(15_000),
-    };
-    let r;
-    try {
-        r = await fetch(url, init);
-    }
-    catch (e) {
-        if (isRedirectError(e)) {
-            // Fail closed — NEVER follow the off-host redirect, NEVER read its body,
-            // and do NOT let it masquerade as a retryable outage (a non-retryable
-            // schema_drift, single attempt).
-            throw driftError(label, `FPDS fetch hit an off-host redirect (the legacy /ezsearch/search.do UI 301-redirects to sam.gov). Refused to follow it (redirect:"error"). This is NOT an empty result — use the /ezsearch/FEEDS/ATOM machine feed.`);
-        }
-        // timeout / abort / network — retryable upstream, but THROWS (never fake-empty).
-        const toolErr = {
-            kind: "upstream_unavailable",
-            message: `Network error reaching ${label}: ${e instanceof Error ? e.message : String(e)}`,
-            retryable: true,
-            retryAfterSeconds: 30,
-            upstreamEndpoint: label,
-        };
-        throw new ToolErrorCarrier(toolErr);
-    }
-    if (!r.ok) {
-        // 404/429/5xx/4xx → the errors.ts taxonomy. A DOWN service NEVER reads empty.
-        throw new ToolErrorCarrier(errorFromResponse(r, label));
-    }
-    return r.text();
-}
+/** The redirect disclosure surfaced when the legacy /ezsearch/search.do UI
+ *  301-redirects off-host to sam.gov (redirect:"error" fails closed). Preserved
+ *  VERBATIM (ADR-0013 Q2) — it names the /ezsearch/FEEDS/ATOM machine feed, an
+ *  honesty disclosure, not incidental text. Passed to getText as redirectMessage. */
+const FPDS_REDIRECT_MSG = `FPDS fetch hit an off-host redirect (the legacy /ezsearch/search.do UI 301-redirects to sam.gov). Refused to follow it (redirect:"error"). This is NOT an empty result — use the /ezsearch/FEEDS/ATOM machine feed.`;
 // ═══════════════════════════════════════════════════════════════════
 // q builder — structured filters → a fielded FPDS `q`. NO raw-q passthrough
 // (a typo'd field name would be a silent zero). m-inject: strip embedded
@@ -426,7 +378,16 @@ export async function searchAwards(args) {
     const start = args.offset ?? 0;
     const { q, filters } = buildQuery(args);
     const url = buildSearchUrl(q, start);
-    const xml = await getText(url, FPDS_LABEL);
+    const xml = await getText(url, {
+        label: FPDS_LABEL,
+        headers: {
+            "User-Agent": FPDS_UA,
+            Accept: "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+        },
+        redirect: "error",
+        retry: false,
+        redirectMessage: FPDS_REDIRECT_MSG,
+    });
     // Feed guard FIRST — an FPDS/edge HTML error page or a redirect target served
     // as 200 is schema DRIFT, never a fake-empty result.
     if (!looksLikeAtomFeed(xml)) {

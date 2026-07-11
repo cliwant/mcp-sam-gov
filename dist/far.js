@@ -32,25 +32,27 @@
  * from ./meta.js — the versioner XML parse lives here (ecfr.ts's stripHtml is
  * private and stays private).
  */
-import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
+import { ToolErrorCarrier } from "./errors.js";
+import { getText } from "./datasource.js";
 import { memoize } from "./cache.js";
 import { listTitles, search as ecfrSearch } from "./ecfr.js";
 import { withMeta } from "./meta.js";
 const ECFR = "https://www.ecfr.gov/api";
 /**
- * Fetch a versioner-full XML document as text. Mirrors ecfr.ts's fetchJson
- * shape (fetchWithRetry + a 15s AbortSignal) but asks for XML and returns the
- * raw body — the versioner endpoint serves `title-48.xml`. fetchWithRetry
- * throws a classified ToolErrorCarrier on any non-2xx (404 → not_found, 5xx →
+ * Fetch a versioner-full XML document as text via the shared `getText` port
+ * (ADR-0013). This thin wrapper owns the far-specific, path-bearing `ecfr:…`
+ * label derivation (kept LOCAL — NOT hoisted into the port), then delegates:
+ * `getText` retries via fetchWithRetry (retry defaults true) and returns the raw
+ * body. The versioner endpoint serves `title-48.xml`. fetchWithRetry throws a
+ * classified ToolErrorCarrier on any non-2xx (404 → not_found, 5xx →
  * upstream_unavailable, network → upstream_unavailable), which callers here
  * either map (404 on the CLAUSE) or let propagate.
  */
 async function fetchText(url) {
-    const r = await fetchWithRetry(url, {
+    return getText(url, {
+        label: `ecfr:${url.split("/api/")[1] ?? url}`,
         headers: { Accept: "application/xml" },
-        signal: AbortSignal.timeout(15_000),
-    }, `ecfr:${url.split("/api/")[1] ?? url}`);
-    return await r.text();
+    });
 }
 /**
  * Strip XML tags → clean, paragraph-preserving plain text. The versioner body
