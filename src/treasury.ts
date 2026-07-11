@@ -36,9 +36,15 @@
  *           path) — removes the SSRF surface for this slice.
  */
 
-import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
+import { getJson, driftError } from "./datasource.js";
+import { num, str } from "./coerce.js";
 import { memoize } from "./cache.js";
 import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
+
+// Re-export the shared honesty coercion (single audited copy now lives in
+// ./coerce.js — ADR-0005 v2 FIX-C) so existing importers and the fault suite's
+// num-parity guard keep resolving `num` from this module.
+export { num };
 
 const BASE =
   "https://api.fiscaldata.treasury.gov/services/api/fiscal_service";
@@ -91,39 +97,11 @@ type TreasuryQuery = {
   pageNumber: number;
 };
 
-// ─── num(): the HONESTY-CRITICAL coercion (F3) ────────────────────
-/**
- * Coerce an inconsistently-typed Treasury value field to `number | null`.
- *
- * Returns **null (NEVER 0)** for absent values so a missing amount is an honest
- * "unknown", never a fabricated zero (the project's forbidden failure class):
- *   - `null` / `undefined`
- *   - the literal string `"null"` (common: early history + MTS parent rows)
- *   - `""` / whitespace  ← CRITICAL: `Number("")` is 0, so this MUST be caught
- *     explicitly or an empty string would masquerade as a real zero.
- *   - the parenthetical placeholder `(-)` (Treasury's "not applicable")
- * Numeric strings parse; numbers pass through (a non-finite number → null).
- */
-export function num(x: unknown): number | null {
-  if (x === null || x === undefined) return null;
-  if (typeof x === "number") return Number.isFinite(x) ? x : null;
-  if (typeof x === "string") {
-    const s = x.trim();
-    if (s === "" || s === "null" || s === "(-)" || s === "-") return null;
-    const n = Number(s);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
-}
-
-/** Coerce a string/date field: null for absent (null/""/"null"), else the string. */
-function str(x: unknown): string | null {
-  if (typeof x === "string") {
-    const s = x.trim();
-    return s === "" || s === "null" ? null : s;
-  }
-  return x == null ? null : String(x);
-}
+// ─── HONESTY-CRITICAL coercions (F1/F2/F3) ────────────────────────
+// `num`/`str` are the shared, audited null-never-0 coercions in ./coerce.js
+// (imported above, `num` re-exported). F3: `num` returns null (NEVER 0) for
+// absent values — the literal string "null" (early history + MTS parent rows),
+// ""/whitespace (Number("") is 0!), and "(-)"/"-" all become null.
 
 // ─── fetch layer ──────────────────────────────────────────────────
 /**
@@ -144,12 +122,10 @@ async function getTreasury<Row = TreasuryRow>(
   params.set("page[size]", String(query.pageSize));
   params.set("page[number]", String(query.pageNumber));
   const url = `${BASE}${path}?${params.toString()}`;
-  const r = await fetchWithRetry(
-    url,
-    { signal: AbortSignal.timeout(15_000) },
-    "treasury:" + path,
-  );
-  const env = (await r.json()) as TreasuryEnvelope<Row>;
+  const label = "treasury:" + path;
+  // Shared fetch envelope (ADR-0005): init === { signal } (no headers/redirect) —
+  // byte-identical to the prior hand-rolled AbortSignal.timeout(15_000) fetch.
+  const env = await getJson<TreasuryEnvelope<Row>>(url, { label });
   if (
     !env ||
     typeof env.meta !== "object" ||
@@ -157,12 +133,10 @@ async function getTreasury<Row = TreasuryRow>(
     typeof env.meta["total-count"] !== "number" ||
     !Array.isArray(env.data)
   ) {
-    throw new ToolErrorCarrier({
-      kind: "schema_drift",
-      message: `treasury:${path} returned an unexpected envelope shape (meta['total-count'] must be a number and data an array).`,
-      retryable: false,
-      upstreamEndpoint: `treasury:${path}`,
-    });
+    throw driftError(
+      label,
+      `treasury:${path} returned an unexpected envelope shape (meta['total-count'] must be a number and data an array).`,
+    );
   }
   return env;
 }

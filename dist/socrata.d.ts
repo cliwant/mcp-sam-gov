@@ -100,18 +100,11 @@
  * `SOCRATA_APP_TOKEN` → the `X-App-Token` header only; never required, never
  * logged, never placed in `_meta` or an error (see m7 at the fetch call site).
  */
+import { num } from "./coerce.js";
 import { type MetaBundle } from "./meta.js";
+export { num };
 export declare const SOCRATA_DOMAINS: readonly ["data.ny.gov", "data.colorado.gov", "data.ct.gov", "data.texas.gov", "data.wa.gov", "opendata.maryland.gov", "data.vermont.gov", "data.nj.gov", "data.oregon.gov", "data.pa.gov", "data.mo.gov", "data.delaware.gov", "opendata.usac.org"];
 export type SocrataDomain = (typeof SOCRATA_DOMAINS)[number];
-/**
- * Coerce a SODA value (the count string, or any curated numeric projection) to
- * `number | null`. Returns **null (NEVER 0)** for absent values so a missing
- * amount is an honest "unknown", never a fabricated zero (the project's
- * forbidden failure class): null/undefined, the literal "null", ""/whitespace
- * (Number("") is 0 — MUST be caught), and the "(-)"/"-" placeholders. Numeric
- * strings parse; numbers pass through (non-finite → null).
- */
-export declare function num(x: unknown): number | null;
 export type SocrataRow = Record<string, unknown>;
 /**
  * Query rows from an allowlisted Socrata SODA dataset. The workhorse: reaches

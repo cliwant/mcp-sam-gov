@@ -60,6 +60,8 @@ import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
 import { padCik as edgarPadCik } from "./dist/edgar.js";
 import { num as socrataNum } from "./dist/socrata.js";
+import { getJson, driftError } from "./dist/datasource.js";
+import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
 import {
   SamGovClient,
@@ -6406,6 +6408,182 @@ async function testSocrataHonesty() {
   }
 }
 
+// §43: DataSource port (ADR-0005 R2) — the byte-identical refactor's contract.
+// getJson (shared fetch envelope) + driftError + the hoisted coerce.num/str are
+// the ONLY new surface; ZERO shipped-tool behavior may change. All OFFLINE,
+// deterministic, NON-VACUOUS: every assertion pins a value and names the mutation
+// that turns it RED.
+//   (a) fetchWithRetry-spy parity (PRIMARY GUARD): the (url, init, label) that
+//       fetchWithRetry receives (init forwarded verbatim to fetch, errors.ts L139)
+//       matches the pre-refactor baseline — Treasury init KEY-SET==={signal};
+//       Socrata row ==={headers,redirect,signal}, redirect==='error'; label via
+//       the error path. Compare by keys/values (NOT JSON.stringify — key order
+//       differs); signal identity excluded.
+//   (b) getJson option matrix: timeout default 15_000 + override; headers passed
+//       ⇒ deep-equal / absent ⇒ NO headers key; redirect 'error' ⇒ set / absent
+//       ⇒ NO redirect key. Each mutation (drop/force a key, change the default)
+//       ⇒ RED.
+//   (c) r.json() parse-error passthrough: a 200 with a non-JSON body ⇒ getJson
+//       propagates the SyntaxError AS-IS (not wrapped, not swallowed, not r.text).
+//   (d) driftError shape {schema_drift, retryable:false, upstreamEndpoint:label}.
+//   (e) coerce parity + single choke point: num/str over the honesty vectors +
+//       treasury.num === socrata.num === coerce.num (one shared impl → a num
+//       regression fails BOTH the §40e and §42m suites at once).
+//   (f) Socrata memoize-drift-not-cached: a non-number resultSetSize ⇒ schema_drift
+//       on BOTH calls (the drift throw is inside the memoize callback → never
+//       cached as a success).
+//   (g) Socrata m4 count-companion swallow: a 429 on the count fetch ⇒ rows STILL
+//       returned + totalAvailable:null + transient note; the error NEVER propagates.
+async function testDataSourcePortParity() {
+  section("43. DataSource port (ADR-0005 R2) — getJson/driftError/coerce byte-identity guards (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+  // Keyless for the deterministic headers-{} assertion (mirrors §42o restore).
+  const priorToken = process.env.SOCRATA_APP_TOKEN;
+  delete process.env.SOCRATA_APP_TOKEN;
+  try {
+    // (a) PRIMARY GUARD — Treasury init/url parity ({signal} only).
+    await withFetch(() => mockResponse({ status: 200, json: { data: [{ record_date: "2026-07-08", tot_pub_debt_out_amt: "1" }], meta: { count: 1, "total-count": 1, "total-pages": 1 } } }), async (calls) => {
+      await runTool("treasury_debt_to_penny", { latest: true }, sam);
+      const c = calls[0];
+      const u = new URL(c.url);
+      ok("43a Treasury fetch on api.fiscaldata.treasury.gov + debt_to_penny path (url baseline)",
+        u.hostname === "api.fiscaldata.treasury.gov" && u.pathname === "/services/api/fiscal_service/v2/accounting/od/debt_to_penny", c.url);
+      eq("43a Treasury init KEY-SET === {signal} (NO headers, NO redirect — byte-identity; add a key ⇒ RED)", Object.keys(c.init).sort(), ["signal"]);
+      ok("43a Treasury init.signal instanceof AbortSignal (timeout; identity excluded)", c.init.signal instanceof AbortSignal, String(c.init.signal));
+    });
+    // Treasury label parity via the error path (upstreamEndpoint === label).
+    await withFetch(() => mockResponse({ status: 503 }), async () => {
+      const { error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
+      eq("43a Treasury label baseline: upstreamEndpoint === 'treasury:/v2/accounting/od/debt_to_penny'", toToolError(error).upstreamEndpoint, "treasury:/v2/accounting/od/debt_to_penny");
+    });
+    // Socrata row init/url parity ({headers, redirect, signal}, redirect 'error').
+    await withFetch(socrataRowsAndCount([{ x: "1" }], 1), async (calls) => {
+      await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam);
+      const rowCall = calls.find((c) => isSocrataRow(c.url));
+      const u = new URL(rowCall.url);
+      ok("43a Socrata row fetch on data.ny.gov/resource/kwxv-fwze.json https (url baseline)",
+        u.hostname === "data.ny.gov" && u.pathname === "/resource/kwxv-fwze.json" && u.protocol === "https:", rowCall.url);
+      eq("43a Socrata init KEY-SET === {headers, redirect, signal} (drop headers/redirect ⇒ RED)", Object.keys(rowCall.init).sort(), ["headers", "redirect", "signal"]);
+      eq("43a Socrata init.redirect === 'error' (B1 SSRF hardening)", rowCall.init.redirect, "error");
+      eq("43a Socrata init.headers deep-equals {} (keyless — no X-App-Token)", rowCall.init.headers, {});
+      ok("43a Socrata init.signal instanceof AbortSignal", rowCall.init.signal instanceof AbortSignal, String(rowCall.init.signal));
+    });
+    // Socrata label parity via the error path.
+    await withFetch((u) => (isSocrataRow(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+      const { error } = await expectThrow(() => runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam));
+      eq("43a Socrata label baseline: upstreamEndpoint === 'socrata:data.ny.gov'", toToolError(error).upstreamEndpoint, "socrata:data.ny.gov");
+    });
+
+    // (b) getJson option matrix — timeout default + override (stub AbortSignal.timeout).
+    {
+      const realTimeout = AbortSignal.timeout;
+      let capturedMs = null;
+      AbortSignal.timeout = (ms) => { capturedMs = ms; return realTimeout.call(AbortSignal, ms); };
+      try {
+        await withFetch(() => mockResponse({ status: 200, json: {} }), async () => {
+          await getJson("https://example.test/x", { label: "port:x" });
+        });
+        eq("43b getJson default timeout === 15_000 (mutate the ?? default ⇒ RED)", capturedMs, 15_000);
+        await withFetch(() => mockResponse({ status: 200, json: {} }), async () => {
+          await getJson("https://example.test/x", { label: "port:x", timeoutMs: 4321 });
+        });
+        eq("43b getJson timeoutMs override honored (4321; ignore the option ⇒ RED)", capturedMs, 4321);
+      } finally {
+        AbortSignal.timeout = realTimeout;
+      }
+    }
+    // headers passed ⇒ deep-equal; ABSENT ⇒ NO headers key (Treasury byte-identity).
+    await withFetch(() => mockResponse({ status: 200, json: {} }), async (calls) => {
+      await getJson("https://example.test/x", { label: "port:x", headers: { "X-Test": "v" } });
+      eq("43b getJson headers passed ⇒ init.headers deep-equals the option", calls[0].init.headers, { "X-Test": "v" });
+    });
+    await withFetch(() => mockResponse({ status: 200, json: {} }), async (calls) => {
+      await getJson("https://example.test/x", { label: "port:x" });
+      ok("43b getJson headers ABSENT ⇒ init has NO 'headers' key (mutate to headers:{} ⇒ RED)", !("headers" in calls[0].init), JSON.stringify(Object.keys(calls[0].init)));
+    });
+    // redirect passed ⇒ set; ABSENT ⇒ NO redirect key.
+    await withFetch(() => mockResponse({ status: 200, json: {} }), async (calls) => {
+      await getJson("https://example.test/x", { label: "port:x", redirect: "error" });
+      eq("43b getJson redirect:'error' passed ⇒ init.redirect === 'error'", calls[0].init.redirect, "error");
+    });
+    await withFetch(() => mockResponse({ status: 200, json: {} }), async (calls) => {
+      await getJson("https://example.test/x", { label: "port:x" });
+      ok("43b getJson redirect ABSENT ⇒ init has NO 'redirect' key (mutate-drop the guard ⇒ RED)", !("redirect" in calls[0].init), JSON.stringify(Object.keys(calls[0].init)));
+    });
+
+    // (c) r.json() parse-error passthrough — a 200 non-JSON body ⇒ SyntaxError AS-IS.
+    await withFetch(() => new Response("not-json", { status: 200 }), async () => {
+      const { threw, error } = await expectThrow(() => getJson("https://example.test/x", { label: "port:x" }));
+      ok("43c getJson r.json() parse error ⇒ propagates SyntaxError as-is (NOT wrapped/swallowed; not an r.text() swap)", threw && error instanceof SyntaxError, `${error?.name}: ${error?.message}`);
+    });
+
+    // (d) driftError shape.
+    {
+      const de = driftError("treasury:/v2/x", "drift msg");
+      ok("43d driftError returns a ToolErrorCarrier", de instanceof ToolErrorCarrier, String(de?.constructor?.name));
+      eq("43d driftError.toolError === {schema_drift, retryable:false, upstreamEndpoint:label} (mutate kind ⇒ RED)", de.toolError, { kind: "schema_drift", message: "drift msg", retryable: false, upstreamEndpoint: "treasury:/v2/x" });
+    }
+
+    // (e) coerce parity — num over the honesty vectors (incl. "NULL"/"(-)"/"-").
+    eq('43e num("null") ⇒ null', coerceNum("null"), null);
+    eq('43e num("NULL") ⇒ null (any-case: Number("NULL") is NaN ⇒ null)', coerceNum("NULL"), null);
+    eq('43e num("") ⇒ null (CRITICAL: Number("") is 0 — MUST be caught)', coerceNum(""), null);
+    eq('43e num("  ") ⇒ null (whitespace trims to "")', coerceNum("  "), null);
+    eq('43e num("(-)") ⇒ null (Treasury "not applicable" placeholder)', coerceNum("(-)"), null);
+    eq('43e num("-") ⇒ null', coerceNum("-"), null);
+    eq('43e num("1,234") ⇒ null (comma-grouped is not a JS number)', coerceNum("1,234"), null);
+    eq('43e num("1234.5") ⇒ 1234.5 (numeric string parses)', coerceNum("1234.5"), 1234.5);
+    eq('43e num("0") ⇒ 0 (a genuine zero is an honest 0, not null)', coerceNum("0"), 0);
+    eq('43e num(0) ⇒ 0', coerceNum(0), 0);
+    eq('43e num(78400.0) ⇒ 78400 (finite number passes through)', coerceNum(78400.0), 78400);
+    eq('43e num(null) ⇒ null', coerceNum(null), null);
+    eq('43e num(undefined) ⇒ null', coerceNum(undefined), null);
+    eq('43e num(NaN) ⇒ null (non-finite)', coerceNum(NaN), null);
+    eq('43e num(Infinity) ⇒ null (non-finite)', coerceNum(Infinity), null);
+    // str over the honesty vectors (null for null/undefined/""/whitespace/"null").
+    eq('43e str(null) ⇒ null', coerceStr(null), null);
+    eq('43e str(undefined) ⇒ null', coerceStr(undefined), null);
+    eq('43e str("") ⇒ null', coerceStr(""), null);
+    eq('43e str("  ") ⇒ null (whitespace)', coerceStr("  "), null);
+    eq('43e str("null") ⇒ null', coerceStr("null"), null);
+    eq('43e str("  null  ") ⇒ null (trimmed then matched)', coerceStr("  null  "), null);
+    eq('43e str("hello") ⇒ "hello"', coerceStr("hello"), "hello");
+    eq('43e str("  x  ") ⇒ "x" (trimmed)', coerceStr("  x  "), "x");
+    eq('43e str(123) ⇒ "123" (number stringified)', coerceStr(123), "123");
+    eq('43e str(0) ⇒ "0" (genuine zero stringifies, not nulled)', coerceStr(0), "0");
+    // Single choke point — the SAME function reference is used by all migrated
+    // sources, so a num regression fails the §40e (Treasury) + §42m (Socrata)
+    // honesty suites at once (proven RED-on-mutate by mutating coerce.num).
+    ok("43e single choke point: treasury.num === socrata.num === coerce.num (one shared impl feeds both honesty suites)",
+      treasuryNum === coerceNum && socrataNum === coerceNum, `t===c:${treasuryNum === coerceNum} s===c:${socrataNum === coerceNum}`);
+
+    // (f) Socrata memoize-drift-not-cached — non-number resultSetSize ⇒ schema_drift
+    // on BOTH calls (drift throws inside the memoize callback → never cached).
+    await withFetch((u) => (isSocrataCatalog(u) ? mockResponse({ status: 200, json: { results: [], resultSetSize: "NOT-A-NUMBER" } }) : failClosed()()), async () => {
+      const q = "43f-memoize-drift-not-cached-unique";
+      const r1 = await expectThrow(() => runTool("socrata_discover_datasets", { q, domain: "data.ny.gov" }, sam));
+      const r2 = await expectThrow(() => runTool("socrata_discover_datasets", { q, domain: "data.ny.gov" }, sam));
+      ok("43f memoize drift-not-cached: non-number resultSetSize ⇒ schema_drift on BOTH calls (never cached as a success; cache-the-throw ⇒ 2nd call RED)",
+        r1.threw && toToolError(r1.error).kind === "schema_drift" && r2.threw && toToolError(r2.error).kind === "schema_drift",
+        JSON.stringify({ a: toToolError(r1.error).kind, b: toToolError(r2.error).kind }));
+    });
+
+    // (g) Socrata m4 count-companion swallow — a 429 on the count fetch (⇒ a
+    // rate_limited ToolErrorCarrier from fetchWithRetry) must NOT fail the row query.
+    await withFetch((u) => (isSocrataCount(u) ? mockResponse({ status: 429, headers: { "Retry-After": "30" } }) : isSocrataRow(u) ? mockResponse({ status: 200, json: [{ x: "1" }] }) : failClosed()()), async () => {
+      const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", limit: 100 }, sam);
+      const m = buildMeta(r.meta);
+      ok("43g m4: count 429 (rate_limited carrier) ⇒ rows STILL returned + totalAvailable:null + transient note; the error NEVER propagates (count never fails the row query / never driftError)",
+        r.data.rows.length === 1 && m.totalAvailable === null && m.notes.some((n) => /transient/i.test(n)),
+        JSON.stringify({ rows: r.data.rows.length, ta: m.totalAvailable, notes: m.notes }));
+    });
+  } finally {
+    if (priorToken === undefined) delete process.env.SOCRATA_APP_TOKEN;
+    else process.env.SOCRATA_APP_TOKEN = priorToken;
+  }
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -6459,6 +6637,7 @@ async function main() {
   await testTreasuryHonesty();
   await testEdgarHonesty();
   await testSocrataHonesty();
+  await testDataSourcePortParity();
 
   // Prove the harness bites.
   await selfCheck();
