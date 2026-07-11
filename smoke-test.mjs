@@ -752,6 +752,30 @@ const tests = [
           ),
       ),
   },
+  // ━━━ FPDS-NG — federal contract AWARD ACTIONS (keyless ATOM, ADR-0012)
+  // The FIRST XML/ATOM source. Live-hits www.fpds.gov/ezsearch/FEEDS/ATOM (keyless,
+  // no key/cookie). NAICS 541511 (custom computer programming) is a broad,
+  // always-populated multi-page query (→ rel="last" → totalAvailable is a lower
+  // bound). Every returned row MUST carry a real string piid — the M3
+  // namespace-drift guard would have THROWN schema_drift otherwise, so a passing
+  // verify proves the ns1: award/IDV extractor is intact against the live feed. A
+  // live transient (5xx/timeout/429) is TOLERATED as a pass-with-note.
+  {
+    name: "fpds_search_awards",
+    args: { naics: "541511", offset: 0 },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      Array.isArray(r.awards) &&
+      r.awards.length >= 1 &&
+      r.awards.length <= 10 &&
+      r.awards.every(
+        (a) => a !== null && typeof a === "object" && typeof a.piid === "string" && a.piid.length > 0,
+      ) &&
+      typeof r.totalAvailable === "number" &&
+      r.totalAvailable >= 1,
+  },
   // ━━━ EPA ECHO REST — keyless facility compliance/enforcement (ADR-0009)
   // Live-hits echodata.epa.gov (keyless). A live transient (5xx/timeout/429) is
   // acceptable and TOLERATED as a pass-with-note (the honest taxonomy, not a code

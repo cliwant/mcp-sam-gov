@@ -64,6 +64,7 @@ import { num as ckanNum } from "./dist/ckan.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
 import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
+import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { getJson, driftError, throughGate } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -7946,6 +7947,347 @@ async function testGovinfoHonesty() {
   ok("47r govinfo.num === coerce.num (one shared audited impl — a num regression fails §40e/§44n/§45j/§47r together)", govinfoNum === coerceNum, "govinfo.num diverged from coerce.num");
 }
 
+// §49: FPDS-NG (www.fpds.gov ezSearch ATOM, ADR-0012) — the FIRST XML/ATOM source.
+// The XML parser is a bounded, ReDoS-safe hand-parser (far.ts/gao.ts lineage), NOT
+// the getJson port. NON-VACUOUS: the fixtures are TRIMMED-but-VERBATIM real ATOM
+// entries live-captured 2026-07-12 (a real award + a real IDV), and every honesty
+// assertion pins a real anchor value + names the mutation that turns it RED.
+//   (a) real-fixture parse: award + IDV anchors (piid/oblig/naics/vendor/UEI/date …).
+//   (b) content-root tolerance: an ns1:IDV entry parses (piid GS06B70103), not dropped.
+//   (c) missing element ⇒ null (never "" / 0) — description/cageCode/PoP-city absent.
+//   (d) M2 attribute ELEMENT-SCOPED: naicsDescription is read from principalNAICSCode,
+//       NOT a global description= scan (which would grab the first "NOT APPLICABLE") ⇒ mutate to global ⇒ RED.
+//   (e) M3 namespace-drift: a non-empty feed whose entries ALL yield null piid (ns2: prefix) ⇒ driftError (mutate the guard off ⇒ the hollow page returns ⇒ RED).
+//   (f) non-ATOM/HTML body ⇒ driftError (an FPDS HTML error page @200 is NOT a fake-empty).
+//   (g) genuine-empty (start=0, returned=0) ⇒ complete:true/total:0 + the silent-zero note.
+//   (h) B1 ceiling-hit (start>0, returned=0, no rel=last) ⇒ totalAvailable:null/complete:false + ambiguity note (mutate to complete:true/0 ⇒ RED).
+//   (i) multi-page total = lastStart+1 + totalIsLowerBound + M1 anti-livelock note (mutate total→page-length ⇒ RED).
+//   (j) hasMore = page-fullness (full 10-entry page ⇒ true; short 1-entry page ⇒ false), NEVER offset<total.
+//   (k) SSRF: q/start injection stays on www.fpds.gov/ezsearch/FEEDS/ATOM; no-filter ⇒ invalid_input, 0 fetch.
+//   (l) redirect:"error" TypeError ⇒ NON-retryable schema_drift, SINGLE attempt (not 3× as upstream_unavailable).
+//   (m) outage 503 / network ⇒ THROWS classified (never a fake empty).
+//   (n) query-injection: embedded " stripped from phrase values; keyword FIELD: operators stripped.
+//   (o) ReDoS fuzz: ~2MB of 10^4 unterminated <entry …> ⇒ [] in <100ms, MAX_ENTRIES never hit.
+//   (p) num null-never-0: "0.00"→0, negative de-obligation preserved, absent→null; fpds.num === coerce.num.
+const FPDS_AWARD_ENTRY = `<entry>
+    <title><![CDATA[New DELIVERY ORDER 00000099FL5GG02 awarded to BLACK & DECKER CORPORATION, TH for the amount of $107,271]]></title>
+    <link rel="alternate" type="text/html" href="https://www.fpds.gov/ezsearch/search.do?s=FPDS&amp;indexName=awardfull&amp;templateName=1.5.3&amp;q=00000099FL5GG02+9700+"></link>
+    <content xmlns:ns1="https://www.fpds.gov/FPDS" type="application/xml">
+      <ns1:award xmlns:ns1="https://www.fpds.gov/FPDS" version="1.2">
+        <ns1:awardID>
+          <ns1:awardContractID>
+            <ns1:agencyID name="DEPT OF DEFENSE">9700</ns1:agencyID>
+            <ns1:PIID>00000099FL5GG02</ns1:PIID>
+            <ns1:modNumber>0</ns1:modNumber>
+            <ns1:transactionNumber>0</ns1:transactionNumber></ns1:awardContractID>
+          <ns1:referencedIDVID>
+            <ns1:agencyID name="DEPT OF DEFENSE">9700</ns1:agencyID>
+            <ns1:PIID>F1963093D0001</ns1:PIID>
+            <ns1:modNumber>0</ns1:modNumber></ns1:referencedIDVID></ns1:awardID>
+        <ns1:relevantContractDates>
+          <ns1:signedDate>1998-11-20 00:00:00</ns1:signedDate>
+          <ns1:effectiveDate>1998-11-20 00:00:00</ns1:effectiveDate>
+          <ns1:currentCompletionDate>1999-09-30 00:00:00</ns1:currentCompletionDate></ns1:relevantContractDates>
+        <ns1:dollarValues>
+          <ns1:obligatedAmount>107271.00</ns1:obligatedAmount>
+          <ns1:baseAndExercisedOptionsValue>0.00</ns1:baseAndExercisedOptionsValue>
+          <ns1:baseAndAllOptionsValue>0.00</ns1:baseAndAllOptionsValue></ns1:dollarValues>
+        <ns1:totalDollarValues>
+          <ns1:totalObligatedAmount>107271.00</ns1:totalObligatedAmount>
+          <ns1:totalBaseAndExercisedOptionsValue>0.00</ns1:totalBaseAndExercisedOptionsValue>
+          <ns1:totalBaseAndAllOptionsValue>0.00</ns1:totalBaseAndAllOptionsValue></ns1:totalDollarValues>
+        <ns1:purchaserInformation><ns1:contractingOfficeAgencyID name="DEPT OF THE NAVY" departmentID="9700" departmentName="DEPT OF DEFENSE">1700</ns1:contractingOfficeAgencyID><ns1:foreignFunding description="NOT APPLICABLE">X</ns1:foreignFunding></ns1:purchaserInformation>
+        <ns1:contractData><ns1:contractActionType description="DELIVERY ORDER">C</ns1:contractActionType><ns1:typeOfContractPricing description="FIRM FIXED PRICE">J</ns1:typeOfContractPricing></ns1:contractData>
+        <ns1:productOrServiceInformation>
+          <ns1:productOrServiceCode description="AUTOMATED INFORMATION SYSTEM SVCS" productOrServiceType="SERVICE">D307</ns1:productOrServiceCode>
+          <ns1:claimantProgramCode description="SERVICES">S1</ns1:claimantProgramCode>
+          <ns1:principalNAICSCode description="CUSTOM COMPUTER PROGRAMMING SERVICES">541511</ns1:principalNAICSCode>
+          <ns1:systemEquipmentCode>2000</ns1:systemEquipmentCode></ns1:productOrServiceInformation>
+        <ns1:vendor>
+          <ns1:vendorHeader><ns1:vendorName>BLACK &amp; DECKER CORPORATION, TH</ns1:vendorName></ns1:vendorHeader>
+          <ns1:vendorSiteDetails>
+            <ns1:vendorSocioEconomicIndicators><ns1:isSmallBusiness>false</ns1:isSmallBusiness><ns1:isWomenOwned>false</ns1:isWomenOwned><ns1:isVeteranOwned>false</ns1:isVeteranOwned></ns1:vendorSocioEconomicIndicators>
+            <ns1:vendorLocation>
+              <ns1:streetAddress>701 E JOPPA RD</ns1:streetAddress>
+              <ns1:city>BALTIMORE</ns1:city>
+              <ns1:state name="MARYLAND">MD</ns1:state>
+              <ns1:ZIPCode city="BALTIMORE">21286</ns1:ZIPCode>
+              <ns1:countryCode name="UNITED STATES">USA</ns1:countryCode>
+              <ns1:congressionalDistrictCode>02</ns1:congressionalDistrictCode>
+              <ns1:entityDataSource>D&amp;B</ns1:entityDataSource></ns1:vendorLocation>
+            <ns1:entityIdentifiers>
+              <ns1:vendorUEIInformation>
+                <ns1:UEI>J5JXMYR1QMW4</ns1:UEI>
+                <ns1:UEILegalBusinessName>BLACK &amp; DECKER CORPORATION, TH</ns1:UEILegalBusinessName>
+                <ns1:ultimateParentUEI>J5JXMYR1QMW4</ns1:ultimateParentUEI>
+                <ns1:ultimateParentUEIName>THE BLACK &amp; DECKER CORPORATION</ns1:ultimateParentUEIName></ns1:vendorUEIInformation></ns1:entityIdentifiers></ns1:vendorSiteDetails>
+          <ns1:contractingOfficerBusinessSizeDetermination description="OTHER THAN SMALL BUSINESS">O</ns1:contractingOfficerBusinessSizeDetermination></ns1:vendor>
+        <ns1:placeOfPerformance>
+          <ns1:principalPlaceOfPerformance>
+            <ns1:locationCode>48376</ns1:locationCode>
+            <ns1:stateCode name="VIRGINIA">VA</ns1:stateCode>
+            <ns1:countryCode name="UNITED STATES">USA</ns1:countryCode></ns1:principalPlaceOfPerformance></ns1:placeOfPerformance>
+        <ns1:competition><ns1:extentCompeted description="FULL AND OPEN COMPETITION">A</ns1:extentCompeted><ns1:typeOfSetAside description="NO SET ASIDE USED.">NONE</ns1:typeOfSetAside><ns1:numberOfOffersReceived>2</ns1:numberOfOffersReceived></ns1:competition></ns1:award>
+    </content>
+  </entry>`;
+const FPDS_IDV_ENTRY = `<entry>
+    <title><![CDATA[New IDC GS06B70103 awarded to  for the amount of $0]]></title>
+    <link rel="alternate" type="text/html" href="https://www.fpds.gov/ezsearch/search.do?s=FPDS&amp;indexName=awardfull&amp;templateName=1.5.3&amp;q=GS06B70103+4740+"></link>
+    <content xmlns:ns1="https://www.fpds.gov/FPDS" type="application/xml">
+      <ns1:IDV xmlns:ns1="https://www.fpds.gov/FPDS" version="1.0">
+        <ns1:contractID>
+          <ns1:IDVID>
+            <ns1:agencyID name="PUBLIC BUILDINGS SERVICE">4740</ns1:agencyID>
+            <ns1:PIID>GS06B70103</ns1:PIID>
+            <ns1:modNumber>0</ns1:modNumber></ns1:IDVID></ns1:contractID>
+        <ns1:relevantContractDates>
+          <ns1:signedDate>1983-06-15 00:00:00</ns1:signedDate>
+          <ns1:effectiveDate>1983-06-15 00:00:00</ns1:effectiveDate></ns1:relevantContractDates>
+        <ns1:dollarValues>
+          <ns1:obligatedAmount>0.00</ns1:obligatedAmount>
+          <ns1:baseAndAllOptionsValue>0.00</ns1:baseAndAllOptionsValue></ns1:dollarValues>
+        <ns1:totalDollarValues>
+          <ns1:totalObligatedAmount>161968.18</ns1:totalObligatedAmount>
+          <ns1:totalBaseAndAllOptionsValue>19274211.84</ns1:totalBaseAndAllOptionsValue></ns1:totalDollarValues>
+        <ns1:purchaserInformation><ns1:contractingOfficeAgencyID name="GENERAL SERVICES ADMINISTRATION" departmentID="4700" departmentName="GENERAL SERVICES ADMINISTRATION">4700</ns1:contractingOfficeAgencyID><ns1:foreignFunding description="NOT APPLICABLE">X</ns1:foreignFunding></ns1:purchaserInformation>
+        <ns1:contractData><ns1:contractActionType description="IDC">B</ns1:contractActionType><ns1:reasonForModification description="SUPPLEMENTAL AGREEMENT FOR WORK WITHIN SCOPE">B</ns1:reasonForModification></ns1:contractData>
+        <ns1:productOrServiceInformation><ns1:productOrServiceCode description="MAINT-REP OF MATERIALS HANDLING EQ" productOrServiceType="SERVICE">J039</ns1:productOrServiceCode></ns1:productOrServiceInformation>
+        <ns1:vendor>
+          <ns1:vendorHeader></ns1:vendorHeader>
+          <ns1:vendorSiteDetails>
+            <ns1:vendorSocioEconomicIndicators><ns1:isSmallBusiness>false</ns1:isSmallBusiness><ns1:isWomenOwned>false</ns1:isWomenOwned><ns1:isVeteranOwned>false</ns1:isVeteranOwned></ns1:vendorSocioEconomicIndicators>
+            <ns1:entityIdentifiers>
+              <ns1:vendorUEIInformation>
+                <ns1:UEI>L88SRK33JSR6</ns1:UEI>
+                <ns1:ultimateParentUEI>L88SRK33JSR6</ns1:ultimateParentUEI>
+                <ns1:ultimateParentUEIName>S.N.C. SCIONTI</ns1:ultimateParentUEIName></ns1:vendorUEIInformation></ns1:entityIdentifiers></ns1:vendorSiteDetails>
+          <ns1:contractingOfficerBusinessSizeDetermination description="OTHER THAN SMALL BUSINESS">O</ns1:contractingOfficerBusinessSizeDetermination></ns1:vendor>
+        <ns1:competition><ns1:extentCompeted description="FULL AND OPEN COMPETITION">A</ns1:extentCompeted><ns1:numberOfOffersReceived>0</ns1:numberOfOffersReceived></ns1:competition></ns1:IDV>
+    </content>
+  </entry>`;
+// The verbatim real genuine-empty feed (VENDOR_NAME:"ZZQX…9999", live-captured).
+const FPDS_EMPTY_FEED = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>FPDS-NG search results for<![CDATA[: VENDOR_NAME:"ZZQXNONEXIST9999"]]></title>
+  <link rel="alternate" type="text/html" href="https://www.fpds.gov/ezsearch/search.do?s=FPDS&amp;indexName=awardfull&amp;templateName=1.5.3&amp;q=VENDOR_NAME%3A%22ZZQXNONEXIST9999%22&amp;start=0"></link>
+  <modified/>
+  <author>
+    <name/>
+  </author>
+</feed>`;
+// The verbatim real rel="last" link (start=553960) from the NAICS-541511 feed.
+const FPDS_REL_LAST_LINK = `\n  <link rel="last" type="text/html" href="https://www.fpds.gov/ezsearch/FEEDS/ATOM?s=FPDS&amp;FEEDNAME=PUBLIC&amp;VERSION=1.5.3&amp;q=PRINCIPAL_NAICS_CODE%3A%22541511%22&amp;start=553960"></link>\n  <link rel="next" type="text/html" href="https://www.fpds.gov/ezsearch/FEEDS/ATOM?start=10"></link>`;
+const fpdsFeedOpen = (relLastLink) =>
+  `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>FPDS-NG search results for<![CDATA[: PRINCIPAL_NAICS_CODE:"541511"]]></title>
+  <link rel="alternate" type="text/html" href="https://www.fpds.gov/ezsearch/search.do?q=x&amp;start=0"></link>${relLastLink}`;
+// A compact but real-structured filler entry (a full-page needs 10 entries; each
+// carries a non-null PIID so the M3 all-null-piid guard never fires spuriously).
+const fpdsFiller = (n) =>
+  `<entry><content xmlns:ns1="https://www.fpds.gov/FPDS" type="application/xml"><ns1:award xmlns:ns1="https://www.fpds.gov/FPDS" version="1.5"><ns1:awardID><ns1:awardContractID><ns1:PIID>FILLER${n}</ns1:PIID></ns1:awardContractID></ns1:awardID><ns1:dollarValues><ns1:obligatedAmount>1000.00</ns1:obligatedAmount></ns1:dollarValues></ns1:award></content></entry>`;
+const isFpds = (u) => /www\.fpds\.gov\/ezsearch\/FEEDS\/ATOM/.test(u);
+const fpdsMock = (xml) => (u) => (isFpds(u) ? mockResponse({ status: 200, json: xml }) : failClosed()());
+
+async function testFpdsHonesty() {
+  section("49. FPDS-NG ATOM (ADR-0012, the FIRST XML/ATOM source) — bounded/ReDoS-safe hand-parser + honesty (totalIsLowerBound + M1 anti-livelock + B1 ceiling + M2 element-scoped attr + M3 namespace-drift), NON-VACUOUS frozen real ATOM fixtures (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // A full 10-entry page: the real award + real IDV + 8 fillers, WITH rel="last".
+  const fillers8 = Array.from({ length: 8 }, (_, i) => fpdsFiller(i)).join("");
+  const MULTIPAGE =
+    fpdsFeedOpen(FPDS_REL_LAST_LINK) + "\n" + FPDS_AWARD_ENTRY + "\n" + FPDS_IDV_ENTRY + "\n" + fillers8 + "\n</feed>";
+  // A ≤10 single-entry feed (no rel="last") — exact total.
+  const SINGLE = fpdsFeedOpen("") + "\n" + FPDS_AWARD_ENTRY + "\n</feed>";
+
+  // ── (a)+(b) real-fixture parse: award + IDV anchors (content-root tolerance). ──
+  await withFetch(fpdsMock(MULTIPAGE), async () => {
+    const r = await runTool("fpds_search_awards", { naics: "541511" }, sam);
+    const m = buildMeta(r.meta);
+    ok("49a MULTIPAGE parses 10 entries (real award + real IDV + 8 fillers)", r.data.awards.length === 10, `got ${r.data.awards.length}`);
+    const a = r.data.awards.find((x) => x.piid === "00000099FL5GG02");
+    ok("49a award anchor: piid/mod/parentIdvPiid (scoped to referencedIDVID, not the award's own PIID)",
+      a && a.piid === "00000099FL5GG02" && a.modNumber === "0" && a.parentIdvPiid === "F1963093D0001",
+      JSON.stringify({ piid: a?.piid, mod: a?.modNumber, parent: a?.parentIdvPiid }));
+    ok("49a award anchor: vendorName/UEI/ultimateParentUEI(+Name) entity-decoded (BLACK & DECKER, J5JXMYR1QMW4)",
+      a && a.vendorName === "BLACK & DECKER CORPORATION, TH" && a.vendorUei === "J5JXMYR1QMW4" && a.ultimateParentUei === "J5JXMYR1QMW4" && a.ultimateParentUeiName === "THE BLACK & DECKER CORPORATION",
+      JSON.stringify({ v: a?.vendorName, u: a?.vendorUei, up: a?.ultimateParentUei, upn: a?.ultimateParentUeiName }));
+    ok("49a award anchor: amounts num() — obligated 107271 (from '107271.00'), total 107271, base 0 (from '0.00')",
+      a && a.obligatedAmount === 107271 && a.totalObligatedAmount === 107271 && a.baseAndAllOptionsValue === 0,
+      JSON.stringify({ o: a?.obligatedAmount, t: a?.totalObligatedAmount, b: a?.baseAndAllOptionsValue }));
+    ok("49a award anchor: naics 541511, psc D307, signedDate, businessSize, extentCompeted, offers 2, setAside",
+      a && a.naics === "541511" && a.psc === "D307" && a.signedDate === "1998-11-20 00:00:00" && a.businessSize === "OTHER THAN SMALL BUSINESS" && a.extentCompeted === "FULL AND OPEN COMPETITION" && a.offersReceived === 2 && a.setAside === "NO SET ASIDE USED.",
+      JSON.stringify({ n: a?.naics, p: a?.psc, s: a?.signedDate, bs: a?.businessSize, e: a?.extentCompeted, of: a?.offersReceived, sa: a?.setAside }));
+    ok("49a award anchor: vendorCity BALTIMORE / vendorState MD (scoped to vendorLocation, not PoP), popState VA (scoped to placeOfPerformance)",
+      a && a.vendorCity === "BALTIMORE" && a.vendorState === "MD" && a.placeOfPerformanceState === "VA",
+      JSON.stringify({ vc: a?.vendorCity, vs: a?.vendorState, pop: a?.placeOfPerformanceState }));
+    ok("49a award anchor: contractingDepartment 9700/DEPT OF DEFENSE (awardContractID/agencyID), office DEPT OF THE NAVY",
+      a && a.contractingDepartmentId === "9700" && a.contractingDepartmentName === "DEPT OF DEFENSE" && a.contractingOfficeAgencyName === "DEPT OF THE NAVY",
+      JSON.stringify({ did: a?.contractingDepartmentId, dn: a?.contractingDepartmentName, off: a?.contractingOfficeAgencyName }));
+    ok("49a award anchor: CDATA title decoded ($107,271 intact — no $1 back-reference corruption)",
+      a && a.title === "New DELIVERY ORDER 00000099FL5GG02 awarded to BLACK & DECKER CORPORATION, TH for the amount of $107,271", JSON.stringify(a?.title));
+    ok("49a award anchor: socioeconomic booleans false (real 'false' leaf), fpdsHtmlUrl decoded",
+      a && a.socioeconomic.smallBusiness === false && a.socioeconomic.womenOwned === false && a.fpdsHtmlUrl === "https://www.fpds.gov/ezsearch/search.do?s=FPDS&indexName=awardfull&templateName=1.5.3&q=00000099FL5GG02+9700+",
+      JSON.stringify({ so: a?.socioeconomic, url: a?.fpdsHtmlUrl }));
+    // (b) content-root tolerance — the ns1:IDV entry parses (NOT dropped as "not an award").
+    const iv = r.data.awards.find((x) => x.recordType === "idv");
+    ok("49b content-root tolerance: the ns1:IDV entry parses (recordType idv, piid GS06B70103 from contractID/IDVID/PIID — a DIFFERENT path than award, proving the flat extractor is not path-sensitive)",
+      iv && iv.recordType === "idv" && iv.piid === "GS06B70103" && iv.parentIdvPiid === null && iv.vendorUei === "L88SRK33JSR6" && iv.ultimateParentUeiName === "S.N.C. SCIONTI" && iv.obligatedAmount === 0 && iv.totalObligatedAmount === 161968.18 && iv.psc === "J039" && iv.actionType === "IDC",
+      JSON.stringify({ t: iv?.recordType, p: iv?.piid, par: iv?.parentIdvPiid, u: iv?.vendorUei, o: iv?.obligatedAmount, to: iv?.totalObligatedAmount, ps: iv?.psc, at: iv?.actionType }));
+    // (c) missing element ⇒ null (never "" / 0). The award has no descriptionOfContractRequirement / cageCode / PoP-city.
+    ok("49c missing element ⇒ null (never '' or 0): description/cageCode/placeOfPerformanceCity absent ⇒ null; IDV vendorName (empty vendorHeader) ⇒ null; IDV naics (no principalNAICSCode) ⇒ null",
+      a.description === null && a.cageCode === null && a.placeOfPerformanceCity === null && iv.vendorName === null && iv.naics === null,
+      JSON.stringify({ d: a.description, c: a.cageCode, pc: a.placeOfPerformanceCity, ivn: iv.vendorName, ivnn: iv.naics }));
+    // (d) M2 — attribute ELEMENT-SCOPED. naicsDescription comes from principalNAICSCode's
+    // OWN attr, NOT a global description= scan (whose first hit is "NOT APPLICABLE").
+    const firstDesc = /description="([^"]*)"/.exec(FPDS_AWARD_ENTRY)[1];
+    ok(`49d M2 element-scoped attr: naicsDescription="CUSTOM COMPUTER PROGRAMMING SERVICES" (from principalNAICSCode), pscDescription/actionType each from their OWN element — a GLOBAL description= scan would grab the entry's FIRST description ${JSON.stringify(firstDesc)} ⇒ mutate to global ⇒ RED`,
+      a.naicsDescription === "CUSTOM COMPUTER PROGRAMMING SERVICES" && a.pscDescription === "AUTOMATED INFORMATION SYSTEM SVCS" && a.actionType === "DELIVERY ORDER" && firstDesc !== "CUSTOM COMPUTER PROGRAMMING SERVICES",
+      JSON.stringify({ nd: a.naicsDescription, pd: a.pscDescription, at: a.actionType, first: firstDesc }));
+    // (i) totalAvailable = lastStart+1 (553961), totalIsLowerBound + M1 note.
+    ok("49i multi-page total = lastStart+1 = 553961 (NOT the page length 10, NOT returned) + totalIsLowerBound:true — mutate total→page-length ⇒ RED",
+      m.totalAvailable === 553961 && m.totalIsLowerBound === true && m.returned === 10, JSON.stringify({ ta: m.totalAvailable, lb: m.totalIsLowerBound, r: m.returned }));
+    ok("49i M1 anti-livelock note present (do NOT paginate using totalAvailable; use hasMore) — the guard against the CKAN-B1 offset<total livelock",
+      m.notes.some((n) => /do NOT paginate using totalAvailable/.test(n) && /hasMore/.test(n) && /lower bound/.test(n)), JSON.stringify(m.notes));
+    ok("49i FPDS↔USAspending disclosure note present (FPDS = action-level source-of-record; USAspending = lagged derivative)",
+      m.notes.some((n) => /AUTHORITATIVE system-of-record/.test(n) && /USAspending/.test(n)), "missing FPDS/USAS note");
+    ok("49i fieldsUnavailable = the USAspending-only derivations (subAwards/federalAccountLinkage/generatedUniqueAwardId)",
+      JSON.stringify(m.fieldsUnavailable) === JSON.stringify(["subAwards", "federalAccountLinkage", "generatedUniqueAwardId"]), JSON.stringify(m.fieldsUnavailable));
+    ok("49i filtersApplied reflects the structured filter (naics)", JSON.stringify(m.filtersApplied) === JSON.stringify(["naics"]), JSON.stringify(m.filtersApplied));
+    // (j) hasMore = page-fullness (full 10-entry page ⇒ true).
+    ok("49j hasMore = page-fullness: a FULL 10-entry page ⇒ hasMore:true, nextOffset:10 (NEVER offset<total)",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 10 && m.pagination.offset === 0, JSON.stringify(m.pagination));
+  });
+
+  // (j cont.) short page ⇒ hasMore:false; ≤10 ⇒ EXACT total; complete:true.
+  await withFetch(fpdsMock(SINGLE), async () => {
+    const r = await runTool("fpds_search_awards", { piid: "00000099FL5GG02" }, sam);
+    const m = buildMeta(r.meta);
+    ok("49j ≤10 results (no rel=last): totalAvailable = returned = 1 (EXACT, totalIsLowerBound undefined), hasMore:false, complete:true (the whole set)",
+      m.returned === 1 && m.totalAvailable === 1 && m.totalIsLowerBound === undefined && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.complete === true,
+      JSON.stringify({ r: m.returned, ta: m.totalAvailable, lb: m.totalIsLowerBound, hm: m.pagination.hasMore, c: m.complete }));
+  });
+
+  // ── (g) genuine-empty (start=0, returned=0) ⇒ complete:true/total:0 + silent-zero note. ──
+  await withFetch(fpdsMock(FPDS_EMPTY_FEED), async () => {
+    const r = await runTool("fpds_search_awards", { vendorName: "ZZQXNONEXIST9999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("49g genuine-empty (start 0, 0 entries, no rel=last) ⇒ returned:0, totalAvailable:0, complete:true, truncated:false",
+      r.data.awards.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false, JSON.stringify(m));
+    ok("49g genuine-empty carries the silent-zero disclosure (bad field name / typo is indistinguishable from a real zero at HTTP 200)",
+      m.notes.some((n) => /empty feed \(HTTP 200\) for BOTH a genuine zero-match AND an unrecognized field/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── (h) B1 ceiling-hit (start>0, returned=0, no rel=last) ⇒ null/false + ambiguity note. ──
+  await withFetch(fpdsMock(FPDS_EMPTY_FEED), async () => {
+    const r = await runTool("fpds_search_awards", { naics: "541511", offset: 500000 }, sam);
+    const m = buildMeta(r.meta);
+    ok("49h B1 ceiling-hit (start 500000, 0 entries, no rel=last) ⇒ totalAvailable:null + complete:false (NOT a false total:0) — mutate to complete:true/total:0 ⇒ RED",
+      m.returned === 0 && m.totalAvailable === null && m.complete === false, JSON.stringify({ r: m.returned, ta: m.totalAvailable, c: m.complete }));
+    ok("49h B1 ceiling ambiguity note present (0 results at offset — ambiguous between a short set and the deep-paging ceiling)",
+      m.notes.some((n) => /AMBIGUOUS/.test(n) && /deep-paging ceiling/.test(n)), JSON.stringify(m.notes));
+    ok("49h B1 ceiling is DISTINCT from genuine-empty: complete is explicitly false here vs true for start=0 (the load-bearing B1 blocker fix)",
+      m.complete === false, "B1 ceiling must not read complete:true");
+  });
+
+  // ── (e) M3 namespace-drift: a non-empty feed where EVERY entry yields null piid. ──
+  const DRIFT_NS2 =
+    fpdsFeedOpen("") +
+    `\n<entry><content xmlns:ns2="https://www.fpds.gov/FPDS" type="application/xml"><ns2:award><ns2:awardID><ns2:awardContractID><ns2:PIID>00000099FL5GG02</ns2:PIID></ns2:awardContractID></ns2:awardID></ns2:award></content></entry>` +
+    `\n<entry><content xmlns:ns2="https://www.fpds.gov/FPDS" type="application/xml"><ns2:IDV><ns2:contractID><ns2:IDVID><ns2:PIID>GS06B70103</ns2:PIID></ns2:IDVID></ns2:contractID></ns2:IDV></content></entry>\n</feed>`;
+  await withFetch(fpdsMock(DRIFT_NS2), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", { naics: "541511" }, sam));
+    ok("49e M3 namespace-drift: a non-empty feed whose entries ALL yield null piid (ns2: prefix) ⇒ schema_drift (never a page of hollow records) — mutate the guard off ⇒ the hollow page returns ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift" && /all entries yielded null piid/.test(toToolError(error).message),
+      JSON.stringify(threw ? toToolError(error) : "did-not-throw"));
+  });
+
+  // ── (f) non-ATOM / HTML body @200 ⇒ driftError (NOT a fake-empty). ──
+  const HTML_ERROR = "<!doctype html>\n<html><head><title>FPDS-NG</title></head><body>Service temporarily unavailable</body></html>";
+  await withFetch(fpdsMock(HTML_ERROR), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", { naics: "541511" }, sam));
+    ok("49f non-ATOM/HTML body @200 ⇒ schema_drift (an FPDS HTML error page must NOT become a fake returned:0)",
+      threw && toToolError(error).kind === "schema_drift" && /not an Atom <feed>/.test(toToolError(error).message), JSON.stringify(threw ? toToolError(error).kind : "did-not-throw"));
+  });
+
+  // ── (k) SSRF + no-filter guard. ──
+  await withFetch(fpdsMock(FPDS_EMPTY_FEED), async (calls) => {
+    // Injection-laden q/values stay on-host (URLSearchParams-encoded — cannot alter host/path).
+    await runTool("fpds_search_awards", { vendorName: 'a" //evil.com/x', keyword: "../../etc&host=evil" }, sam);
+    const built = new URL(calls[calls.length - 1].url);
+    ok("49k SSRF: a q crafted with //evil.com / path-traversal / '&host=' stays on www.fpds.gov/ezsearch/FEEDS/ATOM (host+path fixed; only q/start via URLSearchParams)",
+      built.hostname === "www.fpds.gov" && built.pathname === "/ezsearch/FEEDS/ATOM" && built.protocol === "https:",
+      JSON.stringify({ h: built.hostname, p: built.pathname }));
+    ok("49k buildSearchUrl asserts the built host (belt-and-suspenders, ckan.ts pattern) — a value cannot inject a host",
+      new URL(fpdsBuildSearchUrl("PRINCIPAL_NAICS_CODE:\"x\" @evil.com", 0)).hostname === "www.fpds.gov", "url host drifted off fpds");
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", {}, sam));
+    ok("49k no-filter ⇒ invalid_input, 0 fetch (a bare unbounded FPDS scan is refused BEFORE any network call)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+  });
+
+  // ── (l) redirect:"error" TypeError ⇒ NON-retryable schema_drift, SINGLE attempt. ──
+  await withFetch(
+    () => {
+      const e = new TypeError("fetch failed");
+      e.cause = new Error("unexpected redirect");
+      throw e;
+    },
+    async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", { naics: "541511" }, sam));
+      ok("49l redirect:'error' TypeError (the live search.do→sam.gov 301) ⇒ NON-retryable schema_drift, SINGLE fetch attempt (NOT 3× retried as upstream_unavailable)",
+        threw && toToolError(error).kind === "schema_drift" && /redirect/i.test(toToolError(error).message) && calls.length === 1,
+        JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", calls: calls.length }));
+    },
+  );
+
+  // ── (m) outage 503 / network ⇒ THROWS classified (never a fake empty). ──
+  await withFetch((u) => (isFpds(u) ? mockResponse({ status: 503, json: "" }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", { naics: "541511" }, sam));
+    ok("49m 503 ⇒ throws upstream_unavailable (a DOWN FPDS is NEVER a returned:0)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(() => { throw new Error("ECONNRESET"); }, async () => {
+    const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", { naics: "541511" }, sam));
+    ok("49m network error ⇒ throws upstream_unavailable (never a fake empty)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (n) query-injection: embedded " stripped from phrases; keyword FIELD: stripped. ──
+  eq("49n phrase injection: vendorName 'X\" PIID:\"secret' ⇒ the embedded quote is stripped (cannot close the quote to inject a 2nd FPDS field token)",
+    fpdsBuildQuery({ vendorName: 'X" PIID:"secret' }).q, 'VENDOR_NAME:"X PIID:secret"');
+  eq("49n keyword injection: 'foo BOGUS_FIELD:\"x\" bar' ⇒ the FIELD: operator + quotes stripped (cannot inject an FPDS query operator via the bare keyword)",
+    fpdsBuildQuery({ keyword: 'foo BOGUS_FIELD:"x" bar' }).q, "foo x bar");
+  eq("49n structured naics + signedDate range ⇒ AND-combined fielded q (ISO YYYY-MM-DD reformatted to YYYY/MM/DD)",
+    fpdsBuildQuery({ naics: "541511", signedDateFrom: "2024-01-01", signedDateTo: "2024-12-31" }).q,
+    'PRINCIPAL_NAICS_CODE:"541511" SIGNED_DATE:[2024/01/01,2024/12/31]');
+
+  // ── (o) ReDoS fuzz: ~2MB of unterminated <entry …> ⇒ [] in <100ms, MAX_ENTRIES not hit. ──
+  const REDOS_BODY = '<feed xmlns="http://www.w3.org/2005/Atom">' + '<entry attr="'.repeat(160000);
+  await withFetch(fpdsMock(REDOS_BODY), async () => {
+    const t0 = Date.now();
+    const r = await runTool("fpds_search_awards", { naics: "x" }, sam);
+    const elapsed = Date.now() - t0;
+    ok(`49o ReDoS fuzz: ${(REDOS_BODY.length / 1e6).toFixed(1)}MB of 10^4 unterminated <entry …> ⇒ 0 entries (no matching </entry>), MAX_ENTRIES never hit, bounded time ${elapsed}ms (<100ms — the indexOf walk is O(N), never a lazy-regex O(N^2))`,
+      r.data.awards.length === 0 && elapsed < 100, `awards=${r.data.awards.length} elapsed=${elapsed}ms`);
+  });
+  // MAX_ENTRIES cap bites on a hostile 30-entry feed (real FPDS pages are ≤10).
+  const MANY = fpdsFeedOpen("") + Array.from({ length: 30 }, (_, i) => fpdsFiller(i)).join("") + "\n</feed>";
+  await withFetch(fpdsMock(MANY), async () => {
+    const r = await runTool("fpds_search_awards", { naics: "x" }, sam);
+    ok("49o MAX_ENTRIES cap: a hostile 30-entry feed ⇒ sliced to at most 25 (bounded allocation; the indexOf walk stops at the cap)", r.data.awards.length === 25, `got ${r.data.awards.length}`);
+  });
+
+  // ── (p) num null-never-0 + parity. ──
+  eq("49p num('0.00') ⇒ 0 (a real $0 obligation is REAL data, never null)", fpdsNum("0.00"), 0);
+  eq("49p num('107271.00') ⇒ 107271", fpdsNum("107271.00"), 107271);
+  eq("49p num('-1370595.67') ⇒ -1370595.67 (a de-obligation NEGATIVE is preserved, never dropped/zeroed)", fpdsNum("-1370595.67"), -1370595.67);
+  eq("49p num('') ⇒ null (Number('') is 0 — must be caught; an absent amount is 'unknown', never 0)", fpdsNum(""), null);
+  eq("49p num('null') ⇒ null", fpdsNum("null"), null);
+  eq("49p num(undefined) ⇒ null (absent element ⇒ null)", fpdsNum(undefined), null);
+  ok("49p fpds.num === coerce.num (one shared audited impl — a num regression fails §40e/§42m/§44n/§49p together)", fpdsNum === coerceNum, "fpds.num diverged from coerce.num");
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -8005,6 +8347,7 @@ async function main() {
   await testDatagovHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
+  await testFpdsHonesty();
 
   // Prove the harness bites.
   await selfCheck();
