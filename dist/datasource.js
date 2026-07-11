@@ -31,7 +31,7 @@
  * discoverDatasets memoize boundary — leaving the check at the call site keeps
  * that split honest (ADR-0005 §1c / Q4).
  */
-import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
+import { fetchWithRetry, errorFromResponse, ToolErrorCarrier, } from "./errors.js";
 /**
  * GET + parse one JSON resource through the shared envelope. Assembles `init`
  * (a fresh `AbortSignal.timeout` always; `headers`/`redirect` set ONLY when the
@@ -50,6 +50,74 @@ export async function getJson(url, opts) {
         init.redirect = opts.redirect;
     const r = await fetchWithRetry(url, init, opts.label);
     return (await r.json());
+}
+/**
+ * GET one text resource through the shared envelope. Assembles `init`
+ * (byte-identical to `getJson`'s rule: a fresh `AbortSignal.timeout` always;
+ * `headers`/`redirect` set ONLY when the option is provided), then either
+ * retries via `fetchWithRetry` (default) or does a single classified `fetch`
+ * (retry:false), and returns the raw `r.text()` body.
+ */
+export async function getText(url, opts) {
+    const init = {
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 15_000),
+    };
+    if (opts.headers !== undefined)
+        init.headers = opts.headers;
+    if (opts.redirect)
+        init.redirect = opts.redirect;
+    // Default path (far/gao): retry transient errors up to 3× via the shared
+    // primitive, then return the body text.
+    if (opts.retry !== false) {
+        const r = await fetchWithRetry(url, init, opts.label);
+        return await r.text();
+    }
+    // Single-attempt path (fpds m-redirect): the fetch is done HERE so a
+    // redirect:"error" TypeError is classified as a NON-retryable schema_drift
+    // (never routed through fetchWithRetry, which would retry it 3× as a retryable
+    // upstream_unavailable). A 5xx/429/404/timeout is classified + THROWS (never a
+    // fake empty). Byte-for-byte the shipped fpds single-fetch body.
+    let r;
+    try {
+        r = await fetch(url, init);
+    }
+    catch (e) {
+        if (isRedirectError(e)) {
+            // Fail closed — NEVER follow the off-host redirect, NEVER read its body,
+            // and do NOT let it masquerade as a retryable outage.
+            throw driftError(opts.label, opts.redirectMessage ??
+                `Off-host redirect refused (redirect:"error") while fetching ${opts.label}.`);
+        }
+        // timeout / abort / network — retryable upstream, but THROWS (never fake-empty).
+        throw new ToolErrorCarrier({
+            kind: "upstream_unavailable",
+            message: `Network error reaching ${opts.label}: ${e instanceof Error ? e.message : String(e)}`,
+            retryable: true,
+            retryAfterSeconds: 30,
+            upstreamEndpoint: opts.label,
+        });
+    }
+    if (!r.ok) {
+        // 404/429/5xx/4xx → the errors.ts taxonomy. A DOWN service NEVER reads empty.
+        throw new ToolErrorCarrier(errorFromResponse(r, opts.label));
+    }
+    return await r.text();
+}
+/**
+ * Is a thrown error the redirect:"error" TypeError (undici: cause "unexpected
+ * redirect")? The live FPDS search.do→sam.gov 301 is the concrete case
+ * (ADR-0012 §1a). Moved here from fpds.ts (ADR-0013) as `getText`'s audited home
+ * — it is only reachable when a caller sets `redirect:"error"` (undici throws
+ * the unexpected-redirect TypeError only in `"error"` mode), so it is inert for
+ * any retry:false caller that does NOT set redirect.
+ */
+export function isRedirectError(e) {
+    if (!(e instanceof TypeError))
+        return false;
+    const causeMsg = e.cause && typeof e.cause.message === "string"
+        ? e.cause.message
+        : "";
+    return /redirect/i.test(causeMsg) || /redirect/i.test(e.message);
 }
 /**
  * The shared `schema_drift` constructor (all sources threw the identical
