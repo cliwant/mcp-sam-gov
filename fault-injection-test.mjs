@@ -61,6 +61,7 @@ import { num as treasuryNum } from "./dist/treasury.js";
 import { padCik as edgarPadCik } from "./dist/edgar.js";
 import { num as socrataNum } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
+import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
 import { getJson, driftError } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -6885,6 +6886,306 @@ async function testCkanHonesty() {
   });
 }
 
+// §45: api.data.gov KEYED trio (ADR-0007) — Regulations.gov + Congress.gov. The
+// project's FIRST keyed source. The load-bearing guarantee is the KEY-NEVER-LEAKS
+// discipline (§2): the secret rides ONLY in the X-Api-Key header, never the URL /
+// label / ToolError / _meta. Plus the EDGAR-pattern 40-page/10,000-record cap (B1),
+// EXACT totalElements/pagination.count totals, container-guarded drift checks
+// (M2/M3), the DEMO_KEY disclosure + keylessMode:false, and the standard error
+// taxonomy. All OFFLINE (mock fetch), deterministic, NON-VACUOUS. Driven through
+// the REAL runTool (Zod-first) + direct fn calls (to exercise the runtime cap guard).
+//   (K) KEY NEVER LEAKS (M1 triangulation): sentinel key absent from
+//       message/upstreamEndpoint/_meta/URL, PRESENT in the X-Api-Key header.
+//   (a) SSRF/URL: fetch on the FIXED host over https; key NOT in the URL.
+//   (b) B1 cap: page 40 + totalElements>10000 ⇒ hasMore:true + nextOffset:null + note.
+//   (c) B1 pre-fetch guard: page>40 ⇒ invalid_input, 0 fetch (Zod + runtime).
+//   (d) totalAvailable = meta.totalElements / pagination.count (mutate→page-len ⇒ RED).
+//   (e) container guards: meta absent / pagination absent / data non-array / bills non-array ⇒ driftError.
+//   (f) genuine-empty ⇒ complete:true/total:0.
+//   (g) outage 5xx ⇒ throws upstream_unavailable (never a fake empty).
+//   (h) 404⇒not_found; 400⇒invalid_input; 401/403⇒invalid_input; 429⇒rate_limited.
+//   (i) DEMO_KEY note present when env unset / configured-note when set; keylessMode:false.
+//   (j) num('null')/'' ⇒ null; datagov.num === coerce.num (shared choke point).
+//   (k) congress `query` (unsupported) ⇒ filtersDropped + note (honest, never silently ignored).
+const isRegDocs = (u) => /api\.regulations\.gov\/v4\/documents/.test(u);
+const isRegComments = (u) => /api\.regulations\.gov\/v4\/comments/.test(u);
+const isCongressBill = (u) => /api\.congress\.gov\/v3\/bill/.test(u);
+const SENTINEL = "SENTINEL_abc123_zzz";
+// A JSON:API document item (attributes verbatim). `regDocs(n, total)` builds a body.
+const regDocItem = (i) => ({
+  id: `DOC-${i}`,
+  type: "documents",
+  attributes: {
+    documentType: "Proposed Rule",
+    title: `Doc ${i}`,
+    agencyId: "EPA",
+    docketId: "EPA-HQ-OAR-2021-0257",
+    postedDate: "2024-03-01T00:00:00Z",
+    commentEndDate: "2024-05-01T23:59:59Z",
+    openForComment: true,
+    withinCommentPeriod: true,
+    frDocNum: "2024-04567",
+    objectId: `0900006480abc0${i}`,
+  },
+});
+const regBody = ({ n = 0, total }) => ({
+  data: Array.from({ length: n }, (_, i) => regDocItem(i)),
+  meta: { totalElements: total, totalPages: 40, pageNumber: 1, pageSize: 25 },
+});
+const congressBillItem = (i) => ({
+  congress: 118,
+  type: "hr",
+  number: String(3000 + i),
+  title: `A bill ${i}`,
+  originChamber: "House",
+  latestAction: { actionDate: "2024-02-01", text: "Referred to committee." },
+  updateDate: "2024-02-02",
+  url: "https://api.congress.gov/v3/bill/118/hr/3076?format=json",
+});
+const congressBody = ({ n = 0, count }) => ({
+  bills: Array.from({ length: n }, (_, i) => congressBillItem(i)),
+  pagination: { count, next: "https://api.congress.gov/v3/bill?offset=20&limit=20&format=json" },
+});
+
+/** Run `fn` with DATA_GOV_API_KEY set to `val` (or deleted if undefined), restore after. */
+async function withEnvKey(val, fn) {
+  const orig = process.env.DATA_GOV_API_KEY;
+  if (val === undefined) delete process.env.DATA_GOV_API_KEY;
+  else process.env.DATA_GOV_API_KEY = val;
+  try {
+    return await fn();
+  } finally {
+    if (orig === undefined) delete process.env.DATA_GOV_API_KEY;
+    else process.env.DATA_GOV_API_KEY = orig;
+  }
+}
+
+async function testDatagovHonesty() {
+  section("45. api.data.gov KEYED trio (ADR-0007) — Regulations.gov + Congress.gov: KEY-NEVER-LEAKS (M1), 40-page/10k cap (B1), EXACT totals + container guards, DEMO_KEY disclosure (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (K) THE load-bearing test: the KEY NEVER LEAKS (M1 triangulation). With a
+  // sentinel key set, drive an ERROR path (500) AND a SUCCESS path and assert the
+  // sentinel appears in NONE of: ToolError.message, ToolError.upstreamEndpoint,
+  // the serialized _meta, or the fetch URL (arg[0]) — but IS in the X-Api-Key
+  // header (positive: auth actually applied, the test isn't passing vacuously).
+  await withEnvKey(SENTINEL, async () => {
+    // Error path (500 → throws).
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 500 }) : failClosed()()), async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_documents", { searchTerm: "ai" }, sam));
+      const te = toToolError(error);
+      const call = calls.find((c) => isRegDocs(c.url));
+      const hdr = call?.init?.headers?.["X-Api-Key"];
+      const leaks = [te.message, te.upstreamEndpoint, JSON.stringify(te), call?.url].some((s) => typeof s === "string" && s.includes(SENTINEL));
+      ok("45K KEY-NEVER-LEAKS (error path): sentinel absent from ToolError.message/upstreamEndpoint/serialized-error AND the fetch URL (mutate to put key in URL / echo in label ⇒ RED)",
+        threw && !leaks, JSON.stringify({ msg: te.message, ep: te.upstreamEndpoint, url: call?.url }));
+      ok("45K POSITIVE: the X-Api-Key header WAS sent with the sentinel value (auth applied — not passing because auth was silently dropped)",
+        hdr === SENTINEL, JSON.stringify({ hdr }));
+      ok("45K the key is NOT in the URL query string (header-only; no ?api_key=)",
+        typeof call?.url === "string" && !call.url.includes(SENTINEL) && !/api_key=/i.test(call.url), JSON.stringify(call?.url));
+    });
+    // Success path — the sentinel must not reach the serialized _meta either.
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 1, total: 1 }) }) : failClosed()()), async (calls) => {
+      const r = await runTool("regulations_search_documents", { searchTerm: "ai" }, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((c) => isRegDocs(c.url));
+      ok("45K KEY-NEVER-LEAKS (success path): sentinel absent from the serialized _meta (source is host + key-MODE only, never the value)",
+        !JSON.stringify(m).includes(SENTINEL) && /DATA_GOV_API_KEY/.test(m.source), JSON.stringify(m.source));
+      ok("45K success path still sends the sentinel in the X-Api-Key header (never the URL)",
+        call?.init?.headers?.["X-Api-Key"] === SENTINEL && !call.url.includes(SENTINEL), JSON.stringify(call?.url));
+    });
+  });
+
+  // Everything below runs in DEMO_KEY mode (env unset) unless noted.
+  await withEnvKey(undefined, async () => {
+    // ── (a) SSRF/URL correctness: fetch on the FIXED host over https, key not in URL,
+    // redirect:"error" set, and the X-Api-Key header present (DEMO_KEY here).
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 1, total: 1 }) }) : failClosed()()), async (calls) => {
+      await runTool("regulations_search_documents", { searchTerm: "x" }, sam);
+      const call = calls.find((c) => isRegDocs(c.url));
+      const url = call ? new URL(call.url) : null;
+      ok("45a Regulations fetch on https://api.regulations.gov/v4/documents (fixed host, https); page[size]/page[number] in query; key NOT in URL",
+        !!url && url.hostname === "api.regulations.gov" && url.protocol === "https:" && url.searchParams.get("page[size]") === "25" && !/api_key=/i.test(call.url),
+        JSON.stringify(call?.url));
+      ok("45a Regulations fetch sets init.redirect==='error' and sends X-Api-Key: DEMO_KEY (env unset)",
+        call?.init?.redirect === "error" && call?.init?.headers?.["X-Api-Key"] === "DEMO_KEY",
+        JSON.stringify({ redirect: call?.init?.redirect, hdr: call?.init?.headers?.["X-Api-Key"] }));
+    });
+    await withFetch((u) => (isCongressBill(u) ? mockResponse({ status: 200, json: congressBody({ n: 1, count: 1 }) }) : failClosed()()), async (calls) => {
+      await runTool("congress_search_bills", { congress: 118, billType: "hr" }, sam);
+      const call = calls.find((c) => isCongressBill(c.url));
+      const url = call ? new URL(call.url) : null;
+      ok("45a Congress fetch on https://api.congress.gov/v3/bill/118/hr (fixed host, Zod-constrained path segments); key NOT in URL; redirect:error; X-Api-Key sent",
+        !!url && url.hostname === "api.congress.gov" && url.pathname === "/v3/bill/118/hr" && !/api_key=/i.test(call.url) && call.init.redirect === "error" && call.init.headers["X-Api-Key"] === "DEMO_KEY",
+        JSON.stringify(call?.url));
+    });
+
+    // ── (b) B1 — the 40-page/10,000-record ceiling (EDGAR-pattern). page 40 +
+    // totalElements 1,969,435 ⇒ hasMore:true (more genuinely exists) BUT
+    // nextOffset:null (no reachable continuation) + a ceiling note. Mutating
+    // nextOffset to 10000 (a dead-end page 41 → upstream 400) ⇒ RED.
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 250, total: 1969435 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_documents", { searchTerm: "x", pageNumber: 40, pageSize: 250 }, sam);
+      const m = buildMeta(r.meta);
+      ok("45b B1 CEILING: page 40 + totalElements 1,969,435 ⇒ totalAvailable:1969435, hasMore:true, nextOffset:null, truncated:true, complete:false (mutate nextOffset→10000 ⇒ RED = dead-end page 41)",
+        m.totalAvailable === 1969435 && m.pagination.hasMore === true && m.pagination.nextOffset === null && m.truncated === true && m.complete === false,
+        JSON.stringify(m.pagination));
+      ok("45b B1 CEILING: a disclosing note names the 10000-record ceiling + the reach-the-rest guidance (drop the note ⇒ RED)",
+        m.notes.some((n) => /10000-record/.test(n) && /lastModifiedDate|narrow filters/.test(n)),
+        JSON.stringify(m.notes));
+    });
+    // A NON-ceiling page (page 2 of many, well inside the window) ⇒ nextOffset is a
+    // real numeric offset (page 3's first record), hasMore:true.
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 25, total: 1000 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_documents", { searchTerm: "x", pageNumber: 2, pageSize: 25 }, sam);
+      const m = buildMeta(r.meta);
+      ok("45b non-ceiling page 2/… (offset 25) ⇒ hasMore:true, nextOffset:50 (numeric next-page offset, re-derived — NOT an upstream URL), no ceiling note",
+        m.pagination.offset === 25 && m.pagination.hasMore === true && m.pagination.nextOffset === 50 && !m.notes.some((n) => /ceiling/.test(n)),
+        JSON.stringify(m.pagination));
+    });
+
+    // ── (c) B1 pre-fetch window guard: page>40 ⇒ invalid_input, 0 fetch. Via
+    // runTool (Zod max(40) catches it) AND a DIRECT fn call (the runtime guard).
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_documents", { searchTerm: "x", pageNumber: 41 }, sam));
+      ok("45c pre-fetch guard (Zod): pageNumber 41 ⇒ invalid_input, 0 fetch (page[number] hard cap is 40)",
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+      const before2 = calls.length;
+      const direct = await expectThrow(() => dgSearchDocuments({ searchTerm: "x", pageNumber: 41, pageSize: 250 }));
+      ok("45c pre-fetch guard (RUNTIME, direct call bypassing Zod): pageNumber 41 ⇒ invalid_input, 0 fetch (mirror of edgar from>=9900)",
+        direct.threw && toToolError(direct.error).kind === "invalid_input" && calls.length === before2, JSON.stringify({ kind: toToolError(direct.error).kind, added: calls.length - before2 }));
+    });
+
+    // ── (d) totalAvailable = the PRIMARY-container total, NOT the returned page
+    // length. Regulations: meta.totalElements; Congress: pagination.count.
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 25, total: 1969435 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_documents", { searchTerm: "x" }, sam);
+      const m = buildMeta(r.meta);
+      ok("45d Regulations totalAvailable === meta.totalElements 1969435 (NOT returned 25; NOT totalPages*pageSize; mutate→page-length ⇒ RED)",
+        m.totalAvailable === 1969435 && m.returned === 25, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    });
+    await withFetch((u) => (isCongressBill(u) ? mockResponse({ status: 200, json: congressBody({ n: 1, count: 428608 }) }) : failClosed()()), async () => {
+      const r = await runTool("congress_search_bills", {}, sam);
+      const m = buildMeta(r.meta);
+      ok("45d Congress totalAvailable === pagination.count 428608 (NOT returned 1; mutate→bills.length ⇒ RED); hasMore:true, nextOffset:1",
+        m.totalAvailable === 428608 && m.returned === 1 && m.pagination.hasMore === true && m.pagination.nextOffset === 1, JSON.stringify({ ta: m.totalAvailable, pg: m.pagination }));
+    });
+
+    // ── (e) container-guarded drift (M2/M3). A null/absent meta or pagination, or a
+    // non-array data/bills, must throw driftError (schema_drift) — NEVER a TypeError
+    // (which would mask drift as upstream_unavailable) and NEVER a fake empty.
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: { data: [] } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_documents", { searchTerm: "x" }, sam));
+      ok("45e M3: Regulations body.meta ABSENT ⇒ schema_drift (container guard — NOT a TypeError/upstream_unavailable)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: { data: [], meta: { totalElements: "1969435" } } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_documents", { searchTerm: "x" }, sam));
+      ok("45e M3: Regulations meta.totalElements a STRING ⇒ schema_drift (typeof-guard before num; drop it ⇒ RED)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+    for (const bad of ["not-an-array", null, 42]) {
+      await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: { data: bad, meta: { totalElements: 5 } } }) : failClosed()()), async () => {
+        const { threw, error } = await expectThrow(() => runTool("regulations_search_documents", { searchTerm: "x" }, sam));
+        ok(`45e M2: Regulations data = ${JSON.stringify(bad)} (non-array) ⇒ schema_drift (never []; mutate to read as empty ⇒ RED)`,
+          threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+      });
+    }
+    await withFetch((u) => (isCongressBill(u) ? mockResponse({ status: 200, json: { bills: [] } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("congress_search_bills", {}, sam));
+      ok("45e M3: Congress body.pagination ABSENT ⇒ schema_drift (container guard, not TypeError)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+    await withFetch((u) => (isCongressBill(u) ? mockResponse({ status: 200, json: { bills: "nope", pagination: { count: 5 } } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("congress_search_bills", {}, sam));
+      ok("45e M2: Congress bills non-array ⇒ schema_drift (never [])",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+
+    // ── (f) genuine-empty (0 results) ⇒ honest complete:true / totalAvailable:0.
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 0, total: 0 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_documents", { searchTerm: "zzznomatch" }, sam);
+      const m = buildMeta(r.meta);
+      ok("45f Regulations genuine-empty (data:[], totalElements:0) ⇒ complete:true, truncated:false, totalAvailable:0, returned:0 (a real no-match, not an outage)",
+        r.data.documents.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.returned === 0, JSON.stringify(m));
+    });
+    await withFetch((u) => (isCongressBill(u) ? mockResponse({ status: 200, json: congressBody({ n: 0, count: 0 }) }) : failClosed()()), async () => {
+      const r = await runTool("congress_search_bills", {}, sam);
+      const m = buildMeta(r.meta);
+      ok("45f Congress genuine-empty (bills:[], count:0) ⇒ complete:true, totalAvailable:0, hasMore:false",
+        r.data.bills.length === 0 && m.totalAvailable === 0 && m.complete === true && m.pagination.hasMore === false, JSON.stringify(m));
+    });
+
+    // ── (g) outage 5xx ⇒ throws upstream_unavailable, never a fake empty.
+    await withFetch((u) => (isRegComments(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_comments", { searchTerm: "x" }, sam));
+      ok("45g Regulations /v4/comments 503 ⇒ throws upstream_unavailable, retryable (NOT a fake empty comments[])",
+        threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify(toToolError(error).kind));
+    });
+
+    // ── (h) error taxonomy: 404⇒not_found, 400⇒invalid_input, 401/403⇒invalid_input,
+    // 429⇒rate_limited (errorFromResponse, status-only).
+    await withFetch((u) => (isCongressBill(u) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("congress_get_bill", { congress: 999, billType: "hr", billNumber: 1 }, sam));
+      ok("45h Congress get_bill 404 (nonexistent) ⇒ not_found (never a fabricated bill)",
+        threw && toToolError(error).kind === "not_found", JSON.stringify(toToolError(error).kind));
+    });
+    for (const [status, label] of [[400, "invalid_input"], [401, "invalid_input"], [403, "invalid_input"]]) {
+      await withFetch((u) => (isRegDocs(u) ? mockResponse({ status }) : failClosed()()), async () => {
+        const { threw, error } = await expectThrow(() => runTool("regulations_search_documents", { searchTerm: "x" }, sam));
+        ok(`45h Regulations HTTP ${status} ⇒ ${label} (bad param / missing-or-invalid key surfaced as an error, never a silent empty)`,
+          threw && toToolError(error).kind === label, JSON.stringify(toToolError(error).kind));
+      });
+    }
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 429, headers: { "Retry-After": "25832" } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_documents", { searchTerm: "x" }, sam));
+      const te = toToolError(error);
+      ok("45h Regulations 429 ⇒ rate_limited, retryable, honors Retry-After:25832 (the live DEMO_KEY ceiling shape)",
+        threw && te.kind === "rate_limited" && te.retryable === true && te.retryAfterSeconds === 25832, JSON.stringify({ kind: te.kind, ra: te.retryAfterSeconds }));
+    });
+
+    // ── (i) DEMO_KEY disclosure + keylessMode:false (env unset here).
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 1, total: 1 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_documents", { searchTerm: "x" }, sam);
+      const m = buildMeta(r.meta);
+      ok("45i DEMO_KEY mode (env unset): keylessMode:false (FIRST keyed source), source names (DEMO_KEY), and the ~10 req/hr disclosure + signup URL is present with NO hardcoded date (m4-note)",
+        m.keylessMode === false && /\(DEMO_KEY\)/.test(m.source) && m.notes.some((n) => /DEMO_KEY/.test(n) && /api\.data\.gov\/signup/.test(n) && !/2026-07-12/.test(n)),
+        JSON.stringify({ keyless: m.keylessMode, source: m.source, notes: m.notes }));
+    });
+  });
+  // ── (i cont.) with a real key set, the note switches to configured-key and NO
+  // sentinel leaks; keylessMode stays false.
+  await withEnvKey(SENTINEL, async () => {
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 1, total: 1 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_documents", { searchTerm: "x" }, sam);
+      const m = buildMeta(r.meta);
+      ok("45i configured-key mode: source names (DATA_GOV_API_KEY) not the value, note reads 'configured … value never logged', DEMO_KEY note ABSENT, keylessMode:false, no sentinel in _meta",
+        /\(DATA_GOV_API_KEY\)/.test(m.source) && m.notes.some((n) => /configured DATA_GOV_API_KEY/.test(n)) && !m.notes.some((n) => /DEMO_KEY/.test(n)) && m.keylessMode === false && !JSON.stringify(m).includes(SENTINEL),
+        JSON.stringify({ source: m.source, notes: m.notes }));
+    });
+  });
+
+  // ── (j) num coercion — null-never-0; datagov.num is the SHARED coerce.num choke point.
+  eq("45j num('428608') ⇒ 428608", datagovNum("428608"), 428608);
+  eq("45j num('null') ⇒ null (data-absence honesty — never 0)", datagovNum("null"), null);
+  eq("45j num('') ⇒ null (Number('') is 0 — must be caught)", datagovNum(""), null);
+  ok("45j datagov.num === coerce.num (one shared audited impl — a num regression fails §40e/§42m/§44n/§45j together)", datagovNum === coerceNum, "datagov.num diverged from coerce.num");
+
+  // ── (k) Congress `query` (unsupported by /v3/bill) ⇒ filtersDropped + a note; it
+  // is NEVER sent as a param and NEVER silently ignored.
+  await withEnvKey(undefined, async () => {
+    await withFetch((u) => (isCongressBill(u) ? mockResponse({ status: 200, json: congressBody({ n: 1, count: 1 }) }) : failClosed()()), async (calls) => {
+      const r = await runTool("congress_search_bills", { query: "infrastructure" }, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((c) => isCongressBill(c.url));
+      ok("45k Congress `query` (no keyword search on /v3/bill) ⇒ filtersDropped:['query'] + a disclosing note; complete:false; the term is NOT in the fetch URL (never silently applied)",
+        m.filtersDropped.includes("query") && m.complete === false && m.notes.some((n) => /query/.test(n) && /keyword-search/.test(n)) && !/infrastructure/i.test(call.url),
+        JSON.stringify({ dropped: m.filtersDropped, url: call?.url }));
+    });
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -6940,6 +7241,7 @@ async function main() {
   await testSocrataHonesty();
   await testDataSourcePortParity();
   await testCkanHonesty();
+  await testDatagovHonesty();
 
   // Prove the harness bites.
   await selfCheck();

@@ -35,6 +35,7 @@ import * as treasury from "./treasury.js";
 import * as edgar from "./edgar.js";
 import * as socrata from "./socrata.js";
 import * as ckan from "./ckan.js";
+import * as datagov from "./datagov.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
@@ -945,6 +946,123 @@ const CkanDiscoverDatasetsInput = z.object({
         .default(20)
         .describe("Max datasets (packages) to return, 1..100, default 20."),
 });
+// ─── api.data.gov keyed trio (Regulations.gov + Congress.gov) — input schemas ──
+// ADR-0007. The project's FIRST KEYED source. The key is read from env
+// (DATA_GOV_API_KEY, else the public DEMO_KEY) and travels ONLY in the X-Api-Key
+// header — NEVER in a param here. M4 (Zod-first): page/limit bounds + sort/type
+// enums + ISO date-time formats are validated LOCALLY so bad params fail as
+// invalid_input BEFORE any fetch (Regulations.gov's page[number] is HARD-capped at
+// 40 = a 10,000-record ceiling; page[size] must be 5..250).
+const RegulationsSearchInput = z.object({
+    searchTerm: z
+        .string()
+        .optional()
+        .describe("Full-text search term (filter[searchTerm]), e.g. 'artificial intelligence'."),
+    query: z
+        .string()
+        .optional()
+        .describe("Alias for `searchTerm` (either is accepted; both feed filter[searchTerm])."),
+    agencyId: z
+        .string()
+        .optional()
+        .describe("Filter by posting agency acronym (filter[agencyId]), e.g. 'EPA', 'FDA'."),
+    docketId: z
+        .string()
+        .optional()
+        .describe("Filter by docket id (filter[docketId]), e.g. 'EPA-HQ-OAR-2021-0257'."),
+    documentType: z
+        .enum(datagov.REGULATIONS_DOCUMENT_TYPES)
+        .optional()
+        .describe("Filter by document type (documents only): Rule / Proposed Rule / Notice / Supporting & Related Material / Other."),
+    withinCommentPeriod: z
+        .boolean()
+        .optional()
+        .describe("true ⇒ only documents currently open for comment (documents only; filter[withinCommentPeriod])."),
+    postedDateGe: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe("Posted on/after this date, YYYY-MM-DD (filter[postedDate][ge])."),
+    postedDateLe: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe("Posted on/before this date, YYYY-MM-DD (filter[postedDate][le])."),
+    sort: z
+        .enum(datagov.REGULATIONS_SORTS)
+        .optional()
+        .describe("Sort order (default '-postedDate'). Live-verified set: -postedDate/postedDate/-lastModifiedDate/lastModifiedDate/-commentEndDate (non-exhaustive)."),
+    pageNumber: z
+        .number()
+        .int()
+        .min(1)
+        .max(40)
+        .default(1)
+        .describe("1-based page number, 1..40 (HARD cap — page[number] max is 40; the reachable window is 40×pageSize ≤ 10,000 records)."),
+    pageSize: z
+        .number()
+        .int()
+        .min(5)
+        .max(250)
+        .default(25)
+        .describe("Records per page (page[size]), 5..250, default 25."),
+});
+const CongressSearchBillsInput = z.object({
+    query: z
+        .string()
+        .optional()
+        .describe("Keyword — NOTE: Congress.gov /v3/bill has NO keyword search, so this is NOT applied (disclosed in _meta.filtersDropped). Use congress/billType/date filters instead."),
+    congress: z
+        .number()
+        .int()
+        .min(1)
+        .max(999)
+        .optional()
+        .describe("Congress number, e.g. 118 (scopes the path to /v3/bill/{congress})."),
+    billType: z
+        .enum(datagov.CONGRESS_BILL_TYPES)
+        .optional()
+        .describe("Bill type: hr/s/hjres/sjres/hconres/sconres/hres/sres. Requires `congress` (path /v3/bill/{congress}/{billType})."),
+    fromDateTime: z
+        .string()
+        .datetime({ offset: true })
+        .optional()
+        .describe("Filter to bills updated at/after this ISO-8601 date-time with offset, e.g. '2024-01-01T00:00:00Z'."),
+    toDateTime: z
+        .string()
+        .datetime({ offset: true })
+        .optional()
+        .describe("Filter to bills updated at/before this ISO-8601 date-time with offset, e.g. '2024-12-31T23:59:59Z'."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("0-based record offset for pagination, default 0."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(250)
+        .default(20)
+        .describe("Records per page, 1..250, default 20."),
+});
+const CongressGetBillInput = z.object({
+    congress: z
+        .number()
+        .int()
+        .min(1)
+        .max(999)
+        .describe("Congress number, e.g. 117."),
+    billType: z
+        .enum(datagov.CONGRESS_BILL_TYPES)
+        .describe("Bill type: hr/s/hjres/sjres/hconres/sconres/hres/sres."),
+    billNumber: z
+        .number()
+        .int()
+        .min(1)
+        .describe("Bill number, e.g. 3076 (for H.R.3076)."),
+});
 // Build a ToolDef whose `handler` is type-checked against the schema's inferred
 // input `I` at the call site (e.g. `input.searchText` is known-present). The
 // `I` binding is erased to `any` in the ToolDef[] array, so entries without a
@@ -1794,6 +1912,35 @@ const TOOLS = [
         description: "Find CKAN datastore resource ids by keyword via package_search (keyless). Input `host` (allowlisted enum), `q` (e.g. 'procurement', 'checkbook'), `limit` (≤100, def 20). Returns per-resource rows [{ resourceId, name, datasetTitle, format, datastoreActive }] + totalAvailable = the matching DATASET count. Feed a datastoreActive:true result's `resourceId` to ckan_query (a datastoreActive:false resource is a raw file blob NOT in the datastore, not queryable).",
         inputSchema: CkanDiscoverDatasetsInput,
         handler: (input) => ckan.discoverDatasets(input),
+    }),
+    // ━━━ api.data.gov keyed trio — Regulations.gov + Congress.gov (4) ━━━ ADR-0007
+    // The project's FIRST KEYED source. The key (DATA_GOV_API_KEY, else the public
+    // DEMO_KEY) travels ONLY in the X-Api-Key header — never the URL/label/_meta.
+    // keylessMode:false (genuinely keyed); a DEMO_KEY note discloses the shared
+    // ~10 req/hr ceiling + the free-key upgrade path.
+    defineTool({
+        name: "regulations_search_documents",
+        description: "Search Regulations.gov rulemaking DOCUMENTS (rules, proposed rules, notices) — the flagship of the api.data.gov keyed source (JSON:API; DATA_GOV_API_KEY or the shared DEMO_KEY). Input `searchTerm`/`query`, filters (agencyId, docketId, documentType, withinCommentPeriod, postedDateGe/Le YYYY-MM-DD), `sort` (def -postedDate), `pageNumber` (1..40 HARD cap), `pageSize` (5..250, def 25). Returns { documents:[{ id, documentType, title, agencyId, docketId, postedDate, commentEndDate, openForComment, withinCommentPeriod, frDocNum, objectId }] } + honest _meta. HONESTY: totalAvailable = meta.totalElements (the EXACT real total, ~millions), NOT the capped totalPages; page[number] is hard-capped at 40 (10,000-record ceiling) — at the ceiling hasMore stays true but nextOffset is null + a note says how to reach the rest (narrow filters / seek by lastModifiedDate). Genuine-empty ⇒ complete:true/total:0; an outage/4xx THROWS (never a fake empty).",
+        inputSchema: RegulationsSearchInput,
+        handler: (input) => datagov.searchDocuments(input),
+    }),
+    defineTool({
+        name: "regulations_search_comments",
+        description: "Search Regulations.gov public COMMENTS on rulemakings — the killer B2G dataset (who is lobbying which rule). Same JSON:API envelope + input shape as regulations_search_documents (searchTerm/query, agencyId, docketId, postedDateGe/Le, sort, pageNumber 1..40, pageSize 5..250) against /v4/comments. Returns { comments:[{ id, documentType, title, agencyId, docketId, postedDate, objectId }] } + honest _meta (same totalElements-exact total + 40-page/10,000-record ceiling handling as documents).",
+        inputSchema: RegulationsSearchInput,
+        handler: (input) => datagov.searchComments(input),
+    }),
+    defineTool({
+        name: "congress_search_bills",
+        description: "Search Congress.gov BILLS/legislation (api.data.gov keyed; DATA_GOV_API_KEY or DEMO_KEY). Input optional `congress` (e.g. 118), `billType` (hr/s/hjres/sjres/hconres/sconres/hres/sres — requires `congress`), `fromDateTime`/`toDateTime` (ISO-8601 with offset), `offset`, `limit` (≤250, def 20). Returns { bills:[{ congress, type, number, title, originChamber, latestAction, updateDate, url }] } + _meta with totalAvailable = pagination.count (EXACT). NOTE: /v3/bill has no keyword search, so a `query` arg is NOT applied and is disclosed in _meta.filtersDropped. Outage/4xx THROWS (never a fake empty).",
+        inputSchema: CongressSearchBillsInput,
+        handler: (input) => datagov.searchBills(input),
+    }),
+    defineTool({
+        name: "congress_get_bill",
+        description: "Fetch ONE Congress.gov bill by id via /v3/bill/{congress}/{billType}/{billNumber} (api.data.gov keyed; DATA_GOV_API_KEY or DEMO_KEY). Input `congress` (int), `billType` (enum), `billNumber` (int). Returns { bill:{…} } + single-record _meta. A nonexistent bill ⇒ not_found (never fabricated).",
+        inputSchema: CongressGetBillInput,
+        handler: (input) => datagov.getBill(input),
     }),
 ];
 // ─── Server bootstrap ────────────────────────────────────────────
