@@ -717,6 +717,41 @@ const tests = [
         (d) => typeof d.id === "string" && /^[a-z0-9]{4}-[a-z0-9]{4}$/.test(d.id),
       ),
   },
+  // ━━━ CKAN datastore_search — keyless SLED open data (ADR-0006)
+  {
+    // Query rows from an allowlisted CKAN datastore. data.ca.gov/bb82edc5-… is a
+    // live-verified datastore-active resource (Statewide Purchase Order Data).
+    // The envelope carries a real result.total; records pass through verbatim.
+    name: "ckan_query",
+    args: {
+      host: "data.ca.gov",
+      resourceId: "bb82edc5-9c78-44e2-8947-68ece26197c5",
+      limit: 3,
+    },
+    verify: (r) =>
+      r.host === "data.ca.gov" &&
+      r.resourceId === "bb82edc5-9c78-44e2-8947-68ece26197c5" &&
+      Array.isArray(r.records) &&
+      r.records.length >= 1 &&
+      r.records.length <= 3 &&
+      r.records.every((row) => row !== null && typeof row === "object"),
+  },
+  {
+    // Discover datastore resource ids via package_search. A keyword on data.ca.gov
+    // returns per-resource rows whose resourceId is a valid UUID to feed ckan_query.
+    name: "ckan_discover_datasets",
+    args: { host: "data.ca.gov", q: "purchase order", limit: 5 },
+    verify: (r) =>
+      Array.isArray(r.results) &&
+      r.results.length >= 1 &&
+      r.results.every(
+        (d) =>
+          d.resourceId === null ||
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+            d.resourceId,
+          ),
+      ),
+  },
 ];
 
 function pickPath(obj, path) {

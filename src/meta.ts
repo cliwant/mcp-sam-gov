@@ -59,6 +59,19 @@ export type ResponseMeta = {
    * meaning "exact" for tools that never set it — it is simply not applicable).
    */
   totalIsLowerBound?: boolean;
+  /**
+   * Present (and true) when `totalAvailable` (or, for CKAN, the value disclosed
+   * in `notes`) is an upstream STATISTICAL ESTIMATE rather than an exact count —
+   * i.e. the source reported the total as an approximation that may be ABOVE OR
+   * BELOW the true count (CKAN `datastore_search` returns `total_was_estimated:
+   * true` for a PostgreSQL `reltuples`-style estimate, live-verified to overshoot
+   * — so it is NOT a lower bound, unlike `totalIsLowerBound`). CKAN sets this on
+   * the estimated path alongside `totalAvailable:null` (the estimate never drives
+   * pagination — ADR-0006 B1) + a disclosing note carrying the estimate value.
+   * Absent on endpoints that report an exact total (do NOT read absence as
+   * `false` meaning "exact" for tools that never set it — it is not applicable).
+   */
+  totalIsEstimated?: boolean;
   /** Request filters the upstream verifiably honored. */
   filtersApplied: string[];
   /** Request filters sent but NOT honored (results are unfiltered on these). */
@@ -152,6 +165,11 @@ export function buildMeta(partial: Partial<ResponseMeta> = {}): ResponseMeta {
   // the tool provides it, so existing tools' `_meta` output stays byte-identical.
   if (partial.totalIsLowerBound !== undefined)
     meta.totalIsLowerBound = partial.totalIsLowerBound;
+  // Conditional passthrough (identical shape to totalIsLowerBound above): only
+  // surfaced when the tool provides it (CKAN's estimated-total path), so every
+  // existing tool's `_meta` output stays byte-identical. NO new derivation logic.
+  if (partial.totalIsEstimated !== undefined)
+    meta.totalIsEstimated = partial.totalIsEstimated;
   return meta;
 }
 
