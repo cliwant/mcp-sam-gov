@@ -24,7 +24,14 @@ export type MetaDegraded = {
 };
 /** Offset-based pagination descriptor for list/search/aggregate tools. */
 export type MetaPagination = {
-    offset: number;
+    /**
+     * The row offset of this page. `number` for offset-paginated tools (unchanged —
+     * every existing tool sets an integer). ADR-0010: widened to `number | null` for
+     * OPAQUE-CURSOR tools (GovInfo), where no meaningful numeric offset exists — those
+     * tools set `offset:null` (the honest "not a numeric offset"; continuation is via
+     * `_meta.nextCursor`, not a numeric `nextOffset`). Additive: no existing tool changes.
+     */
+    offset: number | null;
     limit: number;
     nextOffset: number | null;
     hasMore: boolean;
@@ -69,6 +76,21 @@ export type ResponseMeta = {
      * `false` meaning "exact" for tools that never set it — it is not applicable).
      */
     totalIsEstimated?: boolean;
+    /**
+     * Present when this response comes from an OPAQUE-CURSOR-paginated source
+     * (ADR-0010 — GovInfo's `offsetMark`): the opaque continuation token to pass back
+     * to fetch the NEXT page (GovInfo: as the `pageMark` argument), or `null` on the
+     * last page (no further cursor). It is a source-minted token, NOT derived from any
+     * secret and NEVER the raw upstream `nextPage` URL (which embeds pageSize + the
+     * api_key). Cursor tools set `nextOffset:null`/`offset:null` (a numeric offset is
+     * meaningless for a cursor) and use THIS as the sole continuation surface. Absent
+     * on offset-paginated tools (do NOT read absence as "no more" for those). Added as
+     * a conditional passthrough exactly like totalIsLowerBound/totalIsEstimated —
+     * only surfaced when the tool provides it, so existing tools' `_meta` stays
+     * byte-identical and the tools/list snapshot is unaffected (it is a runtime `_meta`
+     * field, not part of any tool's input schema).
+     */
+    nextCursor?: string | null;
     /** Request filters the upstream verifiably honored. */
     filtersApplied: string[];
     /** Request filters sent but NOT honored (results are unfiltered on these). */

@@ -47,6 +47,7 @@ import * as socrata from "./socrata.js";
 import * as ckan from "./ckan.js";
 import * as echo from "./echo.js";
 import * as datagov from "./datagov.js";
+import * as govinfo from "./govinfo.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
@@ -1371,6 +1372,72 @@ const CongressGetBillInput = z.object({
     .describe("Bill number, e.g. 3076 (for H.R.3076)."),
 });
 
+// ─── GovInfo (api.govinfo.gov — the api.data.gov keyed trio's 3rd API) ─
+// ADR-0010. Same DATA_GOV_API_KEY/DEMO_KEY/X-Api-Key discipline as the datagov
+// trio (shared datagovKey.ts seam). `collection` is grammar-checked here AND
+// validated against the live /collections catalog in the handler (the silent-empty
+// guard). The novel piece is the OPAQUE `offsetMark` cursor: continuation rides in
+// _meta.nextCursor (passed back as pageMark), never a numeric offset.
+const GovinfoListCollectionsInput = z.object({});
+
+const GovinfoSearchPackagesInput = z.object({
+  collection: z
+    .string()
+    .regex(
+      govinfo.GOVINFO_COLLECTION_RE,
+      "collection must be an uppercase alpha GovInfo code like BILLS/CFR/FR/PLAW ([A-Z]{2,10}).",
+    )
+    .describe(
+      "GovInfo collection code (uppercase alpha), e.g. BILLS, PLAW, CREC, USCODE, CFR, FR, BUDGET, GAOREPORTS. Validated against the live /collections catalog — an unknown code returns invalid_input listing valid codes (never a misleading empty). Use govinfo_list_collections to discover codes.",
+    ),
+  startDate: z
+    .string()
+    .regex(
+      govinfo.GOVINFO_DATE_RE,
+      "startDate must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ.",
+    )
+    .describe(
+      "Lower bound on lastModified (the record's last-update date, NOT dateIssued), YYYY-MM-DD (normalized to T00:00:00Z) or a full ISO datetime. e.g. '2024-01-01'.",
+    ),
+  endDate: z
+    .string()
+    .regex(
+      govinfo.GOVINFO_DATE_RE,
+      "endDate must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ.",
+    )
+    .optional()
+    .describe("Optional upper bound on lastModified (same format as startDate)."),
+  pageSize: z
+    .number()
+    .int()
+    .min(1)
+    .max(1000)
+    .default(100)
+    .describe("Rows per page (upstream pageSize), 1..1000, default 100."),
+  pageMark: z
+    .string()
+    .regex(
+      govinfo.GOVINFO_PAGE_MARK_RE,
+      'pageMark must be "*" or the opaque _meta.nextCursor from the previous page (≤4096 base64/URL-safe chars).',
+    )
+    .default("*")
+    .describe(
+      'Opaque continuation cursor. Default "*" (first page). To page, pass back the previous response\'s _meta.nextCursor (NOT a numeric offset — GovInfo uses an opaque cursor).',
+    ),
+});
+
+const GovinfoGetPackageInput = z.object({
+  packageId: z
+    .string()
+    .regex(
+      govinfo.GOVINFO_PACKAGE_ID_RE,
+      "packageId must be a GovInfo id like BILLS-118hr1enr / CFR-2023-title1-vol1 ([A-Za-z0-9][A-Za-z0-9._-]{2,}).",
+    )
+    .describe(
+      "GovInfo packageId from govinfo_search_packages (e.g. 'BILLS-118hr1enr', 'PLAW-117publ58', 'CFR-2023-title1-vol1', 'GAOREPORTS-GAO-24-106221').",
+    ),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -2430,6 +2497,35 @@ const TOOLS: ToolDef[] = [
       "Fetch ONE Congress.gov bill by id via /v3/bill/{congress}/{billType}/{billNumber} (api.data.gov keyed; DATA_GOV_API_KEY or DEMO_KEY). Input `congress` (int), `billType` (enum), `billNumber` (int). Returns { bill:{…} } + single-record _meta. A nonexistent bill ⇒ not_found (never fabricated).",
     inputSchema: CongressGetBillInput,
     handler: (input) => datagov.getBill(input),
+  }),
+  // ━━━ GovInfo (api.govinfo.gov) — the api.data.gov keyed trio's 3rd API (3) ━━━ ADR-0010
+  // GPO-authoritative bulk publications (BILLS/PLAW/USCODE/CREC/CFR-FR editions/
+  // BUDGET/GAOREPORTS) with PDF/XML/MODS downloads + provenance. 2nd consumer of the
+  // shared api.data.gov env-key adapter (datagovKey.ts) — key ONLY in the X-Api-Key
+  // header, keylessMode:false, DEMO_KEY disclosure. The novel piece is the OPAQUE
+  // offsetMark cursor: continuation rides in _meta.nextCursor (passed back as
+  // pageMark); pagination.offset/nextOffset are null (no numeric offset). The raw
+  // upstream nextPage URL (which embeds pageSize+api_key) is NEVER surfaced.
+  defineTool({
+    name: "govinfo_list_collections",
+    description:
+      "List the GovInfo collection catalog (GPO-authoritative publications; api.data.gov keyed — DATA_GOV_API_KEY or the shared DEMO_KEY). No input. Returns { collections:[{ collectionCode, collectionName, packageCount, granuleCount }] } + _meta (complete:true, totalAvailable = collection count). The discovery entry-point: feed a collectionCode to govinfo_search_packages. Memoized ~6h; also the validator source for search_packages' collection arg. packageCount = whole packages; granuleCount = sub-package granules (a missing count is null, never 0).",
+    inputSchema: GovinfoListCollectionsInput,
+    handler: () => govinfo.listCollections(),
+  }),
+  defineTool({
+    name: "govinfo_search_packages",
+    description:
+      "Search GovInfo packages in a collection modified since a date (GPO-authoritative bulk publications; api.data.gov keyed). Input `collection` (uppercase code — validated against the live catalog; an unknown code ⇒ invalid_input listing valid codes, NEVER a misleading empty), `startDate`/`endDate?` (YYYY-MM-DD or ISO datetime; filters by lastModified — the record UPDATE date, NOT dateIssued — disclosed in _meta), `pageSize?` (1..1000, def 100), `pageMark?` (opaque cursor, def '*'). Returns { collection, packages:[{ packageId, title, dateIssued, lastModified, docClass, congress, packageLink }] } + cursor _meta. HONESTY: totalAvailable = count (the EXACT real total, NOT the page size); GovInfo uses an OPAQUE cursor, so pagination.offset/nextOffset are null — continue by passing _meta.nextCursor back as `pageMark` (hasMore:false / nextCursor:null = last page). The raw upstream nextPage URL is never surfaced (it embeds the key). Genuine-empty ⇒ complete:true/total:0; outage/4xx THROWS (never a fake empty). CFR/ECFR/FR collections carry a note routing to the ecfr_*/fed_register_* tools for point lookups.",
+    inputSchema: GovinfoSearchPackagesInput,
+    handler: (input) => govinfo.searchPackages(input),
+  }),
+  defineTool({
+    name: "govinfo_get_package",
+    description:
+      "Fetch ONE GovInfo package's summary (metadata + download links txt/xml/pdf/mods/premis/zip + related links) by packageId (api.data.gov keyed). Input `packageId` (from govinfo_search_packages, e.g. 'BILLS-118hr1enr', 'PLAW-117publ58', 'CFR-2023-title1-vol1'). Returns { found:true, packageId, package:{…} } + single-record _meta (complete:true). A nonexistent packageId ⇒ found:false (HTTP 404, never a fabricated summary). Any api_key embedded in a download link is stripped key-free before the payload is surfaced.",
+    inputSchema: GovinfoGetPackageInput,
+    handler: (input) => govinfo.getPackage(input),
   }),
 ];
 

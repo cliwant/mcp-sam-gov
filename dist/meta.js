@@ -90,6 +90,13 @@ export function buildMeta(partial = {}) {
     // existing tool's `_meta` output stays byte-identical. NO new derivation logic.
     if (partial.totalIsEstimated !== undefined)
         meta.totalIsEstimated = partial.totalIsEstimated;
+    // Conditional passthrough (IDENTICAL shape to totalIsLowerBound/totalIsEstimated
+    // above): only surfaced when the tool provides it (GovInfo's opaque-cursor path),
+    // so every existing tool's `_meta` output stays byte-identical. NO new derivation
+    // logic — the value (the offsetMark token, or null on the last page) is set by the
+    // cursor tool and passed through verbatim.
+    if (partial.nextCursor !== undefined)
+        meta.nextCursor = partial.nextCursor;
     return meta;
 }
 /**
