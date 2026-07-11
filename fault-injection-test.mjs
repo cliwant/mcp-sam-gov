@@ -59,6 +59,7 @@ import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
 import { padCik as edgarPadCik } from "./dist/edgar.js";
+import { num as socrataNum } from "./dist/socrata.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
 import {
   SamGovClient,
@@ -6164,6 +6165,247 @@ async function testEdgarHonesty() {
   });
 }
 
+// §42: Socrata / SODA source (ADR-0004) — SSRF (allowlist enum, 4x4 regex,
+// redirect:"error") + honesty (no-total count(*) companion, B2 hasMore, catalog
+// drift). All OFFLINE (mock fetch), deterministic, non-vacuous: every honesty
+// assertion pins a specific value and names the mutation that turns it RED.
+// Driven through the REAL runTool dispatch so a regression in the Zod guard /
+// getSocrataResource / the meta wiring turns RED end-to-end.
+//   (a) SSRF: non-allowlisted domain ⇒ invalid_input, 0 fetch calls (load-bearing).
+//   (b) M2: bad datasetId (incl. "abcd-1234\n", "abcd-1234x") ⇒ invalid_input, no fetch.
+//   (c) hostname/URL construction correctness (a builder mutation ⇒ RED).
+//   (d) B1: every socrata + catalog fetch sets init.redirect==="error" (drop ⇒ RED).
+//   (e) outage 503 ⇒ throws upstream_unavailable, never a fake empty.
+//   (f) genuine-empty [] + count 0 ⇒ honest complete:true / totalAvailable:0.
+//   (g) totalAvailable via count(*) (NOT rows.length — mutate ⇒ RED).
+//   (h) B2/M5: count fails + returned===limit===100 ⇒ complete:false + truncated:true (revert B2 ⇒ RED).
+//   (i) M5: count fails + returned 50 < limit 100 ⇒ hasMore:false, complete:true.
+//   (j) m4: count 200 + renamed field ⇒ rows returned + total:null + drift note (≠ transient).
+//   (k) bad SoQL column ⇒ upstream 400 ⇒ invalid_input surfaced (not silent).
+//   (l) 404 bad 4x4 ⇒ not_found; 429 ⇒ rate_limited retryable.
+//   (m) num() count coercion: "275763"→275763, "null"→null, ""→null, "0"→0.
+//   (n) m3: catalog resultSetSize:"71" (string) ⇒ schema_drift; number ⇒ mapped total.
+//   (o) app-token: set ⇒ X-App-Token header; unset ⇒ absent; token NEVER in _meta/error/label (m7).
+const isSocrataRow = (u) =>
+  /\/resource\/[a-z0-9]{4}-[a-z0-9]{4}\.json\?/.test(u) && /%24limit=/.test(u);
+const isSocrataCount = (u) =>
+  /\/resource\/[a-z0-9]{4}-[a-z0-9]{4}\.json\?/.test(u) && /count%28\*%29/.test(u);
+const isSocrataCatalog = (u) => /api\.us\.socrata\.com\/api\/catalog\/v1/.test(u);
+// A row+count mock (both succeed) — the common healthy path.
+const socrataRowsAndCount = (rows, count) => (u) =>
+  isSocrataCount(u)
+    ? mockResponse({ status: 200, json: [{ count: String(count) }] })
+    : isSocrataRow(u)
+      ? mockResponse({ status: 200, json: rows })
+      : failClosed()();
+
+async function testSocrataHonesty() {
+  section("42. Socrata / SODA — SSRF (allowlist/4x4/redirect) + no-total honesty (B1/B2/M1/M2/M5/m3/m4/m6/m7, OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  // (a) SSRF load-bearing: a non-allowlisted domain ⇒ invalid_input BEFORE any
+  // fetch. The single most important security test — the fetch spy asserts 0 calls.
+  await withFetch(failClosed(), async (calls) => {
+    for (const domain of ["evil.com", "data.ny.gov.evil.com"]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() =>
+        runTool("socrata_query", { domain, datasetId: "kwxv-fwze" }, sam));
+      ok(`42a non-allowlisted domain ${JSON.stringify(domain)} ⇒ invalid_input, 0 fetch calls (SSRF host allowlist — load-bearing)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before,
+        JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (b) M2 — bad datasetId ⇒ invalid_input, no fetch. "abcd-1234\n"/"abcd-1234x"
+  // are the M2-specific cases (a trailing char the regex `$` would admit).
+  await withFetch(failClosed(), async (calls) => {
+    for (const datasetId of ["abc", "../etc", "aaaa_bbbb", "abcd-1234\n", "abcd-1234x"]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() =>
+        runTool("socrata_query", { domain: "data.ny.gov", datasetId }, sam));
+      ok(`42b bad datasetId ${JSON.stringify(datasetId)} ⇒ invalid_input, no fetch (M2: length(9) on the raw string rejects trailing chars)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before,
+        JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (c) hostname / URL construction correctness (positive control: a VALID
+  // domain+4x4 DOES fetch, on the right host/path/scheme). A builder mutation
+  // (wrong host, http, swapped id) ⇒ RED.
+  await withFetch(socrataRowsAndCount([{ a: "1" }], 1), async (calls) => {
+    await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", where: "amount>1000" }, sam);
+    const rowCall = calls.find((c) => isSocrataRow(c.url));
+    const url = rowCall ? new URL(rowCall.url) : null;
+    ok("42c row fetch constructed on the allowlisted host: https://data.ny.gov/resource/kwxv-fwze.json (hostname===domain, https; a builder mutation ⇒ RED)",
+      !!url && url.hostname === "data.ny.gov" && url.pathname === "/resource/kwxv-fwze.json" && url.protocol === "https:",
+      JSON.stringify(rowCall?.url));
+  });
+
+  // (d) B1 — every socrata fetch (row + count companion) sets redirect:"error".
+  await withFetch(socrataRowsAndCount([{ a: "1" }], 1), async (calls) => {
+    await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam);
+    ok("42d B1: every socrata resource fetch (row + count) has init.redirect==='error' (drop it ⇒ RED)",
+      calls.length >= 2 && calls.every((c) => c.init && c.init.redirect === "error"),
+      JSON.stringify(calls.map((c) => c.init?.redirect)));
+  });
+  // ...and the catalog fetch too.
+  await withFetch((u) => (isSocrataCatalog(u) ? mockResponse({ status: 200, json: { results: [], resultSetSize: 0 } }) : failClosed()()), async (calls) => {
+    await runTool("socrata_discover_datasets", { q: "42d-redirect-catalog-unique", domain: "data.ny.gov" }, sam);
+    ok("42d B1: the catalog fetch also has init.redirect==='error' (drop it ⇒ RED)",
+      calls.length === 1 && calls[0].init.redirect === "error", JSON.stringify(calls[0]?.init?.redirect));
+  });
+
+  // (e) outage 503 on the ROW query ⇒ throws upstream_unavailable, never a fake [].
+  await withFetch((u) => (isSocrataRow(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam));
+    ok("42e row query 503 ⇒ throws upstream_unavailable (NOT a fake empty rows[])",
+      threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true,
+      JSON.stringify(toToolError(error).kind));
+  });
+
+  // (f) genuine-empty: rows [] + count "0" ⇒ honest complete:true / totalAvailable:0.
+  await withFetch(socrataRowsAndCount([], 0), async () => {
+    const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", where: "1=0" }, sam);
+    const m = buildMeta(r.meta);
+    ok("42f genuine-empty [] + count 0 ⇒ honest complete:true, truncated:false, totalAvailable:0, returned:0 (a real no-match, NOT an outage)",
+      r.data.rows.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.returned === 0,
+      JSON.stringify(m));
+  });
+
+  // (g) totalAvailable via count(*): rows len 1, count "275763" ⇒ 275763 (NOT rows.length).
+  await withFetch(socrataRowsAndCount([{ x: "1" }], 275763), async () => {
+    const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("42g totalAvailable === count(*) 275763 (NOT rows.length 1 — mutate parseCount→rows.length ⇒ RED); returned 1 ⇒ truncated:true, complete:false",
+      m.totalAvailable === 275763 && m.returned === 1 && m.truncated === true && m.complete === false,
+      JSON.stringify({ ta: m.totalAvailable, r: m.returned, c: m.complete }));
+  });
+
+  // (h) B2/M5 test 7: count companion FAILS + returned===limit===100 ⇒ the full
+  // page on an UNKNOWN total must NOT read complete:true. Revert the B2 formula ⇒ RED.
+  const rows100 = Array.from({ length: 100 }, (_, i) => ({ i: String(i) }));
+  await withFetch((u) => (isSocrataCount(u) ? mockResponse({ status: 503 }) : isSocrataRow(u) ? mockResponse({ status: 200, json: rows100 }) : failClosed()()), async () => {
+    const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("42h B2/M5: count fails + returned===limit===100 ⇒ totalAvailable:null, hasMore:true, truncated:true, complete:false, nextOffset:100 (unknown-total full page is NOT complete — revert B2 ⇒ RED)",
+      m.totalAvailable === null && m.pagination.hasMore === true && m.truncated === true && m.complete === false && m.pagination.nextOffset === 100,
+      JSON.stringify(m));
+  });
+
+  // (i) M5 test 7b: count fails + returned 50 < limit 100 ⇒ inferred-complete (short page).
+  const rows50 = Array.from({ length: 50 }, (_, i) => ({ i: String(i) }));
+  await withFetch((u) => (isSocrataCount(u) ? mockResponse({ status: 503 }) : isSocrataRow(u) ? mockResponse({ status: 200, json: rows50 }) : failClosed()()), async () => {
+    const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("42i M5: count fails + returned 50 < limit 100 ⇒ totalAvailable:null, hasMore:false, complete:true, truncated:false, nextOffset:null (completeness inferred from a short page)",
+      m.totalAvailable === null && m.pagination.hasMore === false && m.complete === true && m.truncated === false && m.pagination.nextOffset === null,
+      JSON.stringify(m));
+  });
+
+  // (j) m4: count returns HTTP 200 but a renamed field [{cnt:"5"}] ⇒ rows STILL
+  // returned, totalAvailable:null, a DRIFT-flavored note (distinct from transient).
+  await withFetch((u) => (isSocrataCount(u) ? mockResponse({ status: 200, json: [{ cnt: "5" }] }) : isSocrataRow(u) ? mockResponse({ status: 200, json: [{ x: "1" }] }) : failClosed()()), async () => {
+    const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("42j m4: count 200 + renamed field [{cnt:...}] ⇒ rows STILL returned + totalAvailable:null (a wrong-shape count never crashes the successful row query)",
+      r.data.rows.length === 1 && m.totalAvailable === null, JSON.stringify({ rows: r.data.rows.length, ta: m.totalAvailable }));
+    ok("42j m4: the note is DRIFT-flavored ('unexpected shape'/'API change') and NOT the transient-failure note",
+      m.notes.some((n) => /unexpected shape|API change/i.test(n)) && !m.notes.some((n) => /transient/i.test(n)),
+      JSON.stringify(m.notes));
+  });
+
+  // (k) bad SoQL column ⇒ upstream 400 ⇒ invalid_input surfaced (never a silent empty).
+  await withFetch((u) => (isSocrataRow(u) ? mockResponse({ status: 400, json: { errorCode: "query.soql.no-such-column" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", select: "nonexistent_col_zzz" }, sam));
+    ok("42k bad SoQL column ⇒ upstream 400 ⇒ invalid_input surfaced as an error (NOT a silent empty)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (l) 404 (well-formed nonexistent 4x4) ⇒ not_found; 429 ⇒ rate_limited retryable.
+  await withFetch((u) => (isSocrataRow(u) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("socrata_query", { domain: "data.ny.gov", datasetId: "zzzz-9999" }, sam));
+    ok("42l well-formed nonexistent 4x4 ⇒ 404 ⇒ not_found (not fabricated rows)",
+      threw && toToolError(error).kind === "not_found", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isSocrataRow(u) ? mockResponse({ status: 429, headers: { "Retry-After": "30" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam));
+    ok("42l 429 ⇒ rate_limited, retryable (honors Retry-After)",
+      threw && toToolError(error).kind === "rate_limited" && toToolError(error).retryable === true,
+      JSON.stringify(toToolError(error).kind));
+  });
+
+  // (m) count string coercion — num() is null (never 0) for absent, but a real "0" is 0.
+  eq("42m num('275763') ⇒ 275763", socrataNum("275763"), 275763);
+  eq("42m num('null') ⇒ null (data-absence honesty — never 0)", socrataNum("null"), null);
+  eq("42m num('') ⇒ null (Number('') is 0 — must be caught)", socrataNum(""), null);
+  eq("42m num('0') ⇒ 0 (a genuine zero count is an honest 0, not null)", socrataNum("0"), 0);
+
+  // (n) m3: catalog resultSetSize as a STRING ⇒ schema_drift (PRIMARY response);
+  // as a NUMBER ⇒ mapped rows + totalAvailable = resultSetSize.
+  await withFetch((u) => (isSocrataCatalog(u) ? mockResponse({ status: 200, json: { results: [], resultSetSize: "71" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("socrata_discover_datasets", { q: "42n-drift-string-total-unique", domain: "data.ny.gov" }, sam));
+    ok("42n m3: catalog resultSetSize:'71' (string, not number) ⇒ schema_drift throw (PRIMARY response; drop the typeof check ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+  const catalogBody = {
+    results: [
+      { resource: { id: "kwxv-fwze", name: "NY Procurement", description: "desc", updatedAt: "2026-01-01T00:00:00.000Z" }, metadata: { domain: "data.ny.gov" }, link: "https://data.ny.gov/d/kwxv-fwze" },
+    ],
+    resultSetSize: 71,
+  };
+  await withFetch((u) => (isSocrataCatalog(u) ? mockResponse({ status: 200, json: catalogBody }) : failClosed()()), async () => {
+    const r = await runTool("socrata_discover_datasets", { q: "42n-procurement-ok-unique", domain: "data.ny.gov" }, sam);
+    const m = buildMeta(r.meta);
+    ok("42n discover: maps id/name/domain/link + totalAvailable = resultSetSize 71 (number)",
+      r.data.results[0].id === "kwxv-fwze" && r.data.results[0].domain === "data.ny.gov" && r.data.results[0].link === "https://data.ny.gov/d/kwxv-fwze" && m.totalAvailable === 71 && m.returned === 1,
+      JSON.stringify({ res: r.data.results[0], ta: m.totalAvailable }));
+    ok("42n discover: returned 1 < totalAvailable 71 ⇒ truncated:true, complete:false (honest partial catalog page)",
+      m.truncated === true && m.complete === false, JSON.stringify(m));
+  });
+
+  // (o) app-token: SET ⇒ X-App-Token on every fetch; token NEVER in _meta/error/label.
+  //     UNSET ⇒ no header. Keyless works either way.
+  const priorToken = process.env.SOCRATA_APP_TOKEN;
+  const SECRET = "SECRET-APP-TOKEN-XYZ";
+  try {
+    process.env.SOCRATA_APP_TOKEN = SECRET;
+    await withFetch(socrataRowsAndCount([{ x: "1" }], 1), async (calls) => {
+      const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam);
+      ok("42o token SET ⇒ every fetch carries the X-App-Token header (keyless-first: header only)",
+        calls.length >= 2 && calls.every((c) => c.init.headers["X-App-Token"] === SECRET),
+        JSON.stringify(calls.map((c) => Object.keys(c.init.headers))));
+      ok("42o token NEVER appears in the serialized {data,_meta} bundle (never logged / never in _meta)",
+        !JSON.stringify({ data: r.data, meta: r.meta }).includes(SECRET), "token leaked into bundle");
+      ok("42o token absent from the _meta.source label (m7 — the label is host-only)",
+        !buildMeta(r.meta).source.includes(SECRET), buildMeta(r.meta).source);
+    });
+    // m7 — even on error, the label (→ ToolError.upstreamEndpoint) is host-only.
+    await withFetch((u) => (isSocrataRow(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+      const { error } = await expectThrow(() =>
+        runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam));
+      const te = toToolError(error);
+      ok("42o m7: token SET + row 503 ⇒ error.upstreamEndpoint is host-only 'socrata:data.ny.gov'; token NOT in the error",
+        te.upstreamEndpoint === "socrata:data.ny.gov" && !JSON.stringify(te).includes(SECRET), JSON.stringify(te.upstreamEndpoint));
+    });
+    delete process.env.SOCRATA_APP_TOKEN;
+    await withFetch(socrataRowsAndCount([{ x: "1" }], 1), async (calls) => {
+      await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam);
+      ok("42o token UNSET ⇒ NO X-App-Token header on any fetch (keyless works without a token)",
+        calls.length >= 2 && calls.every((c) => !("X-App-Token" in c.init.headers)),
+        JSON.stringify(calls.map((c) => Object.keys(c.init.headers))));
+    });
+  } finally {
+    if (priorToken === undefined) delete process.env.SOCRATA_APP_TOKEN;
+    else process.env.SOCRATA_APP_TOKEN = priorToken;
+  }
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -6216,6 +6458,7 @@ async function main() {
   await testRegistryDispatchHonesty();
   await testTreasuryHonesty();
   await testEdgarHonesty();
+  await testSocrataHonesty();
 
   // Prove the harness bites.
   await selfCheck();

@@ -689,6 +689,34 @@ const tests = [
               h.filingIndexUrl.endsWith("/"))),
       ),
   },
+
+  // ━━━ Socrata / SODA — keyless SLED + E-rate open data (ADR-0004)
+  {
+    // Query rows from an allowlisted SODA portal. data.ny.gov/kwxv-fwze is a
+    // live-verified dataset (bare JSON array; value fields are strings). Rows
+    // pass through verbatim; a count(*) companion supplies totalAvailable.
+    name: "socrata_query",
+    args: { domain: "data.ny.gov", datasetId: "kwxv-fwze", limit: 3 },
+    verify: (r) =>
+      r.domain === "data.ny.gov" &&
+      r.datasetId === "kwxv-fwze" &&
+      Array.isArray(r.rows) &&
+      r.rows.length >= 1 &&
+      r.rows.length <= 3 &&
+      r.rows.every((row) => row !== null && typeof row === "object"),
+  },
+  {
+    // Discover dataset 4x4 ids via the catalog. A keyword on data.ny.gov returns
+    // datasets whose `id` is a valid 4x4 to feed socrata_query.
+    name: "socrata_discover_datasets",
+    args: { q: "procurement", domain: "data.ny.gov", limit: 5 },
+    verify: (r) =>
+      Array.isArray(r.results) &&
+      r.results.length >= 1 &&
+      r.results.every(
+        (d) => typeof d.id === "string" && /^[a-z0-9]{4}-[a-z0-9]{4}$/.test(d.id),
+      ),
+  },
 ];
 
 function pickPath(obj, path) {
