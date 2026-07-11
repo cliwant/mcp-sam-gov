@@ -48,6 +48,7 @@
  *   (fuzzy) and MUST NOT be asserted as authoritative.
  */
 import { fetchWithRetry, ToolErrorCarrier, errorFromResponse } from "./errors.js";
+import { throughGate } from "./datasource.js";
 import { memoize } from "./cache.js";
 import { withMeta } from "./meta.js";
 // ─── Hosts + the mandatory User-Agent (F1) ────────────────────────
@@ -75,24 +76,13 @@ const CIK_UEI_CAVEAT = "EDGAR identifies filers by 10-digit SEC CIK, NOT SAM UEI
 // ─── Min-interval gate (self-throttle ≤10 req/s) ──────────────────
 // A tool call can fan out (lookup→submissions), and the process may run many
 // tools; serialize EVERY EDGAR fetch through one promise chain with a ≥110ms
-// spacing (~9 req/s < the 10 req/s ceiling → no ~10-min block). Uses the bare
-// `setTimeout` global so the fault tests' timer-neutralizing patch makes it
-// instant offline (same as fetchWithRetry's backoff).
+// spacing (~9 req/s < the 10 req/s ceiling → no ~10-min block). The chain +
+// spacing math now live in the shared `throughGate("edgar", 110, fn)` primitive
+// (datasource.ts, ADR-0011 R2 deferred slice) — same single-chain, same
+// lastAt-stamped-before-fn, same bare-`setTimeout` global (so the fault tests'
+// timer-neutralizing patch keeps it instant offline). Behavior is byte-identical
+// to the former module singleton this replaced.
 const EDGAR_MIN_INTERVAL_MS = 110;
-let edgarGateChain = Promise.resolve();
-let edgarLastFetchAt = 0;
-function throughEdgarGate(fn) {
-    const run = edgarGateChain.then(async () => {
-        const wait = edgarLastFetchAt + EDGAR_MIN_INTERVAL_MS - Date.now();
-        if (wait > 0)
-            await new Promise((res) => setTimeout(res, wait));
-        edgarLastFetchAt = Date.now();
-        return fn();
-    });
-    // Keep the chain alive whether this link resolves or rejects.
-    edgarGateChain = run.then(() => undefined, () => undefined);
-    return run;
-}
 // ─── fetch layer ──────────────────────────────────────────────────
 /**
  * GET one EDGAR resource with the mandatory UA (+ gzip) and a 15s timeout,
@@ -112,7 +102,7 @@ async function getEdgar(url, label) {
         headers: { ...EDGAR_HEADERS },
         signal: AbortSignal.timeout(15_000),
     };
-    return throughEdgarGate(async () => {
+    return throughGate("edgar", EDGAR_MIN_INTERVAL_MS, async () => {
         let r;
         try {
             r = await fetch(url, init);
