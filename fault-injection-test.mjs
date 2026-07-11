@@ -61,6 +61,7 @@ import { num as treasuryNum } from "./dist/treasury.js";
 import { padCik as edgarPadCik } from "./dist/edgar.js";
 import { num as socrataNum } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
+import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
 import { getJson, driftError } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
@@ -7186,6 +7187,302 @@ async function testDatagovHonesty() {
   });
 }
 
+// §46: EPA ECHO REST source (ADR-0009) — the THIRD source on the R2 port. KEYLESS,
+// single fixed host (echodata.epa.gov) + three fixed service paths (the SSRF core).
+// Covers: SSRF (service-path allowlist + state enum + post-construction host
+// assertion + redirect:"error", keyless byte-clean init); the HIDDEN two-step
+// QueryID orchestration (qid never exposed; pageno math); the 200-with-error-body
+// guard (queryset-limit ⇒ invalid_input, recycled-qid ⇒ not_found RETRYABLE, bad
+// DFR ⇒ not_found, unknown ⇒ schema_drift — NEVER a fake-empty); totalAvailable =
+// exact QueryRows (NOT the page size); genuine-empty ⇒ complete:true/total:0; the
+// M2 LIVE finding (naics DROPPED ⇒ filtersDropped + note = Case B; sic NARROWS ⇒
+// filtersApplied = Case A); offset/limit page-boundary guard; registryId grammar;
+// drift guards; the shared num choke point. All OFFLINE (mock fetch), deterministic,
+// NON-VACUOUS: each honesty assertion pins a value and names the mutation that turns
+// it RED. Driven through the REAL runTool (Zod-first) + a direct echoGet call (SSRF).
+const isEchoFacilities = (u) => /echo_rest_services\.get_facilities\?/.test(u);
+const isEchoQid = (u) => /echo_rest_services\.get_qid\?/.test(u);
+const isEchoDfr = (u) => /dfr_rest_services\.get_dfr\?/.test(u);
+const ECHO_HOST_STR = "echodata.epa.gov";
+// A get_facilities summary envelope (step 1): exact QueryRows + a fresh QueryID, NO
+// rows. `queryRows` is a numeric STRING (as upstream); `queryId` a numeric string.
+const echoFacBody = ({ queryRows, queryId = "835" }) => ({
+  Results: {
+    Message: "Success",
+    Version: "ALL DATA v2017-06-16 0923",
+    QueryRows: queryRows,
+    INSPRows: "611",
+    TotalPenalties: "$1,056,616",
+    CAARows: "620",
+    CWARows: "744",
+    RCRRows: "2733",
+    TRIRows: "10",
+    QueryID: queryId,
+  },
+});
+// A get_qid rows envelope (step 2): the actual facility rows.
+const echoQidBody = (rows) => ({ Results: { Message: "Working", Facilities: rows } });
+// A 200-with-error-body (the fake-empty trap): the load-bearing ECHO failure mode.
+const echoErr = (msg) => ({ Results: { Error: { ErrorMessage: msg } } });
+// A combined two-step mock: facilities body for step 1, qid body for step 2.
+const echoSearchMock = ({ queryRows, rows, queryId }) => (u) => {
+  if (isEchoFacilities(u)) return mockResponse({ status: 200, json: echoFacBody({ queryRows, queryId }) });
+  if (isEchoQid(u)) return mockResponse({ status: 200, json: echoQidBody(rows) });
+  return failClosed()();
+};
+
+async function testEchoHonesty() {
+  section("46. EPA ECHO REST (ADR-0009, R2 port) — SSRF (fixed host/3 fixed services/state enum/redirect) + hidden two-step QueryID + 200-error-body guard + exact-QueryRows total + M2 naics-dropped/sic-narrows honesty (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+  const rows5 = Array.from({ length: 5 }, (_, i) => ({ RegistryID: String(110000000000 + i), FacName: `Fac ${i}` }));
+
+  // (a) SSRF path-injection guard: echoGet with a service OUTSIDE the frozen
+  // 3-member Set ⇒ invalid_input BEFORE any fetch (the caller never supplies a
+  // path fragment; this is the ECHO analogue of CKAN's host-allowlist test).
+  await withFetch(failClosed(), async (calls) => {
+    for (const svc of ["../../../etc/passwd", "echo_rest_services.get_dfr_evil", "evil_service"]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => echoGet(svc, new URLSearchParams()));
+      ok(`46a echoGet service ${JSON.stringify(svc)} (not one of the 3 fixed paths) ⇒ invalid_input, 0 fetch (SSRF path-injection guard — load-bearing)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before,
+        JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (a2) state enum SSRF + silent-zero guard: a non-enum state ⇒ invalid_input, 0
+  // fetch (Zod). ECHO does NOT validate filter VALUES (an unknown value returns
+  // QueryRows:0), so the enum is the client-side defense against the silent lie.
+  await withFetch(failClosed(), async (calls) => {
+    for (const state of ["ZZ", "D", "texas", "XX"]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state }, sam));
+      ok(`46a state ${JSON.stringify(state)} (not in the US state/territory enum) ⇒ invalid_input, 0 fetch (SSRF value guard + silent-zero guard)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before,
+        JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (b) URL-construction positive control: a valid search builds get_facilities on
+  // the FIXED host/path/https with output=JSON + p_st in the query (a builder
+  // mutation ⇒ RED).
+  await withFetch(echoSearchMock({ queryRows: "4714", rows: [rows5[0]] }), async (calls) => {
+    await runTool("echo_search_facilities", { state: "DC", limit: 1 }, sam);
+    const f = calls.find((c) => isEchoFacilities(c.url));
+    const url = f ? new URL(f.url) : null;
+    ok("46b get_facilities on https://echodata.epa.gov/echo/echo_rest_services.get_facilities; output=JSON + p_st=DC + responseset=1 in the query (builder mutation ⇒ RED)",
+      !!url && url.hostname === ECHO_HOST_STR && url.pathname === "/echo/echo_rest_services.get_facilities" && url.protocol === "https:" && url.searchParams.get("output") === "JSON" && url.searchParams.get("p_st") === "DC" && url.searchParams.get("responseset") === "1",
+      JSON.stringify(f?.url));
+  });
+
+  // (c) B1 + keyless: every echo fetch sets init.redirect==='error' and carries NO
+  // 'headers' key (ECHO is anonymous — byte-clean init).
+  await withFetch(echoSearchMock({ queryRows: "4714", rows: [rows5[0]] }), async (calls) => {
+    await runTool("echo_search_facilities", { state: "DC", limit: 1 }, sam);
+    ok("46c B1: every echo fetch (get_facilities + get_qid) has init.redirect==='error' (drop it ⇒ RED)",
+      calls.length >= 2 && calls.every((c) => c.init && c.init.redirect === "error"),
+      JSON.stringify(calls.map((c) => c.init?.redirect)));
+    ok("46c keyless: every echo fetch init has NO 'headers' key (byte-clean init)",
+      calls.every((c) => !("headers" in c.init)), JSON.stringify(Object.keys(calls[0]?.init ?? {})));
+  });
+
+  // (d) HIDDEN two-step orchestration: get_qid's qid === the QueryID from step 1,
+  // pageno === offset/limit+1, responseset === limit on step 1; and the QueryID
+  // appears NOWHERE in the returned payload/_meta (never exposed as a cursor).
+  await withFetch(echoSearchMock({ queryRows: "4714", rows: rows5, queryId: "8675309" }), async (calls) => {
+    const r = await runTool("echo_search_facilities", { state: "DC", limit: 5, offset: 10 }, sam);
+    const f = calls.find((c) => isEchoFacilities(c.url));
+    const q = calls.find((c) => isEchoQid(c.url));
+    const furl = f ? new URL(f.url) : null;
+    const qurl = q ? new URL(q.url) : null;
+    ok("46d two-step: get_facilities responseset===5; then get_qid qid===QueryID '8675309' (from step 1) & pageno===3 (offset10/limit5+1) (mutate the pageno formula or the qid join ⇒ RED)",
+      !!furl && furl.searchParams.get("responseset") === "5" && !!qurl && qurl.searchParams.get("qid") === "8675309" && qurl.searchParams.get("pageno") === "3",
+      JSON.stringify({ rs: furl?.searchParams.get("responseset"), qid: qurl?.searchParams.get("qid"), pageno: qurl?.searchParams.get("pageno") }));
+    const blob = JSON.stringify(r);
+    ok("46d the ephemeral QueryID '8675309' appears NOWHERE in the returned payload/_meta (never exposed — a recycled cursor would be a cross-user data hazard)",
+      !blob.includes("8675309"), blob.slice(0, 200));
+  });
+
+  // (e) totalAvailable = num(QueryRows), the EXACT total — NEVER facilities.length.
+  await withFetch(echoSearchMock({ queryRows: "4714", rows: rows5 }), async () => {
+    const r = await runTool("echo_search_facilities", { state: "DC", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("46e totalAvailable===QueryRows 4714 (NOT facilities.length 5 — mutate totalAvailable→facilities.length ⇒ RED); returned 5 ⇒ hasMore:true, truncated:true, complete:false, nextOffset:5",
+      m.totalAvailable === 4714 && m.returned === 5 && m.pagination.hasMore === true && m.truncated === true && m.complete === false && m.pagination.nextOffset === 5,
+      JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
+  });
+  // exact total, a FULL single page (returned === total) ⇒ complete:true.
+  await withFetch(echoSearchMock({ queryRows: "3", rows: rows5.slice(0, 3) }), async () => {
+    const r = await runTool("echo_search_facilities", { state: "DC", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("46e EXACT total, full single page (returned 3 === total 3) ⇒ totalAvailable:3, hasMore:false, complete:true, truncated:false, nextOffset:null (whole set in one response)",
+      m.totalAvailable === 3 && m.pagination.hasMore === false && m.complete === true && m.truncated === false && m.pagination.nextOffset === null,
+      JSON.stringify(m));
+  });
+  // exact total, last page (offset + returned === total): hasMore:false/nextOffset:null.
+  await withFetch(echoSearchMock({ queryRows: "4704", rows: rows5.slice(0, 4) }), async () => {
+    const r = await runTool("echo_search_facilities", { state: "DC", limit: 100, offset: 4700 }, sam);
+    const m = buildMeta(r.meta);
+    ok("46e EXACT total, last page (offset 4700 + returned 4 === total 4704) ⇒ hasMore:false, nextOffset:null (mutate hasMore to offset+returned<=total ⇒ RED); THIS page (4 of 4704) honestly complete:false/truncated:true (a page ≠ the whole set)",
+      m.totalAvailable === 4704 && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.complete === false && m.truncated === true,
+      JSON.stringify(m.pagination));
+  });
+
+  // (f) genuine-empty: QueryRows:'0', no Results.Error ⇒ complete:true/total:0 AND
+  // NO step-2 fetch (nothing to page — get_qid is failClosed, so a call ⇒ RED).
+  await withFetch((u) => (isEchoFacilities(u) ? mockResponse({ status: 200, json: echoFacBody({ queryRows: "0" }) }) : failClosed()()), async (calls) => {
+    const r = await runTool("echo_search_facilities", { state: "DC", sic: "9999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("46f genuine-empty QueryRows:'0' (no Error) ⇒ honest complete:true, truncated:false, totalAvailable:0, returned:0, AND no get_qid fetch (a real no-match, not an outage)",
+      r.data.facilities.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.returned === 0 && !calls.some((c) => isEchoQid(c.url)),
+      JSON.stringify({ ta: m.totalAvailable, complete: m.complete, qidCalled: calls.some((c) => isEchoQid(c.url)) }));
+  });
+
+  // (g) 200-with-error-body: QUERYSET-LIMIT ErrorMessage ⇒ invalid_input (M1) —
+  // NOT schema_drift, NOT a fake-empty (the observed TX failure mode).
+  await withFetch((u) => (isEchoFacilities(u) ? mockResponse({ status: 200, json: echoErr("Rows Returned would be 343599. Queryset Limit would be exceeded - please make search parameters more selective.") }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "TX" }, sam));
+    ok("46g 200-body 'Queryset Limit would be exceeded' ⇒ invalid_input (M1: a known advisory, NOT schema_drift, NOT a fake empty)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (h) 200-with-error-body: recycled/unknown QueryID on get_qid ⇒ not_found,
+  // RETRYABLE (m6 — a transient shared-slot recycle, never a fake empty).
+  await withFetch((u) => {
+    if (isEchoFacilities(u)) return mockResponse({ status: 200, json: echoFacBody({ queryRows: "4714" }) });
+    if (isEchoQid(u)) return mockResponse({ status: 200, json: echoErr("QueryID 99999999 not found in ECHO.") });
+    return failClosed()();
+  }, async () => {
+    const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "DC" }, sam));
+    const te = toToolError(error);
+    ok("46h 200-body 'QueryID … not found in ECHO' on get_qid ⇒ not_found + retryable:true (recycled ephemeral slot — a transient, never a fake empty; mutate to treat as [] ⇒ RED)",
+      threw && te.kind === "not_found" && te.retryable === true, JSON.stringify({ kind: te.kind, retryable: te.retryable }));
+  });
+
+  // (i) 200-with-error-body: bad DFR RegistryID ⇒ not_found (never a fake report).
+  await withFetch((u) => (isEchoDfr(u) ? mockResponse({ status: 200, json: echoErr("ID 000000000001 is invalid.") }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("echo_facility_report", { registryId: "000000000001" }, sam));
+    ok("46i 200-body 'ID … is invalid' on get_dfr ⇒ not_found (never a fabricated empty report)",
+      threw && toToolError(error).kind === "not_found", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (j) 200-with-error-body: an UNRECOGNIZED ErrorMessage ⇒ schema_drift (surfaced,
+  // not misclassified into a benign kind or a fake empty).
+  await withFetch((u) => (isEchoFacilities(u) ? mockResponse({ status: 200, json: echoErr("Some brand new upstream error string we have never seen.") }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "DC" }, sam));
+    ok("46j 200-body with an UNRECOGNIZED ErrorMessage ⇒ schema_drift (never silently swallowed; mutate the catch-all to not_found ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (k) outage taxonomy: 503 ⇒ upstream_unavailable throws (never a fake empty);
+  // 404 ⇒ not_found; 429 ⇒ rate_limited retryable.
+  await withFetch((u) => (isEchoFacilities(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "DC" }, sam));
+    ok("46k 503 on get_facilities ⇒ upstream_unavailable throws, retryable (NOT a fake empty facilities[])",
+      threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isEchoDfr(u) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("echo_facility_report", { registryId: "110059768461" }, sam));
+    ok("46k HTTP 404 on get_dfr ⇒ not_found", threw && toToolError(error).kind === "not_found", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isEchoFacilities(u) ? mockResponse({ status: 429, headers: { "Retry-After": "30" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "DC" }, sam));
+    ok("46k HTTP 429 ⇒ rate_limited, retryable (honors Retry-After)",
+      threw && toToolError(error).kind === "rate_limited" && toToolError(error).retryable === true, JSON.stringify(toToolError(error).kind));
+  });
+
+  // (l) page-boundary guard: offset not a multiple of limit ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "DC", limit: 100, offset: 50 }, sam));
+    ok("46l offset 50 not a multiple of limit 100 ⇒ invalid_input, 0 fetch (ECHO pages on fixed boundaries — §1b)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: toToolError(error).kind, added: calls.length }));
+  });
+
+  // (m) registryId grammar: bad id ⇒ invalid_input, no fetch (Zod ^[0-9]{9,12}$).
+  await withFetch(failClosed(), async (calls) => {
+    for (const registryId of ["abc", "12345678", "1234567890123", "110059768461\n", "../etc/passwd"]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("echo_facility_report", { registryId }, sam));
+      ok(`46m bad registryId ${JSON.stringify(registryId)} ⇒ invalid_input, no fetch (all-digit 9–12; ` + "`$`" + ` rejects trailing \\n)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before,
+        JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (n) num coercion — null-never-0; echo.num is the SHARED coerce.num choke point.
+  eq("46n num('4714') ⇒ 4714", echoNum("4714"), 4714);
+  eq("46n num('0') ⇒ 0 (a real count, NOT absent — genuine-empty is a real zero)", echoNum("0"), 0);
+  eq("46n num('null') ⇒ null (data-absence honesty — never 0)", echoNum("null"), null);
+  eq("46n num('') ⇒ null (Number('') is 0 — must be caught)", echoNum(""), null);
+  eq("46n num(undefined) ⇒ null", echoNum(undefined), null);
+  ok("46n echo.num === coerce.num (one shared audited impl — a num regression fails §40e/§42m/§44n/§46n together)", echoNum === coerceNum, "echo.num diverged from coerce.num");
+
+  // (o) M2 — the LIVE finding (2026-07-12). naics is DROPPED upstream (Case B) ⇒
+  // _meta.filtersDropped + a best-effort note; sic NARROWS (Case A) ⇒ filtersApplied.
+  await withFetch(echoSearchMock({ queryRows: "4714", rows: [rows5[0]] }), async () => {
+    const r = await runTool("echo_search_facilities", { state: "DC", naics: "325", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("46o M2 Case B: naics ⇒ _meta.filtersDropped includes 'naics', NOT in filtersApplied, + a note that ECHO drops NAICS (never silently presented as filtered — mutate to filtersApplied ⇒ RED)",
+      m.filtersDropped.includes("naics") && !m.filtersApplied.includes("naics") && m.notes.some((n) => /NAICS/i.test(n) && /(dropped|not guaranteed)/i.test(n)),
+      JSON.stringify({ applied: m.filtersApplied, dropped: m.filtersDropped }));
+  });
+  await withFetch(echoSearchMock({ queryRows: "1", rows: [rows5[0]] }), async () => {
+    const r = await runTool("echo_search_facilities", { state: "DC", sic: "2911", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("46o M2 Case A: sic ⇒ _meta.filtersApplied includes 'sic', NOT in filtersDropped (ECHO narrows by SIC — a REAL filter, live-verified DC+sic=2911 ⇒ 1)",
+      m.filtersApplied.includes("sic") && !m.filtersDropped.includes("sic"),
+      JSON.stringify({ applied: m.filtersApplied, dropped: m.filtersDropped }));
+  });
+  await withFetch(echoSearchMock({ queryRows: "4714", rows: [rows5[0]] }), async () => {
+    const r = await runTool("echo_search_facilities", { state: "DC" }, sam);
+    const m = buildMeta(r.meta);
+    ok("46o no naics passed ⇒ filtersDropped empty (the naics disclosure fires only when the caller actually passed it — no phantom claim); filtersApplied includes 'state'",
+      m.filtersDropped.length === 0 && m.filtersApplied.includes("state"), JSON.stringify({ applied: m.filtersApplied, dropped: m.filtersDropped }));
+  });
+
+  // (p) drift guards (never a fake empty): no QueryRows + no Error; a non-array
+  // Facilities; a bad upstream QueryID grammar; a missing Results.
+  await withFetch((u) => (isEchoFacilities(u) ? mockResponse({ status: 200, json: { Results: { Message: "Success" } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "DC" }, sam));
+    ok("46p get_facilities 200 with NO QueryRows and no Results.Error ⇒ schema_drift (nothing valid to return)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+  for (const bad of ["not-an-array", null, 42]) {
+    await withFetch((u) => {
+      if (isEchoFacilities(u)) return mockResponse({ status: 200, json: echoFacBody({ queryRows: "4714" }) });
+      if (isEchoQid(u)) return mockResponse({ status: 200, json: { Results: { Message: "Working", Facilities: bad } } });
+      return failClosed()();
+    }, async () => {
+      const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "DC" }, sam));
+      ok(`46p get_qid Facilities=${JSON.stringify(bad)} (non-array), no Error ⇒ schema_drift (never treated as []; mutate to read as empty ⇒ RED)`,
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+  }
+  await withFetch((u) => (isEchoFacilities(u) ? mockResponse({ status: 200, json: echoFacBody({ queryRows: "4714", queryId: "12ab" }) }) : failClosed()()), async (calls) => {
+    const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "DC" }, sam));
+    ok("46p get_facilities QueryID '12ab' (non-numeric) ⇒ schema_drift, and get_qid is NEVER called with the tainted id (upstream qid validated ^[0-9]+$ before step 2)",
+      threw && toToolError(error).kind === "schema_drift" && !calls.some((c) => isEchoQid(c.url)), JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isEchoFacilities(u) ? mockResponse({ status: 200, json: { notResults: true } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("echo_search_facilities", { state: "DC" }, sam));
+    ok("46p missing Results object ⇒ schema_drift", threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (q) DFR success positive control: single-record complete:true on the fixed
+  // host/path with output=JSON + p_id; redirect:'error' + keyless init.
+  await withFetch((u) => (isEchoDfr(u) ? mockResponse({ status: 200, json: { Results: { Message: "Success", RegistryID: "110059768461", Permits: [{ Statute: "CAA" }], Reports: { HasPollRpt: "Y" } } } }) : failClosed()()), async (calls) => {
+    const r = await runTool("echo_facility_report", { registryId: "110059768461" }, sam);
+    const m = buildMeta(r.meta);
+    const d = calls.find((c) => isEchoDfr(c.url));
+    const url = d ? new URL(d.url) : null;
+    ok("46q DFR success ⇒ { registryId '110059768461', report:{…verbatim…} }, single-record complete:true/returned:1; on https://echodata.epa.gov/echo/dfr_rest_services.get_dfr with output=JSON + p_id in the query",
+      r.data.registryId === "110059768461" && !!r.data.report && m.complete === true && m.returned === 1 && !!url && url.hostname === ECHO_HOST_STR && url.pathname === "/echo/dfr_rest_services.get_dfr" && url.searchParams.get("output") === "JSON" && url.searchParams.get("p_id") === "110059768461",
+      JSON.stringify({ rid: r.data.registryId, complete: m.complete, url: d?.url }));
+    ok("46q DFR fetch: init.redirect==='error' + NO 'headers' key (keyless byte-clean init)",
+      !!d && d.init.redirect === "error" && !("headers" in d.init), JSON.stringify({ redirect: d?.init?.redirect, keys: Object.keys(d?.init ?? {}) }));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -7242,6 +7539,7 @@ async function main() {
   await testDataSourcePortParity();
   await testCkanHonesty();
   await testDatagovHonesty();
+  await testEchoHonesty();
 
   // Prove the harness bites.
   await selfCheck();
