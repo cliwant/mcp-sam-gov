@@ -829,6 +829,43 @@ const tests = [
     tolerateError: (env) => env?.error?.kind === "rate_limited",
     verify: (r) => r.bill !== null && typeof r.bill === "object",
   },
+  // ━━━ GovInfo — api.data.gov keyed trio's 3rd API (ADR-0010)
+  // Same shared DEMO_KEY (~10 req/hr, shared globally) as the datagov trio, so a
+  // 429 rate_limited (or its retry-backoff RPC timeout) is EXPECTED on a clean
+  // install and TOLERATED as a pass-with-note. A 200 is verified normally. Note
+  // search_packages/get_package validate the collection against the live
+  // /collections catalog first, so the throttle typically manifests on that fetch.
+  {
+    name: "govinfo_list_collections",
+    args: {},
+    tolerateError: (env) => env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      Array.isArray(r.collections) &&
+      r.collections.length >= 1 &&
+      r.collections.every(
+        (c) => c !== null && typeof c === "object" && "collectionCode" in c,
+      ),
+  },
+  {
+    name: "govinfo_search_packages",
+    args: { collection: "BILLS", startDate: "2024-01-01", pageSize: 3 },
+    tolerateError: (env) => env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      r.collection === "BILLS" &&
+      Array.isArray(r.packages) &&
+      r.packages.every(
+        (p) => p === null || (typeof p === "object" && "packageId" in p),
+      ),
+  },
+  {
+    name: "govinfo_get_package",
+    args: { packageId: "BILLS-118hr1enr" },
+    tolerateError: (env) => env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      typeof r.found === "boolean" &&
+      r.packageId === "BILLS-118hr1enr" &&
+      (r.found === false || (r.package !== null && typeof r.package === "object")),
+  },
 ];
 
 function pickPath(obj, path) {

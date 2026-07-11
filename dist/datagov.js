@@ -51,6 +51,12 @@ import { ToolErrorCarrier } from "./errors.js";
 import { getJson, driftError } from "./datasource.js";
 import { num, str } from "./coerce.js";
 import { withMeta } from "./meta.js";
+// ADR-0010 §2 — the api.data.gov KEY seam is now a single audited home shared with
+// govinfo.ts (the 2nd consumer). This is a pure behavior-identical extraction of
+// datagov's former module-private key helpers (they read process.env at call time,
+// so the move changes nothing — datagov's key handling / _meta / snapshot / K-test
+// all stay green). govinfo.ts imports from the SAME module; neither imports the other.
+import { keyHeader, keyModeLabel, pushKeyNote } from "./datagovKey.js";
 // Re-export the shared honesty coercion (single audited copy in ./coerce.js —
 // ADR-0005 v2 FIX-C) so the fault suite's num-parity guard resolves the SAME
 // `num` from this module (datagov.num === coerce.num === ckan.num === …).
@@ -96,39 +102,11 @@ export const CONGRESS_BILL_TYPES = [
     "hres",
     "sres",
 ];
-// ─── Key resolver (the load-bearing secret discipline) ────────────
-// The key is read from env; if unset/empty it falls back to the public literal
-// "DEMO_KEY". `keyHeader()` is the ONLY place the value is used — it is placed in
-// the `X-Api-Key` request header and NOWHERE else (never the URL, never the label,
-// never `_meta`, never a log). Mirrors Socrata's `appTokenHeader()`/`appTokenPresent()`
-// split (there the token is optional; here it is required-with-public-fallback).
-const DEMO_KEY = "DEMO_KEY";
-function resolvedKey() {
-    const raw = process.env.DATA_GOV_API_KEY;
-    const trimmed = typeof raw === "string" ? raw.trim() : "";
-    return trimmed ? trimmed : DEMO_KEY;
-}
-/** The X-Api-Key header — the ONLY carrier of the secret. Never logged/echoed. */
-function keyHeader() {
-    return { "X-Api-Key": resolvedKey() };
-}
-/** true when no real DATA_GOV_API_KEY is configured (drives the disclosure note). */
-function usingDemoKey() {
-    const raw = process.env.DATA_GOV_API_KEY;
-    return !(typeof raw === "string" && raw.trim());
-}
-/** Key-MODE label for `_meta.source` — the MODE, never the value. */
-function keyModeLabel() {
-    return usingDemoKey() ? "DEMO_KEY" : "DATA_GOV_API_KEY";
-}
-// The DEMO_KEY disclosure (m4-note: NO hardcoded verification date — "approximately
-// 10 requests/hour", not a pinned date).
-const DEMO_KEY_NOTE = "Using the shared api.data.gov DEMO_KEY — approximately 10 requests/hour, shared across all DEMO_KEY callers (limits reached quickly). Set DATA_GOV_API_KEY for production; free key at https://api.data.gov/signup/.";
-const CONFIGURED_KEY_NOTE = "Using a configured DATA_GOV_API_KEY (value never logged).";
-/** Push the key-mode disclosure note (DEMO_KEY ceiling OR configured-key). */
-function pushKeyNote(notes) {
-    notes.push(usingDemoKey() ? DEMO_KEY_NOTE : CONFIGURED_KEY_NOTE);
-}
+// ─── Key handling (the load-bearing secret discipline) ────────────
+// `keyHeader`/`keyModeLabel`/`pushKeyNote` (+ `usingDemoKey`, the DEMO_KEY literal,
+// and the disclosure notes) now live in the SHARED `./datagovKey.js` seam (ADR-0010
+// §2) — imported above, byte-identical behavior. GovInfo is their 2nd consumer, so
+// the single-audited-home promotion mirrors the `coerce.ts` precedent for `num`.
 // ─── SSRF-guarded fetch (§4 — fixed host + hostname assertion + redirect) ──
 /**
  * GET one api.data.gov JSON resource. `host` is a fixed module constant; `path`
