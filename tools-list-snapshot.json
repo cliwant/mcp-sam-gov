@@ -189,6 +189,124 @@
     }
   },
   {
+    "name": "echo_facility_report",
+    "description": "Fetch the EPA ECHO Detailed Facility Report (DFR) for ONE facility by its FRS RegistryID (keyless) — the per-facility compliance / enforcement / inspection / permit deep-dive for competitor or acquisition-target due diligence. Input `registryId` (all-digit FRS id, 9–12 digits, from echo_search_facilities rows). Returns { registryId, report:{…verbatim compliance/enforcement/permit detail…} } + single-record _meta (complete:true, no pagination). A bad/unknown RegistryID ⇒ not_found (never a fabricated report).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "registryId": {
+          "type": "string",
+          "description": "The facility's FRS RegistryID (from echo_search_facilities rows' RegistryID) — an all-digit id, 9–12 digits (e.g. '110059768461'). A bad/unknown id ⇒ not_found (never a fabricated report)."
+        }
+      },
+      "required": [
+        "registryId"
+      ]
+    }
+  },
+  {
+    "name": "echo_search_facilities",
+    "description": "Search EPA-regulated facilities by US state (+ optional sic / facilityName / majorOnly / federalOnly) with compliance/enforcement screening fields (EPA ECHO, keyless) — the NEW facility environmental compliance-risk / due-diligence axis (CAA/CWA/RCRA/SDWA violation, inspection, penalty, SNC history). Input `state` (REQUIRED enum — the SSRF + silent-zero guard), `sic` (2–4 digits, a REAL filter), `naics` (2–6 digits, BEST-EFFORT — ECHO DROPS it upstream, reported in _meta.filtersDropped + a note), `facilityName` (substring; a typo silently returns 0), `majorOnly`/`federalOnly` (bool), `limit` (≤1000, def 100), `offset` (multiple of limit). Returns { state, facilities:[…verbatim rows incl. RegistryID…], summary:{ queryRows, programCounts, totalPenalties } } + honest _meta. HONESTY: totalAvailable = the EXACT QueryRows total (NEVER the page size); a hidden two-step QueryID pagination fetches the rows (the QueryID is ephemeral/globally-recycled, never exposed); genuine-empty ⇒ complete:true/total:0; a queryset-limit overflow / bad query ⇒ invalid_input; an outage/5xx ⇒ THROWS (never a fake empty). Feed a row's RegistryID to echo_facility_report.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "AL",
+            "AK",
+            "AZ",
+            "AR",
+            "CA",
+            "CO",
+            "CT",
+            "DE",
+            "DC",
+            "FL",
+            "GA",
+            "HI",
+            "ID",
+            "IL",
+            "IN",
+            "IA",
+            "KS",
+            "KY",
+            "LA",
+            "ME",
+            "MD",
+            "MA",
+            "MI",
+            "MN",
+            "MS",
+            "MO",
+            "MT",
+            "NE",
+            "NV",
+            "NH",
+            "NJ",
+            "NM",
+            "NY",
+            "NC",
+            "ND",
+            "OH",
+            "OK",
+            "OR",
+            "PA",
+            "RI",
+            "SC",
+            "SD",
+            "TN",
+            "TX",
+            "UT",
+            "VT",
+            "VA",
+            "WA",
+            "WV",
+            "WI",
+            "WY",
+            "AS",
+            "GU",
+            "MP",
+            "PR",
+            "VI"
+          ],
+          "description": "US state / territory 2-letter code to scope the search (REQUIRED — an unscoped national query is ~5.6M rows; the enum is also the SSRF value guard + the silent-zero guard). e.g. 'DC', 'TX', 'CA', 'PR'."
+        },
+        "naics": {
+          "type": "string",
+          "description": "BEST-EFFORT industry filter (2–6 digit NAICS). WARNING: ECHO DROPS the NAICS filter upstream (live-verified 2026-07-12) — the returned facilities are NOT guaranteed to match this code; it is reported in _meta.filtersDropped + a note. Use `sic` (which DOES narrow) to scope by industry."
+        },
+        "sic": {
+          "type": "string",
+          "description": "Industry filter (2–4 digit SIC code). A REAL filter — ECHO narrows by SIC (live-verified). A code with no facilities returns 0 (silent-zero — verify the code)."
+        },
+        "facilityName": {
+          "type": "string",
+          "description": "Facility-name substring filter (p_fn). NOTE: not validated by ECHO — a typo silently returns 0 results, not an error."
+        },
+        "majorOnly": {
+          "type": "boolean",
+          "description": "true ⇒ only EPA 'major' facilities (p_maj=Y)."
+        },
+        "federalOnly": {
+          "type": "boolean",
+          "description": "true ⇒ only federal facilities (p_ff=Y)."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Facilities per page (→ responseset), 1..1000, default 100."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based offset for pagination, default 0. MUST be an exact multiple of `limit` (ECHO pages on fixed boundaries; a non-multiple ⇒ invalid_input)."
+        }
+      },
+      "required": [
+        "state"
+      ]
+    }
+  },
+  {
     "name": "edgar_company_facts",
     "description": "Curated XBRL financial facts for a filer (keyless, from data.sec.gov companyfacts). Input `cikOrTicker`, optional `concepts` (default: 6 curated USD concepts — Revenues/RevenueFromContractWithCustomerExcludingAssessedTax, Assets, Liabilities, StockholdersEquity, NetIncomeLoss, CashAndCashEquivalentsAtCarryingValue), `unit` (default USD), `latest`. A concept absent for the filer is OMITTED (never 0); a concept present only in another unit (e.g. EPS in USD/shares) is reported under wrongUnit with a note.",
     "inputSchema": {

@@ -752,6 +752,42 @@ const tests = [
           ),
       ),
   },
+  // ━━━ EPA ECHO REST — keyless facility compliance/enforcement (ADR-0009)
+  // Live-hits echodata.epa.gov (keyless). A live transient (5xx/timeout/429) is
+  // acceptable and TOLERATED as a pass-with-note (the honest taxonomy, not a code
+  // failure). p_st=DC is a small state (no queryset limit) with a stable ~4.7k
+  // facilities; the two-step QueryID pagination is hidden in-call.
+  {
+    name: "echo_search_facilities",
+    args: { state: "DC", limit: 3 },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      r.state === "DC" &&
+      Array.isArray(r.facilities) &&
+      r.facilities.length >= 1 &&
+      r.facilities.length <= 3 &&
+      r.facilities.every(
+        (f) => f !== null && typeof f === "object" && /^[0-9]{9,12}$/.test(String(f.RegistryID)),
+      ),
+  },
+  {
+    // DFR deep-dive for the first facility RegistryID from the search above
+    // (chained — no hardcoded id). A bad id would be not_found; a live transient is
+    // tolerated.
+    name: "echo_facility_report",
+    args: { registryId: "FETCH_FROM_PRIOR" },
+    chain: { from: "echo_search_facilities", path: "facilities[0].RegistryID" },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      typeof r.registryId === "string" &&
+      /^[0-9]{9,12}$/.test(r.registryId) &&
+      r.report !== null &&
+      typeof r.report === "object",
+  },
   // ━━━ api.data.gov keyed trio — Regulations.gov + Congress.gov (ADR-0007)
   // These use DATA_GOV_API_KEY, else the shared public DEMO_KEY (~10 req/hr,
   // shared across ALL DEMO_KEY callers globally). A 429 rate_limited is therefore

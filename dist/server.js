@@ -35,6 +35,7 @@ import * as treasury from "./treasury.js";
 import * as edgar from "./edgar.js";
 import * as socrata from "./socrata.js";
 import * as ckan from "./ckan.js";
+import * as echo from "./echo.js";
 import * as datagov from "./datagov.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
@@ -945,6 +946,63 @@ const CkanDiscoverDatasetsInput = z.object({
         .max(100)
         .default(20)
         .describe("Max datasets (packages) to return, 1..100, default 20."),
+});
+// ─── EPA ECHO REST (keyless facility compliance/enforcement) — input schemas ──
+// ADR-0009. KEYLESS, single fixed host (echodata.epa.gov) + three fixed service
+// paths (the SSRF core — no free host/path). `state` is a curated US state/
+// territory ENUM: it scopes the query (national is ~5.6M rows) AND is the
+// silent-zero guard (ECHO does NOT validate filter VALUES, so an unknown value
+// returns QueryRows:0 — indistinguishable from a genuine-empty). M2 (LIVE-verified
+// 2026-07-12): `sic` DOES narrow (a real filter); `naics` is DROPPED upstream —
+// exposed as BEST-EFFORT, disclosed in _meta.filtersDropped + notes, never
+// silently presented as filtered.
+const EchoStateEnum = z
+    .enum(echo.ECHO_STATES)
+    .describe("US state / territory 2-letter code to scope the search (REQUIRED — an unscoped national query is ~5.6M rows; the enum is also the SSRF value guard + the silent-zero guard). e.g. 'DC', 'TX', 'CA', 'PR'.");
+const EchoSearchFacilitiesInput = z.object({
+    state: EchoStateEnum,
+    naics: z
+        .string()
+        .regex(/^[0-9]{2,6}$/)
+        .optional()
+        .describe("BEST-EFFORT industry filter (2–6 digit NAICS). WARNING: ECHO DROPS the NAICS filter upstream (live-verified 2026-07-12) — the returned facilities are NOT guaranteed to match this code; it is reported in _meta.filtersDropped + a note. Use `sic` (which DOES narrow) to scope by industry."),
+    sic: z
+        .string()
+        .regex(/^[0-9]{2,4}$/)
+        .optional()
+        .describe("Industry filter (2–4 digit SIC code). A REAL filter — ECHO narrows by SIC (live-verified). A code with no facilities returns 0 (silent-zero — verify the code)."),
+    facilityName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Facility-name substring filter (p_fn). NOTE: not validated by ECHO — a typo silently returns 0 results, not an error."),
+    majorOnly: z
+        .boolean()
+        .optional()
+        .describe("true ⇒ only EPA 'major' facilities (p_maj=Y)."),
+    federalOnly: z
+        .boolean()
+        .optional()
+        .describe("true ⇒ only federal facilities (p_ff=Y)."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Facilities per page (→ responseset), 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("0-based offset for pagination, default 0. MUST be an exact multiple of `limit` (ECHO pages on fixed boundaries; a non-multiple ⇒ invalid_input)."),
+});
+const EchoFacilityReportInput = z.object({
+    registryId: z
+        .string()
+        .regex(/^[0-9]{9,12}$/)
+        .describe("The facility's FRS RegistryID (from echo_search_facilities rows' RegistryID) — an all-digit id, 9–12 digits (e.g. '110059768461'). A bad/unknown id ⇒ not_found (never a fabricated report)."),
 });
 // ─── api.data.gov keyed trio (Regulations.gov + Congress.gov) — input schemas ──
 // ADR-0007. The project's FIRST KEYED source. The key is read from env
@@ -1912,6 +1970,26 @@ const TOOLS = [
         description: "Find CKAN datastore resource ids by keyword via package_search (keyless). Input `host` (allowlisted enum), `q` (e.g. 'procurement', 'checkbook'), `limit` (≤100, def 20). Returns per-resource rows [{ resourceId, name, datasetTitle, format, datastoreActive }] + totalAvailable = the matching DATASET count. Feed a datastoreActive:true result's `resourceId` to ckan_query (a datastoreActive:false resource is a raw file blob NOT in the datastore, not queryable).",
         inputSchema: CkanDiscoverDatasetsInput,
         handler: (input) => ckan.discoverDatasets(input),
+    }),
+    // ━━━ EPA ECHO REST — keyless facility environmental compliance/enforcement (2) ━━━ ADR-0009
+    // A NEW capability axis: facility & competitor environmental compliance-risk
+    // screening / due diligence. KEYLESS (keylessMode:true, byte-clean init), single
+    // fixed host + three fixed service paths (the SSRF core). The two-step QueryID
+    // pagination is HIDDEN in-call (the ephemeral globally-recycled QueryID is never
+    // exposed); the 200-with-error-body failure mode is guarded FIRST (never a fake
+    // empty). M2: sic narrows (real filter), naics is dropped upstream (best-effort +
+    // disclosed in _meta.filtersDropped/notes).
+    defineTool({
+        name: "echo_search_facilities",
+        description: "Search EPA-regulated facilities by US state (+ optional sic / facilityName / majorOnly / federalOnly) with compliance/enforcement screening fields (EPA ECHO, keyless) — the NEW facility environmental compliance-risk / due-diligence axis (CAA/CWA/RCRA/SDWA violation, inspection, penalty, SNC history). Input `state` (REQUIRED enum — the SSRF + silent-zero guard), `sic` (2–4 digits, a REAL filter), `naics` (2–6 digits, BEST-EFFORT — ECHO DROPS it upstream, reported in _meta.filtersDropped + a note), `facilityName` (substring; a typo silently returns 0), `majorOnly`/`federalOnly` (bool), `limit` (≤1000, def 100), `offset` (multiple of limit). Returns { state, facilities:[…verbatim rows incl. RegistryID…], summary:{ queryRows, programCounts, totalPenalties } } + honest _meta. HONESTY: totalAvailable = the EXACT QueryRows total (NEVER the page size); a hidden two-step QueryID pagination fetches the rows (the QueryID is ephemeral/globally-recycled, never exposed); genuine-empty ⇒ complete:true/total:0; a queryset-limit overflow / bad query ⇒ invalid_input; an outage/5xx ⇒ THROWS (never a fake empty). Feed a row's RegistryID to echo_facility_report.",
+        inputSchema: EchoSearchFacilitiesInput,
+        handler: (input) => echo.searchFacilities(input),
+    }),
+    defineTool({
+        name: "echo_facility_report",
+        description: "Fetch the EPA ECHO Detailed Facility Report (DFR) for ONE facility by its FRS RegistryID (keyless) — the per-facility compliance / enforcement / inspection / permit deep-dive for competitor or acquisition-target due diligence. Input `registryId` (all-digit FRS id, 9–12 digits, from echo_search_facilities rows). Returns { registryId, report:{…verbatim compliance/enforcement/permit detail…} } + single-record _meta (complete:true, no pagination). A bad/unknown RegistryID ⇒ not_found (never a fabricated report).",
+        inputSchema: EchoFacilityReportInput,
+        handler: (input) => echo.facilityReport(input),
     }),
     // ━━━ api.data.gov keyed trio — Regulations.gov + Congress.gov (4) ━━━ ADR-0007
     // The project's FIRST KEYED source. The key (DATA_GOV_API_KEY, else the public
