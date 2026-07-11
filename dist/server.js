@@ -33,6 +33,7 @@ import * as gsaCsv from "./gsa-csv.js";
 import * as sba from "./sba.js";
 import * as treasury from "./treasury.js";
 import * as edgar from "./edgar.js";
+import * as socrata from "./socrata.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
@@ -812,6 +813,75 @@ const EdgarFullTextSearchInput = z.object({
         .min(0)
         .default(0)
         .describe("0-based result offset for pagination; page size is FIXED at 100 (there is no size param). Must be < 9900 (from+100 ≤ 10000 upstream window); a larger from is rejected as invalid_input."),
+});
+// ─── Socrata / SODA (keyless SLED + E-rate) — input schemas ──────
+// ADR-0004. First SLED source. `domain` is a curated allowlist ENUM (the SSRF
+// core — no free host); `datasetId` is a strict 4x4 with .length(9) (M2 — blocks
+// a trailing-newline the regex `$` would admit). SoQL params are raw upstream-
+// validated strings (a bad column ⇒ upstream 400 ⇒ invalid_input, surfaced).
+const SocrataDomainEnum = z
+    .enum(socrata.SOCRATA_DOMAINS)
+    .describe("Which allowlisted Socrata portal to query (curated .gov hosts + USAC E-rate .org; the SSRF host allowlist — no free host). e.g. data.ny.gov, data.texas.gov, data.wa.gov, opendata.usac.org.");
+const SocrataQueryInput = z.object({
+    domain: SocrataDomainEnum,
+    datasetId: z
+        // M2 — a strict 4x4. NOTE: deliberately NO .trim(): Zod applies .trim()
+        // BEFORE .length(9), so `.trim().length(9)` (the ADR's literal wording)
+        // would STRIP a trailing "\n" to a valid 9-char id and ACCEPT it —
+        // empirically confirmed — defeating the very newline rejection M2 wants.
+        // Dropping .trim() makes .length(9) see the raw string, so any trailing
+        // char (incl. "\n", which the regex `$` alone would admit) is rejected.
+        .string()
+        .length(9)
+        .regex(/^[a-z0-9]{4}-[a-z0-9]{4}$/)
+        .describe("The dataset's Socrata 4x4 id, e.g. 'kwxv-fwze' (from socrata_discover_datasets). Exactly [a-z0-9]{4}-[a-z0-9]{4} (9 chars; no surrounding whitespace)."),
+    select: z
+        .string()
+        .optional()
+        .describe("Optional SoQL $select (column projection / aggregate), e.g. 'agency,SUM(amount)'."),
+    where: z
+        .string()
+        .optional()
+        .describe("Optional SoQL $where filter, e.g. \"fiscal_year='2024' AND amount>1000\". A bad column ⇒ upstream HTTP 400 ⇒ invalid_input (surfaced, never silent)."),
+    order: z
+        .string()
+        .optional()
+        .describe("Optional SoQL $order, e.g. 'amount DESC'."),
+    q: z
+        .string()
+        .optional()
+        .describe("Optional SoQL $q full-text search across the row."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page ($limit), 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("0-based row offset ($offset) for pagination, default 0."),
+    withTotal: z
+        .boolean()
+        .default(true)
+        .describe("true (default) ⇒ issue a count(*) companion query so totalAvailable is exact. false ⇒ skip it (one fewer request); totalAvailable is null and a note discloses results may be truncated at $limit."),
+});
+const SocrataDiscoverDatasetsInput = z.object({
+    q: z
+        .string()
+        .min(1)
+        .describe("Keyword(s) to find datasets, e.g. 'procurement', 'vendor payments', 'checkbook'."),
+    domain: SocrataDomainEnum.optional().describe("Optional: scope discovery to ONE allowlisted portal. Omit to search the whole allowlist. NOTE: the federated catalog does not index every host (e.g. USAC E-rate returns 0) — those remain queryable via socrata_query with a known 4x4."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe("Max datasets to return, 1..100, default 20."),
 });
 // Build a ToolDef whose `handler` is type-checked against the schema's inferred
 // input `I` at the call site (e.g. `input.searchText` is known-present). The
@@ -1636,6 +1706,19 @@ const TOOLS = [
         description: "Full-text search across EDGAR filings, 2001-present (keyless, efts.sec.gov). Input `q` (phrase in double-quotes for exact), optional `forms`, `startdt`/`enddt` (ISO), `from` (offset; page size FIXED at 100 — no size param). Returns { accession, form, filingDate, entityNames, ciks, filingIndexUrl }. HONESTY: totalAvailable = the true match count, or a LOWER BOUND (totalIsLowerBound:true) when SEC reports ≥10000; from ≥ 9900 is rejected (10000-result window).",
         inputSchema: EdgarFullTextSearchInput,
         handler: (input) => edgar.fullTextSearch(input),
+    }),
+    // ━━━ Socrata / SODA — keyless SLED + E-rate open data (2) ━━━ ADR-0004
+    defineTool({
+        name: "socrata_query",
+        description: "Query rows from an allowlisted Socrata/SODA open-data portal (keyless; ~a dozen US state portals + USAC E-rate on one identical API — state spend/checkbook/contract/vendor-payment datasets). Input `domain` (curated allowlist enum — the SSRF host guard), `datasetId` (4x4, from socrata_discover_datasets), optional SoQL `select`/`where`/`order`/`q`, `limit` (≤1000, def 100), `offset`, `withTotal` (def true). HONESTY: SODA's row response has no total, so a count(*) companion supplies an exact totalAvailable; if it fails the rows still return with totalAvailable:null + a note (hasMore is then inferred from page-fill, never a false complete). Genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). Value fields are strings.",
+        inputSchema: SocrataQueryInput,
+        handler: (input) => socrata.query(input),
+    }),
+    defineTool({
+        name: "socrata_discover_datasets",
+        description: "Find Socrata dataset 4x4 ids by keyword via the Socrata catalog (keyless, api.us.socrata.com). Input `q` (e.g. 'procurement', 'vendor payments'), optional `domain` (scope to one allowlisted portal; omit to search the whole allowlist), `limit` (≤100, def 20). Returns [{ id, name, description, domain, updatedAt, link }] + totalAvailable = the catalog resultSetSize. Feed a result's `id` to socrata_query as `datasetId`. NOTE: the federated catalog does not index every allowlisted host (e.g. USAC E-rate) — those stay queryable via socrata_query with a known 4x4.",
+        inputSchema: SocrataDiscoverDatasetsInput,
+        handler: (input) => socrata.discoverDatasets(input),
     }),
 ];
 // ─── Server bootstrap ────────────────────────────────────────────
