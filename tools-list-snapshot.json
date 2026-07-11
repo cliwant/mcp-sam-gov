@@ -631,6 +631,63 @@
     }
   },
   {
+    "name": "govinfo_get_package",
+    "description": "Fetch ONE GovInfo package's summary (metadata + download links txt/xml/pdf/mods/premis/zip + related links) by packageId (api.data.gov keyed). Input `packageId` (from govinfo_search_packages, e.g. 'BILLS-118hr1enr', 'PLAW-117publ58', 'CFR-2023-title1-vol1'). Returns { found:true, packageId, package:{…} } + single-record _meta (complete:true). A nonexistent packageId ⇒ found:false (HTTP 404, never a fabricated summary). Any api_key embedded in a download link is stripped key-free before the payload is surfaced.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "packageId": {
+          "type": "string",
+          "description": "GovInfo packageId from govinfo_search_packages (e.g. 'BILLS-118hr1enr', 'PLAW-117publ58', 'CFR-2023-title1-vol1', 'GAOREPORTS-GAO-24-106221')."
+        }
+      },
+      "required": [
+        "packageId"
+      ]
+    }
+  },
+  {
+    "name": "govinfo_list_collections",
+    "description": "List the GovInfo collection catalog (GPO-authoritative publications; api.data.gov keyed — DATA_GOV_API_KEY or the shared DEMO_KEY). No input. Returns { collections:[{ collectionCode, collectionName, packageCount, granuleCount }] } + _meta (complete:true, totalAvailable = collection count). The discovery entry-point: feed a collectionCode to govinfo_search_packages. Memoized ~6h; also the validator source for search_packages' collection arg. packageCount = whole packages; granuleCount = sub-package granules (a missing count is null, never 0).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "govinfo_search_packages",
+    "description": "Search GovInfo packages in a collection modified since a date (GPO-authoritative bulk publications; api.data.gov keyed). Input `collection` (uppercase code — validated against the live catalog; an unknown code ⇒ invalid_input listing valid codes, NEVER a misleading empty), `startDate`/`endDate?` (YYYY-MM-DD or ISO datetime; filters by lastModified — the record UPDATE date, NOT dateIssued — disclosed in _meta), `pageSize?` (1..1000, def 100), `pageMark?` (opaque cursor, def '*'). Returns { collection, packages:[{ packageId, title, dateIssued, lastModified, docClass, congress, packageLink }] } + cursor _meta. HONESTY: totalAvailable = count (the EXACT real total, NOT the page size); GovInfo uses an OPAQUE cursor, so pagination.offset/nextOffset are null — continue by passing _meta.nextCursor back as `pageMark` (hasMore:false / nextCursor:null = last page). The raw upstream nextPage URL is never surfaced (it embeds the key). Genuine-empty ⇒ complete:true/total:0; outage/4xx THROWS (never a fake empty). CFR/ECFR/FR collections carry a note routing to the ecfr_*/fed_register_* tools for point lookups.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "collection": {
+          "type": "string",
+          "description": "GovInfo collection code (uppercase alpha), e.g. BILLS, PLAW, CREC, USCODE, CFR, FR, BUDGET, GAOREPORTS. Validated against the live /collections catalog — an unknown code returns invalid_input listing valid codes (never a misleading empty). Use govinfo_list_collections to discover codes."
+        },
+        "startDate": {
+          "type": "string",
+          "description": "Lower bound on lastModified (the record's last-update date, NOT dateIssued), YYYY-MM-DD (normalized to T00:00:00Z) or a full ISO datetime. e.g. '2024-01-01'."
+        },
+        "endDate": {
+          "type": "string",
+          "description": "Optional upper bound on lastModified (same format as startDate)."
+        },
+        "pageSize": {
+          "type": "number",
+          "description": "Rows per page (upstream pageSize), 1..1000, default 100."
+        },
+        "pageMark": {
+          "type": "string",
+          "description": "Opaque continuation cursor. Default \"*\" (first page). To page, pass back the previous response's _meta.nextCursor (NOT a numeric offset — GovInfo uses an opaque cursor)."
+        }
+      },
+      "required": [
+        "collection",
+        "startDate"
+      ]
+    }
+  },
+  {
     "name": "grants_get_opportunity",
     "description": "Fetch full detail for a single grant opportunity by id. Returns found:true with description, agency, posting/response/archive dates, award_ceiling, award_floor, estimated_funding, expected_number_of_awards, applicant_types, funding_instruments, CFDA programs. `agency` is { code, name (the REAL posting/sub-tier agency, e.g. 'Food and Nutrition Service'), department (the top-tier agency, e.g. 'Department of Agriculture'), contactName (the program officer — NOT the agency) } — Grants.gov's raw `agencyName` field is actually the contact person, so this tool sources the real agency from agencyDetails; `name` may be null if the record carries no structured agency. A NONEXISTENT id returns { found:false, opportunityId } — never a fabricated grant with empty fields (Grants.gov answers a bad id with a hollow 200, which this tool detects). Check `found` before reading the other fields.",
     "inputSchema": {

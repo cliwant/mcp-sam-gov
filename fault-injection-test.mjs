@@ -63,6 +63,7 @@ import { num as socrataNum } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
+import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
 import { getJson, driftError } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -7483,6 +7484,361 @@ async function testEchoHonesty() {
   });
 }
 
+// §47: GovInfo (api.govinfo.gov, ADR-0010) — the api.data.gov keyed trio's 3rd API
+// + the OPAQUE-CURSOR honesty pattern. Reuses the shared datagovKey.ts seam (2nd
+// consumer). The load-bearing guarantees: (K) the KEY (and the echoed api_key in
+// nextPage / download links) NEVER leaks; (M3) phantom-empty-page livelock guard;
+// (M4) cursor `complete` from hasMore+pageMark, not returned<total; (M5) a catalog-
+// fetch failure PROPAGATES (never bypasses the silent-empty collection validation);
+// (M6) a malformed nextPage never surfaces the raw value. Plus exact totalAvailable=
+// count, genuine-empty honesty, the error taxonomy, SSRF grammar (0 fetch), the
+// CFR/FR overlap note, DEMO_KEY disclosure + keylessMode:false, and the shared num
+// choke point. All OFFLINE (mock fetch), deterministic, NON-VACUOUS (each honesty
+// assertion pins a value + names the mutation that turns it RED).
+const isGovinfoCatalog = (u) => new URL(u).pathname === "/collections";
+const isGovinfoSearch = (u) => /^\/collections\/[^/]+\//.test(new URL(u).pathname);
+const isGovinfoPackage = (u) => /^\/packages\/.+\/summary$/.test(new URL(u).pathname);
+// A realistic /collections catalog (the validator source). BILLS/CFR/PLAW/CREC known.
+const GOVINFO_CATALOG = {
+  collections: [
+    { collectionCode: "BILLS", collectionName: "Congressional Bills", packageCount: 300000, granuleCount: 300000 },
+    { collectionCode: "CFR", collectionName: "Code of Federal Regulations", packageCount: 5000, granuleCount: 900000 },
+    { collectionCode: "PLAW", collectionName: "Public and Private Laws", packageCount: 8000, granuleCount: 8000 },
+    { collectionCode: "CREC", collectionName: "Congressional Record", packageCount: 6000, granuleCount: 2000000 },
+  ],
+};
+const govinfoPkgItem = (i) => ({
+  packageId: `BILLS-118hr${3000 + i}enr`,
+  title: `A bill ${i}`,
+  dateIssued: "2024-02-01",
+  lastModified: "2024-03-01T12:00:00Z",
+  docClass: "hr",
+  congress: "118",
+  packageLink: `https://api.govinfo.gov/packages/BILLS-118hr${3000 + i}enr/summary`,
+});
+// `nextPage` (when present) is a FULL upstream URL embedding offsetMark+pageSize
+// (+ sometimes api_key) — exactly what must NEVER be surfaced verbatim.
+const govinfoSearchBody = ({ n = 0, count, nextPage }) => ({
+  count,
+  message: "OK",
+  packages: Array.from({ length: n }, (_, i) => govinfoPkgItem(i)),
+  ...(nextPage !== undefined ? { nextPage } : {}),
+});
+const asResp = (v, u) => (typeof v === "function" ? v(u) : mockResponse({ status: 200, json: v }));
+// A combined govinfo mock: serves the catalog for /collections and the given
+// search/pkg body (or response-fn) for the data/summary paths.
+const govinfoMock = ({ search, pkg, catalog = GOVINFO_CATALOG } = {}) => (u) => {
+  if (isGovinfoCatalog(u)) return asResp(catalog, u);
+  if (isGovinfoSearch(u)) return asResp(search, u);
+  if (isGovinfoPackage(u)) return asResp(pkg, u);
+  return failClosed()();
+};
+// A clean nextPage (DEMO_KEY mode; offsetMark=ABC+123 URL-encoded as ABC%2B123).
+const GOVINFO_NEXT_CLEAN =
+  "https://api.govinfo.gov/collections/BILLS/2024-01-01T00:00:00Z?offsetMark=ABC%2B123&pageSize=2";
+
+async function testGovinfoHonesty() {
+  section("47. GovInfo (api.govinfo.gov, ADR-0010) — KEY/api_key-NEVER-LEAKS (M1/M2/M6), opaque-cursor honesty (M3 phantom / M4 complete / nextCursor), catalog-validation propagate (M5), exact totals, SSRF grammar, overlap note (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ═══ (K) THE load-bearing tests: the KEY + the ECHOED api_key never leak ═══
+  await withEnvKey(SENTINEL, async () => {
+    // (K1) search: nextPage embeds api_key=<SENTINEL>. Assert the sentinel is absent
+    // from the serialized _meta AND the serialized data (the raw nextPage is NEVER
+    // surfaced — only the extracted offsetMark), while X-Api-Key carried the key.
+    _clearCache();
+    const NEXT_KEYED = `https://api.govinfo.gov/collections/BILLS/2024-01-01T00:00:00Z?offsetMark=ABC%2B123&pageSize=2&api_key=${SENTINEL}`;
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 2, count: 551, nextPage: NEXT_KEYED }) }), async (calls) => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01", pageSize: 2 }, sam);
+      const m = buildMeta(r.meta);
+      const searchCall = calls.find((c) => isGovinfoSearch(c.url));
+      const leaks = JSON.stringify(m).includes(SENTINEL) || JSON.stringify(r.data).includes(SENTINEL);
+      ok("47K KEY-NEVER-LEAKS (search): sentinel absent from serialized _meta AND serialized data (raw nextPage never surfaced — mutate to surface the raw nextPage ⇒ RED)",
+        !leaks, JSON.stringify({ meta: m.nextCursor, dataHasSentinel: JSON.stringify(r.data).includes(SENTINEL) }));
+      ok("47K nextCursor === the EXTRACTED offsetMark 'ABC+123' ONLY (URL-decoded via searchParams; substring-hack ⇒ RED on the %2B)",
+        m.nextCursor === "ABC+123", JSON.stringify(m.nextCursor));
+      ok("47K POSITIVE: X-Api-Key header carried the sentinel; the key is NOT in the fetch URL (header-only, no ?api_key= on OUR request)",
+        searchCall?.init?.headers?.["X-Api-Key"] === SENTINEL && typeof searchCall?.url === "string" && !searchCall.url.includes(SENTINEL) && !/api_key=/i.test(searchCall.url),
+        JSON.stringify(searchCall?.url));
+    });
+    // (K2) get_package: every download/related link embeds api_key=<SENTINEL>; assert
+    // NONE survive into the serialized payload (stripped key-free, not dropped).
+    _clearCache();
+    const pkgBody = {
+      packageId: "BILLS-118hr1enr",
+      title: "H.R.1",
+      dateIssued: "2023-01-09",
+      download: {
+        txtLink: `https://api.govinfo.gov/packages/BILLS-118hr1enr/htm?api_key=${SENTINEL}`,
+        pdfLink: `https://api.govinfo.gov/packages/BILLS-118hr1enr/pdf?api_key=${SENTINEL}`,
+        modsLink: `https://api.govinfo.gov/packages/BILLS-118hr1enr/mods?api_key=${SENTINEL}`,
+      },
+      related: { billStatusLink: `https://api.govinfo.gov/related/BILLS-118hr1enr?api_key=${SENTINEL}` },
+    };
+    await withFetch(govinfoMock({ pkg: pkgBody }), async () => {
+      const r = await runTool("govinfo_get_package", { packageId: "BILLS-118hr1enr" }, sam);
+      const serialized = JSON.stringify(r.data) + JSON.stringify(buildMeta(r.meta));
+      ok("47K get_package: api_key stripped from ALL download/related links — sentinel absent from the serialized payload + _meta (found:true, links retained key-free)",
+        r.data.found === true && !serialized.includes(SENTINEL), JSON.stringify({ hasSentinel: serialized.includes(SENTINEL) }));
+      ok("47K get_package: the download link is RETAINED (scrubbed, not dropped) — the txt link path is present, api_key is not",
+        /BILLS-118hr1enr\/htm/.test(JSON.stringify(r.data)) && !/api_key/i.test(JSON.stringify(r.data)),
+        JSON.stringify(r.data.package?.download));
+    });
+    // (K3/M6) a MALFORMED nextPage that embeds the sentinel ⇒ schema_drift whose
+    // message leaks NEITHER the sentinel NOR the raw nextPage value.
+    _clearCache();
+    // A distinctive RAWLEAK marker in the malformed nextPage — if the tool echoed the
+    // raw nextPage, RAWLEAK (and the sentinel) would surface in the error. (Chosen so
+    // it cannot collide with the tool's own drift-message wording.)
+    const NEXT_BAD = `%%%RAWLEAK%%% api_key=${SENTINEL}`;
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 2, count: 5, nextPage: NEXT_BAD }) }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam));
+      const te = toToolError(error);
+      ok("47K M6 malformed nextPage ⇒ schema_drift; the error carries NEITHER the sentinel NOR the raw nextPage value (never echoes a value that may hold the real key)",
+        threw && te.kind === "schema_drift" && !JSON.stringify(te).includes(SENTINEL) && !JSON.stringify(te).includes("RAWLEAK"),
+        JSON.stringify({ kind: te.kind, msg: te.message }));
+    });
+  });
+
+  // ═══ Everything below in DEMO_KEY mode (env unset) unless noted ═══
+  await withEnvKey(undefined, async () => {
+    // ── (a) SSRF positive: the data query is on the fixed host over https, date
+    // normalized to T00:00:00Z, offsetMark/pageSize in the query, key NOT in the URL,
+    // redirect:"error", X-Api-Key sent (DEMO_KEY).
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 1, count: 1 }) }), async (calls) => {
+      await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01", pageSize: 2 }, sam);
+      const call = calls.find((c) => isGovinfoSearch(c.url));
+      const url = call ? new URL(call.url) : null;
+      ok("47a SSRF positive: data query on https://api.govinfo.gov/collections/BILLS/2024-01-01T00:00:00Z (fixed host; date-only normalized to T00:00:00Z); offsetMark='*'/pageSize=2 in query; key NOT in URL; redirect:error; X-Api-Key: DEMO_KEY",
+        !!url && url.hostname === "api.govinfo.gov" && url.protocol === "https:" && url.pathname === "/collections/BILLS/2024-01-01T00:00:00Z" && url.searchParams.get("offsetMark") === "*" && url.searchParams.get("pageSize") === "2" && !/api_key=/i.test(call.url) && call.init.redirect === "error" && call.init.headers["X-Api-Key"] === "DEMO_KEY",
+        JSON.stringify(call?.url));
+    });
+
+    // ── (b) opaque-cursor: nextPage present ⇒ hasMore:true + nextCursor=extracted
+    // offsetMark; offset:null, nextOffset:null (a numeric offset is meaningless).
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 2, count: 551, nextPage: GOVINFO_NEXT_CLEAN }) }), async () => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01", pageSize: 2 }, sam);
+      const m = buildMeta(r.meta);
+      ok("47b cursor: nextPage present ⇒ hasMore:true, nextCursor='ABC+123', offset:null, nextOffset:null (mutate hasMore from count / surface nextOffset ⇒ RED)",
+        m.pagination.hasMore === true && m.nextCursor === "ABC+123" && m.pagination.offset === null && m.pagination.nextOffset === null,
+        JSON.stringify({ p: m.pagination, nc: m.nextCursor }));
+    });
+
+    // ── (c) M3 phantom-empty livelock guard: packages:[] WITH nextPage present ⇒
+    // hasMore:false, nextCursor:null (never follow into an empty cursor loop).
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 0, count: 200, nextPage: GOVINFO_NEXT_CLEAN }) }), async () => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam);
+      const m = buildMeta(r.meta);
+      ok("47c M3 phantom-empty: packages:[] + nextPage present ⇒ hasMore:false, nextCursor:null, complete:false (count 200 proves more) — mutate to FOLLOW the phantom cursor ⇒ RED",
+        r.data.packages.length === 0 && m.pagination.hasMore === false && m.nextCursor === null && m.complete === false,
+        JSON.stringify({ p: m.pagination, nc: m.nextCursor, c: m.complete }));
+    });
+
+    // ── (d) M4 complete from hasMore+pageMark, NOT returned<total. A single first
+    // page ("*", no more) ⇒ complete:true; a mid-stream continuation (pageMark != "*")
+    // ⇒ complete:false EVEN WITH returned===count.
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 2, count: 2 }) }), async () => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01", pageSize: 2 }, sam);
+      const m = buildMeta(r.meta);
+      ok("47d M4 complete: single first page (pageMark='*', no nextPage, returned===count) ⇒ complete:true, truncated:false, hasMore:false, nextCursor:null",
+        m.complete === true && m.truncated === false && m.pagination.hasMore === false && m.nextCursor === null, JSON.stringify(m.pagination));
+    });
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 2, count: 2 }) }), async () => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01", pageSize: 2, pageMark: "MIDCURSOR" }, sam);
+      const m = buildMeta(r.meta);
+      ok("47d M4 complete: a mid-stream page (pageMark != '*') ⇒ complete:false EVEN WITH returned===count (a continuation is never 'the whole set') — mutate to derive complete from returned<total only ⇒ RED",
+        m.complete === false && r.data.packages.length === 2, JSON.stringify({ c: m.complete }));
+    });
+
+    // ── (e) totalAvailable = num(count) EXACT (never packages.length).
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 2, count: 551, nextPage: GOVINFO_NEXT_CLEAN }) }), async () => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01", pageSize: 2 }, sam);
+      const m = buildMeta(r.meta);
+      ok("47e totalAvailable === count 551 (the EXACT real total, NOT the 2 returned rows; mutate→packages.length ⇒ RED); returned:2, truncated:true",
+        m.totalAvailable === 551 && m.returned === 2 && m.truncated === true, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    });
+
+    // ── (f) genuine-empty (count:0, valid inputs) ⇒ complete:true/total:0.
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 0, count: 0 }) }), async () => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2099-01-01" }, sam);
+      const m = buildMeta(r.meta);
+      ok("47f genuine-empty (count:0, packages:[]) ⇒ complete:true, truncated:false, totalAvailable:0, returned:0, hasMore:false, nextCursor:null (a real no-match, not an outage)",
+        r.data.packages.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.pagination.hasMore === false && m.nextCursor === null, JSON.stringify(m));
+    });
+
+    // ── (g) M5 — a catalog-fetch FAILURE during collection-validation PROPAGATES; the
+    // tool THROWS and NEVER proceeds to a possibly-silent-empty data query.
+    _clearCache();
+    await withFetch((u) => (isGovinfoCatalog(u) ? mockResponse({ status: 503 }) : failClosed()()), async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam));
+      const dataFetched = calls.some((c) => isGovinfoSearch(c.url));
+      ok("47g M5 catalog-fetch-fail: the /collections validator 503 ⇒ the tool THROWS upstream_unavailable and NEVER runs the data query (mutate to bypass validation ⇒ the silent-empty trap RED)",
+        threw && toToolError(error).kind === "upstream_unavailable" && !dataFetched, JSON.stringify({ kind: toToolError(error).kind, dataFetched }));
+    });
+
+    // ── (h) ECHO-trap: an unknown-but-well-formed collection ⇒ invalid_input listing
+    // valid codes, with NO data-query fetch (catalog validation is the honesty guard).
+    _clearCache();
+    await withFetch(govinfoMock({ search: (u) => mockResponse({ status: 500 }) }), async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("govinfo_search_packages", { collection: "ZZZZZ", startDate: "2024-01-01" }, sam));
+      const te = toToolError(error);
+      const dataFetched = calls.some((c) => isGovinfoSearch(c.url));
+      ok("47h ECHO-trap: unknown-but-well-formed collection 'ZZZZZ' ⇒ invalid_input listing valid codes (BILLS…), NO data-query fetch (mutate to skip catalog validation ⇒ silent-empty ⇒ RED)",
+        threw && te.kind === "invalid_input" && !dataFetched && /BILLS/.test(te.message), JSON.stringify({ kind: te.kind, dataFetched }));
+    });
+
+    // ── (i) outage / error taxonomy on the DATA query (catalog served OK first).
+    _clearCache();
+    await withFetch(govinfoMock({ search: (u) => mockResponse({ status: 503 }) }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam));
+      ok("47i data-query 503 ⇒ throws upstream_unavailable, retryable (NOT a fake empty packages[])",
+        threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify(toToolError(error).kind));
+    });
+    _clearCache();
+    await withFetch(govinfoMock({ search: (u) => mockResponse({ status: 401 }) }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam));
+      ok("47i data-query 401 (bad/invalid key) ⇒ invalid_input (surfaced as an error, never a silent empty)",
+        threw && toToolError(error).kind === "invalid_input", JSON.stringify(toToolError(error).kind));
+    });
+    _clearCache();
+    await withFetch(govinfoMock({ search: (u) => mockResponse({ status: 429, headers: { "Retry-After": "12" } }) }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam));
+      const te = toToolError(error);
+      ok("47i data-query 429 ⇒ rate_limited, retryable, honors Retry-After:12 (the DEMO_KEY ceiling shape)",
+        threw && te.kind === "rate_limited" && te.retryable === true && te.retryAfterSeconds === 12, JSON.stringify({ kind: te.kind, ra: te.retryAfterSeconds }));
+    });
+
+    // ── (j) get_package 404 ⇒ honest found:false (never a fabricated summary).
+    _clearCache();
+    await withFetch(govinfoMock({ pkg: (u) => mockResponse({ status: 404 }) }), async () => {
+      const r = await runTool("govinfo_get_package", { packageId: "BILLS-999notreal99" }, sam);
+      const m = buildMeta(r.meta);
+      ok("47j get_package 404 (nonexistent id) ⇒ found:false + packageId echoed + complete:true/totalAvailable:0 (never a fabricated summary)",
+        r.data.found === false && r.data.packageId === "BILLS-999notreal99" && m.complete === true && m.totalAvailable === 0, JSON.stringify(r.data));
+    });
+
+    // ── (k) SSRF grammar (bad collection/date/packageId ⇒ invalid_input, 0 fetch).
+    // Via DIRECT fn calls (bypass Zod) to exercise the RUNTIME grammar guard.
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const badCollLower = await expectThrow(() => govinfoSearchPackages({ collection: "cfr", startDate: "2024-01-01" }));
+      ok("47k SSRF grammar (RUNTIME): lowercase collection 'cfr' ⇒ invalid_input, 0 fetch (guard runs BEFORE the catalog fetch)",
+        badCollLower.threw && toToolError(badCollLower.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ added: calls.length - before }));
+      const badCollPath = await expectThrow(() => govinfoSearchPackages({ collection: "BAD/../X", startDate: "2024-01-01" }));
+      ok("47k SSRF grammar: collection 'BAD/../X' (slash/dot) ⇒ invalid_input, 0 fetch (no path injection)",
+        badCollPath.threw && toToolError(badCollPath.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ added: calls.length - before }));
+      const badDate = await expectThrow(() => govinfoSearchPackages({ collection: "BILLS", startDate: "not-a-date" }));
+      ok("47k SSRF grammar: non-ISO startDate ⇒ invalid_input, 0 fetch",
+        badDate.threw && toToolError(badDate.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ added: calls.length - before }));
+      const badMark = await expectThrow(() => govinfoSearchPackages({ collection: "BILLS", startDate: "2024-01-01", pageMark: "x".repeat(5000) }));
+      ok("47k SSRF grammar: over-length pageMark (>4096) ⇒ invalid_input, 0 fetch",
+        badMark.threw && toToolError(badMark.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ added: calls.length - before }));
+      const badPkg = await expectThrow(() => govinfoGetPackage({ packageId: "bad/../id" }));
+      ok("47k SSRF grammar: packageId 'bad/../id' (slash) ⇒ invalid_input, 0 fetch (no path injection)",
+        badPkg.threw && toToolError(badPkg.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ added: calls.length - before }));
+    });
+
+    // ── (l) M6 valid-nextPage-without-offsetMark ⇒ graceful no-more (never the raw
+    // URL); m10 literal-"null" offsetMark ⇒ str() nulls it ⇒ nextCursor:null.
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 2, count: 5, nextPage: "https://api.govinfo.gov/collections/BILLS/2024-01-01T00:00:00Z?pageSize=2" }) }), async () => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01", pageSize: 2, pageMark: "MID" }, sam);
+      const m = buildMeta(r.meta);
+      ok("47l M6: a valid nextPage LACKING offsetMark ⇒ graceful no-more (hasMore:false, nextCursor:null); the raw nextPage (pageSize=2) never surfaces",
+        m.pagination.hasMore === false && m.nextCursor === null && !JSON.stringify(m).includes("pageSize=2"), JSON.stringify({ p: m.pagination, nc: m.nextCursor }));
+    });
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 2, count: 5, nextPage: "https://api.govinfo.gov/collections/BILLS/2024-01-01T00:00:00Z?offsetMark=null&pageSize=2" }) }), async () => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01", pageSize: 2, pageMark: "MID" }, sam);
+      const m = buildMeta(r.meta);
+      ok("47l m10: a nextPage whose offsetMark is the literal 'null' ⇒ str() nulls it ⇒ nextCursor:null, hasMore:false (never the string 'null' as a cursor)",
+        m.nextCursor === null && m.pagination.hasMore === false, JSON.stringify({ nc: m.nextCursor }));
+    });
+
+    // ── (m) overlap note: CFR/ECFR/FR ⇒ the GPO-authoritative routing note; BILLS ⇒ none.
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 1, count: 1 }) }), async () => {
+      const rCfr = await runTool("govinfo_search_packages", { collection: "CFR", startDate: "2024-01-01" }, sam);
+      const mCfr = buildMeta(rCfr.meta);
+      ok("47m overlap note: collection CFR ⇒ the GPO-authoritative-view note present, routing point lookups to ecfr_*/fed_register_* (mutate to always/never emit ⇒ RED)",
+        mCfr.notes.some((n) => /GPO-authoritative/.test(n) && /ecfr_/.test(n) && /fed_register_/.test(n)), JSON.stringify(mCfr.notes));
+    });
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 1, count: 1 }) }), async () => {
+      const rBills = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam);
+      const mBills = buildMeta(rBills.meta);
+      ok("47m overlap note: collection BILLS ⇒ NO GPO-authoritative overlap note (it is not a CFR/FR overlap)",
+        !mBills.notes.some((n) => /GPO-authoritative/.test(n)), JSON.stringify(mBills.notes));
+    });
+
+    // ── (n) DEMO_KEY disclosure + keylessMode:false + lastModified-vs-dateIssued note.
+    _clearCache();
+    await withFetch(govinfoMock({ search: govinfoSearchBody({ n: 1, count: 1 }) }), async () => {
+      const r = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam);
+      const m = buildMeta(r.meta);
+      ok("47n DEMO_KEY mode: keylessMode:false, source names (DEMO_KEY), DEMO_KEY disclosure + signup URL present; a lastModified-vs-dateIssued note is present (m5/m9)",
+        m.keylessMode === false && /\(DEMO_KEY\)/.test(m.source) && m.notes.some((x) => /DEMO_KEY/.test(x) && /api\.data\.gov\/signup/.test(x)) && m.notes.some((x) => /lastModified/.test(x) && /dateIssued/.test(x)),
+        JSON.stringify({ keyless: m.keylessMode, source: m.source }));
+    });
+
+    // ── (o) list_collections: maps the catalog, complete:true, totalAvailable = count;
+    // a non-array collections ⇒ schema_drift (never a fake empty).
+    _clearCache();
+    await withFetch(govinfoMock({}), async () => {
+      const r = await runTool("govinfo_list_collections", {}, sam);
+      const m = buildMeta(r.meta);
+      ok("47o list_collections ⇒ maps catalog (4 rows: BILLS/CFR/PLAW/CREC), complete:true, totalAvailable=4, granuleCount preserved (CFR 900000), keylessMode:false",
+        r.data.collections.length === 4 && r.data.collections[0].collectionCode === "BILLS" && r.data.collections[1].granuleCount === 900000 && m.complete === true && m.totalAvailable === 4 && m.keylessMode === false, JSON.stringify({ n: r.data.collections.length, ta: m.totalAvailable }));
+    });
+    _clearCache();
+    await withFetch((u) => (isGovinfoCatalog(u) ? mockResponse({ status: 200, json: { collections: "nope" } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("govinfo_list_collections", {}, sam));
+      ok("47o list_collections drift: collections non-array ⇒ schema_drift (container guard, never a fake empty)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+
+    // ── (p) container-guarded drift on the DATA query (M2/M3).
+    _clearCache();
+    await withFetch(govinfoMock({ search: { count: 5, packages: "nope" } }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam));
+      ok("47p M2 drift: search packages non-array ⇒ schema_drift (never []; mutate to read as empty ⇒ RED)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+    _clearCache();
+    await withFetch(govinfoMock({ search: { count: "551", packages: [] } }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam));
+      ok("47p M3 drift: search count a STRING '551' ⇒ schema_drift (typeof-guard BEFORE num; drop it ⇒ RED)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+
+    // ── (q) datagov byte-identity: both consumers now import the SAME datagovKey seam.
+    // Prove the shared DEMO_KEY note text is IDENTICAL across a datagov tool and a
+    // govinfo tool (the single audited home — a note regression fails both at once).
+    _clearCache();
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 1, total: 1 }) }) : govinfoMock({ search: govinfoSearchBody({ n: 1, count: 1 }) })(u)), async () => {
+      const rd = await runTool("regulations_search_documents", { searchTerm: "x" }, sam);
+      const rg = await runTool("govinfo_search_packages", { collection: "BILLS", startDate: "2024-01-01" }, sam);
+      const nd = buildMeta(rd.meta).notes.find((n) => /DEMO_KEY/.test(n) && /signup/.test(n));
+      const ng = buildMeta(rg.meta).notes.find((n) => /DEMO_KEY/.test(n) && /signup/.test(n));
+      ok("47q datagov byte-identity: the shared datagovKey seam yields the IDENTICAL DEMO_KEY disclosure note for a datagov tool and a govinfo tool (single audited home)",
+        nd !== undefined && nd === ng, JSON.stringify({ nd, ng }));
+    });
+  });
+
+  // ── (r) num coercion — null-never-0; govinfo.num is the SHARED coerce.num choke point.
+  eq("47r num('551') ⇒ 551", govinfoNum("551"), 551);
+  eq("47r num('null') ⇒ null (data-absence honesty — never 0)", govinfoNum("null"), null);
+  eq("47r num('') ⇒ null (Number('') is 0 — must be caught)", govinfoNum(""), null);
+  ok("47r govinfo.num === coerce.num (one shared audited impl — a num regression fails §40e/§44n/§45j/§47r together)", govinfoNum === coerceNum, "govinfo.num diverged from coerce.num");
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -7540,6 +7896,7 @@ async function main() {
   await testCkanHonesty();
   await testDatagovHonesty();
   await testEchoHonesty();
+  await testGovinfoHonesty();
 
   // Prove the harness bites.
   await selfCheck();
