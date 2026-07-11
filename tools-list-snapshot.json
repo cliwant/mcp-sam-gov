@@ -1,5 +1,81 @@
 [
   {
+    "name": "ckan_discover_datasets",
+    "description": "Find CKAN datastore resource ids by keyword via package_search (keyless). Input `host` (allowlisted enum), `q` (e.g. 'procurement', 'checkbook'), `limit` (≤100, def 20). Returns per-resource rows [{ resourceId, name, datasetTitle, format, datastoreActive }] + totalAvailable = the matching DATASET count. Feed a datastoreActive:true result's `resourceId` to ckan_query (a datastoreActive:false resource is a raw file blob NOT in the datastore, not queryable).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "enum": [
+            "data.ca.gov",
+            "data.virginia.gov",
+            "data.boston.gov"
+          ],
+          "description": "Which allowlisted CKAN portal to query (curated .gov hosts — the SSRF host allowlist, no free host): data.ca.gov (CA), data.virginia.gov (VA — eVA), data.boston.gov (City of Boston Checkbook)."
+        },
+        "q": {
+          "type": "string",
+          "description": "Keyword(s) to find datasets, e.g. 'procurement', 'checkbook', 'vendor'."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max datasets (packages) to return, 1..100, default 20."
+        }
+      },
+      "required": [
+        "host",
+        "q"
+      ]
+    }
+  },
+  {
+    "name": "ckan_query",
+    "description": "Query rows from an allowlisted CKAN datastore resource (keyless; the FIRST source on the R2 DataSource port — state/city spend/checkbook/procurement/vendor tables on the identical CKAN Action API). Input `host` (curated allowlist enum — the SSRF host guard: data.ca.gov, data.virginia.gov, data.boston.gov), `resourceId` (36-char lowercase UUID, from ckan_discover_datasets), optional `q` (full-text), `filters` (constrained object {field:value} we JSON.stringify), `sort`, `limit` (≤1000, def 100), `offset`. HONESTY: CKAN's envelope carries a real result.total — the DEFAULT is an EXACT total (exact totalAvailable + hasMore); the rare estimated total (total_was_estimated:true) is disclosed via totalIsEstimated + a note and does NOT drive pagination (it can be above OR below the truth). Genuine-empty ⇒ complete:true/total:0; an outage/404/409 or success:false THROWS (never a fake empty). Values are typed per result.fields[].type.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "enum": [
+            "data.ca.gov",
+            "data.virginia.gov",
+            "data.boston.gov"
+          ],
+          "description": "Which allowlisted CKAN portal to query (curated .gov hosts — the SSRF host allowlist, no free host): data.ca.gov (CA), data.virginia.gov (VA — eVA), data.boston.gov (City of Boston Checkbook)."
+        },
+        "resourceId": {
+          "type": "string",
+          "description": "The datastore resource_id, a 36-char lowercase UUID e.g. 'bb82edc5-9c78-44e2-8947-68ece26197c5' (from ckan_discover_datasets, a datastoreActive:true resource)."
+        },
+        "q": {
+          "type": "string",
+          "description": "Optional full-text search across the record (CKAN `q`)."
+        },
+        "filters": {
+          "type": "string",
+          "description": "Optional structured field filters, e.g. {\"Fiscal Year\":\"2013-2014\"}. A constrained object (string/number/array values only) that we JSON.stringify; a bad field ⇒ upstream HTTP 409 ⇒ invalid_input (surfaced, never silent)."
+        },
+        "sort": {
+          "type": "string",
+          "description": "Optional sort, e.g. '_id asc' or 'amount desc'. A bad field ⇒ 409 ⇒ invalid_input."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page, 1..1000, default 100."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset for pagination, default 0."
+        }
+      },
+      "required": [
+        "host",
+        "resourceId"
+      ]
+    }
+  },
+  {
     "name": "ecfr_list_titles",
     "description": "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
     "inputSchema": {

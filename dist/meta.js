@@ -85,6 +85,11 @@ export function buildMeta(partial = {}) {
     // the tool provides it, so existing tools' `_meta` output stays byte-identical.
     if (partial.totalIsLowerBound !== undefined)
         meta.totalIsLowerBound = partial.totalIsLowerBound;
+    // Conditional passthrough (identical shape to totalIsLowerBound above): only
+    // surfaced when the tool provides it (CKAN's estimated-total path), so every
+    // existing tool's `_meta` output stays byte-identical. NO new derivation logic.
+    if (partial.totalIsEstimated !== undefined)
+        meta.totalIsEstimated = partial.totalIsEstimated;
     return meta;
 }
 /**

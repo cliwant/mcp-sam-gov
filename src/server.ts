@@ -44,6 +44,7 @@ import * as sba from "./sba.js";
 import * as treasury from "./treasury.js";
 import * as edgar from "./edgar.js";
 import * as socrata from "./socrata.js";
+import * as ckan from "./ckan.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
@@ -1109,6 +1110,79 @@ const SocrataDiscoverDatasetsInput = z.object({
     .describe("Max datasets to return, 1..100, default 20."),
 });
 
+// ─── CKAN datastore_search (keyless SLED) — input schemas ───────
+// ADR-0006. Second SLED source; FIRST on the R2 DataSource port. `host` is a
+// curated allowlist ENUM (the SSRF core — no free host); `resourceId` is a strict
+// 36-char lowercase UUID with .length(36) (m1 — the regex `$` already blocks a
+// trailing "\n"; length is belt-and-suspenders; NO .trim(), NO `i` flag). `filters`
+// is a CONSTRAINED object we JSON.stringify (Q3 — never a raw string). A bad
+// filter field / sort ⇒ upstream 409 ⇒ invalid_input (surfaced, never silent).
+const CkanHostEnum = z
+  .enum(ckan.CKAN_HOSTS)
+  .describe(
+    "Which allowlisted CKAN portal to query (curated .gov hosts — the SSRF host allowlist, no free host): data.ca.gov (CA), data.virginia.gov (VA — eVA), data.boston.gov (City of Boston Checkbook).",
+  );
+
+const CkanQueryInput = z.object({
+  host: CkanHostEnum,
+  resourceId: z
+    // m1 — a strict 36-char lowercase UUID. NO .trim() (Zod trims BEFORE
+    // .length, which would strip a trailing "\n" to a valid id and defeat the
+    // guard); the regex `$` alone rejects a trailing newline in JS, and
+    // .length(36) is belt-and-suspenders. Lowercase-only ⇒ no `i` flag.
+    .string()
+    .length(36)
+    .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    .describe(
+      "The datastore resource_id, a 36-char lowercase UUID e.g. 'bb82edc5-9c78-44e2-8947-68ece26197c5' (from ckan_discover_datasets, a datastoreActive:true resource).",
+    ),
+  q: z
+    .string()
+    .optional()
+    .describe("Optional full-text search across the record (CKAN `q`)."),
+  filters: z
+    .record(
+      z.string(),
+      z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]),
+    )
+    .optional()
+    .describe(
+      "Optional structured field filters, e.g. {\"Fiscal Year\":\"2013-2014\"}. A constrained object (string/number/array values only) that we JSON.stringify; a bad field ⇒ upstream HTTP 409 ⇒ invalid_input (surfaced, never silent).",
+    ),
+  sort: z
+    .string()
+    .optional()
+    .describe("Optional sort, e.g. '_id asc' or 'amount desc'. A bad field ⇒ 409 ⇒ invalid_input."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(1000)
+    .default(100)
+    .describe("Rows per page, 1..1000, default 100."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe("0-based row offset for pagination, default 0."),
+});
+
+const CkanDiscoverDatasetsInput = z.object({
+  host: CkanHostEnum,
+  q: z
+    .string()
+    .min(1)
+    .describe("Keyword(s) to find datasets, e.g. 'procurement', 'checkbook', 'vendor'."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(20)
+    .describe("Max datasets (packages) to return, 1..100, default 20."),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -2098,6 +2172,21 @@ const TOOLS: ToolDef[] = [
       "Find Socrata dataset 4x4 ids by keyword via the Socrata catalog (keyless, api.us.socrata.com). Input `q` (e.g. 'procurement', 'vendor payments'), optional `domain` (scope to one allowlisted portal; omit to search the whole allowlist), `limit` (≤100, def 20). Returns [{ id, name, description, domain, updatedAt, link }] + totalAvailable = the catalog resultSetSize. Feed a result's `id` to socrata_query as `datasetId`. NOTE: the federated catalog does not index every allowlisted host (e.g. USAC E-rate) — those stay queryable via socrata_query with a known 4x4.",
     inputSchema: SocrataDiscoverDatasetsInput,
     handler: (input) => socrata.discoverDatasets(input),
+  }),
+  // ━━━ CKAN datastore_search — keyless SLED open data (2) ━━━ ADR-0006
+  defineTool({
+    name: "ckan_query",
+    description:
+      "Query rows from an allowlisted CKAN datastore resource (keyless; the FIRST source on the R2 DataSource port — state/city spend/checkbook/procurement/vendor tables on the identical CKAN Action API). Input `host` (curated allowlist enum — the SSRF host guard: data.ca.gov, data.virginia.gov, data.boston.gov), `resourceId` (36-char lowercase UUID, from ckan_discover_datasets), optional `q` (full-text), `filters` (constrained object {field:value} we JSON.stringify), `sort`, `limit` (≤1000, def 100), `offset`. HONESTY: CKAN's envelope carries a real result.total — the DEFAULT is an EXACT total (exact totalAvailable + hasMore); the rare estimated total (total_was_estimated:true) is disclosed via totalIsEstimated + a note and does NOT drive pagination (it can be above OR below the truth). Genuine-empty ⇒ complete:true/total:0; an outage/404/409 or success:false THROWS (never a fake empty). Values are typed per result.fields[].type.",
+    inputSchema: CkanQueryInput,
+    handler: (input) => ckan.query(input),
+  }),
+  defineTool({
+    name: "ckan_discover_datasets",
+    description:
+      "Find CKAN datastore resource ids by keyword via package_search (keyless). Input `host` (allowlisted enum), `q` (e.g. 'procurement', 'checkbook'), `limit` (≤100, def 20). Returns per-resource rows [{ resourceId, name, datasetTitle, format, datastoreActive }] + totalAvailable = the matching DATASET count. Feed a datastoreActive:true result's `resourceId` to ckan_query (a datastoreActive:false resource is a raw file blob NOT in the datastore, not queryable).",
+    inputSchema: CkanDiscoverDatasetsInput,
+    handler: (input) => ckan.discoverDatasets(input),
   }),
 ];
 

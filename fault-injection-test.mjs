@@ -60,6 +60,7 @@ import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
 import { padCik as edgarPadCik } from "./dist/edgar.js";
 import { num as socrataNum } from "./dist/socrata.js";
+import { num as ckanNum } from "./dist/ckan.js";
 import { getJson, driftError } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -6584,6 +6585,306 @@ async function testDataSourcePortParity() {
   }
 }
 
+// §44: CKAN datastore_search source (ADR-0006) — the FIRST source on the R2 port.
+// SSRF (allowlist enum, 36-char lowercase-UUID regex + runtime M1 recheck,
+// redirect:"error") + honesty (EXACT vs ESTIMATE total, the B1 anti-livelock
+// guard, totalIsEstimated flag, success:false taxonomy, drift guards). All
+// OFFLINE (mock fetch), deterministic, NON-VACUOUS: every honesty assertion pins a
+// value and names the mutation that turns it RED. Driven through the REAL runTool.
+//   (a) SSRF: non-allowlisted host ⇒ invalid_input, 0 fetch calls (load-bearing).
+//   (b) M1: bad resourceId (35/37 char, uppercase, "../", trailing "\n") ⇒ invalid_input, no fetch.
+//   (c) URL construction: valid host+uuid fetches on the right host/path/https.
+//   (d) B1: every ckan fetch (query + discover) sets init.redirect==="error".
+//   (e) 404 ⇒ not_found; 409 ⇒ invalid_input; 429 ⇒ rate_limited retryable.
+//   (f) outage 503 ⇒ throws upstream_unavailable, never a fake empty.
+//   (g) genuine-empty (records:[], total:0) ⇒ complete:true/total:0.
+//   (h) EXACT total (total_was_estimated:false): totalAvailable=result.total,
+//       hasMore=offset+returned<total (mutate total→page-length ⇒ RED).
+//   (i) ESTIMATE sub-cases (B1): 9a full page ⇒ hasMore:true; 9b partial ⇒
+//       complete:true; 9c empty trailing page (est>offset) ⇒ complete:true (the
+//       anti-livelock guard — mutate the null-total fix back to the estimate ⇒ RED).
+//   (j) totalIsEstimated:true present when estimated / ABSENT when exact; existing
+//       tools' _meta never carries it (socrata check).
+//   (k) 200+success:false: "Not Found Error"⇒not_found, "Validation Error"⇒invalid_input (m3).
+//   (l) result.records non-array (string/null) ⇒ schema_drift, never [] (m5).
+//   (m) typeof result.total !== number ⇒ schema_drift (m6).
+//   (n) num("null")/"" ⇒ null; ckan.num === coerce.num (shared choke point).
+//   (o) discover: package_search maps resources + totalAvailable=result.count;
+//       a non-number count ⇒ schema_drift on BOTH calls (drift inside memoize, never cached).
+const isCkanDatastore = (u) => /\/api\/3\/action\/datastore_search\?/.test(u);
+const isCkanPackageSearch = (u) => /\/api\/3\/action\/package_search\?/.test(u);
+const CA_HOST = "data.ca.gov";
+const CA_UUID = "bb82edc5-9c78-44e2-8947-68ece26197c5";
+// Build a CKAN datastore_search envelope. `estimated` toggles total_was_estimated.
+const ckanDatastoreBody = ({ records, total, estimated = false, fields = [{ id: "_id", type: "int" }] }) => ({
+  success: true,
+  result: { resource_id: CA_UUID, records, total, total_was_estimated: estimated, fields },
+});
+const ckanDatastoreMock = (spec) => (u) =>
+  isCkanDatastore(u) ? mockResponse({ status: 200, json: ckanDatastoreBody(spec) }) : failClosed()();
+
+async function testCkanHonesty() {
+  section("44. CKAN datastore_search (ADR-0006, R2 port) — SSRF (allowlist/UUID/redirect) + EXACT/ESTIMATE total honesty + B1 anti-livelock (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  // (a) SSRF load-bearing: a non-allowlisted host ⇒ invalid_input BEFORE any fetch.
+  await withFetch(failClosed(), async (calls) => {
+    for (const host of ["evil.com", "data.ca.gov.evil.com"]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() =>
+        runTool("ckan_query", { host, resourceId: CA_UUID }, sam));
+      ok(`44a non-allowlisted host ${JSON.stringify(host)} ⇒ invalid_input, 0 fetch calls (SSRF host allowlist — load-bearing)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before,
+        JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (b) M1 — bad resourceId ⇒ invalid_input, no fetch. Wrong length (35/37),
+  // uppercase (no `i` flag), path-traversal, and a trailing "\n" the regex `$`
+  // must reject in JS. The Zod schema AND the fetch-fn runtime recheck both gate.
+  await withFetch(failClosed(), async (calls) => {
+    for (const resourceId of [
+      "bb82edc5-9c78-44e2-8947-68ece26197c", // 35 chars
+      "bb82edc5-9c78-44e2-8947-68ece26197c5x", // 37 chars
+      "BB82EDC5-9C78-44E2-8947-68ECE26197C5", // uppercase
+      "../etc/passwd",
+      "bb82edc5-9c78-44e2-8947-68ece26197c5\n", // trailing newline
+    ]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() =>
+        runTool("ckan_query", { host: CA_HOST, resourceId }, sam));
+      ok(`44b bad resourceId ${JSON.stringify(resourceId)} ⇒ invalid_input, no fetch (M1: length(36)+lowercase UUID, `+"`$`"+` rejects trailing \\n)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before,
+        JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (c) URL construction correctness (positive control): a VALID host+uuid DOES
+  // fetch, on the right host/path/scheme, with resource_id in the query (not path).
+  await withFetch(ckanDatastoreMock({ records: [{ _id: 1 }], total: 1 }), async (calls) => {
+    await runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam);
+    const call = calls.find((c) => isCkanDatastore(c.url));
+    const url = call ? new URL(call.url) : null;
+    ok("44c row fetch on https://data.ca.gov/api/3/action/datastore_search; resource_id is a query param (NOT the path); a builder mutation ⇒ RED",
+      !!url && url.hostname === CA_HOST && url.pathname === "/api/3/action/datastore_search" && url.protocol === "https:" && url.searchParams.get("resource_id") === CA_UUID,
+      JSON.stringify(call?.url));
+  });
+
+  // (d) B1 — every ckan fetch (query + discover) sets init.redirect==="error".
+  await withFetch(ckanDatastoreMock({ records: [{ _id: 1 }], total: 1 }), async (calls) => {
+    await runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam);
+    ok("44d B1: the ckan datastore_search fetch has init.redirect==='error' (drop it ⇒ RED)",
+      calls.length >= 1 && calls.every((c) => c.init && c.init.redirect === "error"),
+      JSON.stringify(calls.map((c) => c.init?.redirect)));
+    ok("44d keyless: the ckan fetch init has NO 'headers' key (datastore is anonymous — byte-clean init)",
+      calls.every((c) => !("headers" in c.init)), JSON.stringify(Object.keys(calls[0]?.init ?? {})));
+  });
+  await withFetch((u) => (isCkanPackageSearch(u) ? mockResponse({ status: 200, json: { success: true, result: { count: 0, results: [] } } }) : failClosed()()), async (calls) => {
+    await runTool("ckan_discover_datasets", { host: CA_HOST, q: "44d-redirect-discover-unique" }, sam);
+    ok("44d B1: the package_search (discover) fetch also has init.redirect==='error' (drop it ⇒ RED)",
+      calls.length === 1 && calls[0].init.redirect === "error", JSON.stringify(calls[0]?.init?.redirect));
+  });
+
+  // (e) 404 ⇒ not_found; 409 ⇒ invalid_input; 429 ⇒ rate_limited retryable.
+  await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("ckan_query", { host: CA_HOST, resourceId: "00000000-0000-0000-0000-000000000000" }, sam));
+    ok("44e HTTP 404 (nonexistent resource) ⇒ not_found (not fabricated records)",
+      threw && toToolError(error).kind === "not_found", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 409, json: { success: false, error: { __type: "Validation Error" } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID, sort: "no_such_field" }, sam));
+    ok("44e HTTP 409 (bad sort/filter) ⇒ invalid_input surfaced (never a silent empty)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 429, headers: { "Retry-After": "30" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam));
+    ok("44e HTTP 429 ⇒ rate_limited, retryable (honors Retry-After)",
+      threw && toToolError(error).kind === "rate_limited" && toToolError(error).retryable === true,
+      JSON.stringify(toToolError(error).kind));
+  });
+
+  // (f) outage 503 ⇒ throws upstream_unavailable, never a fake [].
+  await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam));
+    ok("44f 503 ⇒ throws upstream_unavailable (NOT a fake empty records[])",
+      threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true,
+      JSON.stringify(toToolError(error).kind));
+  });
+
+  // (g) genuine-empty: records [] + total 0 ⇒ honest complete:true / totalAvailable:0.
+  await withFetch(ckanDatastoreMock({ records: [], total: 0 }), async () => {
+    const r = await runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID, q: "zzznomatch" }, sam);
+    const m = buildMeta(r.meta);
+    ok("44g genuine-empty [] + total 0 ⇒ honest complete:true, truncated:false, totalAvailable:0, returned:0 (a real no-match)",
+      r.data.records.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.returned === 0,
+      JSON.stringify(m));
+    ok("44g exact path carries NO totalIsEstimated flag", m.totalIsEstimated === undefined, JSON.stringify(m.totalIsEstimated));
+  });
+
+  // (h) EXACT total: total_was_estimated:false, total 344504, returned 1 ⇒
+  // totalAvailable === 344504 (NOT records.length) + hasMore=offset+returned<total.
+  await withFetch(ckanDatastoreMock({ records: [{ _id: 1 }], total: 344504, estimated: false }), async () => {
+    const r = await runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID, limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("44h EXACT total === result.total 344504 (NOT records.length 1 — mutate totalAvailable→records.length ⇒ RED); returned 1 ⇒ hasMore:true, truncated:true, complete:false, nextOffset:1",
+      m.totalAvailable === 344504 && m.returned === 1 && m.pagination.hasMore === true && m.truncated === true && m.complete === false && m.pagination.nextOffset === 1,
+      JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
+    ok("44h EXACT path carries NO totalIsEstimated flag (mutate to always-set ⇒ RED)", m.totalIsEstimated === undefined, JSON.stringify(m.totalIsEstimated));
+  });
+  // EXACT total, last page (offset+returned === total): hasMore:false /
+  // nextOffset:null (no more pages) — but complete:false/truncated:true because
+  // THIS response (2 of 100 records) is not the whole set. hasMore and complete
+  // are distinct axes; both here are honest.
+  await withFetch(ckanDatastoreMock({ records: [{ _id: 99 }, { _id: 100 }], total: 100, estimated: false }), async () => {
+    const r = await runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID, limit: 2, offset: 98 }, sam);
+    const m = buildMeta(r.meta);
+    ok("44h EXACT total, last page (offset 98 + returned 2 === total 100) ⇒ hasMore:false, nextOffset:null (no more pages; mutate hasMore to offset+returned<=total ⇒ RED)",
+      m.totalAvailable === 100 && m.pagination.hasMore === false && m.pagination.nextOffset === null,
+      JSON.stringify(m.pagination));
+    ok("44h EXACT total, last page: THIS 2-of-100 response is honestly complete:false/truncated:true (a page is not the whole set; hasMore≠complete)",
+      m.complete === false && m.truncated === true, JSON.stringify(m));
+  });
+  // EXACT total, a FULL single page (returned === total) ⇒ complete:true.
+  await withFetch(ckanDatastoreMock({ records: [{ _id: 1 }, { _id: 2 }], total: 2, estimated: false }), async () => {
+    const r = await runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID, limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("44h EXACT total, full single page (returned 2 === total 2) ⇒ totalAvailable:2, hasMore:false, complete:true, truncated:false, nextOffset:null (the whole set in one response)",
+      m.totalAvailable === 2 && m.pagination.hasMore === false && m.complete === true && m.truncated === false && m.pagination.nextOffset === null,
+      JSON.stringify(m));
+  });
+
+  // (i) ESTIMATE sub-cases — the B1 anti-livelock fix. In ALL, totalAvailable is
+  // WITHHELD (null) so the estimate never drives pagination; hasMore is by page-
+  // fullness; totalIsEstimated:true + an estimate note discloses the value.
+  // (9a) full page (returned === limit) + estimated ⇒ hasMore:true.
+  const rows5 = Array.from({ length: 5 }, (_, i) => ({ _id: i }));
+  await withFetch(ckanDatastoreMock({ records: rows5, total: 345285, estimated: true }), async () => {
+    const r = await runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID, limit: 5 }, sam);
+    const m = buildMeta(r.meta);
+    ok("44i-9a ESTIMATE + full page (returned 5 === limit 5) ⇒ totalAvailable:null, hasMore:true, truncated:true, totalIsEstimated:true, note carries ~345285 (paginate by page-fullness, NOT the estimate)",
+      m.totalAvailable === null && m.pagination.hasMore === true && m.truncated === true && m.totalIsEstimated === true && m.notes.some((n) => /ESTIMATE/i.test(n) && /345285/.test(n)),
+      JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore, est: m.totalIsEstimated, notes: m.notes }));
+  });
+  // (9b) partial page (returned < limit) + estimated ⇒ hasMore:false/complete:true.
+  await withFetch(ckanDatastoreMock({ records: rows5, total: 345285, estimated: true }), async () => {
+    const r = await runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID, limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("44i-9b ESTIMATE + partial page (returned 5 < limit 100) ⇒ totalAvailable:null, hasMore:false, complete:true, totalIsEstimated:true (a short page means exhausted)",
+      m.totalAvailable === null && m.pagination.hasMore === false && m.complete === true && m.truncated === false && m.totalIsEstimated === true,
+      JSON.stringify(m));
+  });
+  // (9c) THE anti-livelock guard: empty trailing page + estimated, est(345285) >
+  // offset(345000) ⇒ hasMore:false/complete:true. If the estimate drove pagination
+  // (offset+0 < 345285 ⇒ hasMore:true), an agent would loop FOREVER. Mutating the
+  // B1 fix (pass the estimate instead of null) ⇒ this goes RED.
+  await withFetch(ckanDatastoreMock({ records: [], total: 345285, estimated: true }), async () => {
+    const r = await runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID, limit: 100, offset: 345000 }, sam);
+    const m = buildMeta(r.meta);
+    ok("44i-9c ANTI-LIVELOCK: ESTIMATE + empty trailing page (returned 0, est 345285 > offset 345000) ⇒ totalAvailable:null, hasMore:false, complete:true, nextOffset:null (mutate B1 null-fix back to the estimate ⇒ RED = infinite pagination)",
+      m.totalAvailable === null && m.pagination.hasMore === false && m.complete === true && m.pagination.nextOffset === null && m.totalIsEstimated === true,
+      JSON.stringify(m.pagination));
+  });
+
+  // (j) existing tools' _meta NEVER carries totalIsEstimated (the conditional
+  // passthrough only fires for CKAN's estimated path).
+  await withFetch(socrataRowsAndCount([{ x: "1" }], 5), async () => {
+    const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam);
+    const m = buildMeta(r.meta);
+    ok("44j socrata_query _meta has NO totalIsEstimated key (the meta.ts passthrough is CKAN-only — existing tools byte-identical)",
+      m.totalIsEstimated === undefined, JSON.stringify(m.totalIsEstimated));
+  });
+
+  // (k) m3 — 200 + success:false taxonomy (defensive; modern hosts use real
+  // 404/409). "Not Found Error" ⇒ not_found; "Validation Error" ⇒ invalid_input.
+  await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 200, json: { success: false, error: { __type: "Not Found Error", message: "Resource not found" } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam));
+    ok("44k m3: HTTP 200 + success:false + __type 'Not Found Error' ⇒ not_found THROW (never a fake empty; blanket driftError ⇒ RED)",
+      threw && toToolError(error).kind === "not_found", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 200, json: { success: false, error: { __type: "Validation Error", message: "bad filter" } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam));
+    ok("44k m3: HTTP 200 + success:false + __type 'Validation Error' ⇒ invalid_input THROW",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 200, json: { success: false, error: { __type: "Weird Unknown Error" } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam));
+    ok("44k m3: HTTP 200 + success:false + an UNRECOGNIZED __type ⇒ schema_drift (not misclassified as not_found)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (l) m5 — result.records a non-array (string/null) ⇒ schema_drift, never [].
+  for (const bad of ["not-an-array", null, 42]) {
+    await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 200, json: { success: true, result: { records: bad, total: 5 } } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() =>
+        runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam));
+      ok(`44l m5: result.records = ${JSON.stringify(bad)} (non-array) ⇒ schema_drift throw (never treated as []; mutate to read as empty ⇒ RED)`,
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+  }
+  // result missing entirely ⇒ schema_drift too.
+  await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 200, json: { success: true } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam));
+    ok("44l m5: result missing entirely ⇒ schema_drift throw (never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (m) m6 — a PRESENT non-number result.total ⇒ schema_drift (num() alone would
+  // read it as absent → wrong hedge, so the typeof-check runs BEFORE num()).
+  await withFetch((u) => (isCkanDatastore(u) ? mockResponse({ status: 200, json: { success: true, result: { records: [{ _id: 1 }], total: "344504" } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() =>
+      runTool("ckan_query", { host: CA_HOST, resourceId: CA_UUID }, sam));
+    ok("44m m6: result.total = '344504' (string, not number) ⇒ schema_drift (drop the typeof check ⇒ RED — num() would misread it as absent)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (n) num coercion — null-never-0; ckan.num is the SHARED coerce.num choke point.
+  eq("44n num('754324700') ⇒ 754324700", ckanNum("754324700"), 754324700);
+  eq("44n num('null') ⇒ null (data-absence honesty — never 0)", ckanNum("null"), null);
+  eq("44n num('') ⇒ null (Number('') is 0 — must be caught)", ckanNum(""), null);
+  eq("44n num(13) ⇒ 13", ckanNum(13), 13);
+  ok("44n ckan.num === coerce.num (one shared audited impl — a num regression fails §40e/§42m/§44n together)", ckanNum === coerceNum, "ckan.num diverged from coerce.num");
+
+  // (o) discover: package_search maps per-resource rows + totalAvailable=result.count.
+  const pkgBody = {
+    success: true,
+    result: {
+      count: 42,
+      results: [
+        { title: "Statewide Purchase Orders", resources: [
+          { id: CA_UUID, name: "PO CSV", format: "CSV", datastore_active: true },
+          { id: "11111111-2222-3333-4444-555555555555", name: "PO PDF", format: "PDF", datastore_active: false },
+        ] },
+      ],
+    },
+  };
+  await withFetch((u) => (isCkanPackageSearch(u) ? mockResponse({ status: 200, json: pkgBody }) : failClosed()()), async () => {
+    const r = await runTool("ckan_discover_datasets", { host: CA_HOST, q: "44o-discover-ok-unique" }, sam);
+    const m = buildMeta(r.meta);
+    ok("44o discover: maps per-resource rows (resourceId/name/datasetTitle/format/datastoreActive) + totalAvailable = result.count 42",
+      r.data.results.length === 2 && r.data.results[0].resourceId === CA_UUID && r.data.results[0].datastoreActive === true && r.data.results[0].datasetTitle === "Statewide Purchase Orders" && r.data.results[1].datastoreActive === false && m.totalAvailable === 42,
+      JSON.stringify({ res: r.data.results, ta: m.totalAvailable }));
+  });
+  // m6 on discover: a non-number result.count ⇒ schema_drift on BOTH calls (the
+  // drift throw is INSIDE the memoize callback → a bad shape is never cached).
+  await withFetch((u) => (isCkanPackageSearch(u) ? mockResponse({ status: 200, json: { success: true, result: { count: "42", results: [] } } }) : failClosed()()), async () => {
+    const q = "44o-drift-count-uncached-unique";
+    const a = await expectThrow(() => runTool("ckan_discover_datasets", { host: CA_HOST, q }, sam));
+    const b = await expectThrow(() => runTool("ckan_discover_datasets", { host: CA_HOST, q }, sam));
+    ok("44o m6: discover result.count '42' (string) ⇒ schema_drift on BOTH calls (drift is inside memoize → NEVER cached as success)",
+      a.threw && toToolError(a.error).kind === "schema_drift" && b.threw && toToolError(b.error).kind === "schema_drift",
+      JSON.stringify({ a: toToolError(a.error).kind, b: toToolError(b.error).kind }));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -6638,6 +6939,7 @@ async function main() {
   await testEdgarHonesty();
   await testSocrataHonesty();
   await testDataSourcePortParity();
+  await testCkanHonesty();
 
   // Prove the harness bites.
   await selfCheck();
