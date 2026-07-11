@@ -52,6 +52,65 @@ export type GetJsonOptions = {
  */
 export declare function getJson<T = unknown>(url: string, opts: GetJsonOptions): Promise<T>;
 /**
+ * getText — the shared fetch → `r.text()` → error-classify skeleton for the
+ * keyless XML/RSS/ATOM sources (far/gao/fpds; ADR-0013). Sibling of `getJson`;
+ * returns the RAW body text (each source runs its own bespoke string/regex
+ * parser). The three sources' only structural variation — headers, redirect,
+ * timeout, retry strategy, and the redirect-classification message — are OPTIONS,
+ * reconciled so each source's fetch semantics are BYTE-IDENTICAL to its former
+ * hand-rolled fetcher.
+ *
+ * Two strategies, selected by `retry`:
+ *   - retry !== false (DEFAULT — far/gao): `fetchWithRetry` (3-attempt retry +
+ *     the 429/5xx/404/4xx/network taxonomy), then `r.text()`.
+ *   - retry === false (fpds, m-redirect): a SINGLE direct `fetch`. A redirect
+ *     `"error"` TypeError is classified INLINE as a NON-retryable `schema_drift`
+ *     (via `driftError` + `redirectMessage`) — NOT the retryable
+ *     `upstream_unavailable` that `fetchWithRetry`'s generic network-catch would
+ *     emit, exactly what m-redirect forbids (the live search.do→sam.gov 301 must
+ *     fail closed, single attempt). This is why fpds does its own `fetch` rather
+ *     than routing through the shared, retry-all-transients `fetchWithRetry`.
+ *
+ * Unlike `getJson`, `label` is an OPAQUE passthrough — NOT host-only normalized
+ * (far's label is path-bearing `ecfr:versioner/…`; forcing host-only would break
+ * it). All three sources are keyless, so no token can appear in a label.
+ */
+export type GetTextOptions = {
+    /** fetchWithRetry taxonomy key + `ToolError.upstreamEndpoint`. Opaque
+     *  passthrough (NOT host-only normalized — far's is path-bearing). */
+    label: string;
+    /** Set on init ONLY when defined (far Accept-only / gao+fpds UA+Accept). */
+    headers?: Record<string, string>;
+    /** SSRF hardening passthrough; omitted from init when absent (far/gao). */
+    redirect?: "error";
+    /** Request timeout; default 15_000 (all three sources today). */
+    timeoutMs?: number;
+    /** DEFAULT true → the fetchWithRetry path (far/gao). false → the single-fetch
+     *  path (fpds; the redirect TypeError must be caught on the sole attempt). */
+    retry?: boolean;
+    /** `driftError` message when a redirect TypeError is caught on the single-fetch
+     *  path — preserves fpds's exact honesty disclosure. Only consulted on the
+     *  retry:false + redirect fault. */
+    redirectMessage?: string;
+};
+/**
+ * GET one text resource through the shared envelope. Assembles `init`
+ * (byte-identical to `getJson`'s rule: a fresh `AbortSignal.timeout` always;
+ * `headers`/`redirect` set ONLY when the option is provided), then either
+ * retries via `fetchWithRetry` (default) or does a single classified `fetch`
+ * (retry:false), and returns the raw `r.text()` body.
+ */
+export declare function getText(url: string, opts: GetTextOptions): Promise<string>;
+/**
+ * Is a thrown error the redirect:"error" TypeError (undici: cause "unexpected
+ * redirect")? The live FPDS search.do→sam.gov 301 is the concrete case
+ * (ADR-0012 §1a). Moved here from fpds.ts (ADR-0013) as `getText`'s audited home
+ * — it is only reachable when a caller sets `redirect:"error"` (undici throws
+ * the unexpected-redirect TypeError only in `"error"` mode), so it is inert for
+ * any retry:false caller that does NOT set redirect.
+ */
+export declare function isRedirectError(e: unknown): boolean;
+/**
  * The shared `schema_drift` constructor (all sources threw the identical
  * carrier). Each source keeps its bespoke field-CHECK inline and calls this to
  * standardize only the THROW. `label` becomes `upstreamEndpoint` — host-only,

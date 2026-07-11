@@ -65,7 +65,7 @@ import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
 import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
-import { getJson, driftError, throughGate } from "./dist/datasource.js";
+import { getJson, getText, isRedirectError, driftError, throughGate } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
 import {
@@ -8288,6 +8288,225 @@ async function testFpdsHonesty() {
   ok("49p fpds.num === coerce.num (one shared audited impl — a num regression fails §40e/§42m/§44n/§49p together)", fpdsNum === coerceNum, "fpds.num diverged from coerce.num");
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// §50: getText port (ADR-0013) — the shared XML/RSS/ATOM fetch→r.text()→classify
+// skeleton folding far/gao/fpds. INTERNAL refactor: ZERO shipped-tool behavior
+// change. Two guards, both OFFLINE / deterministic / NON-VACUOUS (every assertion
+// pins a value + names the mutation that turns it RED):
+//   (a) getText OPTION MATRIX (direct calls): timeout default 15_000 + override;
+//       headers passed ⇒ deep-equal / absent ⇒ NO headers key; redirect 'error'
+//       ⇒ set / absent ⇒ NO redirect key; retry default(true) ⇒ fetchWithRetry
+//       (503 retried 3×) / retry:false ⇒ SINGLE fetch (503 once); retry:false +
+//       redirect TypeError ⇒ NON-retryable schema_drift (driftError) carrying the
+//       redirectMessage, 1 attempt; !r.ok taxonomy (404→not_found/400→invalid_input);
+//       r.text() passthrough (NOT r.json()); label opaque passthrough (path-bearing,
+//       NOT host-forced); isRedirectError moved-home.
+//   (b) PER-SOURCE fetch-spy PARITY (the byte-identity guard): far/gao/fpds each
+//       drive a real tool path; the (url, init keys+values, label) triple +
+//       calls.length (= retry-count) match the pre-refactor baseline — far/gao
+//       retry-capable (503 ⇒ 3 attempts), fpds SINGLE attempt (503 ⇒ 1).
+async function testGetTextPort() {
+  section("50. getText port (ADR-0013) — shared XML/RSS/ATOM fetch envelope: option matrix + far/gao/fpds fetch-spy byte-identity parity (OFFLINE, deterministic)");
+
+  const FPDS_REDIRECT_MSG = `FPDS fetch hit an off-host redirect (the legacy /ezsearch/search.do UI 301-redirects to sam.gov). Refused to follow it (redirect:"error"). This is NOT an empty result — use the /ezsearch/FEEDS/ATOM machine feed.`;
+  const redirectThrow = () => {
+    const e = new TypeError("fetch failed");
+    e.cause = new Error("unexpected redirect");
+    throw e;
+  };
+
+  // ── (a) OPTION MATRIX ────────────────────────────────────────────────────
+  // timeout default + override (stub AbortSignal.timeout; mirrors §43b).
+  {
+    const realTimeout = AbortSignal.timeout;
+    let capturedMs = null;
+    AbortSignal.timeout = (ms) => { capturedMs = ms; return realTimeout.call(AbortSignal, ms); };
+    try {
+      await withFetch(() => mockResponse({ status: 200, json: "x" }), async () => {
+        await getText("https://example.test/x", { label: "port:x" });
+      });
+      eq("50a getText default timeout === 15_000 (mutate the ?? default ⇒ RED)", capturedMs, 15_000);
+      await withFetch(() => mockResponse({ status: 200, json: "x" }), async () => {
+        await getText("https://example.test/x", { label: "port:x", timeoutMs: 4321 });
+      });
+      eq("50a getText timeoutMs override honored (4321; ignore the option ⇒ RED)", capturedMs, 4321);
+      // The retry:false (single-fetch) path ALSO sets AbortSignal.timeout.
+      await withFetch(() => mockResponse({ status: 200, json: "x" }), async () => {
+        await getText("https://example.test/x", { label: "port:x", retry: false, timeoutMs: 7000 });
+      });
+      eq("50a getText retry:false path also honors timeoutMs (7000; both strategies set the signal)", capturedMs, 7000);
+    } finally {
+      AbortSignal.timeout = realTimeout;
+    }
+  }
+  // headers passed ⇒ deep-equal; ABSENT ⇒ NO headers key (far/gao byte-identity).
+  await withFetch(() => mockResponse({ status: 200, json: "x" }), async (calls) => {
+    await getText("https://example.test/x", { label: "port:x", headers: { "User-Agent": "UA", Accept: "application/xml" } });
+    eq("50a getText headers passed ⇒ init.headers deep-equals the option", calls[0].init.headers, { "User-Agent": "UA", Accept: "application/xml" });
+  });
+  await withFetch(() => mockResponse({ status: 200, json: "x" }), async (calls) => {
+    await getText("https://example.test/x", { label: "port:x" });
+    ok("50a getText headers ABSENT ⇒ init has NO 'headers' key (mutate to headers:{} ⇒ RED)", !("headers" in calls[0].init), JSON.stringify(Object.keys(calls[0].init)));
+  });
+  // redirect 'error' ⇒ set; ABSENT ⇒ NO redirect key.
+  await withFetch(() => mockResponse({ status: 200, json: "x" }), async (calls) => {
+    await getText("https://example.test/x", { label: "port:x", redirect: "error", retry: false });
+    eq("50a getText redirect:'error' passed ⇒ init.redirect === 'error'", calls[0].init.redirect, "error");
+  });
+  await withFetch(() => mockResponse({ status: 200, json: "x" }), async (calls) => {
+    await getText("https://example.test/x", { label: "port:x" });
+    ok("50a getText redirect ABSENT ⇒ init has NO 'redirect' key (far/gao; mutate-drop the guard ⇒ RED)", !("redirect" in calls[0].init), JSON.stringify(Object.keys(calls[0].init)));
+  });
+  // init signal is always an AbortSignal (both strategies).
+  await withFetch(() => mockResponse({ status: 200, json: "x" }), async (calls) => {
+    await getText("https://example.test/x", { label: "port:x" });
+    ok("50a getText init.signal instanceof AbortSignal (timeout always set)", calls[0].init.signal instanceof AbortSignal, String(calls[0].init.signal));
+  });
+
+  // retry DEFAULT (true) ⇒ fetchWithRetry path: a 503 is attempted 3× then throws.
+  await withFetch(() => mockResponse({ status: 503, json: "" }), async (calls) => {
+    const { threw, error } = await expectThrow(() => getText("https://example.test/x", { label: "port:x" }));
+    ok("50a getText retry DEFAULT(true) ⇒ fetchWithRetry: a 503 is retried ⇒ calls.length===3 + upstream_unavailable (mutate default to single-fetch ⇒ RED: 1 call)",
+      threw && calls.length === 3 && toToolError(error).kind === "upstream_unavailable",
+      JSON.stringify({ calls: calls.length, kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+  // retry:false ⇒ SINGLE fetch: a 503 is attempted ONCE.
+  await withFetch(() => mockResponse({ status: 503, json: "" }), async (calls) => {
+    const { threw, error } = await expectThrow(() => getText("https://example.test/x", { label: "port:x", retry: false }));
+    ok("50a getText retry:false ⇒ single fetch: a 503 is NOT retried ⇒ calls.length===1 + upstream_unavailable (mutate to the fetchWithRetry path ⇒ RED: 3 calls)",
+      threw && calls.length === 1 && toToolError(error).kind === "upstream_unavailable",
+      JSON.stringify({ calls: calls.length, kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+  // retry:false + redirect TypeError ⇒ NON-retryable schema_drift (driftError),
+  // SINGLE attempt, carrying the redirectMessage. THE m-redirect regression anchor.
+  await withFetch(redirectThrow, async (calls) => {
+    const { threw, error } = await expectThrow(() => getText("https://example.test/x", { label: "port:x", redirect: "error", retry: false, redirectMessage: "CUSTOM redirect disclosure" }));
+    const te = threw ? toToolError(error) : {};
+    ok("50a getText retry:false + redirect TypeError ⇒ NON-retryable schema_drift, calls.length===1, message===redirectMessage (mutate to route through fetchWithRetry ⇒ RED: retryable upstream_unavailable, 3×)",
+      threw && te.kind === "schema_drift" && te.retryable === false && te.message === "CUSTOM redirect disclosure" && calls.length === 1,
+      JSON.stringify({ kind: te.kind, retryable: te.retryable, msg: te.message, calls: calls.length }));
+  });
+  // redirectMessage ABSENT ⇒ the generic default still matches /redirect/i.
+  await withFetch(redirectThrow, async () => {
+    const { threw, error } = await expectThrow(() => getText("https://example.test/x", { label: "port:x", redirect: "error", retry: false }));
+    ok("50a getText redirectMessage ABSENT ⇒ generic default is a schema_drift matching /redirect/i (drop the default ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift" && /redirect/i.test(toToolError(error).message), JSON.stringify(threw ? toToolError(error).message : "no-throw"));
+  });
+  // !r.ok taxonomy on the single-fetch path: 404→not_found, 400→invalid_input.
+  await withFetch(() => mockResponse({ status: 404, json: "" }), async (calls) => {
+    const { threw, error } = await expectThrow(() => getText("https://example.test/x", { label: "port:x", retry: false }));
+    ok("50a getText retry:false 404 ⇒ not_found (errorFromResponse taxonomy), 1 attempt", threw && toToolError(error).kind === "not_found" && calls.length === 1, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", calls: calls.length }));
+  });
+  await withFetch(() => mockResponse({ status: 400, json: "" }), async () => {
+    const { threw, error } = await expectThrow(() => getText("https://example.test/x", { label: "port:x", retry: false }));
+    ok("50a getText retry:false 400 ⇒ invalid_input (errorFromResponse taxonomy)", threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // r.text() passthrough: a 200 body returns the RAW string (NOT r.json()).
+  await withFetch(() => new Response("<feed>raw-body-not-json</feed>", { status: 200 }), async () => {
+    const body = await getText("https://example.test/x", { label: "port:x" });
+    ok("50a getText returns raw r.text() body unchanged (mutate to r.json() ⇒ RED: SyntaxError on this XML) — the getText-vs-getJson distinction", body === "<feed>raw-body-not-json</feed>", JSON.stringify(body));
+  });
+  // label is an OPAQUE passthrough (path-bearing, NOT host-forced) → surfaces
+  // verbatim in upstreamEndpoint (documents far's ecfr:versioner/… survives).
+  await withFetch(() => mockResponse({ status: 503, json: "" }), async () => {
+    const label = "ecfr:versioner/v1/full/2026-07-01/title-48.xml?section=52.212-4";
+    const { error } = await expectThrow(() => getText("https://example.test/x", { label, retry: false }));
+    eq("50a getText label opaque passthrough ⇒ upstreamEndpoint === the path-bearing label VERBATIM (no host-only normalization; host-force ⇒ RED)", toToolError(error).upstreamEndpoint, label);
+  });
+  // isRedirectError moved to datasource.ts (ADR-0013) — locks the moved fn.
+  {
+    const t = new TypeError("fetch failed"); t.cause = new Error("unexpected redirect");
+    ok("50a isRedirectError(TypeError w/ cause 'redirect') === true (moved-home)", isRedirectError(t) === true, "cause path");
+    const t2 = new TypeError("a redirect was refused");
+    ok("50a isRedirectError(TypeError w/ 'redirect' in message) === true", isRedirectError(t2) === true, "message path");
+    ok("50a isRedirectError(plain Error) === false (only a redirect TypeError counts)", isRedirectError(new Error("unexpected redirect")) === false, "non-TypeError");
+  }
+
+  // ── (b) PER-SOURCE fetch-spy PARITY (byte-identity vs the pre-refactor baseline) ──
+  const sam = new SamGovClient({});
+
+  // far: retry-capable (fetchWithRetry); init {signal, headers:{Accept}}, NO
+  // redirect; label ecfr:… path-bearing. (includePrescription:false ⇒ 1 clause fetch.)
+  _clearCache();
+  await withFetch(
+    (u) => (isEcfrTitles(u) ? mockResponse({ status: 200, json: TITLES_JSON }) : isEcfrFull(u) ? mockResponse({ status: 200, json: CLAUSE_XML_52_212_4 }) : failClosed()()),
+    async (calls) => {
+      await farClauseLookup({ clauseNumber: "52.212-4", includePrescription: false });
+      const c = calls.find((x) => isEcfrFull(x.url));
+      eq("50b far init KEY-SET === {headers, signal} (NO redirect — byte-identity; add redirect ⇒ RED)", Object.keys(c.init).sort(), ["headers", "signal"]);
+      eq("50b far init.headers deep-equals {Accept:'application/xml'} (no UA)", c.init.headers, { Accept: "application/xml" });
+      ok("50b far init.signal instanceof AbortSignal (timeout)", c.init.signal instanceof AbortSignal, String(c.init.signal));
+    },
+  );
+  _clearCache();
+  await withFetch(
+    (u) => (isEcfrTitles(u) ? mockResponse({ status: 200, json: TITLES_JSON }) : isEcfrFull(u) ? mockResponse({ status: 503, json: "" }) : failClosed()()),
+    async (calls) => {
+      const { threw, error } = await expectThrow(() => farClauseLookup({ clauseNumber: "52.212-4", includePrescription: false }));
+      const clauseCalls = calls.filter((x) => isEcfrFull(x.url)).length;
+      ok("50b far retry PARITY: a 503 on the clause fetch is retried ⇒ 3 attempts (retry-capable; mutate to retry:false ⇒ RED: 1 attempt)", clauseCalls === 3, `clauseCalls=${clauseCalls}`);
+      eq("50b far label PARITY: upstreamEndpoint === 'ecfr:versioner/v1/full/2026-07-01/title-48.xml?section=52.212-4' (path-bearing, preserved)", threw ? toToolError(error).upstreamEndpoint : null, "ecfr:versioner/v1/full/2026-07-01/title-48.xml?section=52.212-4");
+    },
+  );
+
+  // gao: retry-capable; init {signal, headers:{UA,Accept-rss}}, NO redirect; label gao:rss.
+  const GAO_RSS = `<?xml version="1.0"?><rss><channel><item><title>Acme Corp</title><link>https://www.gao.gov/products/b-421234</link><description>Acme Corp protests the award.</description><pubDate>Mon, 01 Jul 2024 00:00:00 GMT</pubDate></item></channel></rss>`;
+  const isGaoRss = (u) => /gao\.gov\/rss\/reportslegal\.xml/.test(u);
+  await withFetch(
+    (u) => (isGaoRss(u) ? mockResponse({ status: 200, json: GAO_RSS }) : failClosed()()),
+    async (calls) => {
+      await gaoProtestLookup({ enrich: false });
+      const c = calls.find((x) => isGaoRss(x.url));
+      eq("50b gao init KEY-SET === {headers, signal} (NO redirect — byte-identity)", Object.keys(c.init).sort(), ["headers", "signal"]);
+      ok("50b gao init.headers has the WAF UA + rss Accept (Chrome UA + application/rss+xml…)",
+        /Chrome\//.test(c.init.headers["User-Agent"]) && /application\/rss\+xml/.test(c.init.headers["Accept"]), JSON.stringify(c.init.headers));
+      ok("50b gao init has NO 'redirect' key", !("redirect" in c.init), JSON.stringify(Object.keys(c.init)));
+    },
+  );
+  await withFetch(
+    (u) => (isGaoRss(u) ? mockResponse({ status: 503, json: "" }) : failClosed()()),
+    async (calls) => {
+      const { threw, error } = await expectThrow(() => gaoProtestLookup({ enrich: false }));
+      const rssCalls = calls.filter((x) => isGaoRss(x.url)).length;
+      ok("50b gao retry PARITY: a 503 on the RSS feed is retried ⇒ 3 attempts (retry-capable; mutate to retry:false ⇒ RED)", rssCalls === 3, `rssCalls=${rssCalls}`);
+      eq("50b gao label PARITY: upstreamEndpoint === 'gao:rss'", threw ? toToolError(error).upstreamEndpoint : null, "gao:rss");
+    },
+  );
+
+  // fpds: SINGLE attempt (retry:false); init {signal, headers:{UA,Accept-atom}, redirect:'error'};
+  // redirect TypeError ⇒ schema_drift carrying the VERBATIM FPDS_REDIRECT_MSG, 1 attempt.
+  const isFpds50 = (u) => /www\.fpds\.gov\/ezsearch\/FEEDS\/ATOM/.test(u);
+  const FPDS_MIN_FEED = `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>x</title></feed>`;
+  await withFetch(
+    (u) => (isFpds50(u) ? mockResponse({ status: 200, json: FPDS_MIN_FEED }) : failClosed()()),
+    async (calls) => {
+      await runTool("fpds_search_awards", { naics: "541511" }, sam);
+      const c = calls.find((x) => isFpds50(x.url));
+      eq("50b fpds init KEY-SET === {headers, redirect, signal} (drop redirect ⇒ RED)", Object.keys(c.init).sort(), ["headers", "redirect", "signal"]);
+      eq("50b fpds init.redirect === 'error' (SSRF m-redirect hardening)", c.init.redirect, "error");
+      ok("50b fpds init.headers has the WAF UA + atom Accept (Chrome UA + application/atom+xml…)",
+        /Chrome\//.test(c.init.headers["User-Agent"]) && /application\/atom\+xml/.test(c.init.headers["Accept"]), JSON.stringify(c.init.headers));
+      ok("50b fpds SINGLE attempt on a 200 (calls.length===1)", calls.filter((x) => isFpds50(x.url)).length === 1, `fpdsCalls=${calls.filter((x) => isFpds50(x.url)).length}`);
+    },
+  );
+  await withFetch(
+    (u) => (isFpds50(u) ? mockResponse({ status: 503, json: "" }) : failClosed()()),
+    async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", { naics: "541511" }, sam));
+      const fpdsCalls = calls.filter((x) => isFpds50(x.url)).length;
+      ok("50b fpds SINGLE-ATTEMPT PARITY: a 503 is NOT retried ⇒ 1 attempt + upstream_unavailable (mutate to retry:true ⇒ RED: 3 attempts) — the byte-identity guard",
+        threw && fpdsCalls === 1 && toToolError(error).kind === "upstream_unavailable", JSON.stringify({ fpdsCalls, kind: threw ? toToolError(error).kind : "no-throw" }));
+    },
+  );
+  await withFetch(redirectThrow, async (calls) => {
+    const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", { naics: "541511" }, sam));
+    const te = threw ? toToolError(error) : {};
+    ok("50b fpds redirect PARITY: search.do→sam.gov redirect TypeError ⇒ NON-retryable schema_drift, 1 attempt, message === FPDS_REDIRECT_MSG VERBATIM (the preserved honesty disclosure; genericize ⇒ RED)",
+      threw && te.kind === "schema_drift" && te.retryable === false && te.message === FPDS_REDIRECT_MSG && calls.length === 1,
+      JSON.stringify({ kind: te.kind, retryable: te.retryable, calls: calls.length, msgMatch: te.message === FPDS_REDIRECT_MSG }));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -8348,6 +8567,7 @@ async function main() {
   await testEchoHonesty();
   await testGovinfoHonesty();
   await testFpdsHonesty();
+  await testGetTextPort();
 
   // Prove the harness bites.
   await selfCheck();
