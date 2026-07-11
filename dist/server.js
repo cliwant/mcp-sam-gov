@@ -38,6 +38,7 @@ import * as ckan from "./ckan.js";
 import * as echo from "./echo.js";
 import * as datagov from "./datagov.js";
 import * as govinfo from "./govinfo.js";
+import * as fpds from "./fpds.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
@@ -1162,6 +1163,64 @@ const GovinfoGetPackageInput = z.object({
         .regex(govinfo.GOVINFO_PACKAGE_ID_RE, "packageId must be a GovInfo id like BILLS-118hr1enr / CFR-2023-title1-vol1 ([A-Za-z0-9][A-Za-z0-9._-]{2,}).")
         .describe("GovInfo packageId from govinfo_search_packages (e.g. 'BILLS-118hr1enr', 'PLAW-117publ58', 'CFR-2023-title1-vol1', 'GAOREPORTS-GAO-24-106221')."),
 });
+// ─── FPDS-NG (www.fpds.gov ezSearch ATOM — keyless XML/ATOM) ─── ADR-0012
+// The FIRST XML/ATOM source. Structured filters ONLY (NO raw-q — a typo'd field
+// name is a SILENT ZERO in FPDS, so the module builds the fielded `q`). At least
+// one filter is REQUIRED (refuse a bare unbounded scan). Dates are ISO
+// YYYY-MM-DD (reformatted to YYYY/MM/DD internally). `offset` is the 0-indexed
+// page start (page size fixed at 10); keyless deep-paging past ~200K is
+// unreliable so it is capped at 600000.
+const FPDS_ISO_DATE = z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "date must be ISO YYYY-MM-DD.");
+const FpdsSearchAwardsInput = z
+    .object({
+    naics: z
+        .string()
+        .optional()
+        .describe("Principal NAICS code (→ PRINCIPAL_NAICS_CODE), e.g. '541511'."),
+    vendorName: z
+        .string()
+        .optional()
+        .describe("Vendor/contractor name phrase (→ VENDOR_NAME), e.g. 'LOCKHEED MARTIN'."),
+    piid: z
+        .string()
+        .optional()
+        .describe("Contract/order PIID (→ PIID) — returns that action's full base+mod chain."),
+    departmentId: z
+        .string()
+        .optional()
+        .describe("4-digit contracting DEPARTMENT_ID, e.g. '9700' (DoD), '4700' (GSA)."),
+    contractingAgencyName: z
+        .string()
+        .optional()
+        .describe("Contracting agency name phrase (→ CONTRACTING_AGENCY_NAME), e.g. 'DEPT OF DEFENSE'."),
+    signedDateFrom: FPDS_ISO_DATE.optional().describe("Signed-date range START (ISO YYYY-MM-DD); pair with signedDateTo (→ SIGNED_DATE:[from,to])."),
+    signedDateTo: FPDS_ISO_DATE.optional().describe("Signed-date range END (ISO YYYY-MM-DD); pair with signedDateFrom."),
+    lastModifiedFrom: FPDS_ISO_DATE.optional().describe("Last-modified range START (ISO YYYY-MM-DD); pair with lastModifiedTo (→ LAST_MOD_DATE:[from,to])."),
+    lastModifiedTo: FPDS_ISO_DATE.optional().describe("Last-modified range END (ISO YYYY-MM-DD); pair with lastModifiedFrom."),
+    keyword: z
+        .string()
+        .optional()
+        .describe("Free-text keyword (bare full-text term; FPDS FIELD: operators are stripped for safety)."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(600_000)
+        .default(0)
+        .describe("0-indexed page start (page size fixed at 10). Keyless deep-paging past ~200K is unreliable."),
+})
+    .refine((a) => a.naics !== undefined ||
+    a.vendorName !== undefined ||
+    a.piid !== undefined ||
+    a.departmentId !== undefined ||
+    a.contractingAgencyName !== undefined ||
+    (a.signedDateFrom !== undefined && a.signedDateTo !== undefined) ||
+    (a.lastModifiedFrom !== undefined && a.lastModifiedTo !== undefined) ||
+    a.keyword !== undefined, {
+    message: "Provide at least one filter (naics, vendorName, piid, departmentId, contractingAgencyName, a signedDate range, a lastModified range, or keyword) — a bare unbounded FPDS scan is refused.",
+});
 // Build a ToolDef whose `handler` is type-checked against the schema's inferred
 // input `I` at the call site (e.g. `input.searchText` is known-present). The
 // `I` binding is erased to `any` in the ToolDef[] array, so entries without a
@@ -2012,6 +2071,16 @@ const TOOLS = [
         inputSchema: CkanDiscoverDatasetsInput,
         handler: (input) => ckan.discoverDatasets(input),
     }),
+    // ━━━ FPDS-NG — federal contract AWARD ACTIONS (keyless ATOM) (1) ━━━ ADR-0012
+    // The FIRST XML/ATOM source (bounded, ReDoS-safe hand-parser — the far.ts/gao.ts
+    // lineage; NOT the getJson port). FPDS is the system-of-record USAspending
+    // derives from — this closes the action-level / mod-level latest-truth gap.
+    defineTool({
+        name: "fpds_search_awards",
+        description: "Search FPDS-NG federal contract AWARD ACTIONS (keyless ATOM) — the AUTHORITATIVE system-of-record for contract actions (each modification is its own transaction), the source USAspending.gov derives from (and lags 1-2 days). Structured filters ONLY, AND-combined (NO raw query — a typo'd FPDS field name is a SILENT ZERO, so the tool builds the fielded q): naics (PRINCIPAL_NAICS_CODE), vendorName, piid, departmentId, contractingAgencyName, signedDate range (from/to ISO), lastModified range, keyword. At least one filter is REQUIRED. Returns award/IDV rows { piid, modNumber, parentIdvPiid, actionType, signedDate, vendorName, vendorUei, ultimateParentUei, obligatedAmount, totalObligatedAmount, naics, psc, placeOfPerformanceState, extentCompeted, setAside, businessSize, socioeconomic, … } (content root is award OR IDV — both parse). HONESTY: page size is FIXED at 10; for >10 results totalAvailable is a LOWER BOUND (totalIsLowerBound:true; true count ∈ [total, total+9]) and you MUST paginate by pagination.hasMore (page-fullness), NEVER by totalAvailable (keyless deep-paging is capped ~200K far below the advertised total). Genuine-empty (offset 0) ⇒ complete:true/total:0 + a silent-zero disclosure; an empty page at offset>0 ⇒ totalAvailable:null/complete:false (deep-paging ceiling, ambiguous); an HTML/non-feed body or an all-null-piid page ⇒ schema_drift (never a fake empty); an outage/5xx/timeout THROWS. Amounts are number|null (a 0.00 obligation and negative de-obligations are REAL, absent ⇒ null). Prefer usas_* tools for spending rollups / sub-award graphs.",
+        inputSchema: FpdsSearchAwardsInput,
+        handler: (input) => fpds.searchAwards(input),
+    }),
     // ━━━ EPA ECHO REST — keyless facility environmental compliance/enforcement (2) ━━━ ADR-0009
     // A NEW capability axis: facility & competitor environmental compliance-risk
     // screening / due diligence. KEYLESS (keylessMode:true, byte-clean init), single
@@ -2200,6 +2269,9 @@ function synthesizeDefaultMeta(toolName, sam) {
     }
     else if (toolName.startsWith("gao_")) {
         source = "gao.gov Legal Products RSS + decision pages (keyless)";
+    }
+    else if (toolName.startsWith("fpds_")) {
+        source = "www.fpds.gov ezSearch ATOM (FPDS-NG, keyless)";
     }
     else {
         source = "unknown";
