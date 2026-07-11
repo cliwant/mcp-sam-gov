@@ -7,12 +7,18 @@
  * — folding the fetch fns into one is lossless.
  *
  * R2 SCOPE (ADR-0005 v2 FIX-B): getJson ships ONLY { label, headers?, redirect?,
- * timeoutMs? }. The min-interval GATE (throughGate / gateKey / minIntervalMs) is
- * DEFERRED to the EDGAR follow-on slice, where it has a real call site + a real
- * parity spy + the AbortSignal-timing disclosure — publishing it now would be
- * unused machinery exercised by zero pilot sources. `redirect:"error"` STAYS: a
- * zero-logic RequestInit passthrough, absent for Treasury, and Socrata + the
- * queued CKAN connector need the identical SSRF hardening.
+ * timeoutMs? }. `redirect:"error"` STAYS: a zero-logic RequestInit passthrough,
+ * absent for Treasury, and Socrata + the queued CKAN connector need the identical
+ * SSRF hardening.
+ *
+ * THE MIN-INTERVAL GATE (ADR-0011 orchestrator, v6 cycle 15 — the R2 deferred
+ * slice, now landed): `throughGate(key, minIntervalMs, fn)` is a STANDALONE
+ * exported primitive (below), the shared home for EDGAR's former module-singleton
+ * self-throttle. It is deliberately NOT wired into getJson and `gateKey`/
+ * `minIntervalMs` are deliberately NOT added to GetJsonOptions — there is no
+ * getJson consumer that throttles, so that would be dead option-surface (FIX-B
+ * "no dead surface"). If a future source makes a throttled getJson call, wiring
+ * the gate into getJson can be revisited then.
  *
  * `label` is the fetchWithRetry taxonomy key AND surfaces verbatim in
  * ToolError.upstreamEndpoint to the MCP caller — it MUST be HOST-ONLY and never
@@ -73,4 +79,55 @@ export function driftError(label: string, message: string): ToolErrorCarrier {
     retryable: false,
     upstreamEndpoint: label,
   });
+}
+
+// ─── Per-key min-interval gate (shared self-throttle primitive) ────
+/**
+ * One serialized promise chain + last-run timestamp PER KEY. Module-level so a
+ * key's chain persists across every call in the process (the whole point of a
+ * self-throttle: a tool call can fan out and many tools may run). Different keys
+ * are independent chains — they never block each other.
+ */
+const gates = new Map<string, { chain: Promise<unknown>; lastAt: number }>();
+
+/**
+ * Serialize every call sharing `key` through a single promise chain, spacing the
+ * START of consecutive runs by ≥ `minIntervalMs`. This is the generalization of
+ * EDGAR's former module singleton (edgar.ts `edgarGateChain`/`edgarLastFetchAt`/
+ * `throughEdgarGate`); `throughGate("edgar", 110, fn)` reproduces its behavior
+ * EXACTLY. Semantics that MUST stay byte-identical to the old EDGAR gate:
+ *   - the Map entry is fetched-or-created and MUTATED IN PLACE (never replaced),
+ *     so a key keeps one chain across the process;
+ *   - before invoking `fn()`, wait `max(0, minIntervalMs - (now - lastAt))` using
+ *     the **bare global `setTimeout`** (NOT `node:timers/promises`) — the fault
+ *     suite's timer-neutralizing patch makes this offline-instant; an import-based
+ *     timer would break that (and offline determinism);
+ *   - `lastAt` is stamped with `Date.now()` **BEFORE** `fn()` is called, so the
+ *     spacing is measured from the START of the previous run (edgar L97-98);
+ *   - the chain SWALLOWS each step's error so the queue keeps flowing, while the
+ *     real result/error still propagates on the promise returned to THAT caller.
+ */
+export function throughGate<T>(
+  key: string,
+  minIntervalMs: number,
+  fn: () => Promise<T>,
+): Promise<T> {
+  let gate = gates.get(key);
+  if (!gate) {
+    gate = { chain: Promise.resolve(), lastAt: 0 };
+    gates.set(key, gate);
+  }
+  const g = gate;
+  const run = g.chain.then(async () => {
+    const wait = g.lastAt + minIntervalMs - Date.now();
+    if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+    g.lastAt = Date.now();
+    return fn();
+  });
+  // Keep the chain alive whether this link resolves or rejects.
+  g.chain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
