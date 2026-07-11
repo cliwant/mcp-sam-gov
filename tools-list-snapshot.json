@@ -76,6 +76,89 @@
     }
   },
   {
+    "name": "congress_get_bill",
+    "description": "Fetch ONE Congress.gov bill by id via /v3/bill/{congress}/{billType}/{billNumber} (api.data.gov keyed; DATA_GOV_API_KEY or DEMO_KEY). Input `congress` (int), `billType` (enum), `billNumber` (int). Returns { bill:{…} } + single-record _meta. A nonexistent bill ⇒ not_found (never fabricated).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "congress": {
+          "type": "number",
+          "description": "Congress number, e.g. 117."
+        },
+        "billType": {
+          "type": "string",
+          "enum": [
+            "hr",
+            "s",
+            "hjres",
+            "sjres",
+            "hconres",
+            "sconres",
+            "hres",
+            "sres"
+          ],
+          "description": "Bill type: hr/s/hjres/sjres/hconres/sconres/hres/sres."
+        },
+        "billNumber": {
+          "type": "number",
+          "description": "Bill number, e.g. 3076 (for H.R.3076)."
+        }
+      },
+      "required": [
+        "congress",
+        "billType",
+        "billNumber"
+      ]
+    }
+  },
+  {
+    "name": "congress_search_bills",
+    "description": "Search Congress.gov BILLS/legislation (api.data.gov keyed; DATA_GOV_API_KEY or DEMO_KEY). Input optional `congress` (e.g. 118), `billType` (hr/s/hjres/sjres/hconres/sconres/hres/sres — requires `congress`), `fromDateTime`/`toDateTime` (ISO-8601 with offset), `offset`, `limit` (≤250, def 20). Returns { bills:[{ congress, type, number, title, originChamber, latestAction, updateDate, url }] } + _meta with totalAvailable = pagination.count (EXACT). NOTE: /v3/bill has no keyword search, so a `query` arg is NOT applied and is disclosed in _meta.filtersDropped. Outage/4xx THROWS (never a fake empty).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Keyword — NOTE: Congress.gov /v3/bill has NO keyword search, so this is NOT applied (disclosed in _meta.filtersDropped). Use congress/billType/date filters instead."
+        },
+        "congress": {
+          "type": "number",
+          "description": "Congress number, e.g. 118 (scopes the path to /v3/bill/{congress})."
+        },
+        "billType": {
+          "type": "string",
+          "enum": [
+            "hr",
+            "s",
+            "hjres",
+            "sjres",
+            "hconres",
+            "sconres",
+            "hres",
+            "sres"
+          ],
+          "description": "Bill type: hr/s/hjres/sjres/hconres/sconres/hres/sres. Requires `congress` (path /v3/bill/{congress}/{billType})."
+        },
+        "fromDateTime": {
+          "type": "string",
+          "description": "Filter to bills updated at/after this ISO-8601 date-time with offset, e.g. '2024-01-01T00:00:00Z'."
+        },
+        "toDateTime": {
+          "type": "string",
+          "description": "Filter to bills updated at/before this ISO-8601 date-time with offset, e.g. '2024-12-31T23:59:59Z'."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based record offset for pagination, default 0."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Records per page, 1..250, default 20."
+        }
+      }
+    }
+  },
+  {
     "name": "ecfr_list_titles",
     "description": "List all 50 CFR titles with name + last_amended_on date. Use to discover what's in each title (Title 48 = FAR, Title 32 = National Defense, Title 14 = Aeronautics, etc.).",
     "inputSchema": {
@@ -531,6 +614,140 @@
       "required": [
         "laborCategory"
       ]
+    }
+  },
+  {
+    "name": "regulations_search_comments",
+    "description": "Search Regulations.gov public COMMENTS on rulemakings — the killer B2G dataset (who is lobbying which rule). Same JSON:API envelope + input shape as regulations_search_documents (searchTerm/query, agencyId, docketId, postedDateGe/Le, sort, pageNumber 1..40, pageSize 5..250) against /v4/comments. Returns { comments:[{ id, documentType, title, agencyId, docketId, postedDate, objectId }] } + honest _meta (same totalElements-exact total + 40-page/10,000-record ceiling handling as documents).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchTerm": {
+          "type": "string",
+          "description": "Full-text search term (filter[searchTerm]), e.g. 'artificial intelligence'."
+        },
+        "query": {
+          "type": "string",
+          "description": "Alias for `searchTerm` (either is accepted; both feed filter[searchTerm])."
+        },
+        "agencyId": {
+          "type": "string",
+          "description": "Filter by posting agency acronym (filter[agencyId]), e.g. 'EPA', 'FDA'."
+        },
+        "docketId": {
+          "type": "string",
+          "description": "Filter by docket id (filter[docketId]), e.g. 'EPA-HQ-OAR-2021-0257'."
+        },
+        "documentType": {
+          "type": "string",
+          "enum": [
+            "Rule",
+            "Proposed Rule",
+            "Notice",
+            "Supporting & Related Material",
+            "Other"
+          ],
+          "description": "Filter by document type (documents only): Rule / Proposed Rule / Notice / Supporting & Related Material / Other."
+        },
+        "withinCommentPeriod": {
+          "type": "boolean",
+          "description": "true ⇒ only documents currently open for comment (documents only; filter[withinCommentPeriod])."
+        },
+        "postedDateGe": {
+          "type": "string",
+          "description": "Posted on/after this date, YYYY-MM-DD (filter[postedDate][ge])."
+        },
+        "postedDateLe": {
+          "type": "string",
+          "description": "Posted on/before this date, YYYY-MM-DD (filter[postedDate][le])."
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "-postedDate",
+            "postedDate",
+            "-lastModifiedDate",
+            "lastModifiedDate",
+            "-commentEndDate"
+          ],
+          "description": "Sort order (default '-postedDate'). Live-verified set: -postedDate/postedDate/-lastModifiedDate/lastModifiedDate/-commentEndDate (non-exhaustive)."
+        },
+        "pageNumber": {
+          "type": "number",
+          "description": "1-based page number, 1..40 (HARD cap — page[number] max is 40; the reachable window is 40×pageSize ≤ 10,000 records)."
+        },
+        "pageSize": {
+          "type": "number",
+          "description": "Records per page (page[size]), 5..250, default 25."
+        }
+      }
+    }
+  },
+  {
+    "name": "regulations_search_documents",
+    "description": "Search Regulations.gov rulemaking DOCUMENTS (rules, proposed rules, notices) — the flagship of the api.data.gov keyed source (JSON:API; DATA_GOV_API_KEY or the shared DEMO_KEY). Input `searchTerm`/`query`, filters (agencyId, docketId, documentType, withinCommentPeriod, postedDateGe/Le YYYY-MM-DD), `sort` (def -postedDate), `pageNumber` (1..40 HARD cap), `pageSize` (5..250, def 25). Returns { documents:[{ id, documentType, title, agencyId, docketId, postedDate, commentEndDate, openForComment, withinCommentPeriod, frDocNum, objectId }] } + honest _meta. HONESTY: totalAvailable = meta.totalElements (the EXACT real total, ~millions), NOT the capped totalPages; page[number] is hard-capped at 40 (10,000-record ceiling) — at the ceiling hasMore stays true but nextOffset is null + a note says how to reach the rest (narrow filters / seek by lastModifiedDate). Genuine-empty ⇒ complete:true/total:0; an outage/4xx THROWS (never a fake empty).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "searchTerm": {
+          "type": "string",
+          "description": "Full-text search term (filter[searchTerm]), e.g. 'artificial intelligence'."
+        },
+        "query": {
+          "type": "string",
+          "description": "Alias for `searchTerm` (either is accepted; both feed filter[searchTerm])."
+        },
+        "agencyId": {
+          "type": "string",
+          "description": "Filter by posting agency acronym (filter[agencyId]), e.g. 'EPA', 'FDA'."
+        },
+        "docketId": {
+          "type": "string",
+          "description": "Filter by docket id (filter[docketId]), e.g. 'EPA-HQ-OAR-2021-0257'."
+        },
+        "documentType": {
+          "type": "string",
+          "enum": [
+            "Rule",
+            "Proposed Rule",
+            "Notice",
+            "Supporting & Related Material",
+            "Other"
+          ],
+          "description": "Filter by document type (documents only): Rule / Proposed Rule / Notice / Supporting & Related Material / Other."
+        },
+        "withinCommentPeriod": {
+          "type": "boolean",
+          "description": "true ⇒ only documents currently open for comment (documents only; filter[withinCommentPeriod])."
+        },
+        "postedDateGe": {
+          "type": "string",
+          "description": "Posted on/after this date, YYYY-MM-DD (filter[postedDate][ge])."
+        },
+        "postedDateLe": {
+          "type": "string",
+          "description": "Posted on/before this date, YYYY-MM-DD (filter[postedDate][le])."
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "-postedDate",
+            "postedDate",
+            "-lastModifiedDate",
+            "lastModifiedDate",
+            "-commentEndDate"
+          ],
+          "description": "Sort order (default '-postedDate'). Live-verified set: -postedDate/postedDate/-lastModifiedDate/lastModifiedDate/-commentEndDate (non-exhaustive)."
+        },
+        "pageNumber": {
+          "type": "number",
+          "description": "1-based page number, 1..40 (HARD cap — page[number] max is 40; the reachable window is 40×pageSize ≤ 10,000 records)."
+        },
+        "pageSize": {
+          "type": "number",
+          "description": "Records per page (page[size]), 5..250, default 25."
+        }
+      }
     }
   },
   {
