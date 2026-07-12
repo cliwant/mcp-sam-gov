@@ -92,6 +92,7 @@ import { num as govinfoNum, listCollections as govinfoListCollections, searchPac
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
 import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward, tokenizeForDisclosure as nsfTok } from "./dist/nsf.js";
+import { num as blsNum, timeseries as blsTimeseries } from "./dist/bls.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
@@ -11485,6 +11486,246 @@ async function testNsfHonesty() {
   ok("52-parity nsf.num === coerce.num (one shared audited impl — a num regression fails §40e/§51i/§52 together; NO local num in nsf.ts)", nsfNum === coerceNum, "nsf.num diverged from coerce.num");
 }
 
+// §62-bls: BLS Public Data API v1/v2 (api.bls.gov/publicAPI/v{1,2}/timeseries/data/,
+// ADR-0032) — the pricing/escalation layer; the SECOND POST-batch getJson-port
+// consumer (after NIH). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a
+// value + names the load-bearing mutation (ADR a–j) it turns RED:
+//   (a) "-"/non-numeric value ⇒ 0 (not null) ⇒ RED; (h) value surfaced as the RAW
+//       STRING (not parsed) ⇒ RED — both in fixture 1.
+//   (b) a "-" row's footnote reason dropped (not on the obs AND in _meta.notes) ⇒ RED.
+//   (c) REQUEST_NOT_PROCESSED read as a fake-empty (not a rate_limited throw) ⇒ RED;
+//       (g) the tier/25-day limit not disclosed ⇒ RED — both in fixture 2 + tierNote.
+//   (d) an empty data[] with no ambiguity/genuine-empty disclosure ⇒ RED (fix 4/5).
+//   (e) a non-JSON 200 / missing Results.series read as empty (not driftError) ⇒ RED.
+//   (f) a non-charclass seriesId accepted, or an un-clamped span sent ⇒ RED (fix 7/8).
+//   (i) BLS_API_KEY in url/label/_meta/log OR in the body when keyless (K-test) ⇒ RED.
+//   (j) an ECI "…A" %-change series without its units label ⇒ RED (fixture 9).
+//   + the fetchWithRetry POST/Content-Type/redirect/body parity spy + num-parity guard.
+const BLS_URL_RE = /api\.bls\.gov\/publicAPI\/v[12]\/timeseries\/data\//;
+const isBls = (u) => BLS_URL_RE.test(u);
+const blsSeries = (seriesID, data) => ({ seriesID, data });
+const blsBody = (series, { status = "REQUEST_SUCCEEDED", message = [] } = {}) => ({ status, responseTime: 10, message, Results: { series } });
+const blsMock = (body, status = 200) => (u) => (isBls(u) ? mockResponse({ status, json: body }) : failClosed()());
+// A real CPI-U row + the "-" 2025-shutdown gap row (the P3 honesty frontier).
+const CPI_REAL = { year: "2025", period: "M09", periodName: "September", latest: "false", value: "335.123", footnotes: [{}] };
+const CPI_GAP = { year: "2025", period: "M10", periodName: "October", latest: "true", value: "-", footnotes: [{ code: "X", text: "Data unavailable due to the 2025 lapse in appropriations" }] };
+// An ECI "…A" 12-month-%-change row (value 3.4 = 3.4%, NOT an index level).
+const ECI_ROW = { year: "2025", period: "Q03", periodName: "3rd Quarter", latest: "true", value: "3.4", footnotes: [{}] };
+/** Run `fn` with BLS_API_KEY set to `val` (or deleted if undefined), restore after. */
+async function withBlsKey(val, fn) {
+  const orig = process.env.BLS_API_KEY;
+  if (val === undefined) delete process.env.BLS_API_KEY;
+  else process.env.BLS_API_KEY = val;
+  try {
+    return await fn();
+  } finally {
+    if (orig === undefined) delete process.env.BLS_API_KEY;
+    else process.env.BLS_API_KEY = orig;
+  }
+}
+
+async function testBlsHonesty() {
+  section("62. BLS Public Data API v1/v2 (ADR-0032 — the pricing/escalation layer; the SECOND POST-batch getJson-port consumer after NIH) — \"-\"→null-never-0 + footnote surfacing (P3) + status-gate THROW (P2) + empty-data ambiguity + per-series units label + span clamp (P1) + K-test key-never-leaks + charclass SSRF + POST parity (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // The whole section runs KEYLESS (v1: 25 series/query, ~10y span) except the
+  // nested key-set K-test — deterministic regardless of the CI env.
+  await withBlsKey(undefined, async () => {
+
+  // ── Fixture 1: SUCCESS + a "-" row (kills a, b, h + the always-on tier note). ──
+  await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [CPI_REAL, CPI_GAP])])), async () => {
+    const r = await runTool("bls_timeseries", { series: ["cpi_u_all"], startYear: 2025, endYear: 2025 }, sam);
+    const m = buildMeta(r.meta);
+    const s = r.data.series[0];
+    const real = s.observations.find((o) => o.period === "M09");
+    const gap = s.observations.find((o) => o.period === "M10");
+    ok("62bls-1 real value PARSED to number 335.123 (typeof number, NOT the raw string) — kills (h) raw-string surfaced",
+      typeof real.value === "number" && real.value === 335.123, JSON.stringify({ t: typeof real.value, v: real.value }));
+    ok("62bls-1 the \"-\" row ⇒ value:null (NEVER 0) + valueUnavailable:true — kills (a) '-'→0 (THE honesty frontier)",
+      gap.value === null && gap.valueUnavailable === true, JSON.stringify({ v: gap.value, u: gap.valueUnavailable }));
+    ok("62bls-1 the footnote reason (code X + the 2025-shutdown text) rides ON the observation — kills (b) footnote dropped",
+      gap.footnotes.some((f) => f.code === "X" && /2025 lapse in appropriations/.test(f.text || "")), JSON.stringify(gap.footnotes));
+    ok("62bls-1 the footnote text is LIFTED into _meta.notes (the gap is DISCLOSED, never a silent null) — kills (b)",
+      m.notes.some((n) => /Data unavailable due to the 2025 lapse in appropriations/.test(n)), JSON.stringify(m.notes));
+    ok("62bls-1 curated series carries its units label + key + meaning (cpi_u_all, index 1982-84=100)",
+      s.units === "index 1982-84=100" && s.key === "cpi_u_all" && /CPI-U/.test(s.meaning), JSON.stringify({ u: s.units, k: s.key }));
+    ok("62bls-1 the always-on tier disclosure is in _meta.notes (v1 keyless, ~25/day, series/span caps) — kills (g) on the success path",
+      m.notes.some((n) => /Active BLS tier: v1 keyless/.test(n) && /25 queries\/day/.test(n) && /series\/query/.test(n)), JSON.stringify(m.notes));
+    ok("62bls-1 coveredRange derived from the returned observations (from/to 2025) — P1 coverage honesty",
+      s.coveredRange.from === 2025 && s.coveredRange.to === 2025 && s.observationCount === 2, JSON.stringify(s.coveredRange));
+  });
+
+  // ── Fixture 2: REQUEST_NOT_PROCESSED (the v1 daily limit) ⇒ rate_limited THROW
+  //    with the tier disclosure (kills c, g). ──
+  await withFetch(blsMock({ status: "REQUEST_NOT_PROCESSED", responseTime: 0, message: ["Request could not be serviced due to daily threshold."], Results: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { series: ["cpi_u_all"] }, sam));
+    const te = toToolError(error);
+    ok("62bls-2 REQUEST_NOT_PROCESSED ⇒ rate_limited THROW (retryable), NEVER a fake-empty — kills (c)",
+      threw && te.kind === "rate_limited" && te.retryable === true, JSON.stringify(threw ? { k: te.kind, r: te.retryable } : "no-throw"));
+    ok("62bls-2 the throw carries the tier disclosure (~25 queries/day, a free BLS_API_KEY for v2, key in the request body, never logged) — kills (g)",
+      /25 queries\/day/.test(te.message) && /BLS_API_KEY/.test(te.message) && /request body/.test(te.message) && /never logged/.test(te.message), JSON.stringify(te.message));
+  });
+
+  // ── Fixture 3: REQUEST_FAILED ⇒ THROW surfacing message[] (P2). ──
+  await withFetch(blsMock({ status: "REQUEST_FAILED", responseTime: 0, message: ["Sorry, an error occurred while processing your request."], Results: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { series: ["cpi_u_all"] }, sam));
+    const te = toToolError(error);
+    ok("62bls-3 REQUEST_FAILED ⇒ THROW upstream_unavailable/invalid_input surfacing message[] (never a fake-empty)",
+      threw && (te.kind === "upstream_unavailable" || te.kind === "invalid_input") && /an error occurred while processing/.test(te.message), JSON.stringify(threw ? { k: te.kind, m: te.message } : "no-throw"));
+  });
+
+  // ── Fixture 4: curated genuine-empty (kills half of d). ──
+  await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [])])), async () => {
+    const r = await runTool("bls_timeseries", { series: ["cpi_u_all"], startYear: 2025, endYear: 2025 }, sam);
+    const m = buildMeta(r.meta);
+    ok("62bls-4 a CURATED series with data:[] ⇒ observations:[] + a 'genuine empty range for a valid series' note (never asserts 'no data' as fact) — kills half of (d)",
+      r.data.series[0].observations.length === 0 && m.notes.some((n) => /genuine empty range for a valid series/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── Fixture 5: raw nonexistent series (kills the other half of d). ──
+  await withFetch(blsMock(blsBody([blsSeries("ZZZZ9999", [])], { message: ["Series does not exist for Series ZZZZ9999"] })), async () => {
+    const r = await runTool("bls_timeseries", { seriesId: ["ZZZZ9999"], startYear: 2025, endYear: 2025 }, sam);
+    const m = buildMeta(r.meta);
+    ok("62bls-5 a RAW seriesId with data:[] ⇒ observations:[] + the AMBIGUITY note (genuine-empty OR nonexistent/typo — verify the ID) + the surfaced top-level message — kills the other half of (d)",
+      r.data.series[0].observations.length === 0 && m.notes.some((n) => /EITHER a genuine empty range OR a nonexistent/.test(n)) && m.notes.some((n) => /Series does not exist for Series ZZZZ9999/.test(n)), JSON.stringify(m.notes));
+    ok("62bls-5 a raw seriesId carries units:null + key:null (units NOT fabricated for an un-curated ID)",
+      r.data.series[0].units === null && r.data.series[0].key === null, JSON.stringify({ u: r.data.series[0].units, k: r.data.series[0].key }));
+  });
+
+  // ── Fixture 6: non-JSON 200 ⇒ driftError; SUCCESS missing Results.series ⇒ driftError (kills e). ──
+  await withFetch((u) => (isBls(u) ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" } : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { series: ["cpi_u_all"] }, sam));
+    ok("62bls-6 non-JSON 200 (an HTML error page) ⇒ SyntaxError reclassified to schema_drift at the call site (never read as empty) — kills half of (e)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(blsMock({ status: "REQUEST_SUCCEEDED", responseTime: 0, message: [], Results: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { series: ["cpi_u_all"] }, sam));
+    ok("62bls-6 a SUCCESS body missing Results.series (non-array) ⇒ schema_drift (never a fake empty) — kills the other half of (e)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── Fixture 7: seriesId charclass reject ⇒ invalid_input, 0 fetch (kills f, SSRF half). ──
+  for (const bad of ["../etc", "ABCD\n", "cuur0000sa0;drop"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { seriesId: [bad] }, sam));
+      ok(`62bls-7 seriesId ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (charclass ^[A-Z0-9]{1,20}$ rejects ../, encoded traversal, ; and a trailing newline) — kills (f) SSRF half`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // Module guard too (a direct call bypassing Zod): a non-charclass id ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => blsTimeseries({ seriesId: ["cuur0000sa0;drop"] }));
+    ok("62bls-7 module pre-fetch guard: blsTimeseries({seriesId:['…;drop']}) directly ⇒ invalid_input, 0 fetch (belt-and-suspenders behind Zod)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── Fixture 8: year-span clamp (kills f, span half; P1). ──
+  await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [CPI_REAL])])), async (calls) => {
+    const r = await runTool("bls_timeseries", { series: ["cpi_u_all"], startYear: 2000, endYear: 2025 }, sam);
+    const m = buildMeta(r.meta);
+    const sent = JSON.parse(calls.find((x) => isBls(x.url)).init.body);
+    ok("62bls-8 span 2000–2025 (26y) > v1 ~10y cap ⇒ the OUTGOING body carries startyear:'2016' (clamped BEFORE the fetch — mutate to send '2000' ⇒ a guaranteed REQUEST_NOT_PROCESSED ⇒ RED)",
+      sent.startyear === "2016" && sent.endyear === "2025", JSON.stringify(sent));
+    ok("62bls-8 _meta clampNote discloses requested (2000) vs sent (2016) + the ~10-year cap — kills (f) span half",
+      m.notes.some((n) => /clamped to 2016/.test(n) && /2000/.test(n) && /10-year/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── Fixture 9: ECI "…A" units label (kills j). ──
+  await withFetch(blsMock(blsBody([blsSeries("CIU1010000000000A", [ECI_ROW])])), async () => {
+    const r = await runTool("bls_timeseries", { series: ["eci_total_comp"], startYear: 2025, endYear: 2025 }, sam);
+    const s = r.data.series[0];
+    ok("62bls-9 the ECI '…A' series carries units:'12-mo % change' (a consumer misreads 3.4 as an index level otherwise) + value 3.4 parsed — kills (j)",
+      s.units === "12-mo % change" && s.observations[0].value === 3.4 && s.key === "eci_total_comp", JSON.stringify({ u: s.units, v: s.observations[0].value }));
+  });
+
+  // ── Fixture 10 (K-test): the BLS_API_KEY NEVER LEAKS (kills i). Spy the fetch. ──
+  //    (i) key set ⇒ path v2, body has registrationkey, key in NEITHER url/source/_meta.
+  await withBlsKey(SENTINEL, async () => {
+    await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [CPI_REAL])])), async (calls) => {
+      const r = await runTool("bls_timeseries", { series: ["cpi_u_all"], startYear: 2025, endYear: 2025 }, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((x) => isBls(x.url));
+      const bodyObj = JSON.parse(call.init.body);
+      ok("62bls-10 KEY set ⇒ the path lifts to /publicAPI/v2/timeseries/data/ (the mode is v2)",
+        /\/publicAPI\/v2\/timeseries\/data\//.test(call.url), JSON.stringify(call.url));
+      ok("62bls-10 POSITIVE: registrationkey IS in the POST body with the sentinel (auth applied — not passing vacuously)",
+        bodyObj.registrationkey === SENTINEL, JSON.stringify(Object.keys(bodyObj)));
+      const leaks = [call.url, m.source, JSON.stringify(m)].some((s) => typeof s === "string" && s.includes(SENTINEL));
+      ok("62bls-10 KEY-NEVER-LEAKS: sentinel absent from the fetch URL, _meta.source, and the serialized _meta (only the MODE 'BLS_API_KEY v2' is disclosed) — kills (i)",
+        !leaks && /BLS_API_KEY v2/.test(m.source), JSON.stringify({ src: m.source }));
+      ok("62bls-10 keylessMode:false when a BLS_API_KEY is configured (honest mode surface)",
+        m.keylessMode === false, JSON.stringify(m.keylessMode));
+    });
+    // Error path (500 ⇒ throws): the key must not leak into the ToolError/label either,
+    // but WAS still carried in the body (auth applied).
+    await withFetch(blsMock("", 500), async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { series: ["cpi_u_all"] }, sam));
+      const te = toToolError(error);
+      const call = calls.find((x) => isBls(x.url));
+      const bodyObj = call ? JSON.parse(call.init.body) : {};
+      const leaks = [te.message, te.upstreamEndpoint, JSON.stringify(te), call?.url].some((s) => typeof s === "string" && s.includes(SENTINEL));
+      ok("62bls-10 KEY-NEVER-LEAKS (error path 500): sentinel absent from ToolError.message/upstreamEndpoint/serialized-error/url (the label is host+path only) — kills (i) on the error path",
+        threw && !leaks, JSON.stringify({ ep: te.upstreamEndpoint, url: call?.url }));
+      ok("62bls-10 error path POSITIVE: the key WAS still carried in the body (auth applied, not silently dropped)",
+        bodyObj.registrationkey === SENTINEL, JSON.stringify(Object.keys(bodyObj)));
+    });
+  });
+  //    (ii) key unset ⇒ path v1, body has NO registrationkey, keylessMode:true.
+  await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [CPI_REAL])])), async (calls) => {
+    const r = await runTool("bls_timeseries", { series: ["cpi_u_all"], startYear: 2025, endYear: 2025 }, sam);
+    const m = buildMeta(r.meta);
+    const call = calls.find((x) => isBls(x.url));
+    const bodyObj = JSON.parse(call.init.body);
+    ok("62bls-10 KEYLESS ⇒ path /publicAPI/v1/, body has NO registrationkey, keylessMode:true, source discloses 'keyless v1' — kills (i) 'key in body when keyless'",
+      /\/publicAPI\/v1\/timeseries\/data\//.test(call.url) && !("registrationkey" in bodyObj) && m.keylessMode === true && /keyless v1/.test(m.source), JSON.stringify({ url: call.url, keys: Object.keys(bodyObj), src: m.source }));
+  });
+
+  // ── Fixture 11: fetchWithRetry parity spy (POST/Content-Type/redirect/body). ──
+  await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [CPI_REAL]), blsSeries("CUUR0000SA0L1E", [CPI_REAL])])), async (calls) => {
+    await runTool("bls_timeseries", { series: ["cpi_u_all", "cpi_u_core"], startYear: 2024, endYear: 2025 }, sam);
+    const c = calls.find((x) => isBls(x.url));
+    ok("62bls-11 getJson POST wiring: init.method:'POST' + Content-Type application/json + redirect:'error' (the SECOND non-GET port consumer — mutate any ⇒ RED)",
+      c.init.method === "POST" && c.init.headers["Content-Type"] === "application/json" && c.init.redirect === "error", JSON.stringify({ m: c.init.method, h: c.init.headers, r: c.init.redirect }));
+    const bodyObj = JSON.parse(c.init.body);
+    ok("62bls-11 init.body = the MODULE-BUILT payload {seriesid:[…resolved+deduped],startyear,endyear} (JSON.stringify'd, curated keys → seriesIDs, NO raw passthrough)",
+      JSON.stringify(bodyObj.seriesid) === JSON.stringify(["CUUR0000SA0", "CUUR0000SA0L1E"]) && bodyObj.startyear === "2024" && bodyObj.endyear === "2025", JSON.stringify(bodyObj));
+  });
+
+  // ── Fixture 12: num-parity guard + required-input + series-cap + P4 absent-series. ──
+  eq("62bls-12 num('-') ⇒ null (THE frontier — NEVER 0)", blsNum("-"), null);
+  eq("62bls-12 num('0') ⇒ 0 (a genuine zero preserved)", blsNum("0"), 0);
+  eq("62bls-12 num('335.123') ⇒ 335.123 (numeric string parses)", blsNum("335.123"), 335.123);
+  eq("62bls-12 num('') ⇒ null (Number('') is 0 — must be caught)", blsNum(""), null);
+  ok("62bls-12 bls.num === coerce.num (one shared audited impl — a num regression fails together; NO local num in bls.ts)", blsNum === coerceNum, "bls.num diverged from coerce.num");
+
+  // required-input: neither series nor seriesId ⇒ invalid_input, 0 fetch (never a silent no-op).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("bls_timeseries", {}, sam));
+    ok("62bls required-input: neither series nor seriesId ⇒ invalid_input, 0 fetch",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // series-cap: 26 distinct series > the v1 cap of 25 ⇒ invalid_input, 0 fetch (P4: the overflow is REFUSED, never silently dropped).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const many = Array.from({ length: 26 }, (_, i) => "S" + String(i).padStart(3, "0"));
+    const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { seriesId: many }, sam));
+    ok("62bls series-cap: 26 distinct series > v1 cap 25 ⇒ invalid_input, 0 fetch (the overflow is REFUSED naming the cap, never silently dropped — P4)",
+      threw && toToolError(error).kind === "invalid_input" && /cap of 25/.test(toToolError(error).message) && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // P4 absent-series: request 2 curated, upstream returns only 1 ⇒ the other is disclosed in fieldsUnavailable + a note (never silently dropped).
+  await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [CPI_REAL])])), async () => {
+    const r = await runTool("bls_timeseries", { series: ["cpi_u_all", "unemployment_rate"], startYear: 2025, endYear: 2025 }, sam);
+    const m = buildMeta(r.meta);
+    ok("62bls P4: a requested series ABSENT from Results.series ⇒ disclosed in fieldsUnavailable + a note (never silently dropped); the present one is returned",
+      m.fieldsUnavailable.some((f) => /LNS14000000/.test(f)) && m.notes.some((n) => /not returned by BLS/i.test(n)) && r.data.series.length === 1, JSON.stringify({ fu: m.fieldsUnavailable, n: r.data.series.length }));
+  });
+
+  }); // withBlsKey(undefined)
+}
+
 // §53-clinicaltrials: ClinicalTrials.gov API v2 (clinicaltrials.gov/api/v2/studies,
 // ADR-0021, source #21 — the trial-REGISTRATION sibling of NIH/NSF grants on the
 // getJson GET port). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a
@@ -12819,6 +13060,7 @@ async function main() {
   await testGetTextPort();
   await testNihHonesty();
   await testNsfHonesty();
+  await testBlsHonesty();
   await testClinicaltrialsHonesty();
   await testClinicaltrialsFacetHonesty();
   await testCensusHonesty();

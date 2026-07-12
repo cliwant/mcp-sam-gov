@@ -1,5 +1,47 @@
 [
   {
+    "name": "bls_timeseries",
+    "description": "Fetch US Bureau of Labor Statistics time series — the PRICING / ESCALATION layer (keyless; api.bls.gov Public Data API v1, POST/JSON batch). CPI-U & ECI drive federal contract escalation / economic-price-adjustment (EPA) clauses; PPI benchmarks materials pricing; CES employment/wages give labor-rate context (next to gsa_benchmark_labor_rates + sam wage determinations). Inputs (at least one of series/seriesId REQUIRED; both combinable): `series` — a FROZEN 9-key CURATED enum (typo-proof; each carries meaning + units): cpi_u_all/cpi_u_core (CPI-U index, NSA — the escalation reference), ppi_final_demand (PPI index), eci_total_comp/eci_wages (★12-MONTH % CHANGE, NOT an index — a consumer misreads 3.4 as an index level otherwise), unemployment_rate/labor_force_participation (percent, SA), employment_total_nonfarm (thousands of persons, SA), avg_hourly_earnings (dollars/hour, SA). `seriesId` — raw BLS IDs (charclass ^[A-Z0-9]{1,20}$; the OEWS/local-area/regional passthrough; units:null for a raw ID). `startYear`/`endYear` (1900..currentYear+1; default a ~10-year window; span CLAMPED to the tier cap ~10y and disclosed). Returns { series:[{ seriesId, key, meaning, units, observations:[{ year, period, periodName, value, valueUnavailable, footnotes, latest }], observationCount, coveredRange }] } + honest _meta. HONESTY: each `value` is PARSED number|null — the BLS \"-\" unavailable marker (e.g. the 2025 lapse-in-appropriations gap) → null NEVER 0, with valueUnavailable:true + the footnote reason on the observation AND lifted into _meta.notes (a data gap is DISCLOSED, never a silent null and never a fabricated 0); a genuine \"0\" stays 0. A non-SUCCESS status THROWS (never a fake-empty): REQUEST_NOT_PROCESSED (the v1 ~25/day limit) ⇒ rate_limited with the tier disclosure; REQUEST_FAILED ⇒ upstream_unavailable/invalid_input surfacing message[]. A non-JSON 200 or a SUCCESS body missing Results.series ⇒ schema_drift. An empty data[] on SUCCESS ⇒ observations:[] + an ambiguity note (a curated key = a genuine empty range; a raw seriesId = EITHER genuine-empty OR a nonexistent/typo'd ID — verify it). Every response discloses the active tier (v1 keyless ~25/day, 25 series/query, ~10y span | v2 with a free BLS_API_KEY ~500/day) + the per-series units caveat. An OPTIONAL free BLS_API_KEY (env; https://data.bls.gov/registrationEngine/) lifts to v2 and is sent ONLY in the request body — never a URL/header/log.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "series": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "cpi_u_all",
+              "cpi_u_core",
+              "ppi_final_demand",
+              "eci_total_comp",
+              "eci_wages",
+              "unemployment_rate",
+              "labor_force_participation",
+              "employment_total_nonfarm",
+              "avg_hourly_earnings"
+            ]
+          },
+          "description": "One or more CURATED series enum keys (typo-proof; each carries a meaning + units label): cpi_u_all (CPI-U all items NSA, index), cpi_u_core (CPI-U core NSA, index), ppi_final_demand (PPI final demand NSA, index), eci_total_comp (ECI total comp — ★12-MO % CHANGE, not an index), eci_wages (ECI wages — ★12-MO % CHANGE), unemployment_rate (SA, percent), labor_force_participation (SA, percent), employment_total_nonfarm (SA, thousands of persons), avg_hourly_earnings (SA, dollars/hour). NSA CPI-U is the escalation/EPA-clause reference. At least one of series/seriesId is required; both may be combined."
+        },
+        "seriesId": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "One or more RAW BLS series IDs (power-user passthrough for the un-curatable space — OEWS area×occupation, local-area unemployment LAUCN…, SA/regional CPI variants). Charclass ^[A-Z0-9]{1,20}$ (uppercase alnum; punctuation/whitespace/lowercase rejected — SSRF + 'verify the ID' honesty). A raw ID has units:null (consult BLS). A nonexistent/typo'd ID returns BLS success + empty data (the ambiguity is disclosed, not asserted as 'no data'). At least one of series/seriesId is required."
+        },
+        "startYear": {
+          "type": "number",
+          "description": "Inclusive start year (1900..2027). Default: endYear − 9 (a ~10-year window). The span is CLAMPED to the active tier's cap (v1 ~10 years/query) BEFORE the request and disclosed in _meta.notes (never a silently truncated range)."
+        },
+        "endYear": {
+          "type": "number",
+          "description": "Inclusive end year (1900..2027). Default: the current year. Must be ≥ startYear."
+        }
+      }
+    }
+  },
+  {
     "name": "census_geocode_address",
     "description": "Resolve a one-line US address → its matched address(es) + the Census GEOGRAPHIES that drive set-aside / place-of-performance analysis (US Census Geocoder, keyless; geocoding.geo.census.gov/geocoder/geographies/onelineaddress) — the NEW territory/geospatial domain. Input `address` (≤500 chars), optional `benchmark` (default Public_AR_Current) / `vintage` (default Current_Current). Returns { matches:[{ matchedAddress, coordinates:{x,y}, tigerLineId, addressComponents, geographies:{ state, county, congressionalDistrict, censusTract, censusBlock, place, cbsaOrCsa, stateLegislativeUpper, stateLegislativeLower } }], matchCount, vintageResolved } + honest _meta. Each geography = { layerKey (the RAW vintage-versioned key, e.g. '119th Congressional Districts'), geoid (a STRING — leading zeros survive: '0102'), name }. HONESTY: genuine-empty (addressMatches:[]) ⇒ matchCount:0/complete:true (NOT an error; verify spelling + add city/state/ZIP); MULTIPLE matches are ALL surfaced (each with its own geographies) + a note; a historical vintage can return >1 layer per type (e.g. 111th+113th Congressional Districts with DISTINCT GEOIDs for a redistricted place) ⇒ BOTH surfaced (chosen + alternates[]) + a mandatory note (NEVER silently dropped); the resolved benchmark/vintage is echoed + a 'Current is a MOVING vintage' note; an invalid/missing benchmark/vintage ⇒ HTTP 400 THROWS (never a fake empty); an outage/5xx ⇒ THROWS. MANDATORY CAVEAT every response: these are a NOMINAL input, NOT an authoritative HUBZone / Opportunity-Zone / set-aside determination (those require SBA's HUBZone map / Treasury's OZ-tract list). Feed censusTract.geoid / county.geoid onward to those authoritative sources.",
     "inputSchema": {

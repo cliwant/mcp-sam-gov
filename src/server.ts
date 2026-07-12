@@ -55,6 +55,7 @@ import * as clinicaltrials from "./clinicaltrials.js";
 import * as census from "./census.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
+import * as bls from "./bls.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
@@ -2384,6 +2385,51 @@ const ClinicaltrialsFacetCountsInput = z.object({
     ),
 });
 
+// ─── BLS Public Data API v1/v2 (api.bls.gov — keyless POST/JSON) ─── ADR-0032
+// A NEW capability axis: the PRICING / ESCALATION layer (CPI-U & ECI drive EPA-
+// clause escalation; PPI benchmarks materials; CES gives labor-rate context). The
+// SECOND POST-batch getJson-port consumer (after NIH). SSRF surface = a compile-
+// time-CONSTANT host+path; seriesids ride in the module-built POST body. `series`
+// is a FROZEN 9-key curated enum (the SSRF value guard + the units-label source);
+// `seriesId` is the raw passthrough, charclass-validated ^[A-Z0-9]{1,20}$. Years
+// are bounded ints (1900..currentYear+1); the span is clamped to the tier cap
+// (v1 ~10y) BEFORE the fetch + disclosed. An OPTIONAL free BLS_API_KEY rides ONLY
+// in the POST body (v2, ~500/day) — never a URL/header/label/_meta/log.
+const BlsTimeseriesInput = z.object({
+  series: z
+    .array(z.enum(bls.BLS_SERIES_KEYS))
+    .max(bls.BLS_SERIES_KEYS.length)
+    .optional()
+    .describe(
+      "One or more CURATED series enum keys (typo-proof; each carries a meaning + units label): cpi_u_all (CPI-U all items NSA, index), cpi_u_core (CPI-U core NSA, index), ppi_final_demand (PPI final demand NSA, index), eci_total_comp (ECI total comp — ★12-MO % CHANGE, not an index), eci_wages (ECI wages — ★12-MO % CHANGE), unemployment_rate (SA, percent), labor_force_participation (SA, percent), employment_total_nonfarm (SA, thousands of persons), avg_hourly_earnings (SA, dollars/hour). NSA CPI-U is the escalation/EPA-clause reference. At least one of series/seriesId is required; both may be combined.",
+    ),
+  seriesId: z
+    .array(z.string().regex(/^[A-Z0-9]{1,20}$/))
+    .max(bls.BLS_SERIES_KEYS.length + 50)
+    .optional()
+    .describe(
+      "One or more RAW BLS series IDs (power-user passthrough for the un-curatable space — OEWS area×occupation, local-area unemployment LAUCN…, SA/regional CPI variants). Charclass ^[A-Z0-9]{1,20}$ (uppercase alnum; punctuation/whitespace/lowercase rejected — SSRF + 'verify the ID' honesty). A raw ID has units:null (consult BLS). A nonexistent/typo'd ID returns BLS success + empty data (the ambiguity is disclosed, not asserted as 'no data'). At least one of series/seriesId is required.",
+    ),
+  startYear: z
+    .number()
+    .int()
+    .min(1900)
+    .max(bls.YEAR_MAX)
+    .optional()
+    .describe(
+      `Inclusive start year (1900..${bls.YEAR_MAX}). Default: endYear − 9 (a ~10-year window). The span is CLAMPED to the active tier's cap (v1 ~10 years/query) BEFORE the request and disclosed in _meta.notes (never a silently truncated range).`,
+    ),
+  endYear: z
+    .number()
+    .int()
+    .min(1900)
+    .max(bls.YEAR_MAX)
+    .optional()
+    .describe(
+      `Inclusive end year (1900..${bls.YEAR_MAX}). Default: the current year. Must be ≥ startYear.`,
+    ),
+});
+
 // ─── US Census Geocoder (keyless source #22) — input schemas ──────
 // ADR-0023. KEYLESS, single fixed host (geocoding.geo.census.gov) + two fixed
 // endpoint paths (the SSRF core — no free host/path; NO id in the path). benchmark /
@@ -3520,6 +3566,22 @@ const TOOLS: ToolDef[] = [
       "FDIC industry & state banking-sector ANNUAL AGGREGATES — the FDIC's own roll-ups (keyless FDIC BankFind, api.fdic.gov/banks/summary). The FIRST aggregate/statistical FDIC tool (the other 4 are per-ENTITY, keyed on CERT): total assets, deposits, net income, equity & net interest income + structural counts (institutions, offices, branches, employees) for the whole US banking industry OR one state/territory in one year, split by charter class. Answers 'how big is the US (or a state's) banking industry this year, and how many institutions?' — a question the entity tools cannot express without summing thousands of rows. Exact-key filters (all optional, AND-combined): `year` (→ YEAR; e.g. 2023 → 121 rows), `state` (2-or-3-letter → STALP — NOTE the /summary state field is STALP, NOT PSTALP; accepts a jurisdiction code TX/CA/DC/GU/PR… OR a ROLL-UP code USA/US/OT/PI), `charterClass` (CB = commercial banks, SI = savings institutions; omit for both — there is NO combined row). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum YEAR/ASSET/DEP/NETINC/BANKS, def YEAR), `sortOrder` (def DESC → newest year / largest first). Returns { summary:[{ year, charterClass, charterClassCode, geography, stateCode, stateFips, scope, isRollup, institutionCount, officeCount, branchCount, employeeCount, totalAssetsUSD, totalDepositsUSD, netIncomeUSD, totalEquityUSD, netInterestIncomeUSD, id }] }. ★ROLL-UP HONESTY: each row crosses charter × geography; STALP ∈ {USA,US,OT,PI} are GEOGRAPHIC AGGREGATES (scope national_total/national_states_dc/territories_total/pacific_islands, isRollup:true), every other STALP is a jurisdiction (isRollup:false) — NEVER sum a roll-up row with jurisdiction rows or across scopes (national_total = national_states_dc + territories_total; a geography's total = its CB row + its SI row), read the national_total (USA) row directly for one national figure; a roll-up is NOT a state. ★NIM is net interest INCOME (a $ sum surfaced as netInterestIncomeUSD), NOT the margin ratio; this endpoint has NO ratio fields (ROA/ROE — derive from netIncomeUSD/totalAssetsUSD/totalEquityUSD). NO name/city filter — FDIC's /summary `search` param is ignored (returns the whole year); drill to institutions via fdic_search_institutions. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); money (ASSET/DEP/NETINC/EQ/NIM) is $thousands → whole USD ×1000 (null-never-0 — a genuine 0 like American Samoa's zero commercial banks stays 0, absent → null), counts (BANKS/OFFICES/BRANCHES/employees) pass through un-scaled (a count ×1000 is a fabrication); a non-int year is rejected pre-fetch (a malformed year is a live HTTP-200 total:0 false-empty); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
     inputSchema: FdicIndustrySummaryInput,
     handler: (input) => fdic.industrySummary(input),
+  }),
+  // ━━━ BLS Public Data API v1/v2 — keyless US labor/price time series (1) ━━━ ADR-0032
+  // A NEW capability axis: the PRICING / ESCALATION layer (CPI-U & ECI EPA-clause
+  // escalation, PPI materials benchmarking, CES labor-rate context). The SECOND
+  // POST-batch getJson-port consumer (after NIH). SSRF surface = a compile-time-
+  // constant host+path; seriesids ride in the module-built POST body. Honesty crux:
+  // the "-" unavailable marker → null-never-0 with the footnote reason surfaced; a
+  // non-SUCCESS status THROWS (never a fake-empty); per-series units are labeled;
+  // the span is clamped to the tier cap + disclosed. An OPTIONAL free BLS_API_KEY
+  // rides ONLY in the POST body (v2) — never a URL/header/label/_meta/log.
+  defineTool({
+    name: "bls_timeseries",
+    description:
+      "Fetch US Bureau of Labor Statistics time series — the PRICING / ESCALATION layer (keyless; api.bls.gov Public Data API v1, POST/JSON batch). CPI-U & ECI drive federal contract escalation / economic-price-adjustment (EPA) clauses; PPI benchmarks materials pricing; CES employment/wages give labor-rate context (next to gsa_benchmark_labor_rates + sam wage determinations). Inputs (at least one of series/seriesId REQUIRED; both combinable): `series` — a FROZEN 9-key CURATED enum (typo-proof; each carries meaning + units): cpi_u_all/cpi_u_core (CPI-U index, NSA — the escalation reference), ppi_final_demand (PPI index), eci_total_comp/eci_wages (★12-MONTH % CHANGE, NOT an index — a consumer misreads 3.4 as an index level otherwise), unemployment_rate/labor_force_participation (percent, SA), employment_total_nonfarm (thousands of persons, SA), avg_hourly_earnings (dollars/hour, SA). `seriesId` — raw BLS IDs (charclass ^[A-Z0-9]{1,20}$; the OEWS/local-area/regional passthrough; units:null for a raw ID). `startYear`/`endYear` (1900..currentYear+1; default a ~10-year window; span CLAMPED to the tier cap ~10y and disclosed). Returns { series:[{ seriesId, key, meaning, units, observations:[{ year, period, periodName, value, valueUnavailable, footnotes, latest }], observationCount, coveredRange }] } + honest _meta. HONESTY: each `value` is PARSED number|null — the BLS \"-\" unavailable marker (e.g. the 2025 lapse-in-appropriations gap) → null NEVER 0, with valueUnavailable:true + the footnote reason on the observation AND lifted into _meta.notes (a data gap is DISCLOSED, never a silent null and never a fabricated 0); a genuine \"0\" stays 0. A non-SUCCESS status THROWS (never a fake-empty): REQUEST_NOT_PROCESSED (the v1 ~25/day limit) ⇒ rate_limited with the tier disclosure; REQUEST_FAILED ⇒ upstream_unavailable/invalid_input surfacing message[]. A non-JSON 200 or a SUCCESS body missing Results.series ⇒ schema_drift. An empty data[] on SUCCESS ⇒ observations:[] + an ambiguity note (a curated key = a genuine empty range; a raw seriesId = EITHER genuine-empty OR a nonexistent/typo'd ID — verify it). Every response discloses the active tier (v1 keyless ~25/day, 25 series/query, ~10y span | v2 with a free BLS_API_KEY ~500/day) + the per-series units caveat. An OPTIONAL free BLS_API_KEY (env; https://data.bls.gov/registrationEngine/) lifts to v2 and is sent ONLY in the request body — never a URL/header/log.",
+    inputSchema: BlsTimeseriesInput,
+    handler: (input) => bls.timeseries(input),
   }),
   // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (2) ━━━ ADR-0016
   defineTool({
