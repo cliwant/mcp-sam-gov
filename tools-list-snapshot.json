@@ -888,6 +888,58 @@
     }
   },
   {
+    "name": "fdic_industry_summary",
+    "description": "FDIC industry & state banking-sector ANNUAL AGGREGATES — the FDIC's own roll-ups (keyless FDIC BankFind, api.fdic.gov/banks/summary). The FIRST aggregate/statistical FDIC tool (the other 4 are per-ENTITY, keyed on CERT): total assets, deposits, net income, equity & net interest income + structural counts (institutions, offices, branches, employees) for the whole US banking industry OR one state/territory in one year, split by charter class. Answers 'how big is the US (or a state's) banking industry this year, and how many institutions?' — a question the entity tools cannot express without summing thousands of rows. Exact-key filters (all optional, AND-combined): `year` (→ YEAR; e.g. 2023 → 121 rows), `state` (2-or-3-letter → STALP — NOTE the /summary state field is STALP, NOT PSTALP; accepts a jurisdiction code TX/CA/DC/GU/PR… OR a ROLL-UP code USA/US/OT/PI), `charterClass` (CB = commercial banks, SI = savings institutions; omit for both — there is NO combined row). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum YEAR/ASSET/DEP/NETINC/BANKS, def YEAR), `sortOrder` (def DESC → newest year / largest first). Returns { summary:[{ year, charterClass, charterClassCode, geography, stateCode, stateFips, scope, isRollup, institutionCount, officeCount, branchCount, employeeCount, totalAssetsUSD, totalDepositsUSD, netIncomeUSD, totalEquityUSD, netInterestIncomeUSD, id }] }. ★ROLL-UP HONESTY: each row crosses charter × geography; STALP ∈ {USA,US,OT,PI} are GEOGRAPHIC AGGREGATES (scope national_total/national_states_dc/territories_total/pacific_islands, isRollup:true), every other STALP is a jurisdiction (isRollup:false) — NEVER sum a roll-up row with jurisdiction rows or across scopes (national_total = national_states_dc + territories_total; a geography's total = its CB row + its SI row), read the national_total (USA) row directly for one national figure; a roll-up is NOT a state. ★NIM is net interest INCOME (a $ sum surfaced as netInterestIncomeUSD), NOT the margin ratio; this endpoint has NO ratio fields (ROA/ROE — derive from netIncomeUSD/totalAssetsUSD/totalEquityUSD). NO name/city filter — FDIC's /summary `search` param is ignored (returns the whole year); drill to institutions via fdic_search_institutions. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); money (ASSET/DEP/NETINC/EQ/NIM) is $thousands → whole USD ×1000 (null-never-0 — a genuine 0 like American Samoa's zero commercial banks stays 0, absent → null), counts (BANKS/OFFICES/BRANCHES/employees) pass through un-scaled (a count ×1000 is a fabrication); a non-int year is rejected pre-fetch (a malformed year is a live HTTP-200 total:0 false-empty); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "year": {
+          "type": "number",
+          "description": "Filter by aggregate YEAR (→ YEAR filter). 1934..current UTC year. e.g. 2023 → the 121 (charter × geography) aggregate rows for 2023. A non-int is rejected pre-fetch (a malformed year is a live HTTP-200 total:0 false-empty)."
+        },
+        "state": {
+          "type": "string",
+          "description": "Filter by geography via the STALP code (uppercase 2-or-3 letters; → STALP filter — the /summary state field is STALP, NOT PSTALP). Accepts a jurisdiction USPS code (TX, CA, DC, GU, PR…) OR a ROLL-UP code: USA (all states+territories), US (states+DC), OT (all territories), PI (Pacific Islands). The output scope/isRollup disambiguates every returned row."
+        },
+        "charterClass": {
+          "type": "string",
+          "enum": [
+            "CB",
+            "SI"
+          ],
+          "description": "Filter by charter class (→ CB_SI filter): CB = commercial banks, SI = savings institutions. Omit to return BOTH charter rows for the geography — there is NO pre-combined 'all institutions' row (a geography's total = its CB row + its SI row)."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page, 1..1000, default 100."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset for pagination, 0..100000, default 0."
+        },
+        "sortBy": {
+          "type": "string",
+          "enum": [
+            "YEAR",
+            "ASSET",
+            "DEP",
+            "NETINC",
+            "BANKS"
+          ],
+          "description": "Sort field (allowlisted enum; default YEAR = aggregate year). An unknown field is rejected before fetch."
+        },
+        "sortOrder": {
+          "type": "string",
+          "enum": [
+            "ASC",
+            "DESC"
+          ],
+          "description": "Sort direction, default DESC (newest year / largest first)."
+        }
+      }
+    }
+  },
+  {
     "name": "fdic_institution_financials",
     "description": "Quarterly financial time-series for ONE FDIC-insured institution by certificate number (keyless FDIC BankFind, api.fdic.gov/banks/financials). Input `cert` (REQUIRED FDIC certificate number, from fdic_search_institutions), `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum REPDTE/ASSET/DEP/NETINC, def REPDTE), `sortOrder` (def DESC → newest quarter first). Returns { cert, financials:[{ cert, reportDate, assetUSD, depositsUSD, netIncomeUSD, id }] } (e.g. CERT 10363 → 169 quarterly rows). HONESTY: totalAvailable is the EXACT meta.total (stable across offset — page via offset for the full history); ASSET/DEP/NETINC are published in $thousands and normalized to whole USD ×1000 (null-never-0); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope THROWS (never a fake empty); the snapshot build time is disclosed.",
     "inputSchema": {
