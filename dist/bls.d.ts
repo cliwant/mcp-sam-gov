@@ -106,4 +106,71 @@ export type BlsTimeseriesArgs = {
  * host/path passthrough); the OPTIONAL BLS_API_KEY rides ONLY in the body.
  */
 export declare function timeseries(args: BlsTimeseriesArgs): Promise<MetaBundle>;
+export declare const BLS_OEWS_OCCUPATION_KEYS: readonly ["all_occupations", "software_developer", "computer_systems_analyst", "info_security_analyst", "management_analyst", "project_mgmt_specialist", "logistician", "accountant_auditor", "general_ops_manager", "civil_engineer", "electrical_engineer", "mechanical_engineer", "industrial_engineer", "lawyer", "technical_writer", "admin_assistant"];
+export type BlsOewsOccupationKey = (typeof BLS_OEWS_OCCUPATION_KEYS)[number];
+export type BlsOewsOccupationEntry = {
+    /** The 6-digit hyphenless SOC code (the occupation component of the series ID). */
+    soc: string;
+    /** The official SOC occupation title (the output label). */
+    label: string;
+};
+export declare const BLS_OEWS_OCCUPATIONS: Record<BlsOewsOccupationKey, BlsOewsOccupationEntry>;
+export declare const BLS_STATE_FIPS: Record<string, string>;
+/** The curated `area` state enum values (the USPS 2-letter codes). */
+export declare const BLS_STATE_KEYS: [string, ...string[]];
+export declare const BLS_OEWS_DATATYPE_KEYS: readonly ["annual_mean", "annual_median", "hourly_mean", "hourly_median", "employment"];
+export type BlsOewsDatatypeKey = (typeof BLS_OEWS_DATATYPE_KEYS)[number];
+export type BlsOewsDatatypeEntry = {
+    /** The 2-digit datatype component of the series ID. */
+    code: string;
+    /** The units label carried on every row's measure (H3 — never mislabel). */
+    units: string;
+};
+export declare const BLS_OEWS_DATATYPES: Record<BlsOewsDatatypeKey, BlsOewsDatatypeEntry>;
+export declare function buildOewsSeriesId(parts: {
+    areatype: string;
+    areaCode: string;
+    occupation: string;
+    datatype: string;
+}): string;
+export type BlsOewsArgs = {
+    occupation?: string[];
+    soc?: string[];
+    area?: string[];
+    datatype?: string[];
+};
+export type BlsOewsRow = {
+    area: {
+        type: string;
+        code: string;
+        label: string;
+    };
+    occupation: {
+        soc: string;
+        key: string | null;
+        label: string | null;
+    };
+    measure: {
+        key: string;
+        code: string;
+        units: string;
+    };
+    /** The PARSED number — null (NEVER 0). Suppressed/absent (H2) ⇒ null too. */
+    value: number | null;
+    /** true iff a PRESENT value was unparseable ("-" gap); H2 absence ⇒ FALSE. */
+    valueUnavailable: boolean;
+    referenceYear: string | null;
+    referencePeriod: string | null;
+    footnotes: BlsFootnote[];
+    seriesId: string;
+};
+/**
+ * OEWS occupational wage benchmarking — build validated 25-char series IDs from
+ * structured (area × occupation × datatype) inputs, batch them into ONE POST
+ * (REUSING the bls_timeseries transport/parse/honesty layer), and return one
+ * normalized wage/employment row per resolved combo + honest _meta. NO year
+ * input (OEWS serves only the latest release; the tool requests a small recent
+ * window internally and discloses the reference year from the returned A01 row).
+ */
+export declare function oewsWages(args: BlsOewsArgs): Promise<MetaBundle>;
 //# sourceMappingURL=bls.d.ts.map

@@ -1972,6 +1972,36 @@ const BlsTimeseriesInput = z.object({
         .optional()
         .describe(`Inclusive end year (1900..${bls.YEAR_MAX}). Default: the current year. Must be ≥ startYear.`),
 });
+// ─── BLS OEWS — occupational wage benchmarking (2nd tool on api.bls.gov) ── ADR-0033
+// The LEVEL layer next to bls_timeseries's ESCALATION layer: mean/median annual &
+// hourly wages + employment by SOC occupation × geography. OEWS series IDs are 25
+// chars — they EXCEED the bls_timeseries raw-seriesId cap (^[A-Z0-9]{1,20}$), so
+// this tool BUILDS the 25-char ID INTERNALLY from validated structured inputs
+// (area/occupation/datatype), reusing the same POST/JSON transport + honesty
+// layer. NO year input (OEWS serves only the latest annual release). The module
+// re-validates every component (belt-and-suspenders behind these schemas).
+const BlsOewsWagesInput = z.object({
+    occupation: z
+        .array(z.enum(bls.BLS_OEWS_OCCUPATION_KEYS))
+        .max(bls.BLS_OEWS_OCCUPATION_KEYS.length)
+        .optional()
+        .describe("One or more CURATED occupation enum keys (typo-proof; each carries an SOC + official label): all_occupations, software_developer (15-1252), computer_systems_analyst, info_security_analyst, management_analyst, project_mgmt_specialist, logistician, accountant_auditor, general_ops_manager, civil_engineer, electrical_engineer, mechanical_engineer, industrial_engineer, lawyer, technical_writer, admin_assistant. The ~830-SOC long tail is reachable via `soc`. At least one of occupation/soc is required."),
+    soc: z
+        .array(z.string().regex(/^\d{6}$/))
+        .max(50)
+        .optional()
+        .describe("One or more RAW 6-digit SOC codes (the long-tail passthrough) — HYPHENLESS (use 151252, not 15-1252; the hyphen is rejected). A raw soc that matches a curated occupation is auto-labeled; otherwise key/label are null. At least one of occupation/soc is required."),
+    area: z
+        .array(z.string())
+        .max(51)
+        .optional()
+        .describe('One or more geographies (default ["national"]). Each element is "national", a 2-letter USPS state code (e.g. CA, TX, DC — the curated state enum), OR a 5-digit CBSA metropolitan code (^\\d{5}$, e.g. 19100 for Dallas-Fort Worth). Resolved internally to the OEWS areatype + zero-padded area code; an unknown token is rejected (invalid_input, never a malformed series ID on the wire).'),
+    datatype: z
+        .array(z.enum(bls.BLS_OEWS_DATATYPE_KEYS))
+        .max(bls.BLS_OEWS_DATATYPE_KEYS.length)
+        .optional()
+        .describe('One or more measures (default ["annual_mean"]): annual_mean (dollars/year), annual_median (dollars/year), hourly_mean (dollars/hour), hourly_median (dollars/hour), employment (count jobs). Each row carries measure.units from this map (H3 — never mislabel).'),
+});
 // ─── US Census Geocoder (keyless source #22) — input schemas ──────
 // ADR-0023. KEYLESS, single fixed host (geocoding.geo.census.gov) + two fixed
 // endpoint paths (the SSRF core — no free host/path; NO id in the path). benchmark /
@@ -2947,6 +2977,19 @@ const TOOLS = [
         description: "Fetch US Bureau of Labor Statistics time series — the PRICING / ESCALATION layer (keyless; api.bls.gov Public Data API v1, POST/JSON batch). CPI-U & ECI drive federal contract escalation / economic-price-adjustment (EPA) clauses; PPI benchmarks materials pricing; CES employment/wages give labor-rate context (next to gsa_benchmark_labor_rates + sam wage determinations). Inputs (at least one of series/seriesId REQUIRED; both combinable): `series` — a FROZEN 9-key CURATED enum (typo-proof; each carries meaning + units): cpi_u_all/cpi_u_core (CPI-U index, NSA — the escalation reference), ppi_final_demand (PPI index), eci_total_comp/eci_wages (★12-MONTH % CHANGE, NOT an index — a consumer misreads 3.4 as an index level otherwise), unemployment_rate/labor_force_participation (percent, SA), employment_total_nonfarm (thousands of persons, SA), avg_hourly_earnings (dollars/hour, SA). `seriesId` — raw BLS IDs (charclass ^[A-Z0-9]{1,20}$; the OEWS/local-area/regional passthrough; units:null for a raw ID). `startYear`/`endYear` (1900..currentYear+1; default a ~10-year window; span CLAMPED to the tier cap ~10y and disclosed). Returns { series:[{ seriesId, key, meaning, units, observations:[{ year, period, periodName, value, valueUnavailable, footnotes, latest }], observationCount, coveredRange }] } + honest _meta. HONESTY: each `value` is PARSED number|null — the BLS \"-\" unavailable marker (e.g. the 2025 lapse-in-appropriations gap) → null NEVER 0, with valueUnavailable:true + the footnote reason on the observation AND lifted into _meta.notes (a data gap is DISCLOSED, never a silent null and never a fabricated 0); a genuine \"0\" stays 0. A non-SUCCESS status THROWS (never a fake-empty): REQUEST_NOT_PROCESSED (the v1 ~25/day limit) ⇒ rate_limited with the tier disclosure; REQUEST_FAILED ⇒ upstream_unavailable/invalid_input surfacing message[]. A non-JSON 200 or a SUCCESS body missing Results.series ⇒ schema_drift. An empty data[] on SUCCESS ⇒ observations:[] + an ambiguity note (a curated key = a genuine empty range; a raw seriesId = EITHER genuine-empty OR a nonexistent/typo'd ID — verify it). Every response discloses the active tier (v1 keyless ~25/day, 25 series/query, ~10y span | v2 with a free BLS_API_KEY ~500/day) + the per-series units caveat. An OPTIONAL free BLS_API_KEY (env; https://data.bls.gov/registrationEngine/) lifts to v2 and is sent ONLY in the request body — never a URL/header/log.",
         inputSchema: BlsTimeseriesInput,
         handler: (input) => bls.timeseries(input),
+    }),
+    // ━━━ BLS OEWS — keyless occupational wage benchmarking (2nd BLS tool) ━━━ ADR-0033
+    // The LEVEL layer next to bls_timeseries's ESCALATION layer: mean/median annual &
+    // hourly wages + employment by SOC occupation × geography — the highest-value B2G
+    // BLS slice (labor-rate benchmarking) that bls_timeseries structurally cannot reach
+    // (OEWS IDs are 25 chars > the raw-seriesId 20-char cap). BUILDS the 25-char series
+    // ID INTERNALLY from validated structured inputs; REUSES the same POST/JSON transport
+    // + parseBlsBody status-throw + mapObservation ("-"→null-never-0) + tier/key seam.
+    defineTool({
+        name: "bls_oews_wages",
+        description: "Benchmark US occupational wages & employment from BLS OEWS (Occupational Employment & Wage Statistics) — the LEVEL layer for labor-rate benchmarking (keyless; api.bls.gov Public Data API, POST/JSON batch). The actual mean/median annual & hourly wage a labor category commands, by area — next to gsa_benchmark_labor_rates (GSA CALC), sam wage determinations, and bls_timeseries (the CPI/ECI escalation layer). OEWS series IDs are 25 chars (area×occupation×industry×datatype), EXCEEDING bls_timeseries's raw-seriesId cap, so this tool BUILDS the ID INTERNALLY from validated structured inputs. Inputs (at least one of occupation/soc REQUIRED; all arrays batch into ONE POST — the cartesian product area×occupation×datatype is capped at the active tier's series cap and refused over-cap WITH THE COUNT NAMED, never silently truncated): `occupation` — a CURATED 16-key SOC enum (typo-proof; e.g. software_developer=15-1252, civil_engineer=17-2051, management_analyst=13-1111); `soc` — raw 6-digit HYPHENLESS SOC codes for the ~830-SOC long tail (use 151252, not 15-1252); `area` — default [\"national\"]; each is \"national\", a 2-letter USPS state code (CA/TX/DC…), or a 5-digit CBSA metro code (19100 = Dallas-Fort Worth); `datatype` — default [\"annual_mean\"]: annual_mean/annual_median (dollars/year), hourly_mean/hourly_median (dollars/hour), employment (count jobs). NO year input — OEWS is ANNUAL and the API serves only the latest release; the tool requests a recent window internally and DISCLOSES the reference year. Returns { results:[{ area:{type,code,label}, occupation:{soc,key,label}, measure:{key,code,units}, value:number|null, valueUnavailable, referenceYear, referencePeriod, footnotes, seriesId }] } + honest _meta. HONESTY: (H1) OEWS is an ANNUAL point-in-time snapshot (reference May <year>, period A01), NOT monthly/current-quarter — disclosed every call; (H2) a built ID that returns empty/absent ⇒ value:null, valueUnavailable:FALSE (the occupation is not surveyed/estimated there OR the cell is suppressed for confidentiality) + the not-published note + the surfaced upstream \"Series does not exist\" message + the ID in fieldsUnavailable — NEVER a fabricated 0; a PRESENT \"-\" in-band value ⇒ null + valueUnavailable:true + footnote; (H3) each row's measure.units labels the datatype (never read an employment count as a wage); (H4) the API returns real numerics (no top-code); a non-SUCCESS status THROWS (REQUEST_NOT_PROCESSED ⇒ rate_limited with the tier disclosure; a non-JSON 200 ⇒ schema_drift). Every response discloses the active tier. An OPTIONAL free BLS_API_KEY lifts to v2 and is sent ONLY in the request body — never a URL/header/log.",
+        inputSchema: BlsOewsWagesInput,
+        handler: (input) => bls.oewsWages(input),
     }),
     // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (2) ━━━ ADR-0016
     defineTool({
