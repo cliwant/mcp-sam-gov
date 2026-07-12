@@ -67,7 +67,7 @@ import { num as govinfoNum, listCollections as govinfoListCollections, searchPac
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
 import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward, tokenizeForDisclosure as nsfTok } from "./dist/nsf.js";
-import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
+import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
@@ -10238,6 +10238,228 @@ async function testClinicaltrialsHonesty() {
   ok("53-parity clinicaltrials.num === coerce.num (one shared audited impl — NO local num/str in clinicaltrials.ts)", ctNum === coerceNum, "clinicaltrials.num diverged from coerce.num");
 }
 
+// §56-ct-facets: ClinicalTrials.gov facet counts (clinicaltrials.gov/api/v2/stats/
+// field/values, ADR-0024, the aggregate/statistical SIBLING of the row search tool
+// on the SAME fixed host + audited getCT). NON-VACUOUS, OFFLINE, deterministic. Each
+// assertion pins a value + names the mutation that turns it RED (the ADR §load-bearing
+// mutations a–i + M1 unit-note + M2 scope-note + in-handler re-guard):
+//   (exact)     studiesCount/uniqueValuesCount typeof-checked to NUMBER before num()
+//               (a non-number ⇒ schema_drift, NEVER a silent 0); the exact value is
+//               surfaced verbatim (fabricate/derive/coerce-to-0 ⇒ RED).
+//   (truncation) a synthetic ENUM facet with unique ≫ returned ⇒ per-facet truncated:
+//               true + the response-level returned<totalAvailable roll-up (complete:
+//               false) + the 250-cap OMITTED note (hard-code truncated:false / drop
+//               the invariant ⇒ RED). NO v1 ENUM truncates live — the guard is
+//               load-bearing for a future high-cardinality whitelist addition.
+//   (bad-field) an un-whitelisted field (Condition) ⇒ invalid_input, 0 fetch via the
+//               IN-HANDLER re-guard (a DIRECT call bypassing Zod; remove it ⇒ RED).
+//   (type-drift) a BOOLEAN {trueCount,falseCount} shape (no topValues) for a
+//               whitelisted field ⇒ schema_drift, never read as empty (⇒ RED).
+//   (M1)        the DISTINCT-FIELD-VALUES unit-disclosure note present (drop ⇒ RED).
+//   (M2)        the whole-registry scope note present + carrying NO frozen registry
+//               integer (reintroduce a number OR drop the note ⇒ RED).
+//   (overlap)   Phase (array-valued) ⇒ overlapping:true + the not-a-partition note;
+//               a scalar field ⇒ overlapping:false + NO overlap note (⇒ RED).
+//   (missing)   a high missingStudiesCount ⇒ the minority-coverage note; low ⇒ none.
+//   (caveat)    the facet-scoped trial≠federal-award caveat in EVERY response (⇒ RED).
+//   (f)         a 404/400/5xx ⇒ THROWS (whitelist drift / outage, NEVER a fake empty);
+//               a non-array 200 / a missing piece ⇒ schema_drift.
+//   (ssrf)      module-built URLSearchParams to clinicaltrials.gov ONLY, fields=
+//               comma-joined from the enum, redirect:'error'; dedup + roll-up.
+const CT_STATS_RE = /clinicaltrials\.gov\/api\/v2\/stats\/field\/values/;
+const isCtStats = (u) => CT_STATS_RE.test(u);
+const ctStatsMock = (body, status = 200) => (u) => (isCtStats(u) ? mockResponse({ status, json: body }) : failClosed()());
+const ctStatsQuery = (calls) => new URL(calls.find((x) => isCtStats(x.url)).url).searchParams;
+const ctStatsFirstUrl = (calls) => calls.find((x) => isCtStats(x.url)).url;
+const fv = (value, studiesCount) => ({ value, studiesCount });
+// One `/stats/field/values` element (verbatim live shape). opts overrides type/field/
+// unique/missing/values.
+const facet = (piece, { type = "ENUM", field = `protocolSection.mod.${piece}`, unique, missing = 0, values = [] } = {}) => ({
+  type, piece, field, missingStudiesCount: missing, uniqueValuesCount: unique, topValues: values,
+});
+// A COMPLETE scalar OverallStatus facet (returned == unique, missing 0 — a clean partition).
+const OS_COMPLETE = () => facet("OverallStatus", { unique: 2, missing: 0, values: [fv("COMPLETED", 324198), fv("RECRUITING", 64943)] });
+// The live Phase ARRAY-valued facet (sum 477032 + missing 140698 = 617730 > registry — an OVERLAP).
+const PHASE_LIVE = () => facet("Phase", { unique: 6, missing: 140698, values: [fv("NA", 231501), fv("PHASE2", 89231), fv("PHASE1", 65013), fv("PHASE3", 49415), fv("PHASE4", 35490), fv("EARLY_PHASE1", 6382)] });
+
+async function testClinicaltrialsFacetHonesty() {
+  section("56. ClinicalTrials.gov facet counts (ADR-0024, source #21's aggregate/statistical SIBLING — EXACT per-value study counts over the WHOLE registry via /stats/field/values, the SAME fixed host + audited getCT) — exact-count-or-drift (typeof-before-num) + returned<unique⇒truncated invariant (250-cap) + [ssrf] in-handler field re-guard (0-fetch) + ENUM-only type-drift guard (BOOLEAN⇒schema_drift) + [M1] distinct-value unit note + [M2] no-frozen-total scope note + Phase array not-a-partition + high-missing note + trial≠award caveat + SSRF + shape/outage honesty (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (exact + M1 + M2 + caveat) a normal multi-field call: EXACT counts, the
+  //    distinct-value roll-up + unit note, the no-frozen-total scope note, complete. ──
+  await withFetch(ctStatsMock([OS_COMPLETE(), PHASE_LIVE()]), async (calls) => {
+    const r = await runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus", "Phase"] }, sam);
+    const m = buildMeta(r.meta);
+    const os = r.data.facets.find((f) => f.field === "OverallStatus");
+    ok("56exact studiesCount is the EXACT upstream value via coerce.num (COMPLETED=324198, RECRUITING=64943) + valueType ENUM + fieldPath echoed — fabricate/derive/coerce-to-0 ⇒ RED",
+      os.values[0].value === "COMPLETED" && os.values[0].studiesCount === 324198 && os.values[1].studiesCount === 64943 && os.valueType === "ENUM" && os.fieldPath === "protocolSection.mod.OverallStatus", JSON.stringify(os));
+    ok("56M1 roll-up: returned = Σ values.length (2+6=8), totalAvailable = Σ uniqueValuesCount (2+6=8), complete:true, truncated:false (v1 ENUM) — these count DISTINCT FIELD VALUES not studies",
+      m.returned === 8 && m.totalAvailable === 8 && m.complete === true && m.truncated === false, JSON.stringify({ r: m.returned, ta: m.totalAvailable, c: m.complete, t: m.truncated }));
+    ok("56M1 the DISTINCT-FIELD-VALUES unit-disclosure note is present (totalAvailable/returned count values NOT studies; points to studiesCount / clinicaltrials_search_studies) — drop it ⇒ RED (the cross-tool unit-overload lie)",
+      m.notes.some((n) => /count DISTINCT FIELD VALUES/.test(n) && /NOT studies/.test(n) && /clinicaltrials_search_studies/.test(n)), JSON.stringify(m.notes));
+    const scope = m.notes.find((n) => /ENTIRE ClinicalTrials\.gov registry/.test(n));
+    // Strip commas first so a grouped total ('593,334') is caught as 6 digits, not
+    // three 3-digit runs; '400' (the HTTP status) stays 3 digits ⇒ allowed.
+    ok("56M2 the whole-registry scope note is present AND carries NO frozen registry integer (no 4+ digit number after removing digit-group commas — the registry only grows; a hard-coded total would go stale) — reintroduce a number OR drop the note ⇒ RED",
+      scope !== undefined && !/\d{4,}/.test(scope.replace(/,/g, "")) && /NOT filtered by any query/.test(scope), JSON.stringify(scope));
+    ok("56caveat the facet-scoped trial≠federal-award caveat is present (a DISTRIBUTION over REGISTRATIONS not awards; LeadSponsorClass is a funding-SOURCE class, not a UEI-keyed join) — reworded from the row-level caveat, NOT the 'leadSponsor.name is FREE-TEXT' wording — drop ⇒ RED",
+      m.notes.some((n) => /DISTRIBUTION over clinical-study REGISTRATIONS/.test(n) && /NOT over federal grants or contract awards/.test(n)) && !m.notes.some((n) => /leadSponsor\.name is a FREE-TEXT/.test(n)), JSON.stringify(m.notes));
+    ok("56src the _meta.source is the FACET endpoint label (distinct from the row tool's /studies source) + NO pagination object (leave undefined, /stats/field/values is un-paged)",
+      m.source === "clinicaltrials.gov /api/v2/stats/field/values (keyless)" && m.pagination === undefined, JSON.stringify({ src: m.source, pg: m.pagination }));
+  });
+
+  // ── (overlap) Phase (array-valued) ⇒ overlapping:true + not-a-partition note;
+  //    OverallStatus (scalar) ⇒ overlapping:false + NO overlap note. ──
+  await withFetch(ctStatsMock([OS_COMPLETE(), PHASE_LIVE()]), async () => {
+    const r = await runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus", "Phase"] }, sam);
+    const m = buildMeta(r.meta);
+    const os = r.data.facets.find((f) => f.field === "OverallStatus");
+    const ph = r.data.facets.find((f) => f.field === "Phase");
+    ok("56overlap Phase (∈ CT_FACET_ARRAY_FIELDS) ⇒ overlapping:true + the not-a-partition note (counts OVERLAP, MUST NOT be summed); OverallStatus (scalar) ⇒ overlapping:false + NO overlap note — drop the Phase note / mis-flag ⇒ RED",
+      ph.overlapping === true && os.overlapping === false && m.notes.some((n) => /'Phase' is multi-valued per study/.test(n) && /MUST NOT be summed/.test(n)) && !m.notes.some((n) => /'OverallStatus' is multi-valued/.test(n)), JSON.stringify({ ph: ph.overlapping, os: os.overlapping, notes: m.notes.filter((n) => /multi-valued/.test(n)) }));
+  });
+
+  // ── (missing) a high missingStudiesCount (more studies lack a value than are shown)
+  //    ⇒ the minority-coverage note; a low-missing scalar ⇒ none. ──
+  await withFetch(ctStatsMock([facet("DesignObservationalModel", { unique: 2, missing: 460578, values: [fv("COHORT", 120000), fv("CASE_CONTROL", 12756)] })]), async () => {
+    const r = await runTool("clinicaltrials_facet_counts", { fields: ["DesignObservationalModel"] }, sam);
+    const m = buildMeta(r.meta);
+    ok("56missing high missingStudiesCount (460578 > shown 132756) ⇒ the 'covers a MINORITY of the registry' note (with the LIVE missing count, NOT a frozen total) — drop it ⇒ RED",
+      m.notes.some((n) => /Field 'DesignObservationalModel' has 460578 studies with NO value/.test(n) && /MINORITY of the registry/.test(n)), JSON.stringify(m.notes));
+  });
+  await withFetch(ctStatsMock([OS_COMPLETE()]), async () => {
+    const r = await runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam);
+    const m = buildMeta(r.meta);
+    ok("56missing a low-missing scalar (OverallStatus missing 0 < shown) ⇒ NO minority-coverage note (the note fires ONLY when missing > shown) — over-fire ⇒ RED",
+      !m.notes.some((n) => /MINORITY of the registry/.test(n)), JSON.stringify(m.notes.filter((n) => /MINORITY/.test(n))));
+  });
+
+  // ── (truncation) THE key honesty invariant: a synthetic ENUM facet with unique ≫
+  //    returned ⇒ truncated:true per-facet + returned<totalAvailable roll-up
+  //    (complete:false) + the 250-cap OMITTED note. NO v1 ENUM truncates live; this
+  //    models a future high-cardinality whitelist addition. Hard-code truncated:false
+  //    / drop the returned<unique invariant ⇒ RED. ──
+  await withFetch(ctStatsMock([facet("OverallStatus", { unique: 131734, missing: 0, values: [fv("A", 300), fv("B", 200), fv("C", 100)] })]), async () => {
+    const r = await runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam);
+    const m = buildMeta(r.meta);
+    const f0 = r.data.facets[0];
+    ok("56truncation a facet with returned(3) < uniqueValuesCount(131734) ⇒ per-facet truncated:true + the response returned<totalAvailable roll-up ⇒ complete:false, truncated:true (the buildMeta derivation) — hard-code truncated:false ⇒ RED",
+      f0.truncated === true && f0.returned === 3 && f0.uniqueValuesCount === 131734 && m.truncated === true && m.complete === false && m.returned === 3 && m.totalAvailable === 131734, JSON.stringify({ ft: f0.truncated, mt: m.truncated, mc: m.complete }));
+    ok("56truncation the mandatory 250-cap OMITTED note fires (131734 distinct, top 3 returned, 131731 OMITTED, NOT the full distribution) — drop the cap note ⇒ RED",
+      m.notes.some((n) => /has 131734 distinct values/.test(n) && /131731 value\(s\) are OMITTED/.test(n) && /NOT the full distribution/.test(n)), JSON.stringify(m.notes.filter((n) => /OMITTED/.test(n))));
+  });
+
+  // ── (exact-drift a) a non-number studiesCount / uniqueValuesCount ⇒ schema_drift
+  //    (typeof-checked BEFORE num — a non-number can NEVER be silently coerced to 0). ──
+  await withFetch(ctStatsMock([facet("OverallStatus", { unique: 2, values: [fv("COMPLETED", "324198"), fv("RECRUITING", 64943)] })]), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56exact-drift a topValues[].studiesCount that is a STRING ('324198') ⇒ schema_drift (typeof-checked before num() so a string can't silently parse; a count is EXACT or it is drift — never a fabricated/coerced 0) ⇒ mutate to num() it ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctStatsMock([facet("OverallStatus", { unique: 2, values: [fv("COMPLETED", null), fv("RECRUITING", 64943)] })]), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56exact-drift a NULL studiesCount ⇒ schema_drift (NEVER a silent 0 / dropped value — the forbidden data-absence-as-0 class)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctStatsMock([facet("OverallStatus", { unique: "2", values: [fv("COMPLETED", 324198)] })]), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56exact-drift a non-number uniqueValuesCount ('2' string) ⇒ schema_drift (typeof-checked before num)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (type-drift g) a BOOLEAN {trueCount,falseCount} shape (no topValues) for a
+  //    WHITELISTED field ⇒ schema_drift (the ENUM-only guard) — never read as empty. ──
+  await withFetch(ctStatsMock([{ type: "BOOLEAN", piece: "OverallStatus", field: "protocolSection.mod.OverallStatus", missingStudiesCount: 14777, falseCount: 421291, trueCount: 157266 }]), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56type-drift a BOOLEAN {trueCount,falseCount} shape (NO topValues/uniqueValuesCount) for a whitelisted field ⇒ schema_drift (type!=='ENUM') — read undefined.topValues as an empty distribution ⇒ RED (the response-shape drift guard, §Honesty #7)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctStatsMock([{ type: "STRING", piece: "OverallStatus", field: "x", missingStudiesCount: 0, uniqueValuesCount: 131734, topValues: [fv("cancer", 300), fv("diabetes", 200)], longest: { value: "…", length: 200, nctId: "NCT00000001" } }]), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56type-drift a STRING shape (type!=='ENUM' but WITH a valid topValues ARRAY — the 250-capped STRING facet) for a whitelisted field ⇒ schema_drift SPECIFICALLY via the type==='ENUM' guard (the topValues-array guard would PASS it) — remove the ENUM type check ⇒ it maps as a (mis-typed) ENUM ⇒ RED (isolates the ENUM-only shape guard)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctStatsMock([{ type: "ENUM", piece: "OverallStatus", field: "x", missingStudiesCount: 0, uniqueValuesCount: 2, topValues: "notarray" }]), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56type-drift topValues that is NOT an array ⇒ schema_drift (container-guarded — never a TypeError masking drift as upstream_unavailable, never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (bad-field c) an un-whitelisted field ⇒ invalid_input, 0 fetch via the
+  //    IN-HANDLER re-guard (a DIRECT call bypasses Zod — the SSRF/shape guard). ──
+  for (const bad of ["Condition", "InterventionName", "HealthyVolunteers", "NotARealField", "overallStatus"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => ctFacetCounts({ fields: [bad] }));
+      ok(`56bad-field DIRECT handler call fields:[${JSON.stringify(bad)}] (un-whitelisted) ⇒ invalid_input, 0 fetch (the in-handler CT_FACET_FIELDS_SET re-guard closes a Zod-bypassing raw field name — NO raw field ever reaches the URL) — remove the re-guard ⇒ it reaches the API ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => ctFacetCounts({ fields: [] }));
+    ok("56bad-field an EMPTY fields array (direct call) ⇒ invalid_input, 0 fetch (at least one facet required)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // Zod-path rejection of an un-whitelisted field (the enum) — parity with the direct guard.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["Condition"] }, sam));
+    ok("56bad-field Zod-path fields:['Condition'] ⇒ invalid_input, 0 fetch (the derived z.enum(CT_FACET_FIELDS) rejects it — the enum and the handler Set share the frozen single source of truth)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── (ssrf) module-built URLSearchParams to clinicaltrials.gov ONLY; fields=
+  //    comma-joined from the enum; only the `fields` key; redirect:'error'; dedup. ──
+  await withFetch(ctStatsMock([OS_COMPLETE(), facet("StudyType", { unique: 1, values: [fv("INTERVENTIONAL", 400000)] })]), async (calls) => {
+    const r = await runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus", "StudyType", "OverallStatus"] }, sam);
+    const q = ctStatsQuery(calls);
+    ok("56ssrf the query is MODULE-BUILT via URLSearchParams to clinicaltrials.gov ONLY: fields=OverallStatus,StudyType (deduped, comma-joined from the enum), NO other key, redirect:'error' (fail-closed off-host 3xx)",
+      q.get("fields") === "OverallStatus,StudyType" && [...q.keys()].join(",") === "fields" && calls.find((x) => isCtStats(x.url)).init.redirect === "error" && new URL(ctStatsFirstUrl(calls)).hostname === "clinicaltrials.gov", JSON.stringify({ fields: q.get("fields"), keys: [...q.keys()] }));
+    ok("56ssrf dedup: fields [OverallStatus, StudyType, OverallStatus] ⇒ 2 facets (order-preserving dedup) + the roll-up over the deduped set",
+      r.data.facets.length === 2 && r.data.facets[0].field === "OverallStatus" && r.data.facets[1].field === "StudyType", JSON.stringify(r.data.facets.map((f) => f.field)));
+    const url = ctStatsFirstUrl(calls).split("?")[0];
+    ok("56ssrf the built path is exactly https://clinicaltrials.gov/api/v2/stats/field/values (the SAME audited getCT + fixed host as the row tools — no injection, no free host/path)",
+      url === "https://clinicaltrials.gov/api/v2/stats/field/values", url);
+  });
+
+  // ── (f) a 404/400/5xx ⇒ THROWS (whitelist drift / outage, NEVER a fake empty);
+  //    a non-array 200 / a missing piece ⇒ schema_drift. ──
+  await withFetch(ctStatsMock("Unknown piece name of field path: OverallStatus", 404), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56f a 404 for a WHITELISTED field (⇒ the whitelist drifted from upstream) ⇒ not_found THROWS — read the 404 body as an empty distribution ⇒ RED",
+      threw && toToolError(error).kind === "not_found", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctStatsMock("`pageSize` is unknown parameter", 400), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56f a 400 ⇒ invalid_input THROWS (never a fake empty)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctStatsMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56f a 503 ⇒ upstream_unavailable THROWS (a DOWN ClinicalTrials.gov is NEVER a fake-empty distribution)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctStatsMock({ notAnArray: true }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56f a 200 body that is NOT a top-level array ⇒ schema_drift (one object per requested field expected — never a fabricated empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctStatsMock([facet("StudyType", { unique: 1, values: [fv("INTERVENTIONAL", 400000)] })]), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam));
+    ok("56f a requested field ABSENT from the response (piece StudyType returned but OverallStatus requested) ⇒ schema_drift (whitelist drift — NEVER read a mismatched/missing facet as empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── value null-never-empty-string + missingStudiesCount null-never-0. ──
+  await withFetch(ctStatsMock([facet("OverallStatus", { unique: 1, missing: 0, values: [fv("", 5)] })]), async () => {
+    const r = await runTool("clinicaltrials_facet_counts", { fields: ["OverallStatus"] }, sam);
+    ok("56coerce a blank value '' ⇒ null (null-never-empty-string) while its exact studiesCount 5 is preserved (a blank label masquerading as a real (blank) value is the forbidden data-absence-as-value class)",
+      r.data.facets[0].values[0].value === null && r.data.facets[0].values[0].studiesCount === 5, JSON.stringify(r.data.facets[0].values[0]));
+  });
+}
+
 // §55-census: US Census Geocoder (geocoding.geo.census.gov/geocoder/geographies/…,
 // ADR-0023, source #22 — the NEW territory/geospatial domain on the getJson GET port).
 // NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the mutation
@@ -10842,6 +11064,7 @@ async function main() {
   await testNihHonesty();
   await testNsfHonesty();
   await testClinicaltrialsHonesty();
+  await testClinicaltrialsFacetHonesty();
   await testCensusHonesty();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();

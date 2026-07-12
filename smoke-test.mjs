@@ -929,6 +929,35 @@ const tests = [
       typeof r.study === "object" &&
       /^NCT\d{8}$/.test(String(r.study.nctId)),
   },
+  {
+    // ADR-0024: the aggregate/statistical sibling — EXACT whole-registry per-value
+    // study-count distribution for whitelisted ENUM fields. OverallStatus (scalar,
+    // complete) + LeadSponsorClass (the funding-SOURCE-class distribution). Every
+    // facet is type ENUM with exact studiesCount; a live transient is tolerated.
+    name: "clinicaltrials_facet_counts",
+    args: { fields: ["OverallStatus", "LeadSponsorClass"] },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      Array.isArray(r.facets) &&
+      r.facets.length === 2 &&
+      r.facets.some((f) => f.field === "LeadSponsorClass") &&
+      r.facets.every(
+        (f) =>
+          f !== null &&
+          typeof f === "object" &&
+          f.valueType === "ENUM" &&
+          typeof f.uniqueValuesCount === "number" &&
+          Array.isArray(f.values) &&
+          f.values.length >= 1 &&
+          f.values.every(
+            (v) =>
+              typeof v.studiesCount === "number" &&
+              typeof v.value === "string",
+          ),
+      ),
+  },
   // ━━━ EPA ECHO REST — keyless facility compliance/enforcement (ADR-0009)
   // Live-hits echodata.epa.gov (keyless). A live transient (5xx/timeout/429) is
   // acceptable and TOLERATED as a pass-with-note (the honest taxonomy, not a code

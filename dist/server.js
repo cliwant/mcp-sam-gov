@@ -1579,6 +1579,18 @@ const ClinicaltrialsGetStudyInput = z.object({
         .regex(clinicaltrials.CT_NCT_RE)
         .describe("NCT id — the form NCT followed by exactly 8 digits (e.g. NCT02403869). Returns the ONE full study record INCLUDING briefSummary; a nonexistent id ⇒ found:false (never a fabricated record). Injection-safe (validated before the path is built)."),
 });
+// ADR-0024 — the facet-counts field enum is DERIVED from clinicaltrials.CT_FACET_FIELDS
+// (single source of truth; the handler re-validates each element against the frozen
+// Set INLINE — the [ssrf] re-guard). 1..11 whitelisted ENUM fields, comma-joined
+// module-built into fields=<v1,v2,…> (NO raw passthrough); a non-member ⇒ invalid_input
+// pre-fetch (0 fetch). No filter/scope/page param (they HTTP-400 here).
+const ClinicaltrialsFacetCountsInput = z.object({
+    fields: z
+        .array(z.enum(clinicaltrials.CT_FACET_FIELDS))
+        .min(1)
+        .max(clinicaltrials.CT_FACET_FIELDS.length)
+        .describe("1..11 ClinicalTrials.gov ENUM facet fields (deduped in-handler): OverallStatus, StudyType, Phase, LeadSponsorClass (★ the funding-SOURCE-class distribution — NIH/FED/OTHER_GOV/INDUSTRY/…, distinct from the search tool's 4-value funderType filter), Sex, DesignAllocation, DesignPrimaryPurpose, DesignInterventionModel, DesignMasking, DesignObservationalModel, DesignTimePerspective. Each returns the EXACT whole-registry per-value study-count distribution. An unlisted field ⇒ invalid_input pre-fetch (0 fetch). Phase is ARRAY-valued (counts OVERLAP — see _meta)."),
+});
 // ─── US Census Geocoder (keyless source #22) — input schemas ──────
 // ADR-0023. KEYLESS, single fixed host (geocoding.geo.census.gov) + two fixed
 // endpoint paths (the SSRF core — no free host/path; NO id in the path). benchmark /
@@ -2578,6 +2590,21 @@ const TOOLS = [
         description: "Fetch ONE clinical study by its NCT id (keyless; clinicaltrials.gov/api/v2/studies/{nctId}). Input `nctId` (the form NCT followed by exactly 8 digits, e.g. NCT02403869 — validated before the path is built, injection-safe). Returns { found, nctId, study:{ …the FULL curated entity record INCLUDING briefSummary… } } + honest _meta. A nonexistent id ⇒ HTTP 404 ⇒ found:false / study:null (NEVER a fabricated record). HONESTY: a registered trial is NOT a federal award and leadSponsor.name is FREE TEXT (not a UEI) ⇒ a NOMINAL name match only (disclosed every response); a 200 body missing protocolSection ⇒ schema_drift; an outage/5xx ⇒ THROWS.",
         inputSchema: ClinicaltrialsGetStudyInput,
         handler: (input) => clinicaltrials.getStudy(input),
+    }),
+    // ── ADR-0024: the aggregate/statistical SIBLING (+1 tool). EXACT per-value study
+    //    counts over the WHOLE registry for whitelisted ENUM fields (/stats/field/values,
+    //    the SAME fixed host + audited getCT). HONESTY: [M1] _meta.totalAvailable/returned
+    //    count DISTINCT FIELD VALUES (not studies — a mandatory unit note); [M2] the
+    //    whole-registry scope note carries NO frozen registry size; the returned<unique⇒
+    //    truncated invariant discloses the 250-cap the instant it binds (never for v1
+    //    ENUMs); a non-ENUM shape for a whitelisted field ⇒ schema_drift; Phase is
+    //    ARRAY-valued (overlap/not-a-partition note); the facet-scoped trial≠award caveat
+    //    every response. NO free-text ⇒ no tokenization.
+    defineTool({
+        name: "clinicaltrials_facet_counts",
+        description: "Aggregate/statistical view: EXACT per-value STUDY counts over the WHOLE ClinicalTrials.gov registry for one or more whitelisted ENUM fields (keyless; clinicaltrials.gov/api/v2/stats/field/values) — the DISTRIBUTION sibling of clinicaltrials_search_studies (which gives the exact FILTERED total for a query). Input `fields`: 1..11 ENUM fields (deduped) — OverallStatus, StudyType, Phase, LeadSponsorClass (★ the funding-SOURCE-class distribution: NIH/FED/OTHER_GOV/INDUSTRY/OTHER/NETWORK/INDIV/UNKNOWN/AMBIG — richer than, and distinct from, the search tool's 4-value funderType filter), Sex, DesignAllocation, DesignPrimaryPurpose, DesignInterventionModel, DesignMasking, DesignObservationalModel, DesignTimePerspective. Module-built comma-joined into fields=<…> (NO raw passthrough). Returns { facets:[{ field, fieldPath, valueType, uniqueValuesCount, missingStudiesCount, returned, truncated, overlapping, values:[{ value, studiesCount }] }] } + honest _meta. HONESTY: each studiesCount/uniqueValuesCount is EXACT (typeof-checked to a NUMBER before num() — a non-number ⇒ schema_drift, NEVER a silent 0); a non-ENUM shape for a whitelisted field (e.g. a BOOLEAN {trueCount,falseCount}) ⇒ schema_drift (never read as empty). [M1] _meta.totalAvailable/returned count DISTINCT FIELD VALUES across the requested facet(s), NOT studies (a mandatory unit note points to facets[].values[].studiesCount / clinicaltrials_search_studies for a study count). These counts cover the ENTIRE registry and are NOT filterable — /stats/field/values rejects query.*/filter.*/countTotal/pageSize (HTTP 400) — a scope note cross-links the search tool for filtered totals. The returned<uniqueValuesCount⇒truncated invariant discloses the endpoint's hard 250-value cap the instant it binds (never for these v1 ENUM fields — all complete). Phase is ARRAY-valued (a study can carry several) ⇒ overlapping:true + a not-a-partition note (counts MUST NOT be summed); scalar fields partition the registry minus missingStudiesCount. A high missingStudiesCount ⇒ a note that the shown buckets cover a MINORITY of the registry. MANDATORY CAVEAT every response: a facet count is a distribution over trial REGISTRATIONS, NOT federal awards; LeadSponsorClass is the funding-SOURCE class, not a UEI-keyed award join. An unlisted field ⇒ invalid_input pre-fetch (0 fetch); a 404/400/5xx ⇒ THROWS (never a fake-empty distribution).",
+        inputSchema: ClinicaltrialsFacetCountsInput,
+        handler: (input) => clinicaltrials.facetCounts(input),
     }),
     // ━━━ EPA ECHO REST — keyless facility environmental compliance/enforcement (2) ━━━ ADR-0009
     // A NEW capability axis: facility & competitor environmental compliance-risk
