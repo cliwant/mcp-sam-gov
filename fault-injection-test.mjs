@@ -11723,6 +11723,40 @@ async function testBlsHonesty() {
       m.fieldsUnavailable.some((f) => /LNS14000000/.test(f)) && m.notes.some((n) => /not returned by BLS/i.test(n)) && r.data.series.length === 1, JSON.stringify({ fu: m.fieldsUnavailable, n: r.data.series.length }));
   });
 
+  // ── Minor-1: a TEXTLESS "-" gap (footnotes:[{}]) still contributes an aggregate
+  //    _meta.notes line (the per-observation flag alone is not enough). ──
+  await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [CPI_REAL, { year: "2025", period: "M10", periodName: "October", latest: "true", value: "-", footnotes: [{}] }])])), async () => {
+    const r = await runTool("bls_timeseries", { series: ["cpi_u_all"], startYear: 2025, endYear: 2025 }, sam);
+    const m = buildMeta(r.meta);
+    const gap = r.data.series[0].observations.find((o) => o.period === "M10");
+    ok("62bls-min1 a TEXTLESS \"-\" gap ⇒ value:null + valueUnavailable:true on the obs (per-observation flag honest even with footnotes:[{}])",
+      gap.value === null && gap.valueUnavailable === true, JSON.stringify({ v: gap.value, u: gap.valueUnavailable, f: gap.footnotes }));
+    ok("62bls-min1 a TEXTLESS gap ALSO pushes the generic aggregate gap line into _meta.notes (no footnote reason supplied) — mutate to drop the generic-note branch ⇒ RED (the summary would omit the gap)",
+      m.notes.some((n) => /BLS "-" marker\) with no footnote reason supplied/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── Minor-2: the AUTO-default startYear is clamped to the 1900 floor (Math.max),
+  //    so an early endYear with no explicit startYear does NOT false-reject. ──
+  await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [{ year: "1905", period: "M06", periodName: "June", latest: "false", value: "10.5", footnotes: [{}] }])])), async (calls) => {
+    // Tolerate the throw so the mutation yields a CLEAN ✗ (not an abort): under the
+    // mutation the auto-default underflows to 1896 < 1900 and runTool rejects.
+    let threw = false;
+    let r = null;
+    try { r = await runTool("bls_timeseries", { series: ["cpi_u_all"], endYear: 1905 }, sam); }
+    catch { threw = true; }
+    const call = calls.find((x) => isBls(x.url));
+    const sent = call ? JSON.parse(call.init.body) : null;
+    ok("62bls-min2 endYear:1905 with NO startYear ⇒ the auto-default is CLAMPED to '1900' (not 1896 which underflows the floor), NO invalid_input, the fetch proceeds — mutate to drop Math.max(1900,…) ⇒ the auto-default underflows, the call rejects, 0 fetch ⇒ RED",
+      !threw && sent !== null && sent.startyear === "1900" && sent.endyear === "1905" && r !== null && r.data.series.length === 1, JSON.stringify({ threw, sent }));
+  });
+  // An EXPLICIT startYear below 1900 is STILL an honest invalid_input (the clamp is auto-only).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => blsTimeseries({ series: ["cpi_u_all"], startYear: 1850, endYear: 1905 }));
+    ok("62bls-min2 an EXPLICIT startYear:1850 (below the floor) ⇒ invalid_input, 0 fetch (the clamp is ONLY for the auto-derived default — an explicit out-of-range year is never silently moved)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
   }); // withBlsKey(undefined)
 }
 

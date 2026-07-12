@@ -215,6 +215,10 @@ const UNITS_NOTE =
 const GAP_NOTE_PREFIX =
   'One or more observations are UNAVAILABLE (BLS "-" marker): value is null with valueUnavailable:true and the footnote reason on the observation — NEVER a fabricated 0. Disclosed reason(s): ';
 
+/** The value-gap disclosure when every gap is TEXTLESS (footnotes:[{}] / no text). */
+const GAP_NOTE_TEXTLESS =
+  'One or more observations are unavailable (BLS "-" marker) with no footnote reason supplied — surfaced as value:null / valueUnavailable:true.';
+
 function clampNote(requestedStart: number, sentStart: number, endYear: number, spanCap: number): string {
   return `The requested span ${requestedStart}–${endYear} (${endYear - requestedStart + 1} years) exceeds the active BLS tier's ~${spanCap}-year/query cap; startYear was clamped to ${sentStart} BEFORE the request (sent span ${sentStart}–${endYear}). Widen with a smaller window or a BLS_API_KEY (v2, ~${V2_CAPS.spanCap}-year span).`;
 }
@@ -443,7 +447,12 @@ export async function timeseries(args: BlsTimeseriesArgs): Promise<MetaBundle> {
 
   // ── Resolve the year window + defaults; enforce startYear ≤ endYear. ──
   const endYear = args.endYear ?? CURRENT_YEAR;
-  const requestedStart = args.startYear ?? endYear - (caps.spanCap - 1);
+  // The AUTO-derived default is CLAMPED to the 1900 floor (Math.max) so an early
+  // endYear (e.g. 1905 ⇒ 1896) never self-inflicts an out-of-range startYear and
+  // false-rejects an in-range endYear. An EXPLICIT caller startYear is NOT clamped
+  // — an explicit 1850 is still an honest invalid_input at the floor guard below.
+  const requestedStart =
+    args.startYear ?? Math.max(YEAR_MIN, endYear - (caps.spanCap - 1));
   if (requestedStart < YEAR_MIN || endYear > YEAR_MAX) {
     throw new ToolErrorCarrier({
       kind: "invalid_input",
@@ -529,6 +538,10 @@ export async function timeseries(args: BlsTimeseriesArgs): Promise<MetaBundle> {
   const fieldsUnavailable: string[] = [];
   const notes: string[] = [];
   const gapTexts = new Set<string>();
+  // Tracks whether ANY returned observation is unavailable — so a textless "-" gap
+  // (footnotes:[{}] / a code with no text) still contributes ONE aggregate note,
+  // not just the per-observation valueUnavailable flag.
+  let anyUnavailable = false;
   const emptyNotes: string[] = [];
   const absentNotes: string[] = [];
 
@@ -561,6 +574,7 @@ export async function timeseries(args: BlsTimeseriesArgs): Promise<MetaBundle> {
     // Lift each disclosed data-gap footnote text into _meta.notes (P3 disclosure).
     for (const o of observations) {
       if (o.valueUnavailable) {
+        anyUnavailable = true;
         for (const f of o.footnotes) if (f.text) gapTexts.add(f.text);
       }
     }
@@ -593,7 +607,13 @@ export async function timeseries(args: BlsTimeseriesArgs): Promise<MetaBundle> {
   notes.push(tierNote());
   notes.push(UNITS_NOTE);
   if (clamped) notes.push(clampNote(requestedStart, sentStart, endYear, caps.spanCap));
-  if (gapTexts.size > 0) notes.push(GAP_NOTE_PREFIX + [...gapTexts].map((t) => `"${t}"`).join("; ") + ".");
+  if (gapTexts.size > 0) {
+    notes.push(GAP_NOTE_PREFIX + [...gapTexts].map((t) => `"${t}"`).join("; ") + ".");
+  } else if (anyUnavailable) {
+    // All gaps were textless (footnotes:[{}] / no text) — the per-observation flag
+    // is honest, but the aggregate summary must reflect the gap too (never omitted).
+    notes.push(GAP_NOTE_TEXTLESS);
+  }
   notes.push(...emptyNotes);
   notes.push(...absentNotes);
   if (parsed.messages.length > 0) {
