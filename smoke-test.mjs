@@ -776,6 +776,35 @@ const tests = [
       typeof r.totalAvailable === "number" &&
       r.totalAvailable >= 1,
   },
+  // ━━━ NIH RePORTER v2 — keyless federal research-GRANT projects (ADR-0014)
+  // The R2 getJson port's FIRST non-GET consumer. Live-hits
+  // api.reporter.nih.gov/v2/projects/search (keyless POST/JSON, no key/cookie).
+  // fiscal_years:[2023] + org_states:['CA'] is a broad, always-populated query
+  // (live-verified to narrow to ~11k). A live transient (5xx/timeout/429) OR an
+  // eRA maintenance window (the whole host 404s / off-host redirects to a
+  // "System Unavailable" page → upstream_unavailable/not_found, never a fake
+  // empty) is TOLERATED as a pass-with-note (the honest taxonomy working, not a
+  // code failure). A 200 is verified normally: every project carries an
+  // organization object (the recipient-enrichment payload with primaryUei).
+  {
+    name: "nih_reporter_search_projects",
+    args: { fiscalYears: [2023], orgStates: ["CA"], limit: 3 },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited" ||
+      env?.error?.kind === "not_found",
+    verify: (r) =>
+      Array.isArray(r.projects) &&
+      r.projects.length >= 1 &&
+      r.projects.length <= 3 &&
+      r.projects.every(
+        (p) =>
+          p !== null &&
+          typeof p === "object" &&
+          p.organization !== null &&
+          typeof p.organization === "object",
+      ),
+  },
   // ━━━ EPA ECHO REST — keyless facility compliance/enforcement (ADR-0009)
   // Live-hits echodata.epa.gov (keyless). A live transient (5xx/timeout/429) is
   // acceptable and TOLERATED as a pass-with-note (the honest taxonomy, not a code

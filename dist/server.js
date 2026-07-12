@@ -39,6 +39,7 @@ import * as echo from "./echo.js";
 import * as datagov from "./datagov.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
+import * as nih from "./nih.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
@@ -1221,6 +1222,48 @@ const FpdsSearchAwardsInput = z
     a.keyword !== undefined, {
     message: "Provide at least one filter (naics, vendorName, piid, departmentId, contractingAgencyName, a signedDate range, a lastModified range, or keyword) — a bare unbounded FPDS scan is refused.",
 });
+// ─── NIH RePORTER v2 (api.reporter.nih.gov — keyless POST/JSON) ─── ADR-0014
+// The R2 getJson port's FIRST non-GET consumer. A NEW capability axis: federal
+// research-GRANT funding footprint by organization / UEI / state (recipient
+// enrichment, joinable to SAM/USAspending via primary_uei). The SSRF surface is
+// a compile-time-CONSTANT URL; all filters ride in the MODULE-BUILT POST body.
+// Only LIVE-CONFIRMED-narrowing criteria are exposed (M1): orgStates / orgNames /
+// fiscalYears. agency_ic_codes is EXCLUDED (it silently no-ops upstream). The
+// 15,000-record retrieval window is enforced by offset .max(14_999) (offset ≥
+// 15,000 ⇒ invalid_input, 0 fetch) + limit .max(500) — a cap on RETRIEVAL, not
+// on the exact meta.total count.
+const NIH_CURRENT_YEAR = new Date().getUTCFullYear();
+const NihSearchProjectsInput = z.object({
+    orgStates: z
+        .array(z.enum(nih.NIH_ORG_STATES))
+        .max(20)
+        .optional()
+        .describe("Recipient-organization US state/territory 2-letter USPS codes (UPPERCASE — the enum is the SSRF value guard + the silent-zero guard: a lowercase 'ca' or an unknown 'ZZ' silently returns zeros, so a typo is an invalid_input, never read as 'no NIH funding'). LIVE-CONFIRMED to narrow. e.g. ['CA','MA']. Max 20."),
+    orgNames: z
+        .array(z.string().min(1).max(512))
+        .max(20)
+        .optional()
+        .describe("Recipient-organization name filter values (each ≤512 chars, max 20). LIVE-CONFIRMED to narrow. e.g. ['MASSACHUSETTS INSTITUTE OF TECHNOLOGY']. A value matching no org returns a genuine total:0."),
+    fiscalYears: z
+        .array(z.number().int().min(1985).max(NIH_CURRENT_YEAR + 1))
+        .max(20)
+        .optional()
+        .describe(`NIH fiscal years to include (int array, ${1985}..${NIH_CURRENT_YEAR + 1}, max 20). LIVE-CONFIRMED to narrow. e.g. [2023,2024].`),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .default(50)
+        .describe("Projects per page (upstream hard cap 500), 1..500, default 50."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(14_999)
+        .default(0)
+        .describe("0-based offset into the result set. HARD-CAPPED at 14,999: NIH caps keyless retrieval at the first 15,000 records (offset 0..14,999), so offset ≥ 15,000 is refused (invalid_input) — narrow criteria to reach records beyond the window. The count (totalAvailable) stays EXACT past the window."),
+});
 // Build a ToolDef whose `handler` is type-checked against the schema's inferred
 // input `I` at the call site (e.g. `input.searchText` is known-present). The
 // `I` binding is erased to `any` in the ToolDef[] array, so entries without a
@@ -2080,6 +2123,19 @@ const TOOLS = [
         description: "Search FPDS-NG federal contract AWARD ACTIONS (keyless ATOM) — the AUTHORITATIVE system-of-record for contract actions (each modification is its own transaction), the source USAspending.gov derives from (and lags 1-2 days). Structured filters ONLY, AND-combined (NO raw query — a typo'd FPDS field name is a SILENT ZERO, so the tool builds the fielded q): naics (PRINCIPAL_NAICS_CODE), vendorName, piid, departmentId, contractingAgencyName, signedDate range (from/to ISO), lastModified range, keyword. At least one filter is REQUIRED. Returns award/IDV rows { piid, modNumber, parentIdvPiid, actionType, signedDate, vendorName, vendorUei, ultimateParentUei, obligatedAmount, totalObligatedAmount, naics, psc, placeOfPerformanceState, extentCompeted, setAside, businessSize, socioeconomic, … } (content root is award OR IDV — both parse). HONESTY: page size is FIXED at 10; for >10 results totalAvailable is a LOWER BOUND (totalIsLowerBound:true; true count ∈ [total, total+9]) and you MUST paginate by pagination.hasMore (page-fullness), NEVER by totalAvailable (keyless deep-paging is capped ~200K far below the advertised total). Genuine-empty (offset 0) ⇒ complete:true/total:0 + a silent-zero disclosure; an empty page at offset>0 ⇒ totalAvailable:null/complete:false (deep-paging ceiling, ambiguous); an HTML/non-feed body or an all-null-piid page ⇒ schema_drift (never a fake empty); an outage/5xx/timeout THROWS. Amounts are number|null (a 0.00 obligation and negative de-obligations are REAL, absent ⇒ null). Prefer usas_* tools for spending rollups / sub-award graphs.",
         inputSchema: FpdsSearchAwardsInput,
         handler: (input) => fpds.searchAwards(input),
+    }),
+    // ━━━ NIH RePORTER v2 — keyless federal research-GRANT projects (1) ━━━ ADR-0014
+    // The R2 getJson port's FIRST non-GET consumer (POST + JSON body). A NEW axis:
+    // federal research-funding footprint by organization / UEI / state (recipient
+    // enrichment, joinable to SAM/USAspending via primary_uei). SSRF surface = a
+    // compile-time-constant URL; all filters ride in the module-built POST body.
+    // Only live-confirmed-narrowing criteria ship (M1); agency_ic_codes is excluded
+    // (silent no-op). The 15,000-record retrieval window is disclosed, not hidden.
+    defineTool({
+        name: "nih_reporter_search_projects",
+        description: "Search awarded NIH RePORTER research-GRANT projects (keyless; api.reporter.nih.gov v2, POST/JSON — the FIRST non-GET getJson-port consumer) — the NEW federal research-funding recipient-enrichment axis (who receives NIH research money, by organization / state, joinable to SAM/USAspending via primary_uei). Structured, LIVE-CONFIRMED-narrowing criteria ONLY, AND-combined in a module-built body (NO raw passthrough): orgStates (UPPERCASE 2-letter USPS enum — the SSRF + silent-zero guard; a lowercase/unknown code silently returns zeros), orgNames (≤512 each, ≤20), fiscalYears (int array 1985..currentYear+1, ≤20), limit (1..500, def 50), offset (0..14,999, def 0). Returns { projects:[{ projectNum, projectTitle, fiscalYear, awardAmount, organization:{ name, state, primaryUei, primaryDuns, ueis, duns }, principalInvestigators, contactPiName, fundingIc }] } + honest _meta. HONESTY: (M2) records are RESEARCH GRANTS, NOT procurement contracts — primary_uei joins to SAM/USAspending recipients but the award nature differs (disclosed in every _meta.notes); totalAvailable = the EXACT meta.total (NEVER the page size, NEVER a lower bound); NIH caps keyless retrieval at the first 15,000 records (offset 0..14,999) — offset ≥ 15,000 ⇒ invalid_input, and past the window the count stays exact while records are UNREACHABLE (disclosed in a note; nextOffset is never a dead-end). Disclose-not-refuse: an unscoped query still returns the first page + the exact total + a narrow-your-criteria note. agencyIcCodes is intentionally NOT a filter (NIH silently drops it — it would be a false 'applied'). Genuine-empty (total:0) ⇒ complete:true/total:0; an outage/5xx/timeout THROWS; a 400 (bad offset/limit/type) ⇒ invalid_input; a 200 body that isn't {meta,results} or a non-numeric meta.total ⇒ schema_drift (never a fake empty). awardAmount is number|null (a real $0 award is 0, an absent amount is null).",
+        inputSchema: NihSearchProjectsInput,
+        handler: (input) => nih.searchProjects(input),
     }),
     // ━━━ EPA ECHO REST — keyless facility environmental compliance/enforcement (2) ━━━ ADR-0009
     // A NEW capability axis: facility & competitor environmental compliance-risk

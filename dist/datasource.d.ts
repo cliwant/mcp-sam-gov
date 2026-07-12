@@ -41,6 +41,22 @@ export type GetJsonOptions = {
     redirect?: "error";
     /** Request timeout; default 15_000 (all sources today). */
     timeoutMs?: number;
+    /**
+     * HTTP method — the SINGLE literal `"POST"` (ADR-0014, the first non-GET
+     * consumer: NIH RePORTER is a POST-with-JSON-body API). Set on init ONLY when
+     * defined, so every existing GET caller (which omits it) keeps a byte-identical
+     * init with NO `method` key. Typed as the literal (not `string`) so a stray
+     * `method:"GET"` cannot silently alter a consumer. A retry of a read-only POST
+     * search with a re-readable string body is safe.
+     */
+    method?: "POST";
+    /**
+     * Request body (a pre-serialized string, e.g. `JSON.stringify(payload)`).
+     * A `RequestInit` field, exactly like `headers`/`redirect` — getJson forwards
+     * it verbatim, adding no logic. Set on init ONLY when defined (the `!== undefined`
+     * idiom), so a GET caller's init stays byte-identical.
+     */
+    body?: string;
 };
 /**
  * GET + parse one JSON resource through the shared envelope. Assembles `init`
