@@ -280,5 +280,47 @@ export declare function filingIndex(args: {
     limit?: number;
     offset?: number;
 }): Promise<MetaBundle>;
+/**
+ * Parse the raw daily master.YYYYMMDD.idx body into `FilingIndexRow[]` (DEDICATED —
+ * NOT parseFullIndex). DRIFT keys on the ABSENCE of the daily `CIK|Company Name|Form
+ * Type|Date Filed|File Name` header (★ File Name WITH A SPACE) + the `----` dashes
+ * boundary ONLY (M1/fact #2) — a non-index / error / format-changed body served with
+ * HTTP 200 → THROW `driftError`. A body WITH the header+dashes but ZERO data rows is a
+ * GENUINE-EMPTY day → returned (NOT thrown; near-unreachable for a real trading day but
+ * honest). A body WITH the header+dashes whose EVERY data row fails the 5-field split →
+ * THROW `driftError` (all-malformed = format drift). Date Filed is normalized to ISO.
+ */
+export declare function parseDailyIndex(body: string, maxRows?: number): ParsedFullIndex;
+/** For tests: evict the daily-index bounded LRU (mirrors `_resetFullIndexCache`). */
+export declare function _resetDailyIndexCache(): void;
+/**
+ * Read the SEC EDGAR daily-index for one calendar `date` and return the filings
+ * matching the given CLIENT-SIDE filters (form / CIK / company substring),
+ * offset-paginated, with the EXACT total match count for the day.
+ *
+ * HONESTY (ADR-0027 v1 + M1 + M2):
+ *  - ★M2 — an EXACT date round-trip (Date.UTC component re-extraction) rejects
+ *    Feb-30 / day-40 / non-leap-Feb-29 / a malformed / a FUTURE date PRE-fetch
+ *    (invalid_input, 0 GET). NOT the `!isNaN(Date.UTC(...))` shortcut (it rolls overflow).
+ *  - Fetch the .idx FIRST (happy path pays zero oracle cost). 200 + parseable ⇒
+ *    found:true; FULL-SCAN → EXACT totalAvailable (byte-cap forbidden).
+ *  - ★M1 — on a 403 (getEdgar mislabels the daily AccessDenied XML rate_limited/403;
+ *    caught TOOL-LOCAL), consult index.json; maxListedMasterDate makes it recency-aware:
+ *      requestedYyyymmdd > maxListed  ⇒ NOT-YET-DISSEMINATED (found:false, complete:FALSE)
+ *      requestedYyyymmdd ≤ maxListed & unlisted ⇒ TRUE genuine-absent (found:false, complete:true)
+ *      listed but .idx 403'd          ⇒ honest rate_limited (retryable ~600s)
+ *      oracle itself 403/bad-shape     ⇒ ambiguous both-causes upstream_unavailable
+ *  - A REAL 429 (status 429, not 403) is NOT caught → stays honest rate_limited.
+ *  - CIK stays a STRING; every column via `str`; companyContains is a LITERAL
+ *    case-insensitive substring (C110 N/A — no token split).
+ */
+export declare function dailyFilingIndex(args: {
+    date: string;
+    formType?: string;
+    cik?: string | number;
+    companyContains?: string;
+    limit?: number;
+    offset?: number;
+}): Promise<MetaBundle>;
 export {};
 //# sourceMappingURL=edgar.d.ts.map
