@@ -67,6 +67,7 @@ import { num as govinfoNum, listCollections as govinfoListCollections, searchPac
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
 import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward } from "./dist/nsf.js";
+import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy } from "./dist/clinicaltrials.js";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
 import { getJson, getText, isRedirectError, driftError, throughGate } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
@@ -9891,6 +9892,301 @@ async function testNsfHonesty() {
   ok("52-parity nsf.num === coerce.num (one shared audited impl — a num regression fails §40e/§51i/§52 together; NO local num in nsf.ts)", nsfNum === coerceNum, "nsf.num diverged from coerce.num");
 }
 
+// §53-clinicaltrials: ClinicalTrials.gov API v2 (clinicaltrials.gov/api/v2/studies,
+// ADR-0021, source #21 — the trial-REGISTRATION sibling of NIH/NSF grants on the
+// getJson GET port). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a
+// value + names the mutation that turns it RED (the ADR §load-bearing mutations
+// a–l + M1 + M2 + parity):
+//   (a) totalAvailable = totalCount EXACT (mutate→studies.length ⇒ RED); countTotal ALWAYS sent.
+//   (b) countTotal=true response w/ MISSING or non-number totalCount ⇒ schema_drift (→null/studies.length ⇒ RED).
+//   (c) a bad token / HTTP 400 ⇒ THROWS (read as empty ⇒ RED).
+//   (e)[M1] an unknown funderType/overallStatus is re-guarded IN THE HANDLER ⇒ invalid_input, 0 fetch (reaches API ⇒ RED).
+//   (M2) a `../`/non-`^NCT\d{8}$` nctId ⇒ invalid_input, 0 fetch (fetched ⇒ RED).
+//   (cursor) hasMore/nextCursor from TOKEN-PRESENCE, token VERBATIM, no forced complete on a continuation (⇒ RED).
+//   (and-note) a multi-word term/sponsor/condition ⇒ mandatory AND-note (drop ⇒ RED); single-word ⇒ none.
+//   (caveat) trial≠federal-award caveat in EVERY response (drop ⇒ RED).
+//   (f) genuine-empty(total:0,no token) ⇒ complete/0; a 400/404/outage ⇒ THROWS (conflate ⇒ RED).
+//   (h) sponsor/org name null-never-empty-string ('' / 'null' ⇒ null; →'' ⇒ RED).
+//   (l) get_study 404 ⇒ found:false (fabricate ⇒ RED); (j) SSRF URLSearchParams containment; parity ct.num===coerce.num.
+const CT_URL_RE = /clinicaltrials\.gov\/api\/v2\/studies/;
+const isCt = (u) => CT_URL_RE.test(u);
+// A real-structured study (verbatim shape from a live NCT02403869 probe).
+const CT_STUDY = {
+  protocolSection: {
+    identificationModule: {
+      nctId: "NCT02403869",
+      briefTitle: "Quality of Life in Multiple Myeloma",
+      orgStudyIdInfo: { id: "CEL-CMM-2013-01" },
+      organization: { fullName: "Celgene", class: "INDUSTRY" },
+    },
+    sponsorCollaboratorsModule: {
+      leadSponsor: { name: "Celgene", class: "INDUSTRY" },
+      collaborators: [{ name: "National Cancer Institute (NCI)", class: "NIH" }],
+    },
+    statusModule: { overallStatus: "COMPLETED", startDateStruct: { date: "2014-03-12" } },
+    designModule: { studyType: "OBSERVATIONAL", phases: ["PHASE2"] },
+    conditionsModule: { conditions: ["Breast Neoplasms"] },
+    descriptionModule: { briefSummary: "An observational study of quality of life." },
+  },
+};
+const ctRows = (n, row = CT_STUDY) => Array.from({ length: n }, () => row);
+// countTotal=true body: { totalCount, studies, nextPageToken? } (token set ONLY when provided).
+const ctBody = (totalCount, rows, nextPageToken) => {
+  const b = { totalCount, studies: rows };
+  if (nextPageToken !== undefined) b.nextPageToken = nextPageToken;
+  return b;
+};
+const ctMock = (body, status = 200) => (u) => (isCt(u) ? mockResponse({ status, json: body }) : failClosed()());
+const ctQuery = (calls) => new URL(calls.find((x) => isCt(x.url)).url).searchParams;
+const ctFirstUrl = (calls) => calls.find((x) => isCt(x.url)).url;
+
+async function testClinicaltrialsHonesty() {
+  section("53. ClinicalTrials.gov API v2 (ADR-0021, source #21 — the trial-REGISTRATION sibling of the NIH/NSF grant sources on the getJson GET port) — countTotal-always exact/uncapped total + opaque nextPageToken cursor + [M1] in-handler funderType/overallStatus enum re-guard (silent HTTP-200 fake-empty trap) + [M2] single getCT + nctId-path guard + AND-tokenization + trial≠award caveat + SSRF + shape/outage honesty (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (a) totalAvailable = totalCount EXACT (NEVER studies.length) + countTotal ALWAYS sent + entity map. ──
+  await withFetch(ctMock(ctBody(142304, ctRows(2), "ZVNj7o2Elu8o3lp3Wcms5bbumpOQJJxtYPat0A")), async (calls) => {
+    const r = await runTool("clinicaltrials_search_studies", { "query.term": "cancer", pageSize: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("53a totalAvailable = totalCount EXACT = 142304 (NOT the 2 returned rows) + returned:2 — mutate the module to use studies.length for the total ⇒ RED (the forbidden total===page-size class)",
+      m.totalAvailable === 142304 && m.returned === 2, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    const q = ctQuery(calls);
+    ok("53a countTotal=true is ALWAYS appended by the module (omitting it drops totalCount entirely) + pageSize sent",
+      q.get("countTotal") === "true" && q.get("pageSize") === "2", JSON.stringify({ ct: q.get("countTotal"), ps: q.get("pageSize") }));
+    const s = r.data.studies[0];
+    ok("53a entity map (sponsor/org/funding enrichment): nctId, leadSponsor Celgene/INDUSTRY, organization Celgene, collaborator NCI/NIH, fundingClass=leadSponsor.class, overallStatus, phases/conditions — briefSummary OMITTED in search rows",
+      s.nctId === "NCT02403869" && s.leadSponsor.name === "Celgene" && s.leadSponsor.class === "INDUSTRY" && s.fundingClass === "INDUSTRY" && s.organization.name === "Celgene" && s.collaborators[0].class === "NIH" && s.overallStatus === "COMPLETED" && JSON.stringify(s.phases) === '["PHASE2"]' && s.briefSummary === undefined,
+      JSON.stringify({ id: s.nctId, lead: s.leadSponsor, fc: s.fundingClass, hasSummary: s.briefSummary !== undefined }));
+  });
+
+  // ── (b) countTotal=true w/ MISSING or non-number totalCount ⇒ schema_drift. ──
+  await withFetch(ctMock({ studies: [] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { "query.term": "cancer" }, sam));
+    ok("53b MISSING totalCount on a countTotal=true call ⇒ schema_drift (we DID request it — its absence is drift, NEVER totalAvailable:null, NEVER studies.length) ⇒ mutate to read studies.length / null ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctMock({ totalCount: "142304", studies: [] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { "query.term": "cancer" }, sam));
+    ok("53b non-number totalCount ('142304' string) ⇒ schema_drift BEFORE num() (typeof-checked first — num() can't tell a non-number from absent; mutate to num() it ⇒ a string total would silently parse ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctMock({ totalCount: 5, studies: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { "query.term": "cancer" }, sam));
+    ok("53b studies non-array ⇒ schema_drift (container-guarded — a TypeError must never mask drift as upstream_unavailable, never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (c) a bad token / HTTP 400 ⇒ THROWS (never read as empty). ──
+  await withFetch(ctMock("Incorrect pageToken format", 400), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { "query.term": "cancer", pageToken: "GARBAGETOKENXYZ" }, sam));
+    ok("53c a bad pageToken loud-fails at HTTP 400 ⇒ invalid_input THROWS (getJson taxonomy) — read as an empty cursor ⇒ RED (the silent-cursor trap)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (e)[M1] in-handler enum RE-GUARD: an unknown funderType/overallStatus ⇒
+  //    invalid_input, 0 fetch — even on a DIRECT handler call that bypasses Zod
+  //    (the funderType HTTP-200 silent-fake-empty trap). ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => ctSearchStudies({ funderType: "indiv" }));
+    ok("53e [M1] DIRECT handler call funderType:'indiv' (a Zod-EXCLUDED value that returns HTTP-200 totalCount:0 silently) ⇒ invalid_input, 0 fetch (the in-handler enum re-guard closes the fake-empty even when Zod is bypassed) — remove the handler re-guard ⇒ it reaches the API ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => ctSearchStudies({ overallStatus: "NONSENSE_STATUS" }));
+    ok("53e [M1] DIRECT handler call overallStatus:'NONSENSE_STATUS' ⇒ invalid_input, 0 fetch (the in-handler enum re-guard mirrors funderType)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  for (const bad of ["bogus", "indiv", "network", "ambig", "unknown"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { funderType: bad }, sam));
+      ok(`53e Zod-path funderType:${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (the 4-value enum — an unlisted value silently returns totalCount:0 at HTTP 200, indistinguishable from a genuine empty)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // The 4 shipped funderType values build aggFilters from the enum-validated value.
+  await withFetch(ctMock(ctBody(14610, ctRows(1))), async (calls) => {
+    const r = await runTool("clinicaltrials_search_studies", { condition: "cancer", funderType: "nih" }, sam);
+    const m = buildMeta(r.meta);
+    const q = ctQuery(calls);
+    ok("53e funderType:nih ⇒ aggFilters=funderType:nih built from the enum-validated value (module-built, NEVER raw caller text) + an OVERLAP note (counts MUST NOT be summed)",
+      q.get("aggFilters") === "funderType:nih" && m.filtersApplied.includes("funderType") && m.notes.some((n) => /OVERLAPPING facet/.test(n) && /MUST NOT be summed/.test(n)), JSON.stringify({ agg: q.get("aggFilters") }));
+  });
+
+  // ── (M2) nctId path validation BEFORE the path is built (traversal never fetched). ──
+  for (const bad of ["NCT123", "NCT0240386X", "nct02403869", "NCT024038690", "../etc/passwd", "NCT02403869/..", "12345678"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => ctGetStudy({ nctId: bad }));
+      ok(`53M2 get_study nctId ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (validated ^NCT\\d{8}$ BEFORE the /studies/{nctId} path is built — a ../ / %2F / non-matching id can never reach the path) — skip the pre-build validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  await withFetch(ctMock(CT_STUDY), async (calls) => {
+    await runTool("clinicaltrials_get_study", { nctId: "NCT02403869" }, sam);
+    const url = ctFirstUrl(calls).split("?")[0];
+    ok("53M2 a valid nctId builds https://clinicaltrials.gov/api/v2/studies/NCT02403869 (fixed host, no injection) — the single getCT [M2] applies the hostname assertion to the path-interpolated get_study too",
+      /^https:\/\/clinicaltrials\.gov\/api\/v2\/studies\/NCT02403869$/.test(url) && new URL(ctFirstUrl(calls)).hostname === "clinicaltrials.gov", url);
+  });
+
+  // ── (cursor) opaque nextPageToken honesty: terminal = token ABSENT; verbatim. ──
+  await withFetch(ctMock(ctBody(6053, ctRows(3), "ZVNj7o2Elu8o3lp3Wcms5bbumpOQJJxtYPat0A")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { sponsor: "Pfizer", pageSize: 3 }, sam);
+    const m = buildMeta(r.meta);
+    ok("53cursor first page + token ⇒ hasMore:true, nextCursor = the token VERBATIM, offset/nextOffset null (a numeric offset is meaningless for a cursor), complete:false — fabricate/derive/mutate the token, or compute hasMore from anything but token-presence ⇒ RED",
+      m.pagination.hasMore === true && m.nextCursor === "ZVNj7o2Elu8o3lp3Wcms5bbumpOQJJxtYPat0A" && m.pagination.offset === null && m.pagination.nextOffset === null && m.complete === false, JSON.stringify({ pg: m.pagination, nc: m.nextCursor, c: m.complete }));
+  });
+  await withFetch(ctMock(ctBody(6053, ctRows(3), "TOK2"), 200), async (calls) => {
+    const r = await runTool("clinicaltrials_search_studies", { sponsor: "Pfizer", pageSize: 3, pageToken: "ZVNj7o2Elu8o3lp3Wcms5bbumpOQJJxtYPat0A" }, sam);
+    const m = buildMeta(r.meta);
+    const q = ctQuery(calls);
+    ok("53cursor continuation: the supplied pageToken is passed back VERBATIM as the `pageToken` query param + complete:false (a continuation page is NEVER complete:true — force complete:true on a continuation ⇒ RED)",
+      q.get("pageToken") === "ZVNj7o2Elu8o3lp3Wcms5bbumpOQJJxtYPat0A" && m.complete === false, JSON.stringify({ sent: q.get("pageToken"), c: m.complete }));
+  });
+  await withFetch(ctMock(ctBody(10, ctRows(10))), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { condition: "progeria", pageSize: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("53cursor terminal single-complete-page (total=10, returned=10, NO token) ⇒ hasMore:false, nextCursor:null, complete:true (token-absent IS the terminal — report token-absent as hasMore:true ⇒ RED)",
+      m.pagination.hasMore === false && m.nextCursor === null && m.complete === true, JSON.stringify({ pg: m.pagination, nc: m.nextCursor, c: m.complete }));
+  });
+  await withFetch(ctMock(ctBody(0, [], "PHANTOMTOK")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { "query.term": "cancer" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53cursor phantom-empty guard: 0 studies WITH a token present ⇒ hasMore:false, nextCursor:null (never advertise a continuation into an empty cursor loop)",
+      r.data.studies.length === 0 && m.pagination.hasMore === false && m.nextCursor === null, JSON.stringify({ n: r.data.studies.length, pg: m.pagination, nc: m.nextCursor }));
+  });
+
+  // ── (and-note) multi-word term/sponsor/condition ⇒ mandatory AND-note; single ⇒ none. ──
+  await withFetch(ctMock(ctBody(50, ctRows(20), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { "query.term": "breast cancer" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and multi-word query.term 'breast cancer' ⇒ a MANDATORY AND-note (ALL tokens must co-occur — mirror of NSF's OR-note, but AND) listing [breast, cancer] — drop it ⇒ RED (the tokenization-honesty class)",
+      m.notes.some((n) => /matches a multi-word term as AND/.test(n) && /breast, cancer/.test(n) && /must co-occur/.test(n)), JSON.stringify(m.notes));
+  });
+  await withFetch(ctMock(ctBody(50, ctRows(20), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { sponsor: "National Cancer Institute" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and multi-word sponsor 'National Cancer Institute' ⇒ AND-note for 'sponsor' (AND-conjunctive: a 0 means no study matches EVERY token, NOT that the sponsor is absent)",
+      m.notes.some((n) => /matches a multi-word sponsor as AND/.test(n)), JSON.stringify(m.notes));
+  });
+  await withFetch(ctMock(ctBody(50, ctRows(20), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { condition: "type 2 diabetes" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and multi-word condition 'type 2 diabetes' ⇒ AND-note for 'condition'",
+      m.notes.some((n) => /matches a multi-word condition as AND/.test(n)), JSON.stringify(m.notes));
+  });
+  await withFetch(ctMock(ctBody(142304, ctRows(20), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { "query.term": "cancer" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and single-token 'cancer' ⇒ NO AND-note (fires ONLY on 2+ whitespace tokens — no false-positive noise)",
+      !m.notes.some((n) => /must co-occur/.test(n)), JSON.stringify(m.notes.filter((n) => /co-occur/.test(n))));
+  });
+
+  // ── (caveat) trial≠federal-award caveat in EVERY response (search + empty + get). ──
+  await withFetch(ctMock(ctBody(142304, ctRows(20), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { "query.term": "cancer" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53caveat trial≠federal-award caveat present in _meta.notes on a normal search (a registration is NOT an award; leadSponsor.name is FREE TEXT, not a UEI ⇒ NOMINAL match only) — drop the caveat ⇒ RED; the cursor disclosure is also present",
+      m.notes.some((n) => /NOT a federal grant or contract award/.test(n) && /NOMINAL name match/.test(n) && /not a UEI|NOT a UEI/i.test(n)) && m.notes.some((n) => /opaque cursor/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── (f) genuine-empty vs outage vs loud-fail — three DISTINCT shapes. ──
+  await withFetch(ctMock(ctBody(0, [])), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { "query.term": "zzzxqywvunobtainium99999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53f genuine-empty (totalCount:0, studies:[], NO token) ⇒ returned:0, totalAvailable:0, complete:true, truncated:false (an honest exact zero, DISTINCT from a loud-fail — NOT thrown) + STILL carries the caveat",
+      r.data.studies.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.notes.some((n) => /NOT a federal grant or contract award/.test(n)), JSON.stringify(m));
+  });
+  await withFetch(ctMock("Invalid value in parameter `overallStatus`", 400), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { "query.term": "cancer", overallStatus: "RECRUITING" }, sam));
+    ok("53f HTTP 400 (an upstream param rejection = our whitelist drifted) ⇒ invalid_input THROWS (never read the studies:[] as an empty result)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { "query.term": "cancer" }, sam));
+    ok("53f 503 ⇒ upstream_unavailable THROWS (a DOWN ClinicalTrials.gov is NEVER a returned:0 — getJson/fetchWithRetry throws)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (h) sponsor/org names null-never-empty-string. ──
+  await withFetch(ctMock(ctBody(1, [{
+    protocolSection: {
+      identificationModule: { nctId: "NCT00000001", briefTitle: "T", organization: { fullName: "null", class: "OTHER" } },
+      sponsorCollaboratorsModule: { leadSponsor: { name: "", class: "INDUSTRY" } },
+      statusModule: { overallStatus: "COMPLETED" },
+    },
+  }])), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { "query.term": "x" }, sam);
+    const s = r.data.studies[0];
+    ok("53h sponsor/org names null-never-empty-string: leadSponsor.name '' ⇒ null, organization.fullName 'null' ⇒ null (a blank name masquerading as a real (blank) entity is the forbidden data-absence-as-value class) — coerce to '' ⇒ RED; absent optional fields ([] phases/conditions) stay honest",
+      s.leadSponsor.name === null && s.organization.name === null && Array.isArray(s.phases) && s.phases.length === 0 && Array.isArray(s.collaborators) && s.collaborators.length === 0, JSON.stringify({ lead: s.leadSponsor, org: s.organization, phases: s.phases }));
+  });
+
+  // ── (g / j) filtersApplied honesty + SSRF query building + URLSearchParams containment. ──
+  await withFetch(ctMock(ctBody(124, ctRows(5), "T")), async (calls) => {
+    const r = await runTool("clinicaltrials_search_studies", { sponsor: "Pfizer", condition: "cancer", location: "Germany", overallStatus: "RECRUITING", funderType: "nih", pageSize: 5 }, sam);
+    const m = buildMeta(r.meta);
+    ok("53g filtersApplied lists EXACTLY the supplied live-confirmed-narrowing filters (sponsor, condition, location, overallStatus, funderType) — a no-op/unsent filter NEVER appears",
+      JSON.stringify([...m.filtersApplied].sort()) === JSON.stringify(["condition", "funderType", "location", "overallStatus", "sponsor"]), JSON.stringify(m.filtersApplied));
+    const q = ctQuery(calls);
+    ok("53ssrf the query is MODULE-BUILT via URLSearchParams to clinicaltrials.gov ONLY: query.spons/query.cond/query.locn/filter.overallStatus/aggFilters + countTotal + pageSize; redirect:'error' (fail-closed off-host 3xx)",
+      q.get("query.spons") === "Pfizer" && q.get("query.cond") === "cancer" && q.get("query.locn") === "Germany" && q.get("filter.overallStatus") === "RECRUITING" && q.get("aggFilters") === "funderType:nih" && q.get("countTotal") === "true" && q.get("pageSize") === "5" && calls.find((x) => isCt(x.url)).init.redirect === "error" && calls.every((c) => !isCt(c.url) || new URL(c.url).hostname === "clinicaltrials.gov"), JSON.stringify([...q.keys()]));
+  });
+  await withFetch(ctMock(ctBody(0, [])), async (calls) => {
+    await runTool("clinicaltrials_search_studies", { "query.term": "cancer&pageSize=9999&aggFilters=funderType:nih" }, sam);
+    const q = ctQuery(calls);
+    ok("53j SSRF: an embedded &/= in query.term stays INSIDE the value (URLSearchParams contains the breakout) ⇒ query.term carries the literal, pageSize stays the default 20, no injected aggFilters",
+      q.get("query.term") === "cancer&pageSize=9999&aggFilters=funderType:nih" && q.get("pageSize") === "20" && q.get("aggFilters") === null, JSON.stringify({ term: q.get("query.term"), ps: q.get("pageSize"), agg: q.get("aggFilters") }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { pageToken: "has space" }, sam));
+    ok("53j a pageToken with a space ⇒ invalid_input, 0 fetch (the CT_TOKEN_RE bound — a bad token would otherwise loud-fail at HTTP 400)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── disclose-not-refuse: an unscoped query is NOT refused. ──
+  await withFetch(ctMock(ctBody(593334, ctRows(20), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", {}, sam);
+    const m = buildMeta(r.meta);
+    ok("53scope disclose-not-refuse: an UNSCOPED query returns the first page (20) + the exact whole-registry total (593334, UNCAPPED) + empty filtersApplied + a narrow-your-criteria note (invalid_input is reserved for the enum/token guards, not for scope)",
+      r.data.studies.length === 20 && m.totalAvailable === 593334 && m.filtersApplied.length === 0 && m.notes.some((n) => /unscoped query/.test(n)), JSON.stringify({ n: r.data.studies.length, ta: m.totalAvailable, fa: m.filtersApplied }));
+  });
+
+  // ── (l) clinicaltrials_get_study: full record (incl. briefSummary) + honest 404. ──
+  await withFetch(ctMock(CT_STUDY), async () => {
+    const r = await runTool("clinicaltrials_get_study", { nctId: "NCT02403869" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53get valid nctId ⇒ found:true, returned:1, the FULL record INCLUDING briefSummary (search rows omit it; get owns it) + the trial≠award caveat",
+      r.data.found === true && r.data.study.nctId === "NCT02403869" && typeof r.data.study.briefSummary === "string" && m.returned === 1 && m.complete === true && m.notes.some((n) => /NOT a federal grant or contract award/.test(n)), JSON.stringify({ found: r.data.found, hasSummary: typeof r.data.study.briefSummary }));
+  });
+  await withFetch(ctMock("NCT number NCT99999999 not found", 404), async () => {
+    const r = await runTool("clinicaltrials_get_study", { nctId: "NCT99999999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53get(l) a nonexistent nctId ⇒ HTTP 404 ⇒ found:false / study:null, complete:true (an honest not-found, NEVER a fabricated study) — fabricate a study on 404 ⇒ RED",
+      r.data.found === false && r.data.study === null && m.returned === 0 && m.complete === true && m.notes.some((n) => /does not exist/.test(n)), JSON.stringify({ found: r.data.found, study: r.data.study }));
+  });
+  await withFetch(ctMock({ hasResults: false }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_get_study", { nctId: "NCT02403869" }, sam));
+    ok("53get a 200 body missing protocolSection ⇒ schema_drift (never a fabricated all-null record)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ctMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_get_study", { nctId: "NCT02403869" }, sam));
+    ok("53get 503 ⇒ upstream_unavailable THROWS (a DOWN service is never a fabricated/empty study)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── num null-never-0 + parity. ──
+  eq("53-parity num(null) ⇒ null", ctNum(null), null);
+  eq("53-parity num(0) ⇒ 0 (genuine zero preserved — a real totalCount:0 stays 0, never null)", ctNum(0), 0);
+  eq("53-parity num('') ⇒ null (Number('') is 0 — must be caught)", ctNum(""), null);
+  eq("53-parity num('142304') ⇒ 142304 (numeric string parses)", ctNum("142304"), 142304);
+  ok("53-parity clinicaltrials.num === coerce.num (one shared audited impl — NO local num/str in clinicaltrials.ts)", ctNum === coerceNum, "clinicaltrials.num diverged from coerce.num");
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // §: fetchWithRetry timeout/abort ⇒ fail-fast NON-retryable (ADR-0015)
 // ──────────────────────────────────────────────────────────────────────────
@@ -10113,6 +10409,7 @@ async function main() {
   await testGetTextPort();
   await testNihHonesty();
   await testNsfHonesty();
+  await testClinicaltrialsHonesty();
   await testFetchWithRetryTimeout();
 
   // Prove the harness bites.
