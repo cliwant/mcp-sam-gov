@@ -109,6 +109,7 @@ function toFpdsDate(iso) {
 export function buildQuery(args) {
     const tokens = [];
     const filters = [];
+    const dropped = [];
     const phrase = (field, val, label) => {
         if (val === undefined)
             return;
@@ -123,13 +124,31 @@ export function buildQuery(args) {
     phrase("PIID", args.piid, "piid");
     phrase("DEPARTMENT_ID", args.departmentId, "departmentId");
     phrase("CONTRACTING_AGENCY_NAME", args.contractingAgencyName, "contractingAgencyName");
+    // FPDS date ranges REQUIRE both ends (SIGNED_DATE:[from,to]) — FPDS has no
+    // open-ended date syntax. F5 (P4 no-silent-filter): when BOTH ends are present
+    // we apply the range; when only ONE end is supplied (orphaned) it CANNOT be
+    // sent, so we DISCLOSE it in `dropped` rather than silently ignoring the lone
+    // bound (which — when the request is satisfied by another filter like naics —
+    // would otherwise vanish: not in filtersApplied, not in filtersDropped).
     if (args.signedDateFrom !== undefined && args.signedDateTo !== undefined) {
         tokens.push(`SIGNED_DATE:[${toFpdsDate(args.signedDateFrom)},${toFpdsDate(args.signedDateTo)}]`);
         filters.push("signedDate");
     }
+    else if (args.signedDateFrom !== undefined) {
+        dropped.push("signedDateFrom(needs signedDateTo — FPDS requires both date-range ends)");
+    }
+    else if (args.signedDateTo !== undefined) {
+        dropped.push("signedDateTo(needs signedDateFrom — FPDS requires both date-range ends)");
+    }
     if (args.lastModifiedFrom !== undefined && args.lastModifiedTo !== undefined) {
         tokens.push(`LAST_MOD_DATE:[${toFpdsDate(args.lastModifiedFrom)},${toFpdsDate(args.lastModifiedTo)}]`);
         filters.push("lastModifiedDate");
+    }
+    else if (args.lastModifiedFrom !== undefined) {
+        dropped.push("lastModifiedFrom(needs lastModifiedTo — FPDS requires both date-range ends)");
+    }
+    else if (args.lastModifiedTo !== undefined) {
+        dropped.push("lastModifiedTo(needs lastModifiedFrom — FPDS requires both date-range ends)");
     }
     if (args.keyword !== undefined) {
         const k = cleanKeyword(args.keyword);
@@ -138,7 +157,7 @@ export function buildQuery(args) {
             filters.push("keyword");
         }
     }
-    return { q: tokens.join(" "), filters };
+    return { q: tokens.join(" "), filters, dropped };
 }
 /**
  * Construct the SSRF-safe feed URL. Everything except `q`+`start` is fixed
@@ -376,7 +395,7 @@ function looksLikeAtomFeed(xml) {
 // ═══════════════════════════════════════════════════════════════════
 export async function searchAwards(args) {
     const start = args.offset ?? 0;
-    const { q, filters } = buildQuery(args);
+    const { q, filters, dropped } = buildQuery(args);
     const url = buildSearchUrl(q, start);
     const xml = await getText(url, {
         label: FPDS_LABEL,
@@ -437,13 +456,18 @@ export async function searchAwards(args) {
         complete = start === 0 ? undefined : false;
     }
     notes.push(FPDS_VS_USAS_NOTE);
+    // F5 (P4): disclose any orphaned lone date bound that could not be applied, so
+    // the results are never silently presented as date-filtered on that facet.
+    if (dropped.length > 0) {
+        notes.push(`An open-ended date filter was supplied but FPDS date ranges require BOTH ends — the lone bound(s) [${dropped.join("; ")}] were NOT applied and appear in _meta.filtersDropped (results are UNFILTERED on that date facet). Supply both signedDateFrom+signedDateTo (or lastModifiedFrom+lastModifiedTo) for a date-bounded search.`);
+    }
     const meta = {
         source: "www.fpds.gov ezSearch ATOM (FPDS-NG, keyless)",
         keylessMode: true,
         returned,
         totalAvailable,
         filtersApplied: filters,
-        filtersDropped: [],
+        filtersDropped: dropped,
         fieldsUnavailable: FIELDS_UNAVAILABLE,
         pagination,
         notes,

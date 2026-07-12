@@ -415,7 +415,10 @@ export async function searchIndividualAwards(args: {
     awards: results.map((r) => ({
       awardId: r["Award ID"] ?? "",
       recipient: r["Recipient Name"] || null,
-      amount: r["Award Amount"] ?? 0,
+      // F2 (P3 null-never-0): an ABSENT Award Amount → null, NEVER a fabricated
+      // $0 (a null-amount IDV/loan-type row must not read as "a $0 award"). A
+      // genuine 0 still survives — `??` fires only on null/undefined.
+      amount: r["Award Amount"] ?? null,
       awardingAgency: r["Awarding Agency"] || null,
       awardingSubAgency: r["Awarding Sub Agency"],
       // D1: NAICS now returned (parity with usas_search_awards_by_recipient).
@@ -526,7 +529,10 @@ export async function searchAwardsByRecipient(args: {
     awards: results.map((r) => ({
       awardId: r["Award ID"] ?? "",
       recipient: r["Recipient Name"] || null,
-      amount: r["Award Amount"] ?? 0,
+      // F2 (P3 null-never-0): an ABSENT Award Amount → null, NEVER a fabricated
+      // $0 (a null-amount IDV/loan-type row must not read as "a $0 award"). A
+      // genuine 0 still survives — `??` fires only on null/undefined.
+      amount: r["Award Amount"] ?? null,
       awardingAgency: r["Awarding Agency"] || null,
       awardingSubAgency: r["Awarding Sub Agency"],
       naicsCode: r.NAICS?.code,
@@ -618,7 +624,9 @@ export async function searchSubawards(args: {
     subawards: results.map((r) => ({
       subAwardId: r["Sub-Award ID"] ?? "",
       subRecipient: r["Sub-Award Recipient"] ?? "(name redacted)",
-      amount: r["Sub-Award Amount"] ?? 0,
+      // F2 (P3 null-never-0): an ABSENT Sub-Award Amount → null, NEVER a
+      // fabricated $0. A genuine 0 still survives (`??` fires only on null).
+      amount: r["Sub-Award Amount"] ?? null,
       actionDate: r["Sub-Award Date"] ?? "",
       // A3: prime-award NAICS on the subaward row (the only NAICS the endpoint
       // exposes for subawards). null when the row genuinely lacks it.
@@ -2059,7 +2067,10 @@ export async function searchRecipients(args: {
   // we never claim a total the endpoint didn't give.
   const total = json.page_metadata?.total ?? null;
   const data = {
-    totalRecords: json.page_metadata?.total ?? 0,
+    // F3 (P1): mirror the honest null `_meta.totalAvailable` — an OMITTED total
+    // must NOT default to 0 in the data field (a 200-with-rows-but-no-total then
+    // says "0 records" while rows exist and _meta says null: a self-contradiction).
+    totalRecords: total,
     recipients: results.map((r) => ({
       id: r.id ?? "",
       duns: r.duns,
@@ -2397,7 +2408,9 @@ export async function glossary(args: { limit?: number; search?: string }) {
     const results = json.results ?? [];
     const total = json.page_metadata?.count ?? null;
     const data = {
-      totalRecords: json.page_metadata?.count ?? 0,
+      // F3 (P1): mirror the honest null `_meta.totalAvailable` — an OMITTED count
+      // must NOT default to 0 in the data field (that would contradict the null meta).
+      totalRecords: total,
       terms: results.map((r) => ({
         term: r.term ?? "",
         slug: r.slug ?? "",

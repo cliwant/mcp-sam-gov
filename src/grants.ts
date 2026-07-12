@@ -13,6 +13,7 @@
  */
 
 import { fetchWithRetry } from "./errors.js";
+import { driftError } from "./datasource.js";
 import { withMeta } from "./meta.js";
 
 const GRANTS = "https://api.grants.gov/v1/api";
@@ -83,7 +84,20 @@ export async function searchGrants(args: {
   if (json.errorcode && json.errorcode !== 0) {
     throw new Error(`Grants.gov error: ${json.msg ?? "unknown"}`);
   }
-  const totalRecords = json.data?.hitCount ?? 0;
+  // F4 (P2 empty-vs-outage): a 200 that is NEITHER a recognized error envelope
+  // (handled above) NOR a `{data:{hitCount:number,…}}` shape is drift — a
+  // malformed / outage / interstitial body — and must NOT coalesce to
+  // `totalRecords:0` (an AUTHORITATIVE "no grants"). A GENUINE empty carries a
+  // numeric `data.hitCount:0` and stays an honest empty below. (Mirrors the
+  // govinfo/nih driftError precedent — a drift is a throw, never a fake-empty.)
+  const hitCount = json.data?.hitCount;
+  if (typeof hitCount !== "number") {
+    throw driftError(
+      "grants.gov",
+      "Grants.gov search2 returned HTTP 200 but the body carries neither an error code nor a numeric data.hitCount — treating it as schema drift / an outage interstitial, NOT an empty result set.",
+    );
+  }
+  const totalRecords = hitCount;
   const data = {
     totalRecords,
     grants: (json.data?.oppHits ?? []).map((g) => ({
