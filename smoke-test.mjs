@@ -1043,6 +1043,48 @@ const tests = [
       r.packageId === "BILLS-118hr1enr" &&
       (r.found === false || (r.package !== null && typeof r.package === "object")),
   },
+  // ━━━ US Census Geocoder — keyless territory/geospatial (ADR-0023, source #22)
+  // Live-hits geocoding.geo.census.gov (keyless). '600 Dexter Ave, Montgomery, AL' is a
+  // stable single-match address whose geographies carry the on-mission leading-zero
+  // GEOIDs (State '01', County '01101', Census Tract '01101000200', CD '0102'). A live
+  // transient (5xx/timeout/429) is TOLERATED as a pass-with-note.
+  {
+    name: "census_geocode_address",
+    args: { address: "600 Dexter Ave, Montgomery, AL 36104" },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      Array.isArray(r.matches) &&
+      r.matchCount >= 1 &&
+      r.matches[0] !== null &&
+      typeof r.matches[0] === "object" &&
+      // GEOIDs are STRINGS with leading zeros intact (never num-coerced).
+      r.matches[0].geographies.state.geoid === "01" &&
+      typeof r.matches[0].geographies.censusTract.geoid === "string" &&
+      /^0/.test(r.matches[0].geographies.censusTract.geoid) &&
+      r.matches[0].geographies.congressionalDistrict !== null &&
+      r.vintageResolved !== null &&
+      typeof r.vintageResolved.vintage === "string",
+  },
+  {
+    // Point → geographies for a stable Montgomery AL lon/lat (x=longitude, y=latitude).
+    // A point resolves to ONE geography set directly (no addressMatches wrapper); a live
+    // transient is tolerated.
+    name: "census_geographies_by_coordinates",
+    args: { longitude: -86.301883, latitude: 32.377612 },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      r.found === true &&
+      r.geographies !== null &&
+      typeof r.geographies === "object" &&
+      r.geographies.state !== null &&
+      typeof r.geographies.state.geoid === "string" &&
+      r.geographies.censusTract !== null &&
+      r.vintageResolved !== null,
+  },
 ];
 
 function pickPath(obj, path) {
