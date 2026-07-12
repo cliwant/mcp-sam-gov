@@ -61,6 +61,18 @@ import { num as treasuryNum } from "./dist/treasury.js";
 import { padCik as edgarPadCik, xbrlFrames, filingIndex, parseFullIndex, MAX_INDEX_ROWS, _resetFullIndexCache, dailyFilingIndex, parseDailyIndex, _resetDailyIndexCache } from "./dist/edgar.js";
 import { num as socrataNum } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
+import {
+  num as fdicNum,
+  escapeSearch as fdicEscape,
+  buildInstFilters as fdicBuildFilters,
+  buildInstSearch as fdicBuildSearch,
+  buildFinFilters as fdicBuildFinFilters,
+  filterTerm as fdicFilterTerm,
+  searchTerm as fdicSearchTerm,
+  searchInstitutions as fdicSearchInstitutions,
+  institutionFinancials as fdicInstitutionFinancials,
+  INST_FILTER_FIELDS as FDIC_INST_FILTER_FIELDS,
+} from "./dist/fdic.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
 import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
@@ -8321,6 +8333,334 @@ async function testFemaHonesty() {
   });
 }
 
+// §58: FDIC BankFind (ADR-0028) — the FIRST off-EDGAR entity source: an
+// FDIC-insured-institution directory + regulated-entity financials. SSRF (fixed
+// host api.fdic.gov + FIXED endpoint constants + hostname assertion + bounded
+// limit/offset + redirect:'error') + injection discipline (M1 name/city→`search`
+// NOT `filters`; M2 backslash-first phrase-escape; sortBy enum+Set.has allowlist)
+// + honesty (P1 EXACT meta.total pagination, P2 3-envelope drift-guard, P3
+// $thousands→USD ×1000 null-never-0, B returned-fields disclosure, freshness).
+// All OFFLINE (mock fetch), deterministic, NON-VACUOUS: every assertion pins a
+// value and names the mutation that turns it RED. Driven through the REAL runTool
+// + the exported builders.
+//   (a) num parity fdic.num===coerce.num + null-never-0.
+//   (b) ★M2 escape ORDER: backslash-first (quote-first ⇒ RED = phrase breakout).
+//   (c) builders: filters (STALP/ACTIVE/CERT) + search (NAME/CITY phrase-quoted).
+//   (d) ★M1: name/city ride the `search` param, NEVER `filters` (spied URL).
+//   (e) allowlist: filterTerm/searchTerm reject an un-allowlisted field; sortBy
+//       enum+Set.has rejects NOTAFIELD BEFORE fetch (0 fetch), both paths.
+//   (f) SSRF: fixed host/path/https, redirect:'error', keyless; bounded l/o (Zod).
+//   (g) P1: totalAvailable===meta.total (NOT page length); exact hasMore/nextOffset.
+//   (h) P2 3-envelope: 400 errors[]⇒invalid_input (detail NOT leaked); 404⇒throw;
+//       429/503⇒taxonomy; non-JSON⇒schema_drift; 200 missing meta/data⇒drift.
+//   (i) genuine-empty (total:0, data:[]) ⇒ complete:true/total:0 (the ONLY honest empty).
+//   (j) P3: ASSET/DEP/NETINC $thousands→USD ×1000; absent⇒null (never 0); 0 stays 0.
+//   (k) B: a record missing ASSET ⇒ assetUSD:null + ASSET∈fieldsUnavailable + note.
+//   (l) freshness: meta.index.createTimestamp disclosed in notes.
+//   (m) S1: multi-word name/city per-token disclosure fires (single word: absent).
+//   (n) S2: 'Mizuho Bank (USA)' accepted (parens in char-class), literal in search.
+//   (o) financials: CERT-only filter + REPDTE DESC default + per-CERT pagination.
+const isFdicInst = (u) => /api\.fdic\.gov\/banks\/institutions\?/.test(u);
+const isFdicFin = (u) => /api\.fdic\.gov\/banks\/financials\?/.test(u);
+// Build an FDIC SUCCESS envelope (records nested under data[].data + meta.index).
+const FDIC_INST_INDEX = { name: "institutions_20260710090007", createTimestamp: "2026-07-10T11:57:10Z" };
+const FDIC_FIN_INDEX = { name: "risview_20260608210616", createTimestamp: "2026-06-08T21:06:18Z" };
+const fdicBody = ({ records, total, index = FDIC_INST_INDEX }) => ({
+  meta: { total, parameters: {}, index },
+  data: records.map((r) => ({ data: r, score: 1 })),
+});
+const fdicInstMock = (spec) => (u) => (isFdicInst(u) ? mockResponse({ status: 200, json: fdicBody(spec) }) : failClosed()());
+const fdicFinMock = (spec) => (u) => (isFdicFin(u) ? mockResponse({ status: 200, json: fdicBody({ ...spec, index: spec.index ?? FDIC_FIN_INDEX }) }) : failClosed()());
+const fdicInstUrl = (calls) => { const c = calls.find((x) => isFdicInst(x.url)); return c ? new URL(c.url) : null; };
+const fdicFinUrl = (calls) => { const c = calls.find((x) => isFdicFin(x.url)); return c ? new URL(c.url) : null; };
+
+async function testFdicHonesty() {
+  section("58. FDIC BankFind (ADR-0028) — SSRF (fixed host/endpoint + hostname assert + bounded l/o) + M1 name/city→search + M2 backslash-first phrase-escape + sortBy allowlist + P1 EXACT-total pagination + P2 3-envelope guard + P3 $thousands→USD null-never-0 (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  // (a) num parity + null-never-0 (shared choke point).
+  ok("58a num parity: fdic.num === coerce.num (single audited copy — a num regression fails here too)", fdicNum === coerceNum, `${fdicNum === coerceNum}`);
+  ok("58a num null-never-0: num(4016571)===4016571; num(0)===0; num('')/num('null')/num(undefined)===null",
+    fdicNum(4016571) === 4016571 && fdicNum(0) === 0 && fdicNum("") === null && fdicNum("null") === null && fdicNum(undefined) === null,
+    JSON.stringify([fdicNum(4016571), fdicNum(0), fdicNum(""), fdicNum("null"), fdicNum(undefined)]));
+
+  // (b) ★M2 (v2 fix) — the `search` value is UNQUOTED and backslash-escaped for
+  // the Lucene reserved chars the char-class allows (`( ) & / -` + `\`). NO
+  // surrounding quotes (quotes ⇒ match_phrase ⇒ recall collapse = the M1
+  // false-empty). The direct-builder fixture BYPASSES the Zod char-class. A
+  // paren-breakout value's grouping metachars are neutralized (escaped), so the
+  // `search` cannot form a Lucene group/boolean — RED if quotes ship OR if the
+  // parens are left unescaped.
+  eq("58b ★M2 escapeSearch escapes grouping parens (belt-and-suspenders, UNQUOTED): 'Mizuho Bank (USA)' → 'Mizuho Bank \\(USA\\)' (no quotes)",
+    fdicEscape("Mizuho Bank (USA)"), "Mizuho Bank \\(USA\\)");
+  eq("58b ★M2 escapeSearch backslash-FIRST then operators: `a\\b(c` → `a\\\\b\\(c` (a pre-existing backslash is doubled BEFORE the paren escape is added)",
+    fdicEscape("a\\b(c"), "a\\\\b\\(c");
+  eq("58b ★M2 escapeSearch escapes & / - too (Farmers & Merchants → 'Farmers \\& Merchants'; recall-preserving, live-verified 181)",
+    fdicEscape("Farmers & Merchants"), "Farmers \\& Merchants");
+  eq("58b ★M2 buildInstSearch is UNQUOTED: buildInstSearch({name:'Axos'}) === 'NAME:Axos' (NO quotes — a quoted 'NAME:\"Axos\"' collapses FDIC recall to 0 ⇒ RED = the M1 false-empty)",
+    fdicBuildSearch({ name: "Axos" }), "NAME:Axos");
+  eq("58b ★M2 injection (Zod-bypass) paren-breakout stays literal: buildInstSearch({name:'zzz) OR (NAME:chase'}) === 'NAME:zzz\\) OR \\(NAME:chase' (grouping metachars escaped → no Lucene group forms; unescape/quote ⇒ RED)",
+    fdicBuildSearch({ name: "zzz) OR (NAME:chase" }), "NAME:zzz\\) OR \\(NAME:chase");
+
+  // (c) builders — filters (STALP/ACTIVE/CERT) + search (NAME/CITY phrase-quoted).
+  eq("58c buildInstFilters compound: STALP:VA AND ACTIVE:1 AND CERT:628 (structured — no free field)",
+    fdicBuildFilters({ state: "VA", activeOnly: true, cert: 628 }), "STALP:VA AND ACTIVE:1 AND CERT:628");
+  eq("58c buildInstFilters activeOnly:false → ACTIVE:0 (not omitted)", fdicBuildFilters({ activeOnly: false }), "ACTIVE:0");
+  eq("58c buildInstFilters no clauses → '' (⇒ no filters param)", fdicBuildFilters({}), "");
+  eq("58c buildInstSearch single UNQUOTED: NAME:chase (no quotes — live full token-match set = 43)", fdicBuildSearch({ name: "chase" }), "NAME:chase");
+  eq("58c buildInstSearch NAME+CITY joined with AND (UNQUOTED): NAME:first AND CITY:richmond",
+    fdicBuildSearch({ name: "first", city: "richmond" }), "NAME:first AND CITY:richmond");
+  eq("58c buildFinFilters: CERT:10363 (the sole, numeric filter — zero string injection surface)", fdicBuildFinFilters({ cert: 10363 }), "CERT:10363");
+
+  // (d) ★M1 — name/city ride the `search` param, NEVER `filters` (which is
+  // case-sensitive exact-keyword → confident false-empties). Spy the wire.
+  await withFetch(fdicInstMock({ records: [{ NAME: "JPMorgan Chase Bank, National Association", CERT: 628 }], total: 43 }), async (calls) => {
+    await runTool("fdic_search_institutions", { name: "chase" }, sam);
+    const url = fdicInstUrl(calls);
+    ok("58d ★M1: name → the `search` param carrying NAME: (UNQUOTED, no %22) NOT `filters` (filters ABSENT; route name via filters ⇒ RED = the case-sensitive false-empty class)",
+      !!url && url.searchParams.get("search") === "NAME:chase" && url.searchParams.get("filters") === null,
+      JSON.stringify({ search: url?.searchParams.get("search"), filters: url?.searchParams.get("filters") }));
+  });
+  await withFetch(fdicInstMock({ records: [{ NAME: "First Bank", CERT: 1 }], total: 9 }), async (calls) => {
+    await runTool("fdic_search_institutions", { name: "first", state: "VA", activeOnly: true }, sam);
+    const url = fdicInstUrl(calls);
+    ok("58d ★M1: name→search AND state/activeOnly→filters, cleanly SPLIT (filters=STALP:VA AND ACTIVE:1, search=NAME:first UNQUOTED); filters NEVER carries NAME",
+      !!url && url.searchParams.get("filters") === "STALP:VA AND ACTIVE:1" && url.searchParams.get("search") === "NAME:first" && !/NAME/.test(url.searchParams.get("filters") ?? ""),
+      JSON.stringify({ filters: url?.searchParams.get("filters"), search: url?.searchParams.get("search") }));
+  });
+  // ★M2-fix regression: a real brand-name bank (Axos, live: NAME:Axos→1, but the
+  // OLD quoted NAME:"Axos"→0) must NOT become a false-empty. Assert the emitted
+  // `search` is UNQUOTED (NAME:Axos, no `"`/%22) and the tool returns the record —
+  // shipping the quoted path (search=NAME:"Axos") ⇒ this assertion goes RED.
+  await withFetch(fdicInstMock({ records: [{ NAME: "Axos Bank", CERT: 35546, ASSET: 28200000, STALP: "CA", CITY: "San Diego", ACTIVE: 1, ESTYMD: "01/01/2000", ID: "35546" }], total: 1 }), async (calls) => {
+    const r = await runTool("fdic_search_institutions", { name: "Axos" }, sam);
+    const url = fdicInstUrl(calls);
+    const m = buildMeta(r.meta);
+    ok("58d ★M2-fix Axos NOT a false-empty: emitted search === 'NAME:Axos' (UNQUOTED — no double-quote/%22); tool returns the record (returned:1, total:1) — the quoted match_phrase path ⇒ RED",
+      !!url && url.searchParams.get("search") === "NAME:Axos" && !url.search.includes("%22") && r.data.institutions.length === 1 && m.totalAvailable === 1,
+      JSON.stringify({ search: url?.searchParams.get("search"), hasQuote: url?.search.includes("%22"), returned: r.data.institutions.length, ta: m.totalAvailable }));
+    ok("58d ★M2-fix the note does NOT vouch a 0-total as a confirmed genuine miss (it discloses a token match that may be BROADER than a literal substring); no 'treat 0 as a genuine miss' wording",
+      m.notes.some((n) => /full-text .*search/i.test(n) && /BROADER|broader/.test(n)) && !m.notes.some((n) => /actual full-text miss|genuine miss/i.test(n)),
+      JSON.stringify(m.notes));
+  });
+
+  // (e) allowlist — filterTerm/searchTerm reject an un-allowlisted field (P4
+  // belt-and-suspenders); the sortBy enum + Set.has recheck rejects NOTAFIELD
+  // BEFORE any fetch, on BOTH the Zod path (runTool) and the module path.
+  {
+    const a = await expectThrow(async () => fdicFilterTerm("NOTAFIELD", "x", FDIC_INST_FILTER_FIELDS));
+    ok("58e filterTerm('NOTAFIELD',…) ⇒ invalid_input (P4 belt-and-suspenders; remove the .has check ⇒ RED)", a.threw && toToolError(a.error).kind === "invalid_input", JSON.stringify({ threw: a.threw }));
+    const b = await expectThrow(async () => fdicSearchTerm("NOTAFIELD", "x"));
+    ok("58e searchTerm('NOTAFIELD',…) ⇒ invalid_input (search-field allowlist; remove the .has check ⇒ RED)", b.threw && toToolError(b.error).kind === "invalid_input", JSON.stringify({ threw: b.threw }));
+    eq("58e filterTerm positive: STALP is allowlisted ⇒ 'STALP:VA'", fdicFilterTerm("STALP", "VA", FDIC_INST_FILTER_FIELDS), "STALP:VA");
+  }
+  await withFetch(failClosed(), async (calls) => {
+    const r = await expectThrow(() => fdicSearchInstitutions({ sortBy: "NOTAFIELD" }));
+    ok("58e ★sortBy Set.has recheck (MODULE path): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch (widen/remove the Set.has recheck ⇒ RED = sort_by=NOTAFIELD reaches the wire)",
+      r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: r.threw ? toToolError(r.error).kind : null, fetches: calls.length }));
+    const rf = await expectThrow(() => fdicInstitutionFinancials({ cert: 1, sortBy: "NOTAFIELD" }));
+    ok("58e ★sortBy Set.has recheck (financials): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch", rf.threw && toToolError(rf.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ fetches: calls.length }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const r = await expectThrow(() => runTool("fdic_search_institutions", { sortBy: "NOTAFIELD" }, sam));
+    ok("58e ★sortBy Zod enum (runTool path): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch (widen the enum ⇒ RED)",
+      r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: r.threw ? toToolError(r.error).kind : null, fetches: calls.length }));
+  });
+
+  // (f) SSRF — fixed host/path/https, redirect:'error', keyless (no headers),
+  // bounded limit/offset (Zod ⇒ invalid_input, 0 fetch on out-of-range).
+  await withFetch(fdicInstMock({ records: [{ NAME: "Capital One", CERT: 4297, ASSET: 672010000, STALP: "VA", CITY: "Mclean", ACTIVE: 1, ESTYMD: "05/22/1933", ID: "4297" }], total: 56 }), async (calls) => {
+    await runTool("fdic_search_institutions", { state: "VA", activeOnly: true }, sam);
+    const url = fdicInstUrl(calls);
+    const c = calls.find((x) => isFdicInst(x.url));
+    ok("58f fixed host/path/https: https://api.fdic.gov/banks/institutions; filters is a query param (NOT the path); a builder mutation off-host ⇒ RED",
+      !!url && url.hostname === "api.fdic.gov" && url.protocol === "https:" && url.pathname === "/banks/institutions" && url.searchParams.get("filters") === "STALP:VA AND ACTIVE:1",
+      JSON.stringify(c?.url));
+    ok("58f B1 redirect:'error' + keyless (NO headers key — byte-clean init) on the fdic fetch (drop redirect ⇒ RED)",
+      !!c && c.init && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
+    ok("58f fixed field projection on the wire: fields=NAME,CITY,STALP,CERT,ASSET,ACTIVE,ESTYMD,ID + format=json",
+      url.searchParams.get("fields") === "NAME,CITY,STALP,CERT,ASSET,ACTIVE,ESTYMD,ID" && url.searchParams.get("format") === "json", JSON.stringify(url?.search));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    for (const [args, why] of [
+      [{ limit: 5000 }, "limit>1000"],
+      [{ offset: -1 }, "offset<0"],
+      [{ offset: 200000 }, "offset>100000"],
+      [{ state: "virginia" }, "state not 2-upper"],
+      [{ name: 'has"quote' }, "name with a raw ES metachar \" (char-class rejects)"],
+    ]) {
+      const before = calls.length;
+      const r = await expectThrow(() => runTool("fdic_search_institutions", args, sam));
+      ok(`53f Zod bound/format guard (${why}) ⇒ invalid_input, 0 fetch`, r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: r.threw ? toToolError(r.error).kind : null, added: calls.length - before }));
+    }
+    const rc = await expectThrow(() => runTool("fdic_institution_financials", { cert: 0 }, sam));
+    ok("58f financials cert:0 ⇒ invalid_input (cert.int().min(1)), 0 fetch", rc.threw && toToolError(rc.error).kind === "invalid_input", JSON.stringify(rc.threw));
+  });
+
+  // (g) ★P1 — totalAvailable is the EXACT meta.total, NOT the page length.
+  await withFetch(fdicInstMock({ records: [{ NAME: "Capital One", CERT: 4297, ASSET: 672010000, STALP: "VA", CITY: "Mclean", ACTIVE: 1, ESTYMD: "05/22/1933", ID: "4297" }], total: 56 }), async () => {
+    const r = await runTool("fdic_search_institutions", { state: "VA", activeOnly: true, limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("58g ★P1 totalAvailable === meta.total 56 (NOT records.length 1 — mutate totalAvailable→page length ⇒ RED); returned 1 ⇒ hasMore:true, truncated:true, complete:false, nextOffset:1",
+      m.totalAvailable === 56 && m.returned === 1 && m.pagination.hasMore === true && m.truncated === true && m.complete === false && m.pagination.nextOffset === 1,
+      JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
+  });
+  // financials offset page: total 169 STABLE, hasMore=offset+returned<total.
+  await withFetch(fdicFinMock({ records: [{ CERT: 10363, REPDTE: "20010331", ASSET: 100, DEP: 50, NETINC: 5, ID: "10363_20010331" }, { CERT: 10363, REPDTE: "20001231", ASSET: 90, DEP: 40, NETINC: 4, ID: "10363_20001231" }], total: 169 }), async () => {
+    const r = await runTool("fdic_institution_financials", { cert: 10363, limit: 2, offset: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("58g ★P1 financials offset page: total 169 STABLE across offset; offset 100 + returned 2 < 169 ⇒ hasMore:true, nextOffset:102, complete:false",
+      m.totalAvailable === 169 && m.pagination.hasMore === true && m.pagination.nextOffset === 102 && m.complete === false, JSON.stringify(m.pagination));
+  });
+  // financials last page: offset+returned === total ⇒ hasMore:false, nextOffset:null.
+  await withFetch(fdicFinMock({ records: [{ CERT: 10363, REPDTE: "19840630", ASSET: 10, DEP: 5, NETINC: 1, ID: "10363_19840630" }], total: 169 }), async () => {
+    const r = await runTool("fdic_institution_financials", { cert: 10363, limit: 1, offset: 168 }, sam);
+    const m = buildMeta(r.meta);
+    ok("58g ★P1 financials last page (offset 168 + returned 1 === total 169) ⇒ hasMore:false, nextOffset:null (mutate hasMore to offset+returned<=total ⇒ RED)",
+      m.totalAvailable === 169 && m.pagination.hasMore === false && m.pagination.nextOffset === null, JSON.stringify(m.pagination));
+  });
+
+  // (h) ★P2 3-envelope drift-guard — every NON-success envelope THROWS, never a
+  // fake empty. 400 errors[] ⇒ invalid_input, the raw ES `detail` NOT leaked.
+  const SECRET_DETAIL = "search_phase_execution_exception PARSE_LEAK_9k";
+  await withFetch((u) => (isFdicInst(u) ? mockResponse({ status: 400, json: { errors: [{ status: 400, detail: SECRET_DETAIL }] } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_search_institutions", { state: "VA" }, sam));
+    const te = toToolError(r.error);
+    ok("58h ★P2 400 errors[] ⇒ invalid_input AND the raw ES parse_exception `detail` is NOT leaked (errorFromResponse never reads the body)",
+      r.threw && te.kind === "invalid_input" && !JSON.stringify(te).includes(SECRET_DETAIL) && !JSON.stringify(te).includes("parse_exception"), JSON.stringify({ kind: te.kind }));
+  });
+  await withFetch((u) => (isFdicInst(u) ? mockResponse({ status: 404, json: { message: "Cannot GET /banks/institutionz", error: "Not Found", statusCode: 404 } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_search_institutions", { state: "VA" }, sam));
+    ok("58h ★P2 404 {message,statusCode} (ROUTING envelope) ⇒ not_found THROW (never a fake empty)", r.threw && toToolError(r.error).kind === "not_found", JSON.stringify(toToolError(r.error).kind));
+  });
+  await withFetch((u) => (isFdicInst(u) ? mockResponse({ status: 429, headers: { "Retry-After": "30" } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_search_institutions", { state: "VA" }, sam));
+    ok("58h ★P2 429 ⇒ rate_limited, retryable", r.threw && toToolError(r.error).kind === "rate_limited" && toToolError(r.error).retryable === true, JSON.stringify(toToolError(r.error).kind));
+  });
+  await withFetch((u) => (isFdicInst(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_search_institutions", { state: "VA" }, sam));
+    ok("58h ★P2 503 ⇒ upstream_unavailable, retryable (NOT a fake empty institutions[])", r.threw && toToolError(r.error).kind === "upstream_unavailable" && toToolError(r.error).retryable === true, JSON.stringify(toToolError(r.error).kind));
+  });
+  const fdicHtmlResp = () => ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON"); }, text: async () => "<html>down</html>" });
+  await withFetch((u) => (isFdicInst(u) ? fdicHtmlResp() : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_search_institutions", { state: "VA" }, sam));
+    ok("58h ★P2 200 non-JSON body (r.json() SyntaxError) ⇒ schema_drift (remove the SyntaxError catch ⇒ RED=unknown; never a fake-empty)", r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(toToolError(r.error).kind));
+  });
+  // 200 but the SUCCESS shape is missing (a 200 carrying the errors[]/routing
+  // shape, or a non-number/absent total) ⇒ schema_drift, never a fake empty.
+  for (const [json, why] of [
+    [{ errors: [{ status: 400 }] }, "meta+data missing (errors[] shape at 200)"],
+    [{ meta: { total: 5 } }, "data missing / not an array"],
+    [{ meta: { total: 5 }, data: "not-an-array" }, "data is a string"],
+    [{ meta: {}, data: [] }, "meta.total absent"],
+    [{ meta: { total: "56" }, data: [] }, "meta.total a string (typeof-check before num)"],
+  ]) {
+    await withFetch((u) => (isFdicInst(u) ? mockResponse({ status: 200, json }) : failClosed()()), async () => {
+      const r = await expectThrow(() => runTool("fdic_search_institutions", { state: "VA" }, sam));
+      ok(`53h ★P2 3-envelope: 200 with ${why} ⇒ schema_drift throw (never [] + complete:true)`, r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(toToolError(r.error).kind));
+    });
+  }
+
+  // (i) genuine-empty — the ONLY honest empty: total:0 + data:[] ⇒ complete:true.
+  await withFetch(fdicInstMock({ records: [], total: 0 }), async () => {
+    const r = await runTool("fdic_search_institutions", { state: "VA", cert: 999999999 }, sam);
+    const m = buildMeta(r.meta);
+    ok("58i genuine-empty (meta.total:0 + data:[]) ⇒ returned:0, totalAvailable:0, complete:true, truncated:false (a real no-match — the ONLY honest empty)",
+      r.data.institutions.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.returned === 0, JSON.stringify(m));
+  });
+
+  // (j) ★P3 — $thousands → whole USD ×1000, null-never-0. Mixed record: a real
+  // value scales, a genuine 0 stays 0, an ABSENT field ⇒ null (never 0).
+  await withFetch(fdicInstMock({ records: [
+    { NAME: "Big Bank", CERT: 1, ASSET: 672010, STALP: "VA", CITY: "X", ACTIVE: 1, ESTYMD: "01/01/1900", ID: "1" },
+    { NAME: "Zero Bank", CERT: 2, ASSET: 0, STALP: "VA", CITY: "Y", ACTIVE: 1, ESTYMD: "02/02/1901", ID: "2" },
+    { NAME: "No-Asset Bank", CERT: 3, STALP: "VA", CITY: "Z", ACTIVE: 1, ESTYMD: "03/03/1902", ID: "3" },
+  ], total: 3 }), async () => {
+    const r = await runTool("fdic_search_institutions", { state: "VA" }, sam);
+    const inst = r.data.institutions;
+    ok("58j ★P3 ASSET $thousands→USD ×1000: 672010 ⇒ assetUSD 672010000 (mutate ×1000 away ⇒ RED)", inst[0].assetUSD === 672010000, JSON.stringify(inst[0].assetUSD));
+    ok("58j ★P3 a genuine 0 stays 0 (num preserves a real zero — NOT null)", inst[1].assetUSD === 0, JSON.stringify(inst[1].assetUSD));
+    ok("58j ★P3 an ABSENT ASSET ⇒ assetUSD:null (the null-guard PRECEDES the ×1000 — apply ×1000 first ⇒ RED = null*1000=0/NaN)", inst[2].assetUSD === null, JSON.stringify(inst[2].assetUSD));
+    ok("58j ESTYMD passes through as a string via str (not num→null): '01/01/1900'", inst[0].establishedDate === "01/01/1900", JSON.stringify(inst[0].establishedDate));
+  });
+  // financials ×1000 on all three money fields.
+  await withFetch(fdicFinMock({ records: [{ CERT: 10363, REPDTE: "20260331", ASSET: 2790564, DEP: 2410464, NETINC: 7892, ID: "10363_20260331" }], total: 169 }), async () => {
+    const r = await runTool("fdic_institution_financials", { cert: 10363 }, sam);
+    const f = r.data.financials[0];
+    ok("58j ★P3 financials ASSET/DEP/NETINC $thousands→USD ×1000 (2790564→2790564000, 2410464→2410464000, 7892→7892000); REPDTE via num ⇒ 20260331",
+      f.assetUSD === 2790564000 && f.depositsUSD === 2410464000 && f.netIncomeUSD === 7892000 && f.reportDate === 20260331, JSON.stringify(f));
+  });
+  // financials absent NETINC ⇒ null (not 0).
+  await withFetch(fdicFinMock({ records: [{ CERT: 10363, REPDTE: "20260331", ASSET: 100, DEP: 50, ID: "10363_20260331" }], total: 169 }), async () => {
+    const r = await runTool("fdic_institution_financials", { cert: 10363 }, sam);
+    ok("58j ★P3 financials absent NETINC ⇒ netIncomeUSD:null (never 0)", r.data.financials[0].netIncomeUSD === null, JSON.stringify(r.data.financials[0].netIncomeUSD));
+  });
+
+  // (k) B — a projected field absent from ALL records ⇒ fieldsUnavailable + note.
+  await withFetch(fdicInstMock({ records: [
+    { NAME: "A", CERT: 1, STALP: "VA", CITY: "X", ACTIVE: 1, ESTYMD: "01/01/1900", ID: "1" },
+    { NAME: "B", CERT: 2, STALP: "VA", CITY: "Y", ACTIVE: 1, ESTYMD: "02/02/1901", ID: "2" },
+  ], total: 2 }), async () => {
+    const r = await runTool("fdic_search_institutions", { state: "VA" }, sam);
+    const m = buildMeta(r.meta);
+    ok("58k B: ASSET absent from ALL records ⇒ ASSET ∈ fieldsUnavailable + a drift note; assetUSD:null (drop the returned-fields disclosure ⇒ RED)",
+      m.fieldsUnavailable.includes("ASSET") && r.data.institutions[0].assetUSD === null && m.notes.some((n) => /ASSET/.test(n) && /not.*returned|schema drift/i.test(n)),
+      JSON.stringify({ fu: m.fieldsUnavailable, note: m.notes }));
+  });
+  await withFetch(fdicInstMock({ records: [{ NAME: "A", CERT: 1, ASSET: 100, STALP: "VA", CITY: "X", ACTIVE: 1, ESTYMD: "01/01/1900", ID: "1" }], total: 1 }), async () => {
+    const m = buildMeta((await runTool("fdic_search_institutions", { state: "VA" }, sam)).meta);
+    ok("58k B: all projected fields present ⇒ fieldsUnavailable empty (non-vacuity for the disclosure)", m.fieldsUnavailable.length === 0, JSON.stringify(m.fieldsUnavailable));
+  });
+
+  // (l) freshness — meta.index.createTimestamp disclosed in notes (drop it ⇒ RED).
+  await withFetch(fdicInstMock({ records: [{ NAME: "A", CERT: 1, ASSET: 1, STALP: "VA", CITY: "X", ACTIVE: 1, ESTYMD: "01/01/1900", ID: "1" }], total: 1 }), async () => {
+    const m = buildMeta((await runTool("fdic_search_institutions", { state: "VA" }, sam)).meta);
+    ok("58l freshness: the snapshot name + createTimestamp 2026-07-10T11:57:10Z are disclosed in notes (a stale snapshot is NEVER a live-exact read)",
+      m.notes.some((n) => /institutions_20260710090007/.test(n) && /2026-07-10T11:57:10Z/.test(n) && /point-in-time|snapshot/i.test(n)), JSON.stringify(m.notes));
+    ok("58l source is set INLINE (A1) to the institutions endpoint provenance", m.source === "api.fdic.gov/banks/institutions (BankFind, keyless)", JSON.stringify(m.source));
+  });
+
+  // (m) ★S1 — a multi-word name/city is matched PER-TOKEN; the disclosure fires
+  // whenever a value has a space (and is ABSENT for a single-word value).
+  await withFetch(fdicInstMock({ records: [{ NAME: "First State Bank", CERT: 1, ASSET: 1, STALP: "VA", CITY: "X", ACTIVE: 1, ESTYMD: "01/01/1900", ID: "1" }], total: 224 }), async () => {
+    const m = buildMeta((await runTool("fdic_search_institutions", { name: "First Community" }, sam)).meta);
+    ok("58m ★S1 multi-word name 'First Community' ⇒ a PER-TOKEN disclosure note fires (phrase-quoting does NOT phrase-scope; drop the space-check ⇒ RED)",
+      m.notes.some((n) => /PER-TOKEN/.test(n) && /verify counts/i.test(n)), JSON.stringify(m.notes));
+  });
+  await withFetch(fdicInstMock({ records: [{ NAME: "Chase", CERT: 1, ASSET: 1, STALP: "VA", CITY: "X", ACTIVE: 1, ESTYMD: "01/01/1900", ID: "1" }], total: 11 }), async () => {
+    const m = buildMeta((await runTool("fdic_search_institutions", { name: "chase" }, sam)).meta);
+    ok("58m ★S1 single-word name 'chase' ⇒ NO per-token note (non-vacuity — the general full-text search note still discloses the token match)",
+      !m.notes.some((n) => /PER-TOKEN/.test(n)) && m.notes.some((n) => /full-text .*search/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // (n) ★S2 — 'Mizuho Bank (USA)' (parens) is ACCEPTED by the char-class (a real
+  // foreign-bank US subsidiary), and the parens are LITERAL inside the phrase-
+  // quoted + escaped search value (never false-rejected as invalid_input).
+  await withFetch(fdicInstMock({ records: [{ NAME: "Mizuho Bank (USA)", CERT: 1, ASSET: 1, STALP: "NY", CITY: "New York", ACTIVE: 1, ESTYMD: "01/01/1900", ID: "1" }], total: 1 }), async (calls) => {
+    const r = await expectThrow(() => runTool("fdic_search_institutions", { name: "Mizuho Bank (USA)" }, sam));
+    ok("58n ★S2 'Mizuho Bank (USA)' is ACCEPTED (parens/# in the char-class — NOT false-rejected as invalid_input; narrow the char-class ⇒ RED)", r.threw === false, JSON.stringify({ threw: r.threw, kind: r.threw ? toToolError(r.error).kind : null }));
+    const url = fdicInstUrl(calls);
+    ok("58n ★S2 the parens are backslash-ESCAPED (UNQUOTED) so they match literally, live-verified →1: search=NAME:Mizuho Bank \\(USA\\) (NOT quoted, NOT rejected)", url && url.searchParams.get("search") === "NAME:Mizuho Bank \\(USA\\)", JSON.stringify(url?.searchParams.get("search")));
+  });
+
+  // (o) financials — CERT-only filter + REPDTE DESC default + per-CERT pagination.
+  await withFetch(fdicFinMock({ records: [{ CERT: 10363, REPDTE: "20260331", ASSET: 1, DEP: 1, NETINC: 1, ID: "10363_20260331" }], total: 169 }), async (calls) => {
+    await runTool("fdic_institution_financials", { cert: 10363 }, sam);
+    const url = fdicFinUrl(calls);
+    ok("58o financials: filters=CERT:10363 (the sole filter) + sort_by=REPDTE&sort_order=DESC default (newest first) on https://api.fdic.gov/banks/financials",
+      !!url && url.pathname === "/banks/financials" && url.searchParams.get("filters") === "CERT:10363" && url.searchParams.get("sort_by") === "REPDTE" && url.searchParams.get("sort_order") === "DESC",
+      JSON.stringify({ path: url?.pathname, filters: url?.searchParams.get("filters"), sb: url?.searchParams.get("sort_by"), so: url?.searchParams.get("sort_order") }));
+    const c = calls.find((x) => isFdicFin(x.url));
+    ok("58o financials fetch is keyless (no headers) + redirect:'error' (same port discipline as institutions)", !!c && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
+  });
+  await withFetch(fdicFinMock({ records: [{ CERT: 10363, REPDTE: "20260331", ASSET: 1, DEP: 1, NETINC: 1, ID: "10363_20260331" }], total: 169 }), async () => {
+    const m = buildMeta((await runTool("fdic_institution_financials", { cert: 10363 }, sam)).meta);
+    ok("58o financials source set INLINE (A1) to the financials endpoint provenance (distinct from institutions — no synthesizeDefaultMeta branch)",
+      m.source === "api.fdic.gov/banks/financials (BankFind, keyless)", JSON.stringify(m.source));
+  });
+}
+
 // §45: api.data.gov KEYED trio (ADR-0007) — Regulations.gov + Congress.gov. The
 // project's FIRST keyed source. The load-bearing guarantee is the KEY-NEVER-LEAKS
 // discipline (§2): the secret rides ONLY in the X-Api-Key header, never the URL /
@@ -11734,6 +12074,7 @@ async function main() {
   await testThroughGate();
   await testCkanHonesty();
   await testFemaHonesty();
+  await testFdicHonesty();
   await testDatagovHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();

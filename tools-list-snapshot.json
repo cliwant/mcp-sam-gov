@@ -839,6 +839,106 @@
     }
   },
   {
+    "name": "fdic_institution_financials",
+    "description": "Quarterly financial time-series for ONE FDIC-insured institution by certificate number (keyless FDIC BankFind, api.fdic.gov/banks/financials). Input `cert` (REQUIRED FDIC certificate number, from fdic_search_institutions), `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum REPDTE/ASSET/DEP/NETINC, def REPDTE), `sortOrder` (def DESC → newest quarter first). Returns { cert, financials:[{ cert, reportDate, assetUSD, depositsUSD, netIncomeUSD, id }] } (e.g. CERT 10363 → 169 quarterly rows). HONESTY: totalAvailable is the EXACT meta.total (stable across offset — page via offset for the full history); ASSET/DEP/NETINC are published in $thousands and normalized to whole USD ×1000 (null-never-0); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope THROWS (never a fake empty); the snapshot build time is disclosed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "cert": {
+          "type": "number",
+          "description": "REQUIRED FDIC certificate number of the institution (→ CERT filter). From fdic_search_institutions."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page, 1..1000, default 100."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset for pagination, 0..100000, default 0."
+        },
+        "sortBy": {
+          "type": "string",
+          "enum": [
+            "REPDTE",
+            "ASSET",
+            "DEP",
+            "NETINC"
+          ],
+          "description": "Sort field (allowlisted enum; default REPDTE = report date)."
+        },
+        "sortOrder": {
+          "type": "string",
+          "enum": [
+            "ASC",
+            "DESC"
+          ],
+          "description": "Sort direction, default DESC (newest quarter first)."
+        }
+      },
+      "required": [
+        "cert"
+      ]
+    }
+  },
+  {
+    "name": "fdic_search_institutions",
+    "description": "Search the FDIC-insured-institution directory (keyless FDIC BankFind, api.fdic.gov/banks/institutions) — a regulated-entity directory for B2G counterparty / bank due-diligence. Structured filters: `state` (2-letter, → STALP), `activeOnly` (→ ACTIVE 1/0), `cert` (→ CERT, the STABLE entity key), plus `name`/`city` matched via FDIC's case-insensitive full-text `search` param (NOT `filters` — `filters=NAME:\"chase\"` is case-sensitive exact-keyword and returns a false-empty; `search=NAME:chase` finds JPMorgan Chase etc.). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum NAME/CERT/ASSET/ESTYMD/STALP/CITY/ACTIVE), `sortOrder` (ASC/DESC). Returns { institutions:[{ name, city, state, cert, assetUSD, active, establishedDate, id }] }. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); ASSET is published in $thousands and normalized to whole USD ×1000 (null-never-0 — a real 0 stays 0, absent → null); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); a multi-word name/city is matched per-token (disclosed); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "Filter by 2-letter US state code (uppercase; → STALP filter). e.g. 'VA'."
+        },
+        "activeOnly": {
+          "type": "boolean",
+          "description": "Filter to active (true → ACTIVE:1) or inactive (false → ACTIVE:0) institutions; omit for both."
+        },
+        "cert": {
+          "type": "number",
+          "description": "Filter by FDIC certificate number (the STABLE entity key; → CERT filter)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Filter by institution NAME via FDIC full-text `search` (case-insensitive token match; NOT case-sensitive exact-keyword — that is why we route to `search`, not `filters`)."
+        },
+        "city": {
+          "type": "string",
+          "description": "Filter by CITY via FDIC full-text `search` (case-insensitive token match)."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page, 1..1000, default 100."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset for pagination, 0..100000, default 0."
+        },
+        "sortBy": {
+          "type": "string",
+          "enum": [
+            "NAME",
+            "CERT",
+            "ASSET",
+            "ESTYMD",
+            "STALP",
+            "CITY",
+            "ACTIVE"
+          ],
+          "description": "Optional sort field (an allowlisted enum; an unknown field is rejected before fetch)."
+        },
+        "sortOrder": {
+          "type": "string",
+          "enum": [
+            "ASC",
+            "DESC"
+          ],
+          "description": "Sort direction when sortBy is set, ASC (default) or DESC."
+        }
+      }
+    }
+  },
+  {
     "name": "fed_register_get_document",
     "description": "Fetch full detail for a Federal Register document by number. Returns title, abstract, citation, publication_date, effective_on, raw_text_url (for the full body), CFR references — everything needed to ground a regulation citation.",
     "inputSchema": {
