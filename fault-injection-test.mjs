@@ -65,6 +65,7 @@ import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
 import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
+import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
 import { getJson, getText, isRedirectError, driftError, throughGate } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -8507,6 +8508,245 @@ async function testGetTextPort() {
   });
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// §51: NIH RePORTER v2 (api.reporter.nih.gov, ADR-0014) — the R2 getJson port's
+// FIRST non-GET consumer (POST + JSON body). NON-VACUOUS, OFFLINE, deterministic.
+// Guards (each assertion pins a value + names the mutation that turns it RED):
+//   (a) getJson POST port wiring: init carries method:"POST" + body + Content-Type
+//       + redirect:"error"; body is the module-built {criteria,limit,offset} JSON.
+//   (b) test-12 backward-compat lock: an existing GET consumer's captured init has
+//       !Object.hasOwn(init,"method") AND !Object.hasOwn(init,"body") — a mutant
+//       "always set method" in getJson turns this RED.
+//   (c) totalAvailable = num(meta.total) EXACT (mutate→results.length ⇒ RED).
+//   (d) 15k window: offset≥15000 ⇒ invalid_input, 0 fetch (Zod + module guard);
+//       candidateNext≥15000 ⇒ nextOffset:null/hasMore:false (mutate→15000 ⇒ RED);
+//       candidateNext≥totalAvailable ⇒ nextOffset:null.
+//   (e) shape guards: 200 non-{meta,results} ⇒ driftError; non-number meta.total ⇒
+//       driftError (before num); genuine-empty(total:0) ⇒ complete:true/0.
+//   (f) outage 5xx ⇒ throws; 400 ⇒ invalid_input (never a fake empty).
+//   (g) orgStates enum: "ca"/"ZZ"/"texas" ⇒ invalid_input, 0 fetch (silent-zero guard).
+//   (h) grant caveat (M2) present in EVERY _meta.notes; filtersApplied honesty
+//       (a shipped filter appears; agencyIcCodes never sent, never applied).
+//   (i) free-text max-length + array-size Zod rejects; num null-never-0 + parity.
+const NIH_URL_RE = /api\.reporter\.nih\.gov\/v2\/projects\/search/;
+const isNih = (u) => NIH_URL_RE.test(u);
+// A real-structured NIH results[] row (the recipient-enrichment payload).
+const NIH_ROW = {
+  project_num: "5R01CA123456-03",
+  project_title: "Mechanisms of Tumor Suppression",
+  fiscal_year: 2023,
+  award_amount: 512345,
+  award_type: "5",
+  activity_code: "R01",
+  is_active: true,
+  organization: {
+    org_name: "MASSACHUSETTS INSTITUTE OF TECHNOLOGY",
+    org_city: "CAMBRIDGE",
+    org_state: "MA",
+    org_country: "UNITED STATES",
+    primary_uei: "E2NYLCDML6V1",
+    primary_duns: "001425594",
+    org_ueis: ["E2NYLCDML6V1"],
+    org_duns: ["001425594"],
+  },
+  principal_investigators: [
+    { profile_id: 1234567, first_name: "Jane", last_name: "Smith", full_name: "Jane Smith", is_contact_pi: true, title: "Professor" },
+  ],
+  contact_pi_name: "SMITH, JANE",
+  agency_ic_admin: { code: "CA", abbreviation: "NCI", name: "National Cancer Institute" },
+};
+const nihRows = (n, row = NIH_ROW) => Array.from({ length: n }, () => row);
+const nihBody = (total, rows) => ({ meta: { total, offset: 0, limit: rows.length }, results: rows });
+const nihMock = (body, status = 200) => (u) => (isNih(u) ? mockResponse({ status, json: body }) : failClosed()());
+
+async function testNihHonesty() {
+  section("51. NIH RePORTER v2 (ADR-0014, the R2 getJson port's FIRST non-GET/POST consumer) — POST-port wiring + backward-compat lock + exact-total + 15k retrieval-window + grant caveat + orgStates silent-zero guard + shape/outage honesty (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (a) getJson POST port wiring: method/body/Content-Type/redirect on init. ──
+  await withFetch(nihMock(nihBody(85109, nihRows(50))), async (calls) => {
+    await runTool("nih_reporter_search_projects", { fiscalYears: [2023], orgStates: ["CA"] }, sam);
+    const c = calls.find((x) => isNih(x.url));
+    ok("51a getJson POST wiring: the NIH call carries method:'POST' (the FIRST non-GET port consumer — mutate method→GET ⇒ upstream 405 ⇒ RED)", c && c.init.method === "POST", JSON.stringify(c?.init?.method));
+    ok("51a getJson POST wiring: Content-Type application/json (MANDATORY for NIH — 415 without it)", c && c.init.headers && c.init.headers["Content-Type"] === "application/json", JSON.stringify(c?.init?.headers));
+    ok("51a getJson POST wiring: redirect:'error' (fail-closed on any off-host 3xx; body never read)", c && c.init.redirect === "error", JSON.stringify(c?.init?.redirect));
+    const parsed = JSON.parse(c.init.body);
+    ok("51a body is the MODULE-BUILT typed payload {criteria,limit,offset} (JSON.stringify'd, never concatenated) — criteria carries fiscal_years + org_states (mapped keys), NO raw passthrough",
+      typeof c.init.body === "string" && JSON.stringify(parsed.criteria.fiscal_years) === "[2023]" && JSON.stringify(parsed.criteria.org_states) === "[\"CA\"]" && parsed.limit === 50 && parsed.offset === 0,
+      JSON.stringify(parsed));
+  });
+
+  // ── (b) test-12 backward-compat lock: an existing GET consumer keeps a
+  //    byte-identical init with NO method/body KEY (KEY absence, not value). ──
+  await withFetch(() => mockResponse({ status: 200, json: {} }), async (calls) => {
+    await getJson("https://example.test/x", { label: "port:x" });
+    const init = calls[0].init;
+    ok("51b test-12 backward-compat: a GET getJson caller's init has NO 'method' key AND NO 'body' key (Object.hasOwn — a mutant 'always set method' in getJson ⇒ RED)",
+      !Object.hasOwn(init, "method") && !Object.hasOwn(init, "body"), JSON.stringify(Object.keys(init)));
+  });
+  // And the POST path DOES set both keys (proves the passthrough fires only when given).
+  await withFetch(() => mockResponse({ status: 200, json: {} }), async (calls) => {
+    await getJson("https://example.test/x", { label: "port:x", method: "POST", body: "{}" });
+    const init = calls[0].init;
+    ok("51b getJson POST caller ⇒ init HAS method:'POST' + body key (the passthrough fires when the option is given — mutate to drop it ⇒ RED)",
+      init.method === "POST" && Object.hasOwn(init, "body") && init.body === "{}", JSON.stringify({ m: init.method, b: init.body }));
+  });
+
+  // ── (c) totalAvailable = num(meta.total) EXACT (NEVER results.length). ──
+  await withFetch(nihMock(nihBody(85109, nihRows(50))), async () => {
+    const r = await runTool("nih_reporter_search_projects", { fiscalYears: [2023] }, sam);
+    const m = buildMeta(r.meta);
+    ok("51c totalAvailable = meta.total EXACT = 85109 (NOT the 50 returned rows) + returned:50 — mutate the module to use results.length for the total ⇒ RED (the forbidden total===page-size class)",
+      m.totalAvailable === 85109 && m.returned === 50, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    ok("51c NO totalIsLowerBound (the count is EXACT, only retrieval is capped — never a lower bound like EDGAR/FPDS)", m.totalIsLowerBound === undefined, JSON.stringify(m.totalIsLowerBound));
+    // The mapped enrichment payload is non-vacuous (org/UEI/PI/amount/IC).
+    const p = r.data.projects[0];
+    ok("51c record map (recipient enrichment): projectNum/title, awardAmount 512345, org MIT/MA/primary_uei, PI, fundingIc NCI — the join-key primary_uei is surfaced",
+      p.projectNum === "5R01CA123456-03" && p.awardAmount === 512345 && p.organization.name === "MASSACHUSETTS INSTITUTE OF TECHNOLOGY" && p.organization.state === "MA" && p.organization.primaryUei === "E2NYLCDML6V1" && p.principalInvestigators[0].fullName === "Jane Smith" && p.fundingIc.abbreviation === "NCI",
+      JSON.stringify({ pn: p.projectNum, aa: p.awardAmount, uei: p.organization.primaryUei, ic: p.fundingIc.abbreviation }));
+  });
+
+  // ── (d) 15k retrieval window. ──
+  // offset≥15000 ⇒ invalid_input, 0 fetch (Zod .max(14_999) via runTool).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { fiscalYears: [2023], offset: 15000 }, sam));
+    ok("51d offset:15000 (≥15000) ⇒ invalid_input, 0 fetch (the retrieval-window pre-fetch guard — offset 0..14,999 only) [Zod .max(14_999)]",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // Module-level guard too (a direct caller that bypasses Zod): offset 15000 ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => nihSearchProjects({ offset: 15000 }));
+    ok("51d module pre-fetch guard: nihSearchProjects({offset:15000}) directly ⇒ invalid_input, 0 fetch (belt-and-suspenders behind Zod)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // candidateNext≥15000 ⇒ nextOffset:null / hasMore:false, truncated:true + cap note.
+  await withFetch(nihMock({ meta: { total: 85109, offset: 14950, limit: 50 }, results: nihRows(50) }), async () => {
+    const r = await runTool("nih_reporter_search_projects", { fiscalYears: [2023], offset: 14950, limit: 50 }, sam);
+    const m = buildMeta(r.meta);
+    ok("51d candidateNext = 14950+50 = 15000 ≥ 15000 ⇒ nextOffset:null, hasMore:false (NEVER a dead-end nextOffset=15000) — mutate to hand nextOffset=candidateNext ⇒ RED",
+      m.pagination.nextOffset === null && m.pagination.hasMore === false, JSON.stringify(m.pagination));
+    ok("51d past-window: totalAvailable stays EXACT 85109 + truncated:true (returned<total) + a retrieval-cap disclosure note (records beyond 15,000 UNREACHABLE)",
+      m.totalAvailable === 85109 && m.truncated === true && m.notes.some((n) => /caps keyless retrieval at the first 15000/.test(n) && /UNREACHABLE|cannot be retrieved/.test(n)), JSON.stringify({ ta: m.totalAvailable, tr: m.truncated }));
+  });
+  // candidateNext≥totalAvailable ⇒ nextOffset:null (the whole set fits).
+  await withFetch(nihMock(nihBody(30, nihRows(30))), async () => {
+    const r = await runTool("nih_reporter_search_projects", { fiscalYears: [2023], limit: 50 }, sam);
+    const m = buildMeta(r.meta);
+    ok("51d candidateNext = 0+30 = 30 ≥ totalAvailable 30 ⇒ nextOffset:null, hasMore:false, complete:true (the whole set, within window)",
+      m.pagination.nextOffset === null && m.pagination.hasMore === false && m.totalAvailable === 30 && m.complete === true, JSON.stringify({ pg: m.pagination, c: m.complete }));
+  });
+  // within-window page ⇒ exact nextOffset + hasMore.
+  await withFetch(nihMock(nihBody(200, nihRows(50))), async () => {
+    const r = await runTool("nih_reporter_search_projects", { fiscalYears: [2023], limit: 50 }, sam);
+    const m = buildMeta(r.meta);
+    ok("51d within-window: offset 0, returned 50, total 200 ⇒ hasMore:true, nextOffset:50, truncated:true (more reachable pages)",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 50 && m.truncated === true, JSON.stringify(m.pagination));
+  });
+
+  // ── (e) shape guards + genuine-empty. ──
+  await withFetch(nihMock([{ project_num: "x" }]), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { fiscalYears: [2023] }, sam));
+    ok("51e 200 body is an ARRAY (not {meta,results}) ⇒ schema_drift (never read as a fake empty) — mutate to read results on a non-object ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nihMock({ results: [NIH_ROW] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { fiscalYears: [2023] }, sam));
+    ok("51e 200 {results:[…]} with NO meta ⇒ schema_drift (never fabricate a total)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nihMock({ meta: { total: "85109" }, results: [] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { fiscalYears: [2023] }, sam));
+    ok("51e non-number meta.total ('85109' string) ⇒ schema_drift BEFORE num() (m-total-guard, CKAN m6) — num() can't tell a non-number from absent, so typeof-check first; mutate to num() it ⇒ RED (a string total would silently parse)",
+      threw && toToolError(error).kind === "schema_drift" && /meta\.total absent\/non-numeric/.test(toToolError(error).message), JSON.stringify(threw ? toToolError(error) : "no-throw"));
+  });
+  await withFetch(nihMock({ meta: { total: 0, offset: 0, limit: 50 }, results: [] }), async () => {
+    const r = await runTool("nih_reporter_search_projects", { orgNames: ["ZZZZZZZZ_NOSUCH_ORG_9999"] }, sam);
+    const m = buildMeta(r.meta);
+    ok("51e genuine-empty (total:0, results:[]) ⇒ returned:0, totalAvailable:0, complete:true, truncated:false (an honest exact zero, NOT a swallowed error)",
+      r.data.projects.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false, JSON.stringify(m));
+    ok("51e genuine-empty STILL carries the grant caveat (every response discloses it)", m.notes.some((n) => /RESEARCH GRANTS/.test(n) && /NOT federal procurement contracts/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── (f) outage 5xx ⇒ throws; 400 (NIH's array error body) ⇒ invalid_input. ──
+  await withFetch(nihMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { fiscalYears: [2023] }, sam));
+    ok("51f 503 ⇒ throws upstream_unavailable (a DOWN NIH is NEVER a returned:0 — getJson/fetchWithRetry throws)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nihMock(["System doesn't support offset value greater than 14,999. Please narrow down your search criteria."], 400), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { fiscalYears: [2023], offset: 14000 }, sam));
+    ok("51f HTTP 400 (NIH's JSON-array error body) ⇒ invalid_input THROWS via errorFromResponse BEFORE the map layer (never a fake empty; results never read as [])",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (g) orgStates enum: lowercase / unknown / full-name ⇒ invalid_input, 0 fetch. ──
+  for (const bad of ["ca", "ZZ", "texas"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { orgStates: [bad] }, sam));
+      ok(`51g orgStates:[${JSON.stringify(bad)}] ⇒ invalid_input, 0 fetch (the UPPERCASE 2-letter enum is BOTH the SSRF value guard AND the silent-zero guard — a lowercase/unknown/full-name code would silently return zeros, read as 'no NIH funding')`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ── (h) filtersApplied honesty + agencyIcCodes never sent/applied. ──
+  await withFetch(nihMock(nihBody(200, nihRows(50))), async (calls) => {
+    // Pass a spurious agencyIcCodes (Zod strips unknown keys); it must NEVER be built into the body NOR listed in filtersApplied.
+    const r = await runTool("nih_reporter_search_projects", { fiscalYears: [2023], orgStates: ["CA"], orgNames: ["MIT"], agencyIcCodes: ["DK"] }, sam);
+    const m = buildMeta(r.meta);
+    ok("51h filtersApplied lists EXACTLY the shipped, live-confirmed-narrowing filters actually sent (fiscalYears, orgStates, orgNames) — a shipped filter appears; a not-sent one never does",
+      JSON.stringify([...m.filtersApplied].sort()) === JSON.stringify(["fiscalYears", "orgNames", "orgStates"]), JSON.stringify(m.filtersApplied));
+    const parsed = JSON.parse(calls.find((x) => isNih(x.url)).init.body);
+    ok("51h agencyIcCodes (M1 silent-drop) is NEVER built into the POST body (no agency_ic_codes key) NOR listed in filtersApplied — a filter that no-ops upstream is never presented as applied",
+      !("agency_ic_codes" in parsed.criteria) && !m.filtersApplied.includes("agencyIcCodes"), JSON.stringify(Object.keys(parsed.criteria)));
+  });
+  // Disclose-not-refuse: an unscoped query is NOT refused — first page + exact total + narrow note.
+  await withFetch(nihMock(nihBody(85109, nihRows(50))), async () => {
+    const r = await runTool("nih_reporter_search_projects", {}, sam);
+    const m = buildMeta(r.meta);
+    ok("51h disclose-not-refuse: an UNSCOPED query is NOT refused — it returns the first page (50) + the EXACT total (85109) + empty filtersApplied + a narrow-your-criteria note (invalid_input is reserved for the offset guard, not for scope)",
+      r.data.projects.length === 50 && m.totalAvailable === 85109 && m.filtersApplied.length === 0 && m.notes.some((n) => /narrow criteria/.test(n)), JSON.stringify({ n: r.data.projects.length, ta: m.totalAvailable, fa: m.filtersApplied }));
+  });
+  // Grant caveat present on a normal success too.
+  await withFetch(nihMock(nihBody(200, nihRows(50))), async () => {
+    const r = await runTool("nih_reporter_search_projects", { fiscalYears: [2023] }, sam);
+    const m = buildMeta(r.meta);
+    ok("51h M2 grant caveat present in _meta.notes on a normal success (an agent must never conflate a grant recipient with a contractor) — mutate the caveat off ⇒ RED",
+      m.notes.some((n) => /RESEARCH GRANTS/.test(n) && /NOT federal procurement contracts/.test(n) && /primary_uei/.test(n)), JSON.stringify(m.notes));
+    ok("51h data-currency + UEI-join notes also present (rolling-refresh disclosure; primary_uei is the SAM/USAspending join key)",
+      m.notes.some((n) => /rolling basis/.test(n)) && m.notes.some((n) => /primaryUei is the join key/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── (i) free-text max-length + array-size Zod rejects (0 fetch); num null-never-0 + parity. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { orgNames: ["x".repeat(513)] }, sam));
+    ok("51i orgNames over-length (513 > 512) ⇒ invalid_input, 0 fetch (free-text max-length before body assembly)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const big = Array.from({ length: 21 }, (_, i) => 2000 + i);
+    const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { fiscalYears: big }, sam));
+    ok("51i fiscalYears array over-size (21 > 20) ⇒ invalid_input, 0 fetch (array-length cap)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // num null-never-0 on award_amount, mapped through a real response.
+  await withFetch(nihMock({ meta: { total: 2, offset: 0, limit: 50 }, results: [
+    { ...NIH_ROW, award_amount: null },
+    { ...NIH_ROW, award_amount: 0 },
+  ] }), async () => {
+    const r = await runTool("nih_reporter_search_projects", { fiscalYears: [2023] }, sam);
+    ok("51i award_amount null ⇒ null (an absent amount is 'unknown', NEVER a fabricated 0) AND a real award_amount:0 ⇒ 0 (a genuine $0 is REAL, not nulled)",
+      r.data.projects[0].awardAmount === null && r.data.projects[1].awardAmount === 0, JSON.stringify(r.data.projects.map((p) => p.awardAmount)));
+  });
+  eq("51i num(null) ⇒ null", nihNum(null), null);
+  eq("51i num(0) ⇒ 0 (genuine zero preserved)", nihNum(0), 0);
+  eq("51i num('') ⇒ null (Number('') is 0 — must be caught)", nihNum(""), null);
+  eq("51i num('512345') ⇒ 512345 (numeric string parses)", nihNum("512345"), 512345);
+  ok("51i nih.num === coerce.num (one shared audited impl — a num regression fails §40e/§49p/§51i together)", nihNum === coerceNum, "nih.num diverged from coerce.num");
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -8568,6 +8808,7 @@ async function main() {
   await testGovinfoHonesty();
   await testFpdsHonesty();
   await testGetTextPort();
+  await testNihHonesty();
 
   // Prove the harness bites.
   await selfCheck();

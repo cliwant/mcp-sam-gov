@@ -799,6 +799,102 @@
     }
   },
   {
+    "name": "nih_reporter_search_projects",
+    "description": "Search awarded NIH RePORTER research-GRANT projects (keyless; api.reporter.nih.gov v2, POST/JSON — the FIRST non-GET getJson-port consumer) — the NEW federal research-funding recipient-enrichment axis (who receives NIH research money, by organization / state, joinable to SAM/USAspending via primary_uei). Structured, LIVE-CONFIRMED-narrowing criteria ONLY, AND-combined in a module-built body (NO raw passthrough): orgStates (UPPERCASE 2-letter USPS enum — the SSRF + silent-zero guard; a lowercase/unknown code silently returns zeros), orgNames (≤512 each, ≤20), fiscalYears (int array 1985..currentYear+1, ≤20), limit (1..500, def 50), offset (0..14,999, def 0). Returns { projects:[{ projectNum, projectTitle, fiscalYear, awardAmount, organization:{ name, state, primaryUei, primaryDuns, ueis, duns }, principalInvestigators, contactPiName, fundingIc }] } + honest _meta. HONESTY: (M2) records are RESEARCH GRANTS, NOT procurement contracts — primary_uei joins to SAM/USAspending recipients but the award nature differs (disclosed in every _meta.notes); totalAvailable = the EXACT meta.total (NEVER the page size, NEVER a lower bound); NIH caps keyless retrieval at the first 15,000 records (offset 0..14,999) — offset ≥ 15,000 ⇒ invalid_input, and past the window the count stays exact while records are UNREACHABLE (disclosed in a note; nextOffset is never a dead-end). Disclose-not-refuse: an unscoped query still returns the first page + the exact total + a narrow-your-criteria note. agencyIcCodes is intentionally NOT a filter (NIH silently drops it — it would be a false 'applied'). Genuine-empty (total:0) ⇒ complete:true/total:0; an outage/5xx/timeout THROWS; a 400 (bad offset/limit/type) ⇒ invalid_input; a 200 body that isn't {meta,results} or a non-numeric meta.total ⇒ schema_drift (never a fake empty). awardAmount is number|null (a real $0 award is 0, an absent amount is null).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "orgStates": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "AL",
+              "AK",
+              "AZ",
+              "AR",
+              "CA",
+              "CO",
+              "CT",
+              "DE",
+              "DC",
+              "FL",
+              "GA",
+              "HI",
+              "ID",
+              "IL",
+              "IN",
+              "IA",
+              "KS",
+              "KY",
+              "LA",
+              "ME",
+              "MD",
+              "MA",
+              "MI",
+              "MN",
+              "MS",
+              "MO",
+              "MT",
+              "NE",
+              "NV",
+              "NH",
+              "NJ",
+              "NM",
+              "NY",
+              "NC",
+              "ND",
+              "OH",
+              "OK",
+              "OR",
+              "PA",
+              "RI",
+              "SC",
+              "SD",
+              "TN",
+              "TX",
+              "UT",
+              "VT",
+              "VA",
+              "WA",
+              "WV",
+              "WI",
+              "WY",
+              "AS",
+              "GU",
+              "MP",
+              "PR",
+              "VI"
+            ]
+          },
+          "description": "Recipient-organization US state/territory 2-letter USPS codes (UPPERCASE — the enum is the SSRF value guard + the silent-zero guard: a lowercase 'ca' or an unknown 'ZZ' silently returns zeros, so a typo is an invalid_input, never read as 'no NIH funding'). LIVE-CONFIRMED to narrow. e.g. ['CA','MA']. Max 20."
+        },
+        "orgNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Recipient-organization name filter values (each ≤512 chars, max 20). LIVE-CONFIRMED to narrow. e.g. ['MASSACHUSETTS INSTITUTE OF TECHNOLOGY']. A value matching no org returns a genuine total:0."
+        },
+        "fiscalYears": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "NIH fiscal years to include (int array, 1985..2027, max 20). LIVE-CONFIRMED to narrow. e.g. [2023,2024]."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Projects per page (upstream hard cap 500), 1..500, default 50."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based offset into the result set. HARD-CAPPED at 14,999: NIH caps keyless retrieval at the first 15,000 records (offset 0..14,999), so offset ≥ 15,000 is refused (invalid_input) — narrow criteria to reach records beyond the window. The count (totalAvailable) stays EXACT past the window."
+        }
+      }
+    }
+  },
+  {
     "name": "regulations_search_comments",
     "description": "Search Regulations.gov public COMMENTS on rulemakings — the killer B2G dataset (who is lobbying which rule). Same JSON:API envelope + input shape as regulations_search_documents (searchTerm/query, agencyId, docketId, postedDateGe/Le, sort, pageNumber 1..40, pageSize 5..250) against /v4/comments. Returns { comments:[{ id, documentType, title, agencyId, docketId, postedDate, objectId }] } + honest _meta (same totalElements-exact total + 40-page/10,000-record ceiling handling as documents).",
     "inputSchema": {
