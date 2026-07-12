@@ -92,7 +92,7 @@ import { num as govinfoNum, listCollections as govinfoListCollections, searchPac
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
 import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward, tokenizeForDisclosure as nsfTok } from "./dist/nsf.js";
-import { num as blsNum, timeseries as blsTimeseries } from "./dist/bls.js";
+import { num as blsNum, timeseries as blsTimeseries, oewsWages as blsOews, buildOewsSeriesId, BLS_OEWS_DATATYPES, BLS_OEWS_OCCUPATIONS, BLS_STATE_FIPS } from "./dist/bls.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
@@ -11760,6 +11760,248 @@ async function testBlsHonesty() {
   }); // withBlsKey(undefined)
 }
 
+// §62b-oews: BLS OEWS occupational wage benchmarking (bls_oews_wages, ADR-0033 —
+// the 2nd tool on the keyless BLS source; the LEVEL layer next to bls_timeseries's
+// ESCALATION layer). NON-VACUOUS, OFFLINE, deterministic. The tool BUILDS the
+// 25-char OEWS series ID from validated structured inputs, then REUSES the SAME
+// api.bls.gov POST/JSON transport + parseBlsBody + mapObservation + tier/key seam.
+// Each assertion pins a value + names the load-bearing mutation (ADR a–j) it RED-s:
+//   (a) suppressed/absent cell → fabricated 0 / silently dropped (not null + H2) ⇒ RED — fixture 3.
+//   (b) the H1 annual/A01/latest-year cadence NOT disclosed ⇒ RED — fixture 2.
+//   (c) a datatype mis-map (annual_mean building …03 hourly) ⇒ RED — fixtures 1 + 4.
+//   (d) the builder emitting a wrong-width/mispadded ID not caught by ^OEU[NSM][0-9]{21}$ ⇒ RED — fixture 1.
+//   (e) an empty combo returned WITHOUT the OEWS not-published note ⇒ RED — fixture 3.
+//   (f) units mislabeled per datatype (annual tagged dollars/hour) ⇒ RED — fixtures 2 + 4.
+//   (g) an areatype/datatype/state-enum bypass or a non-^\d{6}$ soc accepted ⇒ RED — fixture 6.
+//   (h) a value surfaced as the RAW STRING instead of the parsed number ⇒ RED — fixture 2.
+//   (i) the cartesian product over the tier cap SILENTLY truncated (not refused w/ count) ⇒ RED — fixture 5.
+//   (j) the BLS_API_KEY appearing in url/label/_meta, or in the body when keyless ⇒ RED — fixture 7 K-test.
+const OEWS_A01_ROW = { year: "2025", period: "A01", periodName: "Annual", latest: "true", value: "148100", footnotes: [{}] };
+
+async function testBlsOewsHonesty() {
+  section("62b. BLS OEWS occupational wage benchmarking (ADR-0033 — the 2nd BLS tool; labor-rate LEVEL layer) — the 25-char series-ID builder (validate-each-component + ^OEU[NSM][0-9]{21}$ assert) + REUSED transport/parse/honesty (status-throw, \"-\"→null-never-0) + OEWS honesty H1(annual/A01) / H2(not-published→null-never-0) / H3(units-per-datatype) / H4(top-code) + over-cap-refuse (P4) + charclass/allowlist SSRF + K-test key-never-leaks (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  await withBlsKey(undefined, async () => {
+
+  // ── Fixture 1: the builder unit matrix (PURE fn, no fetch) — exact 25-char IDs
+  //    vs the ADR live-verified strings + ^OEU[NSM][0-9]{21}$ + FIPS/CBSA zero-pad
+  //    (kills c datatype-mismap, d wrong-width, g). ──
+  const OEWS_ID_RE = /^OEU[NSM][0-9]{21}$/;
+  const bmatrix = [
+    // national software-developer (SOC 151252) × the 5 v1 datatypes (04/13/03/08/01):
+    ["N-swdev-annual_mean(04)",   { areatype: "N", areaCode: "0000000", occupation: "151252", datatype: "04" }, "OEUN000000000000015125204"],
+    ["N-swdev-annual_median(13)", { areatype: "N", areaCode: "0000000", occupation: "151252", datatype: "13" }, "OEUN000000000000015125213"],
+    ["N-swdev-hourly_mean(03)",   { areatype: "N", areaCode: "0000000", occupation: "151252", datatype: "03" }, "OEUN000000000000015125203"],
+    ["N-swdev-hourly_median(08)", { areatype: "N", areaCode: "0000000", occupation: "151252", datatype: "08" }, "OEUN000000000000015125208"],
+    ["N-allocc-employment(01)",   { areatype: "N", areaCode: "0000000", occupation: "000000", datatype: "01" }, "OEUN000000000000000000001"],
+    // states — FIPS 2-digit + 5 zeros (CA 06, MS 28, DC 11):
+    ["S-CA(06)-swdev-04", { areatype: "S", areaCode: "0600000", occupation: "151252", datatype: "04" }, "OEUS060000000000015125204"],
+    ["S-MS(28)-swdev-04", { areatype: "S", areaCode: "2800000", occupation: "151252", datatype: "04" }, "OEUS280000000000015125204"],
+    ["S-DC(11)-swdev-04", { areatype: "S", areaCode: "1100000", occupation: "151252", datatype: "04" }, "OEUS110000000000015125204"],
+    // metro — "00" + 5-digit CBSA (DFW 19100), ortho SOC 291242 (ADR doc example):
+    ["M-DFW(19100)-ortho-04", { areatype: "M", areaCode: "0019100", occupation: "291242", datatype: "04" }, "OEUM001910000000029124204"],
+  ];
+  for (const [name, parts, want] of bmatrix) {
+    const got = buildOewsSeriesId(parts);
+    ok(`62b-1 builder ${name} ⇒ ${want} (exact 25-char ID; mutate the datatype/area/occupation width ⇒ RED — kills c/d)`,
+      got === want && got.length === 25 && OEWS_ID_RE.test(got), JSON.stringify({ got, want }));
+  }
+  // The zero-padding is LOAD-BEARING: a single-digit FIPS or an un-padded CBSA must
+  // NOT slip through (the ^[0-9]{7}$ area guard + the final assert catch it) — kills (d).
+  for (const [name, parts] of [
+    ["single-digit FIPS areaCode '600000' (CA not zero-padded)", { areatype: "S", areaCode: "600000", occupation: "151252", datatype: "04" }],
+    ["un-padded 5-digit CBSA areaCode '19100'", { areatype: "M", areaCode: "19100", occupation: "151252", datatype: "04" }],
+    ["occupation not 6 digits '15125'", { areatype: "N", areaCode: "0000000", occupation: "15125", datatype: "04" }],
+    ["off-allowlist datatype '15' (a v2 percentile, not v1)", { areatype: "N", areaCode: "0000000", occupation: "151252", datatype: "15" }],
+    ["areatype bypass 'X'", { areatype: "X", areaCode: "0000000", occupation: "151252", datatype: "04" }],
+  ]) {
+    const { threw, error } = await expectThrow(async () => buildOewsSeriesId(parts));
+    ok(`62b-1 builder REJECTS ${name} ⇒ invalid_input (a wrong-width component NEVER silently makes a different valid series — kills d)`,
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  }
+
+  // ── Fixture 2: SUCCESS + a real A01 row (national swdev annual-mean). The mock
+  //    returns the built ID with a 2025/A01 $148,100 row ⇒ value 148100 (number),
+  //    units dollars/year, referenceYear 2025, H1+H3 notes (kills b, f, h). ──
+  await withFetch(blsMock(blsBody([blsSeries("OEUN000000000000015125204", [OEWS_A01_ROW])])), async (calls) => {
+    const r = await runTool("bls_oews_wages", { occupation: ["software_developer"] }, sam);
+    const m = buildMeta(r.meta);
+    const row = r.data.results[0];
+    ok("62b-2 wage PARSED to number 148100 (typeof number, NOT the raw string '148100') — kills (h) raw-string surfaced",
+      typeof row.value === "number" && row.value === 148100, JSON.stringify({ t: typeof row.value, v: row.value }));
+    ok("62b-2 measure units labeled dollars/year for annual_mean (code 04) — kills (f) units-mislabel + (c) datatype-mismap",
+      row.measure.units === "dollars/year" && row.measure.key === "annual_mean" && row.measure.code === "04", JSON.stringify(row.measure));
+    ok("62b-2 the A01 reference year/period are DISCLOSED (referenceYear 2025, referencePeriod A01) + valueUnavailable:false",
+      row.referenceYear === "2025" && row.referencePeriod === "A01" && row.valueUnavailable === false, JSON.stringify({ ry: row.referenceYear, rp: row.referencePeriod, u: row.valueUnavailable }));
+    ok("62b-2 occupation resolved from the curated catalog (soc 151252, key software_developer, label Software Developers)",
+      row.occupation.soc === "151252" && row.occupation.key === "software_developer" && /Software Developers/.test(row.occupation.label), JSON.stringify(row.occupation));
+    ok("62b-2 area defaulted to national (type national, code 0000000, label United States); the built seriesId is echoed",
+      row.area.type === "national" && row.area.code === "0000000" && row.area.label === "United States" && row.seriesId === "OEUN000000000000015125204", JSON.stringify(row.area));
+    ok("62b-2 (H1) the ANNUAL / A01 / latest-year-only cadence is DISCLOSED in _meta.notes (reference May 2025) — kills (b) misread-as-monthly",
+      m.notes.some((n) => /ANNUAL point-in-time snapshot/.test(n) && /A01/.test(n) && /reference May 2025/.test(n) && /NOT monthly/.test(n)), JSON.stringify(m.notes));
+    ok("62b-2 (H3) the units-per-datatype caveat is DISCLOSED in _meta.notes (dollars/year vs dollars/hour vs count) — kills (f)",
+      m.notes.some((n) => /measure\.units/.test(n) && /dollars\/year/.test(n) && /dollars\/hour/.test(n) && /count \(jobs\)/.test(n)), JSON.stringify(m.notes));
+    ok("62b-2 the always-on tier disclosure is reused (v1 keyless, ~25/day, series/query cap) — P1",
+      m.notes.some((n) => /Active BLS tier: v1 keyless/.test(n) && /25 queries\/day/.test(n)), JSON.stringify(m.notes));
+    ok("62b-2 the OUTGOING body carries the module-BUILT id + a recent-window (no caller year) — SSRF: built id rides the body, not the url",
+      (() => { const c = calls.find((x) => isBls(x.url)); const b = JSON.parse(c.init.body); return JSON.stringify(b.seriesid) === JSON.stringify(["OEUN000000000000015125204"]) && Number(b.endyear) - Number(b.startyear) === 2 && c.init.method === "POST"; })(), JSON.stringify(JSON.parse(calls.find((x) => isBls(x.url)).init.body)));
+  });
+
+  // ── Fixture 3: not-published (H2). A built ID returns SUCCESS + empty data[] +
+  //    top-level "Series does not exist" ⇒ value:null, valueUnavailable:FALSE (ABSENT,
+  //    not a "-" gap), the H2 note + surfaced message + the id in fieldsUnavailable
+  //    (kills a fabricated-0, e missing-not-published-note). ──
+  const wyOrthoId = buildOewsSeriesId({ areatype: "S", areaCode: BLS_STATE_FIPS.WY + "00000", occupation: "291242", datatype: "04" });
+  await withFetch(blsMock(blsBody([blsSeries(wyOrthoId, [])], { message: [`Series does not exist for Series ${wyOrthoId}`] })), async () => {
+    const r = await runTool("bls_oews_wages", { soc: ["291242"], area: ["WY"] }, sam);
+    const m = buildMeta(r.meta);
+    const row = r.data.results[0];
+    ok("62b-3 a NOT-PUBLISHED cell ⇒ value:null (NEVER a fabricated 0) AND valueUnavailable:FALSE (it is ABSENT, not a '-' in-band gap) — kills (a)",
+      row.value === null && row.valueUnavailable === false, JSON.stringify({ v: row.value, u: row.valueUnavailable }));
+    ok("62b-3 (H2) the not-published disclosure names occ/area/measure + says 'not a tool error' + 'no published value' — kills (e)",
+      m.notes.some((n) => /OEWS publishes no estimate/.test(n) && /not a tool error/i.test(n) && /no published value/.test(n)), JSON.stringify(m.notes));
+    ok("62b-3 the surfaced upstream 'Series does not exist' message rides in _meta.notes (not swallowed)",
+      m.notes.some((n) => new RegExp(`Series does not exist for Series ${wyOrthoId}`).test(n)), JSON.stringify(m.notes));
+    ok("62b-3 the built seriesId is listed in _meta.fieldsUnavailable (disclosed as unavailable, never silently dropped)",
+      m.fieldsUnavailable.some((f) => f.includes(wyOrthoId)), JSON.stringify(m.fieldsUnavailable));
+    ok("62b-3 the row still echoes its resolved descriptors (area WY, soc 291242, measure annual_mean) + seriesId — a full accounted row",
+      row.area.code === "5600000" && row.occupation.soc === "291242" && row.measure.key === "annual_mean" && row.seriesId === wyOrthoId, JSON.stringify({ a: row.area, o: row.occupation, s: row.seriesId }));
+  });
+
+  // ── Fixture 4: the datatype → code + units mapping table (the frozen source of
+  //    truth). Each key resolves to the pinned code + units; a mutated map fails
+  //    (kills c datatype-mismap, f units-mislabel). ──
+  const dtTable = [
+    ["annual_mean", "04", "dollars/year"],
+    ["annual_median", "13", "dollars/year"],
+    ["hourly_mean", "03", "dollars/hour"],
+    ["hourly_median", "08", "dollars/hour"],
+    ["employment", "01", "count (jobs)"],
+  ];
+  for (const [key, code, units] of dtTable) {
+    const e = BLS_OEWS_DATATYPES[key];
+    ok(`62b-4 datatype ${key} ⇒ code ${code} + units ${units} (frozen map; mutate the code or units ⇒ RED — kills c/f)`,
+      e && e.code === code && e.units === units, JSON.stringify(e));
+    // And the builder threads that code into the ID's datatype slot (positions 24-25).
+    const id = buildOewsSeriesId({ areatype: "N", areaCode: "0000000", occupation: "151252", datatype: code });
+    ok(`62b-4 the builder threads datatype code ${code} into positions 24-25 of the ID (…${id.slice(-2)})`,
+      id.slice(-2) === code, id);
+  }
+
+  // ── Fixture 5: over-cap product (3 areas × 5 occ × 2 dt = 30 > v1 cap 25) ⇒
+  //    invalid_input naming 30, fetch NOT called (kills i silent-truncation, P4). ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("bls_oews_wages", {
+      area: ["national", "CA", "TX"],
+      occupation: ["software_developer", "civil_engineer", "lawyer", "logistician", "technical_writer"],
+      datatype: ["annual_mean", "hourly_mean"],
+    }, sam));
+    const te = toToolError(error);
+    ok("62b-5 3×5×2 = 30 > v1 cap 25 ⇒ invalid_input naming 30 vs 25, 0 fetch (the overflow is REFUSED, never silently truncated — kills i, P4)",
+      threw && te.kind === "invalid_input" && /= 30 series/.test(te.message) && /cap of 25/.test(te.message) && calls.length === before, JSON.stringify({ k: threw ? te.kind : "no-throw", m: te.message, added: calls.length - before }));
+  });
+
+  // ── Fixture 6: allowlist / charclass rejects ⇒ invalid_input, 0 fetch (kills g).
+  //    Through runTool (Zod + module) AND direct blsOews (module belt-and-suspenders). ──
+  const rejects = [
+    ["area '../' (path-ish)", { area: ["../"], occupation: ["software_developer"] }],
+    ["state 'ZZ' (not a FIPS state)", { area: ["ZZ"], occupation: ["software_developer"] }],
+    ["off-enum datatype 'monthly_mean'", { datatype: ["monthly_mean"], occupation: ["software_developer"] }],
+    ["hyphenated soc '15-1252'", { soc: ["15-1252"] }],
+    ["junk soc 'abc'", { soc: ["abc"] }],
+    ["short soc '15125' (5 digits)", { soc: ["15125"] }],
+  ];
+  for (const [name, args] of rejects) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("bls_oews_wages", args, sam));
+      ok(`62b-6 ${name} ⇒ invalid_input, 0 fetch (allowlist/charclass — no malformed token reaches the wire; kills g)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // Module-direct guards (bypassing Zod) — belt-and-suspenders on the SAME rejects + required-input.
+  for (const [name, args] of [
+    ["hyphenated soc '15-1252' (module guard)", { soc: ["15-1252"] }],
+    ["area '../' (module guard)", { area: ["../"], occupation: ["software_developer"] }],
+    ["off-enum datatype (module guard)", { datatype: ["monthly_mean"], occupation: ["software_developer"] }],
+    ["neither occupation nor soc — required-input (never a silent no-op, P4)", {}],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => blsOews(args));
+      ok(`62b-6 module pre-fetch guard: blsOews(${name}) ⇒ invalid_input, 0 fetch`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ── Fixture 7: reuse-parity spies — the OEWS handler drives the SAME parseBlsBody
+  //    status-gate + the SAME key seam (kills j; reuses ADR-0032 faults 2/6/10). ──
+  //  (7a) REQUEST_NOT_PROCESSED (v1 daily limit) ⇒ rate_limited THROW + tier disclosure.
+  await withFetch(blsMock({ status: "REQUEST_NOT_PROCESSED", responseTime: 0, message: ["Request could not be serviced due to daily threshold."], Results: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bls_oews_wages", { occupation: ["software_developer"] }, sam));
+    const te = toToolError(error);
+    ok("62b-7 REQUEST_NOT_PROCESSED ⇒ rate_limited THROW (retryable) with the tier disclosure — the SAME parseBlsBody path as bls_timeseries (never a fake-empty)",
+      threw && te.kind === "rate_limited" && te.retryable === true && /25 queries\/day/.test(te.message) && /BLS_API_KEY/.test(te.message), JSON.stringify(threw ? { k: te.kind, r: te.retryable } : "no-throw"));
+  });
+  //  (7b) non-JSON 200 ⇒ schema_drift at the call site (never read as empty).
+  await withFetch((u) => (isBls(u) ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" } : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bls_oews_wages", { occupation: ["software_developer"] }, sam));
+    ok("62b-7 non-JSON 200 (an HTML error page) ⇒ schema_drift (reused SyntaxError→driftError reclassify; never a fake-empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  //  (7c) SUCCESS body missing Results.series ⇒ schema_drift.
+  await withFetch(blsMock({ status: "REQUEST_SUCCEEDED", responseTime: 0, message: [], Results: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bls_oews_wages", { occupation: ["software_developer"] }, sam));
+    ok("62b-7 SUCCESS body missing Results.series (non-array) ⇒ schema_drift (reused shape guard; never a fake-empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  //  (7d) K-test — KEY SET ⇒ v2 path + registrationkey in body; NEVER in url/source/_meta (kills j).
+  await withBlsKey(SENTINEL, async () => {
+    await withFetch(blsMock(blsBody([blsSeries("OEUN000000000000015125204", [OEWS_A01_ROW])])), async (calls) => {
+      const r = await runTool("bls_oews_wages", { occupation: ["software_developer"] }, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((x) => isBls(x.url));
+      const bodyObj = JSON.parse(call.init.body);
+      ok("62b-7 KEY set ⇒ path lifts to /publicAPI/v2/ AND registrationkey IS in the POST body with the sentinel (auth applied — not vacuous)",
+        /\/publicAPI\/v2\/timeseries\/data\//.test(call.url) && bodyObj.registrationkey === SENTINEL, JSON.stringify({ url: call.url, keys: Object.keys(bodyObj) }));
+      const leaks = [call.url, m.source, JSON.stringify(m)].some((s) => typeof s === "string" && s.includes(SENTINEL));
+      ok("62b-7 KEY-NEVER-LEAKS: the sentinel is absent from the fetch URL, _meta.source, and the serialized _meta (only the MODE 'BLS_API_KEY v2' is disclosed) — kills (j)",
+        !leaks && /BLS_API_KEY v2/.test(m.source) && m.keylessMode === false, JSON.stringify({ src: m.source, keyless: m.keylessMode }));
+    });
+  });
+  //  (7e) KEY UNSET ⇒ v1 path, NO registrationkey in body, keylessMode:true.
+  await withFetch(blsMock(blsBody([blsSeries("OEUN000000000000015125204", [OEWS_A01_ROW])])), async (calls) => {
+    const r = await runTool("bls_oews_wages", { occupation: ["software_developer"] }, sam);
+    const m = buildMeta(r.meta);
+    const call = calls.find((x) => isBls(x.url));
+    const bodyObj = JSON.parse(call.init.body);
+    ok("62b-7 KEYLESS ⇒ path /publicAPI/v1/, body has NO registrationkey, keylessMode:true, source discloses 'keyless v1' — kills (j) 'key in body when keyless'",
+      /\/publicAPI\/v1\/timeseries\/data\//.test(call.url) && !("registrationkey" in bodyObj) && m.keylessMode === true && /keyless v1/.test(m.source), JSON.stringify({ url: call.url, keys: Object.keys(bodyObj), src: m.source }));
+  });
+
+  // ── Fixture 8: num-parity + a raw-soc auto-label + a metro round-trip. ──
+  eq("62b-8 num('-') ⇒ null (THE frontier — a suppressed OEWS '-' in-band value is NEVER 0)", blsNum("-"), null);
+  eq("62b-8 num('148100') ⇒ 148100 (numeric wage string parses)", blsNum("148100"), 148100);
+  ok("62b-8 bls.num === coerce.num (one shared audited impl — no local num fork in the OEWS code)", blsNum === coerceNum, "bls.num diverged from coerce.num");
+  // A RAW soc that equals a curated one is auto-labeled (helpful & honest); a metro
+  // CBSA round-trips through the builder into the body (present-with-data path).
+  const dfwId = buildOewsSeriesId({ areatype: "M", areaCode: "0019100", occupation: "151252", datatype: "04" });
+  await withFetch(blsMock(blsBody([blsSeries(dfwId, [{ year: "2025", period: "A01", periodName: "Annual", latest: "true", value: "170000", footnotes: [{}] }])])), async () => {
+    const r = await runTool("bls_oews_wages", { soc: ["151252"], area: ["19100"] }, sam);
+    const row = r.data.results[0];
+    ok("62b-8 a RAW soc 151252 equal to a curated SOC is AUTO-LABELED (key software_developer, label Software Developers) — helpful & honest",
+      row.occupation.key === "software_developer" && /Software Developers/.test(row.occupation.label), JSON.stringify(row.occupation));
+    ok("62b-8 a 5-digit CBSA metro (19100 = Dallas-Fort Worth) round-trips ⇒ area type metro, code 0019100, value 170000",
+      row.area.type === "metro" && row.area.code === "0019100" && row.value === 170000 && row.seriesId === dfwId, JSON.stringify({ a: row.area, v: row.value }));
+    ok("62b-8 the curated occupation catalog is the SOURCE OF TRUTH (BLS_OEWS_OCCUPATIONS.software_developer.soc === 151252)",
+      BLS_OEWS_OCCUPATIONS.software_developer.soc === "151252", JSON.stringify(BLS_OEWS_OCCUPATIONS.software_developer));
+  });
+
+  }); // withBlsKey(undefined)
+}
+
 // §53-clinicaltrials: ClinicalTrials.gov API v2 (clinicaltrials.gov/api/v2/studies,
 // ADR-0021, source #21 — the trial-REGISTRATION sibling of NIH/NSF grants on the
 // getJson GET port). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a
@@ -13095,6 +13337,7 @@ async function main() {
   await testNihHonesty();
   await testNsfHonesty();
   await testBlsHonesty();
+  await testBlsOewsHonesty();
   await testClinicaltrialsHonesty();
   await testClinicaltrialsFacetHonesty();
   await testCensusHonesty();

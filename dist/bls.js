@@ -520,4 +520,391 @@ export async function timeseries(args) {
     };
     return withMeta({ series: seriesOut }, metaOut);
 }
+// ═══════════════════════════════════════════════════════════════════════════
+// OEWS — Occupational Employment & Wage Statistics (the 2nd tool, ADR-0033)
+// ═══════════════════════════════════════════════════════════════════════════
+// A SECOND tool on this keyless BLS source: occupational LABOR-RATE benchmarking
+// (mean/median annual & hourly wages + employment by SOC occupation × geography)
+// — the LEVEL layer next to bls_timeseries's ESCALATION layer, GSA CALC, and SAM
+// wage determinations. OEWS series IDs are 25 chars — they EXCEED the
+// bls_timeseries raw-seriesId cap (^[A-Z0-9]{1,20}$), so OEWS is NOT reachable
+// there; this tool BUILDS the 25-char ID INTERNALLY from validated structured
+// inputs (the built ID is never caller-supplied raw text). The endpoint + shape
+// are IDENTICAL to bls_timeseries (same POST api.bls.gov, same
+// {status, Results.series[].data[]} envelope), so the fetch/parse/honesty layer
+// is REUSED byte-identical (getJson-POST, throughGate, parseBlsBody status-throw,
+// mapObservation "-"→null-never-0 + footnotes, the resolvedBlsKey/blsSource/tier
+// key seam, the SSRF host assert, num/str, withMeta) — only the ID builder +
+// curated maps + output shaping are new.
+//
+// OEWS-specific honesty ON TOP of the reused adapter:
+//   (H1) OEWS is an ANNUAL point-in-time snapshot (reference May <year>, period
+//        A01); the API serves ONLY the latest release (may lag ~1yr) — NOT
+//        monthly/current-quarter; historical needs the downloadable tables.
+//   (H2) a built-ID that returns empty data[] (or is absent from Results.series)
+//        ⇒ value:null, valueUnavailable:FALSE (it is ABSENT, not a "-" gap) + the
+//        not-published note + the surfaced upstream "Series does not exist…"
+//        message + the ID in fieldsUnavailable — NEVER a fabricated 0. (Contrast:
+//        a present-with-data row goes through mapObservation; a "-" in-band value
+//        ⇒ the adapter's null + valueUnavailable:true + footnote.)
+//   (H3) each row's measure.units from the datatype map (dollars/year |
+//        dollars/hour | count (jobs)) — never mislabel.
+//   (H4) the API returns real numerics (no "#"); very-high percentile/median
+//        wages are estimates (published-tables boundary ≥$115/hr or ≥$239,200/yr).
+// ─── Curated occupation catalog (SOC codes LIVE-verified, ADR §catalog) ──────
+// The FROZEN single source of truth for the `occupation` enum, the resolver, and
+// the output label (mirrors BLS_CATALOG). The long tail (~830 SOC detailed
+// occupations) is reachable via the raw `soc` passthrough (^\d{6}$).
+export const BLS_OEWS_OCCUPATION_KEYS = [
+    "all_occupations",
+    "software_developer",
+    "computer_systems_analyst",
+    "info_security_analyst",
+    "management_analyst",
+    "project_mgmt_specialist",
+    "logistician",
+    "accountant_auditor",
+    "general_ops_manager",
+    "civil_engineer",
+    "electrical_engineer",
+    "mechanical_engineer",
+    "industrial_engineer",
+    "lawyer",
+    "technical_writer",
+    "admin_assistant",
+];
+export const BLS_OEWS_OCCUPATIONS = {
+    all_occupations: { soc: "000000", label: "All Occupations" },
+    software_developer: { soc: "151252", label: "Software Developers" },
+    computer_systems_analyst: { soc: "151211", label: "Computer Systems Analysts" },
+    info_security_analyst: { soc: "151212", label: "Information Security Analysts" },
+    management_analyst: { soc: "131111", label: "Management Analysts" },
+    project_mgmt_specialist: { soc: "131082", label: "Project Management Specialists" },
+    logistician: { soc: "131081", label: "Logisticians" },
+    accountant_auditor: { soc: "132011", label: "Accountants and Auditors" },
+    general_ops_manager: { soc: "111021", label: "General and Operations Managers" },
+    civil_engineer: { soc: "172051", label: "Civil Engineers" },
+    electrical_engineer: { soc: "172071", label: "Electrical Engineers" },
+    mechanical_engineer: { soc: "172141", label: "Mechanical Engineers" },
+    industrial_engineer: { soc: "172112", label: "Industrial Engineers" },
+    lawyer: { soc: "231011", label: "Lawyers" },
+    technical_writer: { soc: "273042", label: "Technical Writers" },
+    admin_assistant: {
+        soc: "436014",
+        label: "Secretaries and Administrative Assistants, Except Legal, Medical, and Executive",
+    },
+};
+// Reverse SOC → curated key: a RAW soc that HAPPENS to equal a curated one is then
+// also labeled (known-valid) — the honest, helpful behavior (mirrors BLS_ID_TO_KEY).
+const BLS_SOC_TO_KEY = new Map(BLS_OEWS_OCCUPATION_KEYS.map((k) => [BLS_OEWS_OCCUPATIONS[k].soc, k]));
+// ─── State USPS → 2-digit FIPS map (ADR §area formation) ─────────────────────
+// The curated `area` state enum. State areaCode = 2-digit FIPS + "00000" (CA
+// 06 → "0600000"). The 5 unused FIPS (03/07/14/43/52) are simply absent.
+export const BLS_STATE_FIPS = {
+    AL: "01", AK: "02", AZ: "04", AR: "05", CA: "06", CO: "08", CT: "09",
+    DE: "10", DC: "11", FL: "12", GA: "13", HI: "15", ID: "16", IL: "17",
+    IN: "18", IA: "19", KS: "20", KY: "21", LA: "22", ME: "23", MD: "24",
+    MA: "25", MI: "26", MN: "27", MS: "28", MO: "29", MT: "30", NE: "31",
+    NV: "32", NH: "33", NJ: "34", NM: "35", NY: "36", NC: "37", ND: "38",
+    OH: "39", OK: "40", OR: "41", PA: "42", RI: "44", SC: "45", SD: "46",
+    TN: "47", TX: "48", UT: "49", VT: "50", VA: "51", WA: "53", WV: "54",
+    WI: "55", WY: "56", PR: "72",
+};
+/** The curated `area` state enum values (the USPS 2-letter codes). */
+export const BLS_STATE_KEYS = Object.keys(BLS_STATE_FIPS);
+// ─── Datatype map (LIVE-verified; friendly enum → 2-digit code + units) ──────
+// The FROZEN source of truth for the `datatype` enum, the series-ID datatype
+// component, and the per-row measure.units label (H3). Default = annual_mean.
+export const BLS_OEWS_DATATYPE_KEYS = [
+    "annual_mean",
+    "annual_median",
+    "hourly_mean",
+    "hourly_median",
+    "employment",
+];
+export const BLS_OEWS_DATATYPES = {
+    annual_mean: { code: "04", units: "dollars/year" },
+    annual_median: { code: "13", units: "dollars/year" },
+    hourly_mean: { code: "03", units: "dollars/hour" },
+    hourly_median: { code: "08", units: "dollars/hour" },
+    employment: { code: "01", units: "count (jobs)" },
+};
+// ─── The OEWS series-ID builder (the crux — ADR §crux, PINNED) ───────────────
+// A 25-char ID: OE + U + areatype(N/S/M) + area(7) + industry(000000) +
+// occupation(6) + datatype(2). Each component is validated BEFORE concat, then
+// the assembled ID is re-asserted ^OEU[NSM][0-9]{21}$ — a wrong-width component
+// can NEVER silently produce a DIFFERENT valid series. Pure fn (no fetch).
+const OEWS_AREATYPES = new Set(["N", "S", "M"]);
+const OEWS_AREA_RE = /^[0-9]{7}$/;
+const OEWS_OCC_RE = /^[0-9]{6}$/;
+const OEWS_CBSA_RE = /^[0-9]{5}$/;
+const OEWS_INDUSTRY = "000000"; // cross-industry / all industries (the B2G default)
+const OEWS_DATATYPE_CODES = new Set(["01", "03", "04", "08", "13"]);
+const OEWS_ID_RE = /^OEU[NSM][0-9]{21}$/;
+/** Throw a uniform invalid_input (host+path-only label — no token). */
+function oewsInvalid(message) {
+    throw new ToolErrorCarrier({
+        kind: "invalid_input",
+        message,
+        retryable: false,
+        upstreamEndpoint: blsLabel(),
+    });
+}
+export function buildOewsSeriesId(parts) {
+    const { areatype, areaCode, occupation, datatype } = parts;
+    if (!OEWS_AREATYPES.has(areatype)) {
+        oewsInvalid(`Cannot build OEWS series ID: areatype ${JSON.stringify(areatype)} must be one of N (national), S (state), M (metro).`);
+    }
+    if (!OEWS_AREA_RE.test(areaCode)) {
+        oewsInvalid(`Cannot build OEWS series ID: areaCode ${JSON.stringify(areaCode)} must be exactly 7 digits (^[0-9]{7}$).`);
+    }
+    if (!OEWS_OCC_RE.test(occupation)) {
+        oewsInvalid(`Cannot build OEWS series ID: occupation ${JSON.stringify(occupation)} must be exactly 6 digits — a HYPHENLESS SOC (e.g. 151252, not 15-1252).`);
+    }
+    if (!OEWS_DATATYPE_CODES.has(datatype)) {
+        oewsInvalid(`Cannot build OEWS series ID: datatype code ${JSON.stringify(datatype)} must be one of 01/03/04/08/13.`);
+    }
+    const id = "OE" + "U" + areatype + areaCode + OEWS_INDUSTRY + occupation + datatype;
+    if (!OEWS_ID_RE.test(id)) {
+        oewsInvalid(`Cannot build OEWS series ID: assembled ID ${JSON.stringify(id)} failed the ^OEU[NSM][0-9]{21}$ assertion (defense-in-depth — a wrong-width component must never silently produce a different valid series).`);
+    }
+    return id;
+}
+/** Resolve one area token → areatype + zero-padded areaCode + output descriptor. */
+function resolveOewsArea(token) {
+    if (token === "national") {
+        return { areatype: "N", areaCode: "0000000", type: "national", code: "0000000", label: "United States" };
+    }
+    const fips = BLS_STATE_FIPS[token];
+    if (fips !== undefined) {
+        const areaCode = fips + "00000"; // 2-digit FIPS + 5 zeros = 7 digits
+        return { areatype: "S", areaCode, type: "state", code: areaCode, label: token };
+    }
+    if (OEWS_CBSA_RE.test(token)) {
+        const areaCode = "00" + token; // "00" + 5-digit CBSA = 7 digits
+        return { areatype: "M", areaCode, type: "metro", code: areaCode, label: `CBSA ${token}` };
+    }
+    return oewsInvalid(`Unknown area ${JSON.stringify(token)} — expected "national", a 2-letter USPS state code (e.g. CA, TX, DC), or a 5-digit CBSA metro code (e.g. 19100). Punctuation/mistyped codes are rejected (SSRF + verify-the-input honesty).`);
+}
+// ─── OEWS honesty notes (H1/H3/H4 always-on; H2 per empty combo) ─────────────
+/** (H1) The always-on annual / latest-year-only cadence disclosure. */
+function oewsAnnualNote(refYear) {
+    const ref = refYear
+        ? `reference May ${refYear}, period A01`
+        : "reference May of the latest release year, period A01";
+    return `OEWS is an ANNUAL point-in-time snapshot (${ref}); the BLS API serves ONLY the most recent release and may lag ~1 year. These are NOT monthly time-series values and NOT current-quarter figures — do not read a wage as "this month's". Historical OEWS is not in the API; it requires the downloadable OEWS tables (https://www.bls.gov/oes/tables.htm).`;
+}
+/** (H3) The always-on units-per-datatype caveat. */
+const OEWS_UNITS_NOTE = "Each row's measure.units is set from its datatype: annual_mean/annual_median = dollars/year, hourly_mean/hourly_median = dollars/hour, employment = count (jobs). Never read an employment count as a wage, or an hourly rate as an annual salary — check measure.units on every row.";
+/** (H4) The always-on top-coding informational note. */
+const OEWS_TOPCODE_NOTE = "The BLS API returns the actual numeric estimate (no '#' top-code); very-high percentile/median wages are BLS estimates, and the published OEWS tables show values >= $115.00/hr or >= $239,200/yr as a boundary. If a '#' ever appeared it is non-numeric and maps to value:null + valueUnavailable + a footnote (never a fabricated number).";
+/** (H2) The per-combo not-published disclosure (empty/absent built ID). */
+function oewsNotPublishedNote(occLabel, areaLabel, measureLabel, seriesId) {
+    return `OEWS publishes no estimate for ${occLabel} in ${areaLabel} (${measureLabel}) — the occupation may not be surveyed/estimated in that area, OR the cell was suppressed for confidentiality/reliability. This is NOT a tool error; the built series ${seriesId} simply has no published value (value:null, not a fabricated 0).`;
+}
+/** Pick the latest observation (explicit `latest` flag, else max year). */
+function pickLatestOewsObservation(observations) {
+    let best = null;
+    for (const o of observations) {
+        if (best === null) {
+            best = o;
+            continue;
+        }
+        const oy = o.year !== null ? Number(o.year) : -Infinity;
+        const by = best.year !== null ? Number(best.year) : -Infinity;
+        if (o.latest && !best.latest)
+            best = o;
+        else if (o.latest === best.latest && oy > by)
+            best = o;
+    }
+    return best;
+}
+/**
+ * OEWS occupational wage benchmarking — build validated 25-char series IDs from
+ * structured (area × occupation × datatype) inputs, batch them into ONE POST
+ * (REUSING the bls_timeseries transport/parse/honesty layer), and return one
+ * normalized wage/employment row per resolved combo + honest _meta. NO year
+ * input (OEWS serves only the latest release; the tool requests a small recent
+ * window internally and discloses the reference year from the returned A01 row).
+ */
+export async function oewsWages(args) {
+    const label = blsLabel();
+    const caps = tierCaps();
+    // ── Resolve occupations (curated keys + raw socs), preserving order. ──
+    const occupations = [];
+    for (const k of args.occupation ?? []) {
+        const entry = BLS_OEWS_OCCUPATIONS[k];
+        if (!entry) {
+            oewsInvalid(`Unknown occupation key ${JSON.stringify(k)} — expected one of: ${BLS_OEWS_OCCUPATION_KEYS.join(", ")}, or pass a raw 6-digit SOC via 'soc'.`);
+        }
+        occupations.push({ soc: entry.soc, key: k, label: entry.label });
+    }
+    for (const raw of args.soc ?? []) {
+        if (typeof raw !== "string" || !OEWS_OCC_RE.test(raw)) {
+            oewsInvalid(`Invalid soc ${JSON.stringify(raw)} — expected exactly 6 digits with NO hyphen (use 151252, not 15-1252). The curated 'occupation' enum is typo-proof; 'soc' is the long-tail passthrough.`);
+        }
+        const key = BLS_SOC_TO_KEY.get(raw) ?? null;
+        occupations.push({ soc: raw, key, label: key ? BLS_OEWS_OCCUPATIONS[key].label : null });
+    }
+    // ── At least one of occupation/soc is required (P4 — never a silent no-op). ──
+    if (occupations.length === 0) {
+        oewsInvalid("At least one of `occupation` (a curated enum key) or `soc` (a raw 6-digit SOC) is required — nothing to query.");
+    }
+    // ── Resolve areas (default national) + datatypes (default annual_mean). An
+    //    empty array falls back to the default (never a silent 0-row no-op). ──
+    const areaTokens = args.area && args.area.length > 0 ? args.area : ["national"];
+    const areas = areaTokens.map((t) => resolveOewsArea(String(t)));
+    const datatypeKeys = args.datatype && args.datatype.length > 0 ? args.datatype : ["annual_mean"];
+    const datatypes = datatypeKeys.map((k) => {
+        const entry = BLS_OEWS_DATATYPES[k];
+        if (!entry) {
+            oewsInvalid(`Unknown datatype ${JSON.stringify(k)} — expected one of: ${BLS_OEWS_DATATYPE_KEYS.join(", ")}.`);
+        }
+        return { key: k, code: entry.code, units: entry.units };
+    });
+    // ── Refuse over the tier's series cap — NEVER a silent drop of the overflow
+    //    (P4). The count is the cartesian product size, named explicitly. ──
+    const product = areas.length * occupations.length * datatypes.length;
+    if (product > caps.seriesCap) {
+        oewsInvalid(`Requested ${areas.length} area(s) × ${occupations.length} occupation(s) × ${datatypes.length} datatype(s) = ${product} series, over the active BLS ${keyModeLabel()} tier cap of ${caps.seriesCap} series/query. Reduce the request (or set a free BLS_API_KEY for the v2 tier, ${V2_CAPS.seriesCap} series/query) — the overflow is NOT silently dropped.`);
+    }
+    const planned = [];
+    const seen = new Set();
+    for (const area of areas) {
+        for (const occ of occupations) {
+            for (const dt of datatypes) {
+                const seriesId = buildOewsSeriesId({
+                    areatype: area.areatype,
+                    areaCode: area.areaCode,
+                    occupation: occ.soc,
+                    datatype: dt.code,
+                });
+                if (seen.has(seriesId))
+                    continue;
+                seen.add(seriesId);
+                planned.push({ area, occ, dt, seriesId });
+            }
+        }
+    }
+    // ── The recent-window years (NO caller year input; OEWS serves only the
+    //    latest release — a 3-year window covers the ~1-year lag). ──
+    const endYear = CURRENT_YEAR;
+    const startYear = CURRENT_YEAR - 2;
+    // ── Module-built typed payload (SSRF: no raw host/path passthrough; the built
+    //    seriesIDs + years + the OPTIONAL key ride in the JSON body). ──
+    const payload = {
+        seriesid: planned.map((p) => p.seriesId),
+        startyear: String(startYear),
+        endyear: String(endYear),
+    };
+    // The OPTIONAL BLS_API_KEY — injected ONLY here, in the body, and NOWHERE else.
+    const key = resolvedBlsKey();
+    if (key !== "")
+        payload.registrationkey = key;
+    // ── SSRF belt-and-suspenders: the URL is a compile-time constant; assert it
+    //    cannot have drifted (a future typo / downgrade). ──
+    const url = `https://${BLS_HOST}${apiPath()}`;
+    const built = new URL(url);
+    if (built.hostname !== BLS_HOST || built.protocol !== "https:") {
+        oewsInvalid(`Constructed BLS URL host ${JSON.stringify(built.hostname)} (${built.protocol}) is not ${BLS_HOST} over https — refusing to fetch (SSRF safety).`);
+    }
+    // ── The POST-batch fetch through the shared self-throttle gate (the SAME idiom
+    //    as timeseries). A non-JSON 200 → driftError; the status/error taxonomy +
+    //    redirect:"error" propagate unchanged. ──
+    let body;
+    try {
+        body = await throughGate(BLS_GATE_KEY, BLS_MIN_INTERVAL_MS, () => getJson(built.toString(), {
+            label,
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            redirect: "error",
+        }));
+    }
+    catch (e) {
+        if (e instanceof ToolErrorCarrier)
+            throw e;
+        if (e instanceof SyntaxError) {
+            throw driftError(label, "BLS returned a non-JSON body at HTTP 200 (an HTML error page) — treating as schema drift (never read as an empty result).");
+        }
+        throw e;
+    }
+    const parsed = parseBlsBody(body, label);
+    // ── Assemble one row per planned combo; account for EVERY combo (P4). ──
+    const rows = [];
+    const fieldsUnavailable = [];
+    const notPublishedNotes = [];
+    let refYear = null;
+    for (const p of planned) {
+        const rawSeries = parsed.byId.get(p.seriesId);
+        const rawData = rawSeries && Array.isArray(rawSeries.data) ? rawSeries.data : [];
+        const observations = rawData.map(mapObservation);
+        const latest = pickLatestOewsObservation(observations);
+        const areaOut = { type: p.area.type, code: p.area.code, label: p.area.label };
+        const occOut = { soc: p.occ.soc, key: p.occ.key, label: p.occ.label };
+        const measureOut = { key: p.dt.key, code: p.dt.code, units: p.dt.units };
+        if (latest === null) {
+            // (H2) empty data[] OR absent from Results.series → NOT-PUBLISHED (absent,
+            // not a "-" gap): value:null, valueUnavailable:FALSE, never a fabricated 0.
+            fieldsUnavailable.push(`${p.seriesId} (OEWS publishes no estimate)`);
+            notPublishedNotes.push(oewsNotPublishedNote(p.occ.label ?? p.occ.soc, p.area.label, `${p.dt.key} (${p.dt.units})`, p.seriesId));
+            rows.push({
+                area: areaOut,
+                occupation: occOut,
+                measure: measureOut,
+                value: null,
+                valueUnavailable: false,
+                referenceYear: null,
+                referencePeriod: null,
+                footnotes: [],
+                seriesId: p.seriesId,
+            });
+            continue;
+        }
+        // Present-with-data → the reused mapObservation path (null-never-0 +
+        // valueUnavailable + footnotes for an in-band "-"; a real number otherwise).
+        if (latest.year !== null && (refYear === null || Number(latest.year) > Number(refYear))) {
+            refYear = latest.year;
+        }
+        rows.push({
+            area: areaOut,
+            occupation: occOut,
+            measure: measureOut,
+            value: latest.value,
+            valueUnavailable: latest.valueUnavailable,
+            referenceYear: latest.year,
+            referencePeriod: latest.period,
+            footnotes: latest.footnotes,
+            seriesId: p.seriesId,
+        });
+    }
+    // ── Notes: H1 + H3 + H4 always; the tier disclosure (reused, P1); H2 per empty
+    //    combo; any surfaced top-level BLS message. ──
+    const notes = [];
+    notes.push(oewsAnnualNote(refYear));
+    notes.push(OEWS_UNITS_NOTE);
+    notes.push(OEWS_TOPCODE_NOTE);
+    notes.push(tierNote());
+    notes.push(...notPublishedNotes);
+    if (parsed.messages.length > 0) {
+        notes.push(`BLS returned top-level message(s): ${parsed.messages.join(" | ")}.`);
+    }
+    const filtersApplied = [
+        `areas:${areas.map((a) => a.code).join(",")}`,
+        `occupations:${occupations.map((o) => o.soc).join(",")}`,
+        `datatypes:${datatypes.map((d) => `${d.key}=${d.code}`).join(",")}`,
+        `years:${startYear}-${endYear}`,
+    ];
+    const metaOut = {
+        source: blsSource(),
+        keylessMode: usingKeylessV1(),
+        returned: rows.length,
+        totalAvailable: rows.length,
+        filtersApplied,
+        filtersDropped: [],
+        fieldsUnavailable,
+        notes,
+    };
+    return withMeta({ results: rows }, metaOut);
+}
 //# sourceMappingURL=bls.js.map
