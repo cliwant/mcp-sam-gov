@@ -96,6 +96,12 @@ const CT_STUDIES_PATH = "/studies";
 // HOST+path label (keyless ⇒ no token can ever appear). Surfaces in
 // ToolError.upstreamEndpoint.
 const CT_LABEL = "clinicaltrials:/api/v2/studies";
+// ADR-0024 — the facet-counts endpoint (per-field value distribution), a SIBLING
+// path on the SAME fixed host, routed through the SAME audited getCT helper. Its
+// own HOST+path label (keyless ⇒ no token) so ToolError.upstreamEndpoint and the
+// _meta.source distinguish the facet endpoint from the row endpoint.
+const CT_STATS_FIELDS_PATH = "/stats/field/values";
+const CT_STATS_FIELDS_LABEL = "clinicaltrials:/api/v2/stats/field/values";
 
 // ─── Frozen enums (Zod source of truth + [M1] in-handler re-guard) ─
 // overallStatus — the 14 values from /stats/field/values (P24). Built FROM this
@@ -129,6 +135,43 @@ const CT_STATUSES_SET: ReadonlySet<string> = new Set(CT_STATUSES);
 export const CT_FUNDER_TYPES = ["nih", "fed", "industry", "other"] as const;
 export type CtFunderType = (typeof CT_FUNDER_TYPES)[number];
 const CT_FUNDER_TYPES_SET: ReadonlySet<string> = new Set(CT_FUNDER_TYPES);
+
+// ─── Facet-counts field whitelist (ADR-0024 — the SECOND tool's Zod source of
+//     truth + its [ssrf] in-handler re-guard) ──────────────────────────────
+// The 11 LIVE-VERIFIED (2026-07-12, keyless) `type:"ENUM"` faceteable fields on
+// `/stats/field/values`, each of which returns COMPLETE (topValues.length ==
+// uniqueValuesCount — max observed 14 ≪ the endpoint's hard 250-value cap) and a
+// UNIFORM `{uniqueValuesCount:number, topValues:[{value,studiesCount}]}` shape.
+// The Zod enum in server.ts is DERIVED from this frozen array (single source of
+// truth); the handler ALSO re-checks each requested field against CT_FACET_FIELDS_SET
+// INLINE (the [ssrf] re-guard — a Zod-bypassing DIRECT handler call cannot smuggle a
+// raw field name; mirrors CT_FUNDER_TYPES_SET / CT_STATUSES_SET). ENUM-ONLY by design:
+// a whitelisted field whose response is NOT type:"ENUM" (e.g. the BOOLEAN
+// HealthyVolunteers `{trueCount,falseCount}` shape, which has NO topValues) is
+// schema_drift, never a silent mis-parse (§Honesty #7).
+export const CT_FACET_FIELDS = [
+  "OverallStatus", // 14 values — study-status distribution
+  "StudyType", // 3  — interventional / observational / expanded-access
+  "Phase", // 6  — ARRAY-valued ⇒ OVERLAP note (not a partition)
+  "LeadSponsorClass", // 9  — ★ the FUNDING-SOURCE distribution (B2G: NIH/FED/OTHER_GOV/…)
+  "Sex", // 3
+  "DesignAllocation", // 3
+  "DesignPrimaryPurpose", // 10
+  "DesignInterventionModel", // 5
+  "DesignMasking", // 5
+  "DesignObservationalModel", // 9
+  "DesignTimePerspective", // 4
+] as const;
+export type CtFacetField = (typeof CT_FACET_FIELDS)[number];
+const CT_FACET_FIELDS_SET: ReadonlySet<string> = new Set(CT_FACET_FIELDS);
+
+// The ARRAY-valued members whose per-value counts OVERLAP (a study can hold several,
+// e.g. PHASE1|PHASE2) so Σ counts + missing OVERSHOOTS the registry total (Phase:
+// live-verified sum 477032 + missing 140698 = 617730 > 593334). The v1 whitelist's
+// ONLY array member is Phase; all 10 others are scalar (sum + missing == 593334, an
+// exact partition). A static Set (no /stats/size call needed) drives the not-a-
+// partition note + the per-facet `overlapping` flag.
+export const CT_FACET_ARRAY_FIELDS: ReadonlySet<string> = new Set(["Phase"]);
 
 // ─── Client-side value grammars (SSRF + injection guards) ─────────
 // [M2] NCT id = exactly 8 digits (P1/P11/P12 — every observed id). Validated
@@ -169,6 +212,62 @@ const CT_SPONSOR_NOTE =
 /** A conservative data-currency note (not API-verifiable). */
 const CT_DATA_CURRENCY_NOTE =
   "ClinicalTrials.gov updates registrations on a rolling basis; per-record refresh lag is not API-verifiable.";
+
+// ─── Facet-counts disclosure constants (ADR-0024 honesty obligations) ──────
+const CT_FACET_SOURCE =
+  "clinicaltrials.gov /api/v2/stats/field/values (keyless)";
+
+/**
+ * [M1] totalAvailable/returned UNIT disclosure. For the facet tool ONLY,
+ * `_meta.totalAvailable = Σ facet.uniqueValuesCount` and `_meta.returned =
+ * Σ facet.values.length` — these drive buildMeta's `returned < totalAvailable ⇒
+ * truncated` invariant, but they count DISTINCT FIELD VALUES, NOT studies (in
+ * every OTHER tool, incl. clinicaltrials_search_studies, totalAvailable is a
+ * study/record match count). Mandatory on every facet response so an AI never
+ * reads the distinct-value total as a study total.
+ */
+const CT_FACET_UNIT_NOTE =
+  "In this facet-counts response _meta.totalAvailable and _meta.returned count DISTINCT FIELD VALUES across the requested facet(s), NOT studies (e.g. OverallStatus+Phase ⇒ totalAvailable = 14+6 = 20 distinct values, which is NOT a study count). The per-value STUDY counts are facets[].values[].studiesCount; for a COUNT of studies use clinicaltrials_search_studies (its _meta.totalAvailable is the exact study total).";
+
+/**
+ * [M2] Whole-registry scope note — NO hard-coded registry size (the registry only
+ * grows; freezing a total in a truthfulness string would go stale). These counts
+ * are ALWAYS over the ENTIRE registry and are UNfilterable (query/filter/countTotal/
+ * pageSize params all HTTP-400 here). Cross-links the sibling row tool for filtered
+ * totals.
+ */
+const CT_FACET_SCOPE_NOTE =
+  "These are whole-registry distribution counts — they cover the ENTIRE ClinicalTrials.gov registry and are NOT filtered by any query (the /stats/field/values endpoint rejects query.*/filter.*/countTotal/pageSize with HTTP 400). To count studies matching a specific query / sponsor / condition / status, use clinicaltrials_search_studies (its _meta.totalAvailable is the exact filtered total).";
+
+/**
+ * The FACET-SCOPED trial≠federal-award caveat (EVERY facet response). Carries the
+ * same trial-registration ≠ federal-award substance as the row-level
+ * CT_TRIAL_CAVEAT, but REWORDED for a distribution output — it describes the
+ * LeadSponsorClass DISTRIBUTION, not a row-level leadSponsor.name free-text field.
+ */
+const CT_FACET_TRIAL_CAVEAT =
+  "A ClinicalTrials.gov facet count is a DISTRIBUTION over clinical-study REGISTRATIONS, NOT over federal grants or contract awards. LeadSponsorClass (NIH / FED / OTHER_GOV vs INDUSTRY / OTHER / NETWORK / …) is the study's funding-SOURCE class, NOT a count of federal awards; these classes overlap — but do NOT equal — the entities in NIH RePORTER / NSF Awards / SAM / USAspending (a nominal funding-source-class distribution, not a UEI-keyed award join). A registered trial does not imply a federal award to its sponsor.";
+
+/** Per-facet TOP-N truncation note — the 250-cap disclosure. Never fires for the
+ *  v1 ENUM whitelist (all ≤14 unique ≪ 250) but is load-bearing: if the whitelist
+ *  is ever extended to a high-cardinality (STRING) field, this discloses the cap. */
+function ctFacetTruncationNote(field: string, unique: number, returned: number): string {
+  return `Field '${field}' has ${unique} distinct values but ClinicalTrials.gov's /stats/field/values returned only the top ${returned} by study count (a hard 250-value cap, not pageable); the remaining ${unique - returned} value(s) are OMITTED — this is NOT the full distribution.`;
+}
+
+/** Per-facet not-a-partition note — an ARRAY-valued field (Phase) whose per-value
+ *  counts OVERLAP and MUST NOT be summed to a registry total. */
+function ctFacetOverlapNote(field: string): string {
+  return `'${field}' is multi-valued per study (a study can carry several values, e.g. a trial registered as PHASE1|PHASE2), so its per-value studiesCount counts OVERLAP and MUST NOT be summed to a registry total (Σ counts + missingStudiesCount OVERSHOOTS the registry size). The other facets are scalar (each study has at most one value). Always read missingStudiesCount alongside the shown buckets.`;
+}
+
+/** Per-facet high-missing interpretation note — when more studies LACK a value for
+ *  the field than are represented across all shown buckets, the distribution covers
+ *  a MINORITY of the registry. `missing` is this response's exact (live) count — NOT
+ *  a frozen constant (M2). */
+function ctFacetHighMissingNote(field: string, missing: number): string {
+  return `Field '${field}' has ${missing} studies with NO value for it — MORE than the studies represented across all shown buckets — so this distribution covers a MINORITY of the registry; do NOT read the shown value counts as registry-wide (the uncounted / missing studies dominate).`;
+}
 
 // CT's Essie analyzer AND-tokenizes free-text query.spons/query.cond/query.term on
 // whitespace AND the confirmed PUNCTUATION set (space + `- , / ; + & | @ # =` split
@@ -591,6 +690,227 @@ export async function getStudy(args: { nctId: string }): Promise<MetaBundle> {
       filtersApplied: ["nctId"],
       filtersDropped: [],
       fieldsUnavailable: [],
+      notes,
+    } satisfies Partial<ResponseMeta>,
+  );
+}
+
+// ─── Tool 3: clinicaltrials_facet_counts (ADR-0024) ───────────────
+export type CtFacetValue = {
+  /** The enum value (str — null-never-empty-string). */
+  value: string | null;
+  /** The EXACT per-value study count (num — null-never-0; a non-number ⇒ drift). */
+  studiesCount: number | null;
+};
+
+export type CtFacet = {
+  /** The requested/echoed field name (the `piece`). */
+  field: string;
+  /** The dotted upstream JSON path (the `field`), e.g. protocolSection.statusModule.overallStatus. */
+  fieldPath: string | null;
+  /** The echoed upstream `type` (asserted "ENUM"; else drift). */
+  valueType: string | null;
+  /** Distinct values that exist upstream (num — non-number ⇒ drift). */
+  uniqueValuesCount: number | null;
+  /** Studies with NO value for this field (num — null-never-0). */
+  missingStudiesCount: number | null;
+  /** values.length (== uniqueValuesCount for a COMPLETE ENUM facet). */
+  returned: number;
+  /** returned < uniqueValuesCount (the 250-cap surface; never true for v1 ENUMs). */
+  truncated: boolean;
+  /** true for an ARRAY-valued field (Phase) — counts OVERLAP, must not be summed. */
+  overlapping: boolean;
+  /** The EXACT per-value distribution. */
+  values: CtFacetValue[];
+};
+
+/**
+ * Map ONE `/stats/field/values` facet element → the curated facet shape (a FRESH
+ * mapper — does NOT reuse mapStudy/strArray/mapEntities, which are row-shaped).
+ * ENUM-ONLY drift guard (§Honesty #7): the element MUST be `type:"ENUM"` with an
+ * ARRAY `topValues` and a NUMBER `uniqueValuesCount` — a BOOLEAN
+ * (`{trueCount,falseCount}`, no topValues) / STRING / re-typed shape for a
+ * whitelisted field is schema_drift, NEVER read as an empty distribution. Each
+ * `studiesCount` is typeof-checked to a finite NUMBER BEFORE `num()` (mirrors the
+ * search tool's totalCount guard) so a non-number can NEVER silently parse or
+ * coerce-to-0 — an EXACT count or drift, never a fabricated 0.
+ */
+function mapFacet(requested: string, item: unknown): CtFacet {
+  const o = (item ?? {}) as Record<string, unknown>;
+  if (o.type !== "ENUM") {
+    throw driftError(
+      CT_STATS_FIELDS_LABEL,
+      `clinicaltrials facet shape drift — field '${requested}' returned type ${JSON.stringify(o.type)} (expected "ENUM"). A non-ENUM shape (e.g. a BOOLEAN {trueCount,falseCount} with NO topValues) must NEVER be read as an empty distribution.`,
+    );
+  }
+  if (!Array.isArray(o.topValues)) {
+    throw driftError(
+      CT_STATS_FIELDS_LABEL,
+      `clinicaltrials facet shape drift — field '${requested}' topValues is not an array (container-guarded — a TypeError must never mask drift as upstream_unavailable, never a fake empty).`,
+    );
+  }
+  if (typeof o.uniqueValuesCount !== "number" || !Number.isFinite(o.uniqueValuesCount)) {
+    throw driftError(
+      CT_STATS_FIELDS_LABEL,
+      `clinicaltrials facet shape drift — field '${requested}' uniqueValuesCount is missing/non-number (typeof-checked BEFORE num() so a string can't silently parse).`,
+    );
+  }
+  const values: CtFacetValue[] = (o.topValues as unknown[]).map((v) => {
+    const it = (v ?? {}) as Record<string, unknown>;
+    if (typeof it.studiesCount !== "number" || !Number.isFinite(it.studiesCount)) {
+      throw driftError(
+        CT_STATS_FIELDS_LABEL,
+        `clinicaltrials facet shape drift — a topValues[].studiesCount for field '${requested}' is missing/non-number (typeof-checked BEFORE num() so a non-number can NEVER be silently coerced to 0 — a per-value count is EXACT or it is drift).`,
+      );
+    }
+    return { value: str(it.value), studiesCount: num(it.studiesCount) };
+  });
+  const uniqueValuesCount = num(o.uniqueValuesCount) as number;
+  const returned = values.length;
+  return {
+    field: requested,
+    fieldPath: str(o.field),
+    valueType: str(o.type),
+    uniqueValuesCount,
+    missingStudiesCount: num(o.missingStudiesCount),
+    returned,
+    // The universal truncation invariant: returned < unique ⇒ truncated (rolled up
+    // into buildMeta via the response-level returned/totalAvailable roll-up too).
+    truncated: returned < uniqueValuesCount,
+    overlapping: CT_FACET_ARRAY_FIELDS.has(requested),
+    values,
+  };
+}
+
+export type CtFacetArgs = { fields: string[] };
+
+/**
+ * Aggregate / statistical view: EXACT per-value study counts over the WHOLE
+ * ClinicalTrials.gov registry for one or more whitelisted ENUM fields
+ * (studies-by-OverallStatus / by-Phase / by-LeadSponsorClass = the funding-source
+ * distribution / …). The aggregate SIBLING of clinicaltrials_search_studies (which
+ * gives the exact FILTERED total for a query) — this gives the exact WHOLE-REGISTRY
+ * distribution across a field's values. Reuses the shipped getCT verbatim (one new
+ * path constant), coerce.num/str, buildMeta/withMeta — ZERO new fetch/coerce/error/
+ * meta code.
+ */
+export async function facetCounts(args: CtFacetArgs): Promise<MetaBundle> {
+  // ── [ssrf] In-handler field RE-GUARD (load-bearing for a Zod-BYPASSING direct
+  //    call): re-check EACH requested field against the frozen CT_FACET_FIELDS_SET
+  //    INLINE (mirror CT_FUNDER_TYPES_SET / CT_STATUSES_SET) BEFORE building params,
+  //    and dedupe (preserving order). A non-member ⇒ invalid_input PRE-fetch, 0
+  //    network call — NO raw field-name ever reaches the URL. ──
+  const requested = args.fields ?? [];
+  const seen = new Set<string>();
+  const fields: string[] = [];
+  for (const f of requested) {
+    if (!CT_FACET_FIELDS_SET.has(f)) {
+      throw new ToolErrorCarrier({
+        kind: "invalid_input",
+        message: `field ${JSON.stringify(f)} is not a supported facet (ships: ${CT_FACET_FIELDS.join(", ")}). An unlisted field is NOT asserted upstream-invalid (it may be a real STRING/BOOLEAN field this tool deliberately does not whitelist) — refused before any fetch (SSRF + ENUM-shape-stability guard).`,
+        retryable: false,
+        upstreamEndpoint: CT_STATS_FIELDS_LABEL,
+      });
+    }
+    if (!seen.has(f)) {
+      seen.add(f);
+      fields.push(f);
+    }
+  }
+  if (fields.length === 0) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `at least one facet field is required (ships: ${CT_FACET_FIELDS.join(", ")}).`,
+      retryable: false,
+      upstreamEndpoint: CT_STATS_FIELDS_LABEL,
+    });
+  }
+
+  // ── Build the query from the enum-validated array (SSRF: module-built, comma-
+  //    joined; each element is a frozen enum member — no raw passthrough). The ONLY
+  //    query key is `fields`; no filter/scope/page key is EVER sent (they 400). ──
+  const params = new URLSearchParams();
+  params.set("fields", fields.join(","));
+
+  const body = await getCT(CT_STATS_FIELDS_PATH, CT_STATS_FIELDS_LABEL, params);
+  // The 200 body is a TOP-LEVEL ARRAY (one object per requested field). Its absence
+  // is drift, NEVER a fake-empty distribution. A 404 (a whitelisted field missing
+  // upstream = whitelist drift) / 400 / 5xx is THROWN by getJson (never caught).
+  if (!Array.isArray(body)) {
+    throw driftError(
+      CT_STATS_FIELDS_LABEL,
+      "clinicaltrials facet shape drift — /stats/field/values response must be a top-level array (one object per requested field).",
+    );
+  }
+
+  // Match each requested field to its response element by the echoed `piece`
+  // (robust to element ordering); a whitelisted field absent from the response is
+  // whitelist drift ⇒ driftError, never a silent empty.
+  const byPiece = new Map<string, unknown>();
+  for (const el of body as unknown[]) {
+    const p = (el ?? {}) as Record<string, unknown>;
+    if (typeof p.piece === "string" && !byPiece.has(p.piece)) byPiece.set(p.piece, el);
+  }
+  const facets: CtFacet[] = [];
+  for (const f of fields) {
+    const el = byPiece.get(f);
+    if (el === undefined) {
+      throw driftError(
+        CT_STATS_FIELDS_LABEL,
+        `clinicaltrials facet shape drift — requested field '${f}' is absent from the response (a whitelisted field must always be echoed; its absence signals the whitelist drifted from upstream — NEVER read as an empty distribution).`,
+      );
+    }
+    facets.push(mapFacet(f, el));
+  }
+
+  // ── [M1] Response-level roll-up: returned = Σ values.length, totalAvailable =
+  //    Σ uniqueValuesCount (DISTINCT VALUES, not studies — the unit note discloses
+  //    it). buildMeta's `returned < totalAvailable ⇒ truncated:true / complete:false`
+  //    auto-derives truncation the instant ANY facet is capped; for the v1 ENUM
+  //    whitelist returned == totalAvailable ⇒ complete:true, truncated:false. ──
+  const returned = facets.reduce((a, ff) => a + ff.values.length, 0);
+  const totalAvailable = facets.reduce(
+    (a, ff) => a + (ff.uniqueValuesCount ?? 0),
+    0,
+  );
+
+  // ── Notes: the mandatory unit (M1) + scope (M2) always; per-facet truncation /
+  //    overlap / high-missing conditionals; the facet-scoped trial≠award caveat +
+  //    data-currency always. ──
+  const notes: string[] = [CT_FACET_UNIT_NOTE, CT_FACET_SCOPE_NOTE];
+  for (const ff of facets) {
+    if (ff.truncated && ff.uniqueValuesCount !== null) {
+      notes.push(ctFacetTruncationNote(ff.field, ff.uniqueValuesCount, ff.returned));
+    }
+  }
+  for (const ff of facets) {
+    if (ff.overlapping) notes.push(ctFacetOverlapNote(ff.field));
+  }
+  for (const ff of facets) {
+    const missing = ff.missingStudiesCount;
+    const shown = ff.values.reduce((a, v) => a + (v.studiesCount ?? 0), 0);
+    // Denominator-free (no frozen registry total, M2): the shown buckets cover a
+    // MINORITY when more studies lack a value than are represented across them.
+    if (missing !== null && missing > shown) {
+      notes.push(ctFacetHighMissingNote(ff.field, missing));
+    }
+  }
+  notes.push(CT_FACET_TRIAL_CAVEAT, CT_DATA_CURRENCY_NOTE);
+
+  return withMeta(
+    { facets },
+    {
+      source: CT_FACET_SOURCE,
+      keylessMode: true,
+      returned,
+      totalAvailable,
+      // complete/truncated DERIVED by buildMeta from returned/totalAvailable (never
+      // forced): v1 ENUM ⇒ complete:true; a future capped facet ⇒ complete:false.
+      filtersApplied: [],
+      filtersDropped: [],
+      fieldsUnavailable: [],
+      // NO pagination object — /stats/field/values is un-paged (pageSize 400s);
+      // leave `pagination` undefined (NOT {hasMore:false}).
       notes,
     } satisfies Partial<ResponseMeta>,
   );
