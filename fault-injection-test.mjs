@@ -58,7 +58,7 @@ import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
-import { padCik as edgarPadCik, xbrlFrames } from "./dist/edgar.js";
+import { padCik as edgarPadCik, xbrlFrames, filingIndex, parseFullIndex, MAX_INDEX_ROWS, _resetFullIndexCache } from "./dist/edgar.js";
 import { num as socrataNum } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
@@ -6768,6 +6768,232 @@ async function testEdgarShardsHonesty() {
   });
 }
 
+// §41e: SEC EDGAR edgar_filing_index (ADR-0026) — the KEYLESS BULK cross-filer
+// quarterly full-index (www.sec.gov/Archives/edgar/full-index/<year>/QTR<n>/
+// master.idx). All OFFLINE (mock fetch of the getEdgar `.text()` body — a COMPACT
+// .idx fixture per A2, NOT a 33MB body), deterministic, non-vacuous: each assertion
+// pins an honest value + names the load-bearing mutation (a)-(i) that turns it RED.
+// Driven through the REAL runTool dispatch (Zod → handler → getEdgar over a spied
+// fetch) except the SSRF direct-call + the MAX_INDEX_ROWS ceiling (parser-level).
+//   (a) totalAvailable = the EXACT full-scan match count, NEVER the returned page length.
+//   (b) a formType filter's matches span LOW+HIGH CIK ⇒ the total counts BOTH ends
+//       (a byte-capped/partial scan would drop the CIK-sorted tail → under-count → RED).
+//   (c) M1: header-ABSENT body ⇒ driftError; header+dashes+0-rows ⇒ GENUINE-EMPTY
+//       (complete:true) — BOTH directions (mutate either way ⇒ RED).
+//   (d) all-malformed rows (header present) ⇒ driftError (never "0 filings").
+//   (e) 403 AccessDenied ⇒ AMBIGUOUS both-causes reclassify (NOT a bare rate_limited,
+//       NOT a fake-empty); a REAL 429 stays an honest rate_limited (not reclassified).
+//   (f) a `|`-in-company-name row is COUNTED (bounded first-4-pipe split), never
+//       under-counted (an "exactly-5-else-malformed" split drops it → RED).
+//   (g) MAX_INDEX_ROWS exceeded ⇒ totalIsLowerBound; the normal path never sets it.
+//   (h) SSRF: URL is exactly .../<year>/QTR<quarter>/master.idx with ZERO query string;
+//       a future/out-of-range/non-integer year|quarter ⇒ invalid_input, 0 fetch.
+//   (i) companyContains is a LITERAL substring (case-insensitive), NOT AND/OR-tokenized.
+const isEdgarFullIndex = (u) => /www\.sec\.gov\/Archives\/edgar\/full-index\//.test(u);
+const IDX_PREAMBLE =
+  "Description:           Master Index of EDGAR Dissemination Feed\n" +
+  "Last Data Received:    March 31, 2024\n" +
+  "Comments:              webmaster@sec.gov\n" +
+  "Anonymous FTP:         ftp://ftp.sec.gov/edgar/\n" +
+  "Cloud HTTP:            https://www.sec.gov/Archives/\n\n\n\n";
+const IDX_HEADER = "CIK|Company Name|Form Type|Date Filed|Filename\n";
+const IDX_DASHES = "-".repeat(80) + "\n";
+// Build a master.idx body from an array of "CIK|Company|Form|Date|Filename" rows
+// (preamble + header + dashes + rows). rows:[] ⇒ the genuine-empty (2026/QTR4) shape.
+const idxBody = (rows) => IDX_PREAMBLE + IDX_HEADER + IDX_DASHES + (rows.length ? rows.join("\n") + "\n" : "");
+const ACCESS_DENIED_XML = `<?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>`;
+
+async function testEdgarFilingIndexHonesty() {
+  section("41e. SEC EDGAR edgar_filing_index — full-scan EXACT total, M1 empty-vs-drift, 403 reclassify, bounded pipe-split, MAX_INDEX_ROWS ceiling, SSRF, literal companyContains (ADR-0026, OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+  _resetFullIndexCache();
+
+  // A COMPACT CIK-SORTED fixture (master.idx is CIK-sorted): 8-K matches at the LOW
+  // (CIK 100) AND HIGH (CIK 999998/999999) ends, non-8-K in between. A `|`-in-company
+  // row (CIK 555) tests the bounded split. TotalAvailable(8-K)=4 (100/300/999998/999999).
+  const rowsBase = [
+    "100|ALPHA CORP|8-K|2024-01-05|edgar/data/100/0000000100-24-000001.txt",
+    "200|BETA LLC|10-Q|2024-01-10|edgar/data/200/0000000200-24-000001.txt",
+    "210|BETA LLC|10-Q|2024-02-11|edgar/data/210/0000000210-24-000001.txt",
+    "300|GAMMA INC|8-K|2024-02-15|edgar/data/300/0000000300-24-000001.txt",
+    "400|DELTA WIDGETS INC|4|2024-03-01|edgar/data/400/0000000400-24-000001.txt",
+    "410|DELTA WIDGETS INC|4|2024-03-02|edgar/data/410/0000000410-24-000001.txt",
+    "999998|OMEGA HOLDINGS|8-K|2024-03-20|edgar/data/999998/0000999998-24-000001.txt",
+    "999999|ZETA TRUST|8-K|2024-03-31|edgar/data/999999/0000999999-24-000001.txt",
+  ];
+  const TOTAL_ROWS = rowsBase.length; // 8
+  const TOTAL_8K = 4;
+
+  // (a) + happy path — exact total is the FULL-SCAN match count, NOT the page length.
+  // 2024/QTR1 is a CLOSED quarter (long TTL); reset the LRU so this fetch is fresh.
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 200, json: idxBody(rowsBase) }) : failClosed()()), async (calls) => {
+    const r = await runTool("edgar_filing_index", { year: 2024, quarter: 1, limit: 3 }, sam);
+    const m = buildMeta(r.meta);
+    ok("41e(a) totalAvailable === 8 (the EXACT full-scan count), returned 3 (page) — NOT the page length (mutate total→returned/page.length ⇒ RED)",
+      m.totalAvailable === TOTAL_ROWS && m.returned === 3 && r.data.filings.length === 3 && r.data.totalAvailable === TOTAL_ROWS, JSON.stringify({ ta: m.totalAvailable, ret: m.returned, len: r.data.filings.length }));
+    ok("41e(a) subset page ⇒ complete:false + truncated:true + hasMore:true + nextOffset:3 (buildMeta-derived offset pagination)",
+      m.complete === false && m.truncated === true && m.pagination.hasMore === true && m.pagination.nextOffset === 3, JSON.stringify(m.pagination));
+    ok("41e preamble skipped: first filing is the CIK-100 data row (cik '100', cikPadded '0000000100' STRING, filingUrl resolvable) — NO 'Description:' row emitted",
+      r.data.filings[0].cik === "100" && r.data.filings[0].cikPadded === "0000000100" && r.data.filings[0].filingUrl === "https://www.sec.gov/Archives/edgar/data/100/0000000100-24-000001.txt" && !r.data.filings.some((f) => /Master Index|Description/.test(f.companyName ?? "")), JSON.stringify(r.data.filings[0]));
+    ok("41e no totalIsLowerBound on the normal path (mutate: always-set ⇒ RED); indexFile echoed",
+      m.totalIsLowerBound === undefined && r.data.indexFile === "master.idx" && r.data.year === 2024 && r.data.quarter === 1, JSON.stringify({ lb: m.totalIsLowerBound, f: r.data.indexFile }));
+    // (h) SSRF — the fetched URL is EXACTLY the static file path, NO query string.
+    const u = calls.find((c) => isEdgarFullIndex(c.url))?.url;
+    ok("41e(h) SSRF: URL === https://www.sec.gov/Archives/edgar/full-index/2024/QTR1/master.idx with ZERO query string (a filter-on-the-wire / wrong host ⇒ RED)",
+      u === "https://www.sec.gov/Archives/edgar/full-index/2024/QTR1/master.idx" && !u.includes("?"), JSON.stringify(u));
+  });
+
+  // (b) byte-cap under-count guard — filter 8-K whose matches SPAN low (100) + high
+  // (999998/999999) CIK. The EXACT total is 4; a byte-capped/prefix scan would miss
+  // the tail 8-Ks → under-count. ZERO query string (the filter is client-side).
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 200, json: idxBody(rowsBase) }) : failClosed()()), async (calls) => {
+    const r = await runTool("edgar_filing_index", { year: 2024, quarter: 2, formType: "8-K", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("41e(b) formType 8-K ⇒ totalAvailable === 4 (matches at LOW CIK 100 AND HIGH CIK 999998/999999 all counted; a byte-capped tail-truncation ⇒ under-count ⇒ RED)",
+      m.totalAvailable === TOTAL_8K && r.data.filings.every((f) => f.formType === "8-K"), JSON.stringify({ ta: m.totalAvailable, forms: r.data.filings.map((f) => f.formType) }));
+    ok("41e(b) the HIGH-CIK tail 8-K (CIK 999999) is reachable via pagination (offset walks the exact match set to the last page)",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 2, JSON.stringify(m.pagination));
+    const u = calls.find((c) => isEdgarFullIndex(c.url))?.url;
+    ok("41e(b/h) the 8-K filter is CLIENT-SIDE — the URL carries NO ?formType= query string",
+      typeof u === "string" && !u.includes("?") && !/formType|8-K/.test(u), JSON.stringify(u));
+    // fetch the last page to prove the tail is reachable.
+    const r2 = await runTool("edgar_filing_index", { year: 2024, quarter: 2, formType: "8-K", limit: 2, offset: 2 }, sam);
+    ok("41e(b) last page (offset 2) returns CIK 999998/999999 8-Ks ⇒ exact-total offset pagination reaches the CIK-sorted tail",
+      r2.data.filings.map((f) => f.cik).join(",") === "999998,999999", JSON.stringify(r2.data.filings.map((f) => f.cik)));
+  });
+
+  // (e-memoize/9) a REPEAT call for the SAME quarter (different filters) re-uses the
+  // cached raw text — NO second 33MB download (fetch count stays 1 across both calls).
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 200, json: idxBody(rowsBase) }) : failClosed()()), async (calls) => {
+    await runTool("edgar_filing_index", { year: 2024, quarter: 3, formType: "8-K" }, sam);
+    await runTool("edgar_filing_index", { year: 2024, quarter: 3, formType: "10-Q", offset: 0 }, sam);
+    ok("41e(memoize A1) two calls for the SAME (2024,Q3) ⇒ getEdgar fetched ONCE (bounded-LRU raw-text cache; a re-download per call ⇒ 2 fetches ⇒ RED)",
+      calls.filter((c) => isEdgarFullIndex(c.url)).length === 1, JSON.stringify(calls.filter((c) => isEdgarFullIndex(c.url)).length));
+  });
+
+  // (i) + (f) companyContains LITERAL substring + a `|`-in-company row is COUNTED.
+  const rowsPipe = rowsBase.concat(["555|BIG | DEAL CORP|8-K|2024-02-01|edgar/data/555/0000000555-24-000001.txt"]);
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 200, json: idxBody(rowsPipe) }) : failClosed()()), async () => {
+    // literal multi-word substring: "widgets inc" matches "DELTA WIDGETS INC" (contiguous).
+    const rHit = await runTool("edgar_filing_index", { year: 2024, quarter: 4, companyContains: "widgets inc" }, sam);
+    ok("41e(i) companyContains 'widgets inc' ⇒ 2 matches (DELTA WIDGETS INC ×2) — a LITERAL contiguous case-insensitive substring",
+      buildMeta(rHit.meta).totalAvailable === 2 && rHit.data.filings.every((f) => /DELTA WIDGETS INC/.test(f.companyName)), JSON.stringify({ ta: buildMeta(rHit.meta).totalAvailable }));
+    // reordered tokens: "inc widgets" must NOT match (proves it is NOT AND/OR-tokenized).
+    const rMiss = await runTool("edgar_filing_index", { year: 2024, quarter: 4, companyContains: "inc widgets" }, sam);
+    ok("41e(i) companyContains 'inc widgets' (reordered) ⇒ 0 matches (a token-AND/OR split ⇒ would match ⇒ RED) + a LITERAL-substring disclosure note",
+      buildMeta(rMiss.meta).totalAvailable === 0 && buildMeta(rMiss.meta).notes.some((n) => /LITERAL substring/i.test(n) && /NOT AND\/OR-tokenized/i.test(n)), JSON.stringify({ ta: buildMeta(rMiss.meta).totalAvailable }));
+    // (f) the `|`-in-company row (CIK 555) is COUNTED (bounded first-4-pipe split, 5 fields) —
+    // unfiltered total = 9 (8 base + 1 pipe row). An "exactly-5-else-malformed" split drops it ⇒ 8 ⇒ RED.
+    const rAll = await runTool("edgar_filing_index", { year: 2024, quarter: 4, limit: 1000 }, sam);
+    ok("41e(f) a `|`-in-company-name row is COUNTED (bounded split) ⇒ totalAvailable === 9 (8 base + the pipe row) — an exactly-5-else-malformed split under-counts to 8 ⇒ RED",
+      buildMeta(rAll.meta).totalAvailable === 9 && rAll.data.filings.some((f) => f.cik === "555"), JSON.stringify({ ta: buildMeta(rAll.meta).totalAvailable, has555: rAll.data.filings.some((f) => f.cik === "555") }));
+  });
+
+  // cik filter — leading-zero-safe (padCik both-sides): '300' and '0000000300' match the same filer.
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 200, json: idxBody(rowsBase) }) : failClosed()()), async () => {
+    const rA = await runTool("edgar_filing_index", { year: 2023, quarter: 1, cik: "300" }, sam);
+    const rB = await runTool("edgar_filing_index", { year: 2023, quarter: 1, cik: "0000000300" }, sam);
+    ok("41e cik filter padCik both-sides: '300' and '0000000300' each match exactly the CIK-300 row (1 match); cik stays a STRING",
+      buildMeta(rA.meta).totalAvailable === 1 && buildMeta(rB.meta).totalAvailable === 1 && rA.data.filings[0].cik === "300" && rA.data.filings[0].cikPadded === "0000000300", JSON.stringify({ a: buildMeta(rA.meta).totalAvailable, b: buildMeta(rB.meta).totalAvailable }));
+  });
+
+  // (c) M1 — a header+dashes body with 0 DATA ROWS (the live 2026/QTR4 shape) ⇒
+  // GENUINE-EMPTY (complete:true / totalAvailable:0), NOT a driftError.
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 200, json: idxBody([]) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_filing_index", { year: 2024, quarter: 2, formType: "8-K" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41e(c/M1) header+dashes+0-rows ⇒ GENUINE-EMPTY: filings:[] / totalAvailable:0 / complete:true (mutate to driftError on 0-rows ⇒ RED — a healthy empty must NOT throw)",
+      Array.isArray(r.data.filings) && r.data.filings.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false, JSON.stringify({ len: r.data.filings.length, ta: m.totalAvailable, complete: m.complete }));
+    ok("41e(c/M1) genuine-empty note: 'EXACT ZERO over the full quarter index — NOT a truncation'",
+      m.notes.some((n) => /EXACT ZERO/i.test(n) && /NOT a truncation/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // (c) M1 — a header-ABSENT body (a non-index / error HTML page served 200) ⇒ driftError
+  // (mutate: ship empty instead of throw ⇒ RED).
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 200, json: "<html><body>Service temporarily unavailable</body></html>\nnot a pipe index\n" }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_filing_index", { year: 2024, quarter: 1 }, sam));
+    ok("41e(c/M1) header-ABSENT body ⇒ schema_drift THROW (a 200 non-index/error page is NEVER read as '0 filings'; mutate off ⇒ ships empty ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (d) all-malformed rows (header present, EVERY data row fails the 5-field split) ⇒ driftError.
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 200, json: idxBody(["garbage-no-pipes", "another bad row", "still|only|three"]) }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_filing_index", { year: 2024, quarter: 1 }, sam));
+    ok("41e(d) header present but ALL data rows fail the 5-field split ⇒ schema_drift THROW (never '0 filings')",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (e) 403 AccessDenied ⇒ AMBIGUOUS both-causes reclassify — NOT a bare rate_limited,
+  // NOT a fake-empty. getEdgar F6 would label the 403 rate_limited (the AccessDenied
+  // XML does not match /automated|undeclared/); the TOOL-LOCAL catch re-surfaces it.
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 403, json: ACCESS_DENIED_XML, headers: { "content-type": "application/xml" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_filing_index", { year: 2024, quarter: 2 }, sam));
+    const te = toToolError(error);
+    ok("41e(e) 403 ⇒ THROW an AMBIGUOUS both-causes error naming BOTH 'not published' AND the rate-limit (NOT a fake-empty; reclassify-off ⇒ bare 'rate limited' ⇒ RED)",
+      threw && /not published|too-early|non-existent/i.test(te.message) && /rate-limit|10 req\/s/i.test(te.message) && te.upstreamStatus === 403, JSON.stringify({ kind: te.kind, msg: te.message.slice(0, 80) }));
+    ok("41e(e) the 403 is NOT surfaced as a bare kind:'rate_limited' and NOT as a success/empty result",
+      te.kind !== "rate_limited" && threw, JSON.stringify(te.kind));
+  });
+
+  // (e) a REAL 429 (status 429, not 403) stays an HONEST rate_limited — the reclassify
+  // is scoped to upstreamStatus===403, so a genuine rate-block is NOT masked/relabeled.
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 429 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_filing_index", { year: 2024, quarter: 2 }, sam));
+    ok("41e(e) a REAL HTTP 429 ⇒ honest rate_limited (upstreamStatus 429 ≠ 403 ⇒ NOT reclassified) — a genuine rate-block is not swallowed by the 403 catch",
+      threw && toToolError(error).kind === "rate_limited" && toToolError(error).upstreamStatus === 429, JSON.stringify({ kind: toToolError(error).kind, st: toToolError(error).upstreamStatus }));
+  });
+
+  // (h) SSRF — pre-fetch bounds guard: a future year / out-of-range year / bad quarter /
+  // non-integer segment ⇒ invalid_input with 0 FETCH (direct handler call bypassing Zod).
+  await withFetch(failClosed(), async (calls) => {
+    const nextYear = new Date().getUTCFullYear() + 1;
+    const bads = [
+      { why: `future year ${nextYear}`, args: { year: nextYear, quarter: 1 } },
+      { why: "pre-1993 year 1990", args: { year: 1990, quarter: 1 } },
+      { why: "quarter 5 (>4)", args: { year: 2024, quarter: 5 } },
+      { why: "quarter 0 (<1)", args: { year: 2024, quarter: 0 } },
+      { why: "non-integer year 2024.5", args: { year: 2024.5, quarter: 1 } },
+      { why: "non-integer/string year '2024/../etc'", args: { year: "2024/../etc", quarter: 1 } },
+      { why: "NaN quarter", args: { year: 2024, quarter: NaN } },
+    ];
+    for (const b of bads) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => filingIndex(b.args));
+      ok(`41e(h) SSRF bounds: ${b.why} ⇒ invalid_input, 0 fetch (direct-call builder guard; a bad segment reaching fetch ⇒ RED)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (g) MAX_INDEX_ROWS ceiling (parser-level, COMPACT fixture via the maxRows param — A2):
+  // a body EXCEEDING the ceiling ⇒ totalIsLowerBound:true (never a silent truncation);
+  // the normal path (under the ceiling) never sets it.
+  const parsedCapped = parseFullIndex(idxBody(rowsBase), 3); // ceiling 3 < 8 data rows
+  ok("41e(g) parse with maxRows=3 over 8 rows ⇒ scan STOPS at 3 + totalIsLowerBound:true (ceiling-hit-without-flag ⇒ RED)",
+    parsedCapped.rows.length === 3 && parsedCapped.totalIsLowerBound === true, JSON.stringify({ n: parsedCapped.rows.length, lb: parsedCapped.totalIsLowerBound }));
+  const parsedFull = parseFullIndex(idxBody(rowsBase)); // default ceiling 500000 » 8
+  ok(`41e(g) normal path (default ceiling ${MAX_INDEX_ROWS} » 8 rows) ⇒ all 8 parsed + totalIsLowerBound:false (a fabricated lower-bound on the exact path ⇒ RED)`,
+    parsedFull.rows.length === 8 && parsedFull.totalIsLowerBound === false, JSON.stringify({ n: parsedFull.rows.length, lb: parsedFull.totalIsLowerBound }));
+
+  // date range filter — ISO string compare (the Date Filed column is already YYYY-MM-DD).
+  _resetFullIndexCache();
+  await withFetch((u) => (isEdgarFullIndex(u) ? mockResponse({ status: 200, json: idxBody(rowsBase) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_filing_index", { year: 2023, quarter: 2, dateFrom: "2024-02-01", dateTo: "2024-02-28" }, sam);
+    ok("41e date range [2024-02-01, 2024-02-28] ⇒ exactly the Feb rows (CIK 210 10-Q, 300 8-K) counted (ISO string compare)",
+      buildMeta(r.meta).totalAvailable === 2 && r.data.filings.map((f) => f.cik).sort().join(",") === "210,300", JSON.stringify(r.data.filings.map((f) => ({ c: f.cik, d: f.dateFiled }))));
+  });
+}
+
 // §42: Socrata / SODA source (ADR-0004) — SSRF (allowlist enum, 4x4 regex,
 // redirect:"error") + honesty (no-total count(*) companion, B2 hasMore, catalog
 // drift). All OFFLINE (mock fetch), deterministic, non-vacuous: every honesty
@@ -11213,6 +11439,7 @@ async function main() {
   await testEdgarFramesHonesty();
   await testEdgarFtsFilters();
   await testEdgarShardsHonesty();
+  await testEdgarFilingIndexHonesty();
   await testSocrataHonesty();
   await testDataSourcePortParity();
   await testThroughGate();

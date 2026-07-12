@@ -1134,6 +1134,83 @@ const EdgarFullTextSearchInput = z.object({
     ),
 });
 
+// ADR-0026. Keyless BULK cross-filer capability on the EXISTING edgar source: the
+// SEC EDGAR quarterly full-index (www.sec.gov/Archives/edgar/full-index/<year>/
+// QTR<n>/master.idx). year/quarter are the ONLY path segments (bounded integers —
+// the SSRF guard, re-checked belt-and-suspenders pre-fetch in edgar's
+// buildFullIndexUrl). ALL other params are CLIENT-SIDE filters over the whole
+// downloaded body (ZERO query string reaches the wire). The year UPPER bound
+// (≤ current UTC year) is enforced at CALL time in the handler, NOT baked into Zod,
+// so the tools/list snapshot stays deterministic across a year rollover.
+const EdgarFilingIndexInput = z.object({
+  year: z
+    .number()
+    .int()
+    .min(1993)
+    .describe(
+      "Filing year (>= 1993 — EDGAR full-index begins 1993 Q1). Must be <= the current year; a future year is rejected as invalid_input with 0 fetch. Path segment.",
+    ),
+  quarter: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .describe(
+      "Calendar quarter 1..4 (path segment QTR<quarter>). A same-year FUTURE quarter returns a well-formed EMPTY result (genuine-empty, complete:true), NOT an error.",
+    ),
+  formType: z
+    .string()
+    .min(1)
+    .max(30)
+    .optional()
+    .describe(
+      "Optional CLIENT-SIDE filter: case-insensitive EXACT match on the Form Type column (e.g. '8-K', '10-K'). '8-K' does NOT match '8-K/A' — pass each amendment variant separately.",
+    ),
+  cik: z
+    .union([z.string().regex(/^\d{1,10}$/), z.number().int().nonnegative()])
+    .optional()
+    .describe(
+      "Optional CLIENT-SIDE filter: numeric SEC CIK (1-10 digits or a number), matched leading-zero-safe via padCik on both sides (so '320193' and '0000320193' match the same filer).",
+    ),
+  companyContains: z
+    .string()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe(
+      "Optional CLIENT-SIDE filter: case-insensitive LITERAL substring on the Company Name column. A multi-word value matches as ONE contiguous string (NOT AND/OR-tokenized).",
+    ),
+  dateFrom: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .describe(
+      "Optional CLIENT-SIDE filter: keep filings whose Date Filed >= this ISO YYYY-MM-DD (string compare; the column is already YYYY-MM-DD).",
+    ),
+  dateTo: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .describe(
+      "Optional CLIENT-SIDE filter: keep filings whose Date Filed <= this ISO YYYY-MM-DD.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(1000)
+    .default(100)
+    .describe(
+      "Page size over the FILTERED, full-scanned matches (1..1000, default 100). Does NOT reduce the download — the whole quarter is scanned; this only windows the returned rows (page via _meta.pagination.nextOffset).",
+    ),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe("0-based offset into the filtered matches (default 0)."),
+});
+
 // ─── Socrata / SODA (keyless SLED + E-rate) — input schemas ──────
 // ADR-0004. First SLED source. `domain` is a curated allowlist ENUM (the SSRF
 // core — no free host); `datasetId` is a strict 4x4 with .length(9) (M2 — blocks
@@ -3001,7 +3078,7 @@ const TOOLS: ToolDef[] = [
     inputSchema: TreasuryAvgInterestRatesInput,
     handler: (input) => treasury.avgInterestRates(input),
   }),
-  // ━━━ SEC EDGAR — filings / XBRL facts / CIK / full-text (keyless) (4) ━━━ ADR-0003
+  // ━━━ SEC EDGAR — filings / XBRL facts / CIK / full-text / frames / full-index (keyless) (6) ━━━ ADR-0003 / ADR-0017 / ADR-0026
   defineTool({
     name: "edgar_lookup_cik",
     description:
@@ -3036,6 +3113,13 @@ const TOOLS: ToolDef[] = [
       "Keyless cross-filer XBRL cross-section (SEC EDGAR frames, data.sec.gov). In ONE call, return EVERY filer's reported value for a single us-gaap/dei concept in a single calendar period — the complete cross-section — for peer benchmarking + distribution stats. Input `tag` (EXACT alnum concept, e.g. 'Assets'), `period` (CY2023 annual · CY2023Q1 quarterly · CY2023Q4I instant/trailing-I), optional `taxonomy` (us-gaap|dei), `unit` (default USD; EPS uses 'USD-per-shares'), `limit`/`offset` (CLIENT-SIDE window over the fully-fetched set), `includeStats`. Rows: { accn, cik, entityName, loc, end, val, start? } (start only for duration concepts). HONESTY: totalAvailable = SEC's own pts (asserted === data.length, else schema_drift THROW — no fake completeness); the whole frame is fetched upstream in one call and limit/offset is a disclosed client-side page (never a subset labeled complete); a tag/unit/period mismatch ⇒ 404 ⇒ found:false (NEVER a fabricated val:0); val is null-never-0; includeStats covers the FULL set with linear-interpolated percentiles (count===0 ⇒ all-null, never 0/NaN). taxonomy/tag/unit/period are validated path segments (enum+regex, re-checked pre-fetch) — no injection surface. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS.",
     inputSchema: EdgarXbrlFramesInput,
     handler: (input) => edgar.xbrlFrames(input),
+  }),
+  defineTool({
+    name: "edgar_filing_index",
+    description:
+      "Bulk cross-filer SEC filing index for a quarter (keyless, from the www.sec.gov EDGAR full-index master.idx). Reads the WHOLE quarter's index (every filer's every filing — CIK|Company|Form|Date|Filename, ~370K rows), FULL-SCANS it, and returns offset-paginated filings matching CLIENT-SIDE filters with the EXACT total. Input `year` (>=1993, <= current year), `quarter` (1..4); optional `formType` (exact form, e.g. '8-K'), `cik` (numeric, leading-zero-safe), `companyContains` (LITERAL case-insensitive substring), `dateFrom`/`dateTo` (ISO YYYY-MM-DD), `limit` (<=1000, def 100), `offset`. Returns { year, quarter, indexFile, returned, totalAvailable, filings:[{ cik, cikPadded, companyName, formType, dateFiled, filename, filingUrl }] }. This is the BULK-ENUMERATION primitive (the per-filer edgar tools need a CIK you already hold; this sweeps a whole quarter by form/date/company, e.g. 'every 8-K in 2024 Q1'). HONESTY: totalAvailable is the EXACT match count over the full quarter scan — never a page length, never a byte-capped subset (SEC ignores HTTP Range); a 0-match result is a genuine EXACT ZERO (complete:true), NOT a truncation; a bounds-valid but unpublished quarter returns HTTP 403 and is surfaced as an AMBIGUOUS both-causes error (quarter-not-published OR the 10 req/s rate-block), never a bare rate-limit and never a fake-empty; a non-index / all-malformed body is refused as schema_drift; a future year / bad quarter is rejected pre-fetch (invalid_input, 0 fetch). The CURRENT quarter grows daily (totalAvailable is exact AS-OF-snapshot). filingUrl is a resolvable archive URL. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS — there is no authoritative CIK↔UEI join.",
+    inputSchema: EdgarFilingIndexInput,
+    handler: (input) => edgar.filingIndex(input),
   }),
   // ━━━ Socrata / SODA — keyless SLED + E-rate open data (2) ━━━ ADR-0004
   defineTool({

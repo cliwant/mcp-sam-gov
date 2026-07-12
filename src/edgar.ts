@@ -49,7 +49,7 @@
  */
 
 import { fetchWithRetry, ToolErrorCarrier, errorFromResponse } from "./errors.js";
-import { throughGate } from "./datasource.js";
+import { throughGate, driftError } from "./datasource.js";
 import { memoize } from "./cache.js";
 import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
 
@@ -1488,5 +1488,477 @@ export async function xbrlFrames(args: {
       },
       notes,
     }),
+  );
+}
+
+// ─── Tool 6: edgar_filing_index (ADR-0026) ────────────────────────
+// A KEYLESS BULK cross-filer capability on the EXISTING edgar source: read the
+// SEC EDGAR quarterly FULL-INDEX (www.sec.gov/Archives/edgar/full-index/<year>/
+// QTR<n>/master.idx — a COMPLETE cross-filer index of EVERY filer's EVERY filing
+// in a quarter, pipe-delimited, ~33MB / ~370K rows), FULL-SCAN it, apply
+// CLIENT-SIDE filters, and return offset-paginated filings with an EXACT total.
+// The per-filer edgar tools require you ALREADY hold a CIK; this is the
+// bulk-enumeration primitive ("every 8-K in 2024 Q1", "every filing by CIK X in
+// Q1", "every filer named '…'"). Reuses getEdgar VERBATIM (UA + Accept-Encoding:
+// gzip + the ≤10 req/s throughGate — UNTOUCHED, so the other 5 edgar tools stay
+// byte-identical), `.text()`, padCik, the module-local `str`, `driftError`,
+// `buildMeta`/`withMeta`. Copies (does NOT import) the frames buildFramesUrl
+// S1/S2 path-segment idiom.
+//
+// LIVE-VERIFIED 2026-07-12 (org UA `cliwant-mcp-sam-gov/1.0`):
+//  - 2024/QTR1/master.idx → 200, 33,206,408 bytes, 370,304 data rows (all 5-field);
+//    exact 8-K count 16,997, exact 10-K count 4,980.
+//  - `Range: bytes=0-1000` → 200 FULL body (Range IGNORED, no 206) → a byte-cap
+//    would truncate the CIK-sorted tail → under-count; FULL-SCAN → EXACT
+//    totalAvailable is the ONLY honest model (byte-cap FORBIDDEN).
+//  - 2026/QTR4 (current-YEAR future quarter) → 200, header+dashes, 0 data rows →
+//    GENUINE-EMPTY (M1: NOT drift). 2026/QTR3 (current quarter) → 200, ~33K rows,
+//    GROWING daily (short cache TTL + a point-in-time-snapshot note).
+//  - 2024/QTR5 → 403 `AccessDenied` XML (does NOT match getEdgar F6's /automated|
+//    undeclared/ → getEdgar mislabels it `rate_limited`) → TOOL-LOCAL reclassify.
+//  - 2027/QTR1 (future YEAR) → 403, but the year bound blocks it PRE-FETCH
+//    (invalid_input, 0 fetch — a future year has no published quarter index).
+
+const FULLINDEX_HOST = "www.sec.gov";
+const FULLINDEX_BASE = "https://www.sec.gov/Archives/edgar/full-index";
+const FULLINDEX_FILE = "master.idx"; // the single backing file (pipe-delimited)
+const FULLINDEX_LABEL = "edgar:full-index"; // host+path only; keyless ⇒ no token can appear
+const FULLINDEX_HEADER = "CIK|Company Name|Form Type|Date Filed|Filename";
+const EDGAR_FULLINDEX_START_YEAR = 1993; // EDGAR full-index begins 1993 Q1
+const FILING_ARCHIVE_BASE = "https://www.sec.gov/Archives/"; // prefix for row.filename → a resolvable URL
+// Safety ceiling ABOVE the live ~370K rows (2024Q1 = 370,304). If a body EXCEEDS
+// it (drift/hostile/giant), the scan stops + `totalIsLowerBound` is set + a note —
+// NEVER a silent truncation. The normal path never reaches it, so totals stay EXACT.
+// Exported (with the `maxRows` param on parseFullIndex) so the fault suite can drive
+// the ceiling with a COMPACT fixture (A2) instead of a 500K-row body.
+export const MAX_INDEX_ROWS = 500_000;
+
+/**
+ * Fresh UTC year at CALL time (M2/S1) — NOT a module-load constant, so the upper
+ * year bound survives a year rollover in a long-running process.
+ */
+function currentUtcYear(): number {
+  return new Date().getUTCFullYear();
+}
+
+/**
+ * True iff (year,quarter) is the CURRENT calendar quarter (UTC). The current
+ * quarter GROWS daily (short cache TTL + a point-in-time-snapshot note); a closed
+ * past quarter is immutable (long TTL). NOTE: this is a freshness/cache signal
+ * ONLY — it is deliberately NOT a pre-fetch guard (M2: a same-year future quarter
+ * returns a well-formed empty 200, so it must be reachable, not refused).
+ */
+function isCurrentQuarter(year: number, quarter: number): boolean {
+  const now = new Date();
+  return (
+    year === now.getUTCFullYear() &&
+    quarter === Math.floor(now.getUTCMonth() / 3) + 1
+  );
+}
+
+/** Throw the pre-fetch bounds/injection guard error (invalid_input, 0 fetch). */
+function fullIndexInvalid(message: string): never {
+  throw new ToolErrorCarrier({
+    kind: "invalid_input",
+    message,
+    retryable: false,
+    upstreamEndpoint: FULLINDEX_LABEL,
+  });
+}
+
+/**
+ * Build the full-index URL from the ONLY two caller-influenced path segments
+ * (year, quarter) — the frames `buildFramesUrl` S1/S2 idiom, with the segments as
+ * BOUNDED INTEGERS (a range check, not a regex: `%`/`/`/`.`/`\`/`..`/`%2F` cannot
+ * appear in an integer, so there is no path-segment-injection surface). This is
+ * BELT-AND-SUSPENDERS behind Zod (a direct handler call could bypass Zod):
+ *   - year   ∈ [1993, currentUtcYear()]   else invalid_input (0 fetch)  — the upper
+ *     bound is CALL-TIME fresh (M2); a future YEAR has no published quarter index.
+ *   - quarter ∈ {1,2,3,4}                  else invalid_input (0 fetch).
+ * There is NO `≤currentCalendarQuarter` guard (M2): a same-year FUTURE quarter
+ * returns a well-formed EMPTY 200 (2026/QTR4 live), so refusing it would be a false
+ * "not available"; the two honest terminal paths (200+header+0rows → genuine-empty;
+ * a bounds-valid 403 → the ambiguous reclassify) handle everything else.
+ * THEN assert the built URL is https on the fixed www.sec.gov host.
+ */
+function buildFullIndexUrl(year: number, quarter: number): string {
+  const maxYear = currentUtcYear();
+  if (
+    !Number.isInteger(year) ||
+    year < EDGAR_FULLINDEX_START_YEAR ||
+    year > maxYear
+  ) {
+    fullIndexInvalid(
+      `edgar_filing_index: year ${JSON.stringify(year)} must be an integer in [${EDGAR_FULLINDEX_START_YEAR}, ${maxYear}] (EDGAR full-index begins 1993 Q1; a future year has no published quarter index) — refused before any fetch (path-segment bounds guard).`,
+    );
+  }
+  if (!Number.isInteger(quarter) || quarter < 1 || quarter > 4) {
+    fullIndexInvalid(
+      `edgar_filing_index: quarter ${JSON.stringify(quarter)} must be an integer in {1,2,3,4} — refused before any fetch (path-segment bounds guard).`,
+    );
+  }
+  const built = `${FULLINDEX_BASE}/${year}/QTR${quarter}/${FULLINDEX_FILE}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(built);
+  } catch {
+    fullIndexInvalid(
+      `edgar_filing_index: could not construct a valid URL from year=${year} quarter=${quarter} — refused before any fetch.`,
+    );
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname !== FULLINDEX_HOST) {
+    fullIndexInvalid(
+      `edgar_filing_index: constructed URL host/scheme is not https://${FULLINDEX_HOST} (${parsed.protocol}//${parsed.hostname}) — refused before any fetch (fixed-host assertion).`,
+    );
+  }
+  return built;
+}
+
+/** One filing row from master.idx. CIK stays a STRING (never num-coerced). */
+export type FilingIndexRow = {
+  cik: string | null; // raw CIK from the row (e.g. "1000045")
+  cikPadded: string | null; // padCik(cik) canonical 10-digit — the join key to the per-filer edgar tools
+  companyName: string | null;
+  formType: string | null;
+  dateFiled: string | null; // "YYYY-MM-DD"
+  filename: string | null; // raw archive path "edgar/data/<cik>/<accession>.txt"
+  filingUrl: string | null; // FILING_ARCHIVE_BASE + filename → a resolvable URL (null if filename null)
+};
+
+type ParsedFullIndex = {
+  rows: FilingIndexRow[];
+  malformedRows: number; // data rows that did NOT split into 5 pipe fields (skipped + counted)
+  totalIsLowerBound: boolean; // true iff the MAX_INDEX_ROWS safety ceiling was hit
+};
+
+/**
+ * Split `line` on its FIRST `n` occurrences of `|`; the remainder (which may
+ * itself contain `|`) is the FINAL element (the BOUNDED pipe-split — minor fix). For
+ * n=4 a well-formed row yields exactly 5 fields, and a row carrying an EXTRA `|`
+ * still yields 5 fields (the extra pipe stays inside the rejoined tail) rather than
+ * being dropped as "malformed" — so `totalAvailable` is never SILENTLY under-counted
+ * by an over-split. A row with FEWER than 4 pipes returns <5 elements → malformed.
+ */
+function splitOnFirstPipes(line: string, n: number): string[] {
+  const out: string[] = [];
+  let start = 0;
+  for (let k = 0; k < n; k++) {
+    const idx = line.indexOf("|", start);
+    if (idx === -1) break;
+    out.push(line.slice(start, idx));
+    start = idx + 1;
+  }
+  out.push(line.slice(start));
+  return out;
+}
+
+/**
+ * Parse the raw master.idx body into `FilingIndexRow[]`.
+ *
+ * DRIFT keys on the ABSENCE of the `CIK|Company Name|Form Type|Date Filed|Filename`
+ * header + the `----` dashes boundary ONLY (M1) — a non-index / error / format-changed
+ * body served with HTTP 200 (e.g. an S3 error HTML page) → THROW `driftError`. A
+ * body WITH the header+dashes but ZERO data rows is a GENUINE-EMPTY quarter (2026/QTR4
+ * live) → returned to the caller (NOT thrown). A body WITH the header+dashes whose
+ * EVERY data row fails the 5-field split → THROW `driftError` (all-malformed = format
+ * drift). The fixed preamble (`Description:` …) BEFORE the header is skipped.
+ */
+export function parseFullIndex(
+  body: string,
+  maxRows: number = MAX_INDEX_ROWS,
+): ParsedFullIndex {
+  const lines = body.split("\n");
+  // Locate the header line immediately followed by the `----` dashes boundary.
+  let dashesIdx = -1;
+  for (let i = 0; i < lines.length - 1; i++) {
+    if ((lines[i] ?? "").replace(/\r$/, "").trim() === FULLINDEX_HEADER) {
+      const next = (lines[i + 1] ?? "").replace(/\r$/, "");
+      if (/^-{5,}\s*$/.test(next.trim())) {
+        dashesIdx = i + 1;
+        break;
+      }
+    }
+  }
+  if (dashesIdx === -1) {
+    throw driftError(
+      FULLINDEX_LABEL,
+      `edgar:full-index body is missing the '${FULLINDEX_HEADER}' header / '----' dashes boundary (a non-index / error / format-changed body served with HTTP 200) — refusing to report an empty result (schema drift, NOT a genuine-empty quarter).`,
+    );
+  }
+  const rows: FilingIndexRow[] = [];
+  let malformedRows = 0;
+  let totalIsLowerBound = false;
+  for (let i = dashesIdx + 1; i < lines.length; i++) {
+    const line = (lines[i] ?? "").replace(/\r$/, "");
+    if (line.trim() === "") continue; // blank line (e.g. the trailing newline) — skip
+    // Safety ceiling (never a SILENT truncation): once the scanned data-row count
+    // reaches MAX_INDEX_ROWS, stop + set totalIsLowerBound. The live ~370K is well
+    // under 500K, so the normal path never trips it and totals stay EXACT.
+    if (rows.length + malformedRows >= maxRows) {
+      totalIsLowerBound = true;
+      break;
+    }
+    const parts = splitOnFirstPipes(line, 4);
+    if (parts.length < 5) {
+      malformedRows++;
+      continue;
+    }
+    const cik = str(parts[0]);
+    const filename = str(parts[4]);
+    rows.push({
+      cik,
+      cikPadded: cik === null ? null : padCik(cik),
+      companyName: str(parts[1]),
+      formType: str(parts[2]),
+      dateFiled: str(parts[3]),
+      filename,
+      filingUrl: filename === null ? null : FILING_ARCHIVE_BASE + filename,
+    });
+  }
+  // M1 — header+dashes PRESENT but EVERY data row failed the split ⇒ drift (a
+  // format change). 0 data rows total (rows.length===0 && malformedRows===0) ⇒
+  // GENUINE-EMPTY (returned by the caller, NOT thrown).
+  if (rows.length === 0 && malformedRows > 0) {
+    throw driftError(
+      FULLINDEX_LABEL,
+      `edgar:full-index has the header/dashes boundary but ALL ${malformedRows} data row(s) failed the 5-field pipe split (format drift) — refusing to report an empty result.`,
+    );
+  }
+  return { rows, malformedRows, totalIsLowerBound };
+}
+
+// A1 — a BOUNDED LRU for the full-index RAW TEXT. DELIBERATELY NOT the shared,
+// UNBOUNDED `memoize` (cache.ts): as the review flagged, memoizing ~370K parsed
+// row-objects per (year,quarter) with no eviction would OOM when a client sweeps
+// many quarters. This caps at FULLINDEX_CACHE_MAX distinct quarters (a HARD size
+// bound), caches the RAW TEXT (leaner than parsed rows) re-parsed per call (cheap),
+// and TTL-splits: the CURRENT quarter grows daily → short TTL; a CLOSED quarter is
+// immutable → long TTL. Map insertion order = LRU recency; the oldest quarter is
+// evicted past the cap. A repeat call for the same quarter (different filters/
+// offset) re-uses the cached text — NO second ~33MB download.
+const FULLINDEX_CACHE_MAX = 3;
+const FULLINDEX_TTL_CURRENT_MS = 5 * 60 * 1000; // current quarter: 5 min (grows daily)
+const FULLINDEX_TTL_CLOSED_MS = 6 * 60 * 60 * 1000; // closed quarter: 6h (immutable)
+const fullIndexCache = new Map<string, { text: string; expiresAt: number }>();
+
+/** Fetch the whole quarter's master.idx text (getEdgar VERBATIM + `.text()`),
+ *  through the bounded LRU (A1). getEdgar sets the mandatory UA + gzip + the ≤10
+ *  req/s gate + the 15s timeout; a slow body-read → abort → getEdgar's honest
+ *  upstream_unavailable throw (never a fake-empty). */
+async function fetchFullIndexText(
+  built: string,
+  year: number,
+  quarter: number,
+): Promise<string> {
+  const key = `${year}:${quarter}`;
+  const now = Date.now();
+  const hit = fullIndexCache.get(key);
+  if (hit && hit.expiresAt > now) {
+    fullIndexCache.delete(key); // LRU touch → re-insert as the newest
+    fullIndexCache.set(key, hit);
+    return hit.text;
+  }
+  if (hit) fullIndexCache.delete(key); // expired
+  const r = await getEdgar(built, FULLINDEX_LABEL);
+  const text = await r.text();
+  const ttl = isCurrentQuarter(year, quarter)
+    ? FULLINDEX_TTL_CURRENT_MS
+    : FULLINDEX_TTL_CLOSED_MS;
+  fullIndexCache.set(key, { text, expiresAt: now + ttl });
+  while (fullIndexCache.size > FULLINDEX_CACHE_MAX) {
+    const oldest = fullIndexCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    fullIndexCache.delete(oldest);
+  }
+  return text;
+}
+
+/** For tests: evict the full-index bounded LRU (mirrors cache.ts `_clearCache` for
+ *  this dedicated cache, which the shared `_clearCache` does not touch). */
+export function _resetFullIndexCache(): void {
+  fullIndexCache.clear();
+}
+
+/**
+ * Read the SEC EDGAR quarterly full-index for (year, quarter) and return the
+ * filings matching the given CLIENT-SIDE filters (form / CIK / company substring /
+ * date range), offset-paginated, with the EXACT total match count for the quarter.
+ *
+ * HONESTY (ADR-0026 v2):
+ *  - FULL-SCAN → `totalAvailable` is the EXACT filtered match count across the WHOLE
+ *    quarter (never a page length, never a byte-capped under-count — SEC ignores Range).
+ *  - A bounds-valid but unpublished quarter 403s (getEdgar mislabels it rate_limited);
+ *    TOOL-LOCAL reclassify to an AMBIGUOUS both-causes error (unpublished quarter OR
+ *    the 10 req/s rate-block) — never a bare rate-limit, never a fake-empty.
+ *  - Drift on header/dashes ABSENCE or an all-malformed body (THROW); header+0-rows ⇒
+ *    genuine-empty (complete:true). A future year / bad quarter ⇒ invalid_input, 0 fetch.
+ *  - CIK stays a STRING; every column via the module-local `str` (null-never-"").
+ *  - `companyContains` is a LITERAL case-insensitive substring (C110 N/A — no token split).
+ */
+export async function filingIndex(args: {
+  year: number;
+  quarter: number;
+  formType?: string;
+  cik?: string | number;
+  companyContains?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<MetaBundle> {
+  const { year, quarter } = args;
+  // S1 — build + re-validate the path BEFORE any fetch (0 fetch on a bad year/quarter).
+  const built = buildFullIndexUrl(year, quarter);
+
+  // Fetch the WHOLE quarter (getEdgar VERBATIM + `.text()`, bounded-LRU cached). A
+  // bounds-valid 403 (an unpublished quarter) is reclassified TOOL-LOCAL — getEdgar
+  // is UNTOUCHED (the other 5 edgar tools stay byte-identical).
+  let body: string;
+  try {
+    body = await fetchFullIndexText(built, year, quarter);
+  } catch (e) {
+    if (
+      e instanceof ToolErrorCarrier &&
+      e.toolError.kind === "rate_limited" &&
+      e.toolError.upstreamStatus === 403
+    ) {
+      // 403-not-404 reclassify (fact #2): a bad/unpublished full-index quarter
+      // returns 403 `AccessDenied` (NOT 404); getEdgar's F6 can't match /automated|
+      // undeclared/ so it labels it rate_limited. Re-surface an AMBIGUOUS both-causes
+      // error — NEVER a bare "rate limited", NEVER a fake-empty. A REAL 429 (status
+      // 429, not 403) is NOT caught here → stays an honest rate_limited.
+      throw new ToolErrorCarrier({
+        kind: "upstream_unavailable",
+        message: `SEC returned HTTP 403 for the full-index path ${FULLINDEX_BASE}/${year}/QTR${quarter}/${FULLINDEX_FILE}. This is AMBIGUOUS: EITHER the ${year} QTR${quarter} index is not published yet (a too-early / non-existent quarter returns 403, not 404) OR SEC is rate-limiting this IP at the 10 req/s ceiling (~10-minute block). NOT fabricated as empty. Verify the quarter is a real past/current EDGAR quarter and retry after ~10 minutes.`,
+        retryable: true,
+        retryAfterSeconds: 600,
+        upstreamStatus: 403,
+        upstreamEndpoint: FULLINDEX_LABEL,
+      });
+    }
+    throw e; // schema_drift / invalid_input(UA) / upstream_unavailable / real 429 — loud
+  }
+
+  // FULL-SCAN → parse ALL rows past the preamble. Drift (header-absent / all-malformed)
+  // THROWS; header+0-rows ⇒ genuine-empty (below).
+  const parsed = parseFullIndex(body);
+  const all = parsed.rows;
+
+  // CLIENT-SIDE filters — ZERO query string (none reach the URL). cik via padCik
+  // both-sides; companyContains a LITERAL case-insensitive substring (no token split);
+  // dates are ISO string compares (the column is already YYYY-MM-DD).
+  const formNeedle = args.formType?.trim()
+    ? args.formType.trim().toLowerCase()
+    : null;
+  const cikFilter =
+    args.cik != null && String(args.cik).trim() !== ""
+      ? padCik(args.cik)
+      : null;
+  const companyNeedle = args.companyContains?.trim()
+    ? args.companyContains.trim().toLowerCase()
+    : null;
+  const dateFrom = args.dateFrom;
+  const dateTo = args.dateTo;
+
+  const matches = all.filter((row) => {
+    if (formNeedle !== null) {
+      if (row.formType === null || row.formType.toLowerCase() !== formNeedle)
+        return false;
+    }
+    if (cikFilter !== null) {
+      if (row.cikPadded !== cikFilter) return false;
+    }
+    if (companyNeedle !== null) {
+      if (
+        row.companyName === null ||
+        !row.companyName.toLowerCase().includes(companyNeedle)
+      )
+        return false;
+    }
+    if (dateFrom !== undefined) {
+      if (row.dateFiled === null || row.dateFiled < dateFrom) return false;
+    }
+    if (dateTo !== undefined) {
+      if (row.dateFiled === null || row.dateFiled > dateTo) return false;
+    }
+    return true;
+  });
+
+  const limit = args.limit ?? 100;
+  const offset = args.offset ?? 0;
+  const totalAvailable = matches.length; // EXACT (full-scan) — never a page length
+  const page = matches.slice(offset, offset + limit);
+  const returned = page.length;
+  const hasMore = offset + returned < totalAvailable;
+  const nextOffset = hasMore ? offset + returned : null;
+
+  const filtersApplied: string[] = [];
+  if (formNeedle !== null) filtersApplied.push("formType");
+  if (cikFilter !== null) filtersApplied.push("cik");
+  if (companyNeedle !== null) filtersApplied.push("companyContains");
+  if (dateFrom !== undefined) filtersApplied.push("dateFrom");
+  if (dateTo !== undefined) filtersApplied.push("dateTo");
+
+  const notes: string[] = [];
+  // Index-vs-live-submissions caveat (always).
+  notes.push(
+    `The quarterly full-index (master.idx) is a POINT-IN-TIME snapshot of ${year} QTR${quarter}'s EDGAR dissemination feed — it covers ONLY that quarter. For the LATEST or complete-history filings of a KNOWN filer use edgar_company_filings (it fans out older shards); for a text query across 2001-present use edgar_full_text_search.`,
+  );
+  // Full-scan / exact-total disclosure + the ~33MB size caveat.
+  notes.push(
+    `The whole ${year} QTR${quarter} index was downloaded and FULL-SCANNED (~33MB / hundreds of thousands of rows); totalAvailable (${totalAvailable}) is the EXACT count of filings matching the filters across the ENTIRE quarter (not a page length, not a byte-capped subset — SEC ignores HTTP Range). This page contains ${returned} of ${totalAvailable}; page via _meta.pagination.nextOffset for the rest.`,
+  );
+  if (isCurrentQuarter(year, quarter)) {
+    notes.push(
+      `${year} QTR${quarter} is the CURRENT calendar quarter — it GROWS daily as new filings disseminate, so totalAvailable is EXACT AS-OF this (short-cached) snapshot, not exact-forever. A closed past quarter is immutable.`,
+    );
+  }
+  if (companyNeedle !== null) {
+    notes.push(
+      `companyContains is a case-insensitive LITERAL substring match on the Company Name column — a multi-word value matches as ONE contiguous string, NOT AND/OR-tokenized.`,
+    );
+  }
+  if (formNeedle !== null) {
+    notes.push(
+      `formType is a case-insensitive EXACT match on the Form Type column ("${args.formType?.trim()}" matches that form only — e.g. "8-K" does NOT match "8-K/A"). Pass each amendment variant separately.`,
+    );
+  }
+  if (parsed.malformedRows > 0) {
+    notes.push(
+      `${parsed.malformedRows} row(s) did not split into 5 pipe fields and were skipped (tolerated as stray malformed rows; a body with ZERO valid rows would instead be refused as schema drift).`,
+    );
+  }
+  if (parsed.totalIsLowerBound) {
+    notes.push(
+      `The scan hit the MAX_INDEX_ROWS safety ceiling (${MAX_INDEX_ROWS}); totals are a LOWER BOUND — the quarter index is larger than expected (possible format drift). See totalIsLowerBound.`,
+    );
+  }
+  if (totalAvailable === 0) {
+    notes.push(
+      filtersApplied.length
+        ? `0 filings in ${year} QTR${quarter} matched the filters (${filtersApplied.join(", ")}). This is an EXACT ZERO over the full quarter index — NOT a truncation, NOT an outage.`
+        : `0 filings in ${year} QTR${quarter} (the quarter index has no data rows). This is an EXACT ZERO over the full quarter index — NOT a truncation, NOT an outage.`,
+    );
+  }
+
+  const meta: Partial<ResponseMeta> = {
+    returned,
+    totalAvailable,
+    filtersApplied,
+    pagination: { offset, limit, hasMore, nextOffset },
+    notes,
+  };
+  if (parsed.totalIsLowerBound) meta.totalIsLowerBound = true;
+
+  return withMeta(
+    {
+      year,
+      quarter,
+      indexFile: FULLINDEX_FILE,
+      returned,
+      totalAvailable,
+      filings: page,
+    },
+    edgarMeta(meta),
   );
 }
