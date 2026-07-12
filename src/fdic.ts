@@ -624,3 +624,270 @@ export async function institutionFinancials(args: {
     } satisfies Partial<ResponseMeta>,
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool 3: fdic_bank_failures (ADR-0029) — the historical failed / FDIC-assisted
+// institution list (`/banks/failures`). B2G counterparty-risk: a failed or
+// FDIC-assisted institution is a due-diligence red flag; `CERT` links a failure
+// back to fdic_search_institutions / fdic_institution_financials. Reuses the
+// C116-hardened adapter VERBATIM (getFdic / parseEnvelope 3-envelope-guard /
+// filter-field allowlist-by-construction / sortBy enum+Set.has / EXACT meta.total
+// pagination / snapshot-freshness / $thousands→USD ×1000 null-never-0). The NEW
+// surface is exactly three things, all forced by the v2 (cycle-33) live review:
+//   ★F1 — the state field on /failures is PSTALP, NOT STALP (live: `STALP:CA`→
+//     total 0 = the unknown-field false-empty landmine; `PSTALP:CA`→265). We map
+//     state→PSTALP in the filter, the allowlist, the projection, and the output.
+//   ★F2 — the `search` param is IGNORED on /failures (live: `search=NAME:…` AND
+//     no-params BOTH return total 4115 = the whole dataset = a false-FLOOD). So
+//     this tool has NO name/city filter and NEVER emits `search=` — it does NOT
+//     reuse searchTerm/escapeSearch. NAME/CITY stay in the PROJECTION (surfaced
+//     per row) but are not filterable; name-based lookup is the honest 2-step CERT
+//     linkage (resolve CERT in fdic_search_institutions → filter here by cert).
+//   ★F3 — FAILDATE is `M/D/YYYY` (not financials' YYYYMMDD): normFailDate does an
+//     EXACT Date.UTC round-trip → ISO YYYY-MM-DD (an unrecognized value is
+//     surfaced RAW + disclosed, never nulled/fabricated); COST can be a genuine 0
+//     (fully-assisted, no DIF loss) or NEGATIVE (a net DIF recovery/gain) —
+//     thousandsToUsd keeps both faithfully (null-guard BEFORE the ×1000).
+// ═══════════════════════════════════════════════════════════════════
+
+// Fixed endpoint constant — the TOOL chooses it; NO caller value on the path (SSRF core).
+const ENDPOINT_FAILURES = "failures";
+
+// Fixed field projection (every field live-verified 2026-07-13). NAME/CITY are
+// PROJECTED (surfaced per output row) but NOT filterable (F2).
+const FAIL_FIELDS = "NAME,CERT,FAILDATE,FAILYR,CITY,PSTALP,COST,RESTYPE,SAVR,QBFDEP,QBFASSET,ID";
+const FAIL_PROJECTION = [
+  "NAME",
+  "CERT",
+  "FAILDATE",
+  "FAILYR",
+  "CITY",
+  "PSTALP",
+  "COST",
+  "RESTYPE",
+  "SAVR",
+  "QBFDEP",
+  "QBFASSET",
+  "ID",
+] as const;
+
+// ★F1 — the failures filter-FIELD allowlist (P4 belt-and-suspenders). The state
+// field is PSTALP (NOT STALP — that is a false-empty landmine). NAME/CITY are NOT
+// here (F2 — /failures has no working name/city filter). These fields carry only
+// constrained non-string values (PSTALP a 2-letter code, FAILYR a year, CERT an
+// int) → no quoting needed.
+const FDIC_FAILURES_FILTER_FIELDS: ReadonlySet<string> = new Set(["PSTALP", "FAILYR", "CERT"]);
+// sortBy allowlist (mirrors the server's Zod enum; a Set.has recheck in sortParams
+// → an unknown sort field is invalid_input BEFORE fetch).
+const FAIL_SORT_FIELDS: ReadonlySet<string> = new Set([
+  "FAILDATE",
+  "COST",
+  "QBFASSET",
+  "QBFDEP",
+  "NAME",
+  "FAILYR",
+]);
+
+// Exported so the fault suite can drive the belt-and-suspenders field-guard directly.
+export { FDIC_FAILURES_FILTER_FIELDS };
+
+/**
+ * Build the failures `filters` string — EXACT-KEY terms only: `state`→`PSTALP:<s>`
+ * (★F1), `failYear`→`FAILYR:<year>` (emit the integer's digits — FAILYR is a
+ * string field but the digits filter cleanly, live-verified), `cert`→`CERT:<int>`.
+ * There is NO name/city term (★F2 — /failures ignores `search` and NAME/CITY only
+ * filter as brittle exact-uppercase foot-guns). Terms joined with ` AND `. Returns
+ * "" when there is no structured filter clause. Exported for the fault fixtures.
+ */
+export function buildFailFilters(inp: {
+  state?: string;
+  failYear?: number;
+  cert?: number;
+}): string {
+  const terms: string[] = [];
+  if (inp.state !== undefined)
+    terms.push(filterTerm("PSTALP", inp.state, FDIC_FAILURES_FILTER_FIELDS));
+  if (inp.failYear !== undefined)
+    terms.push(filterTerm("FAILYR", String(inp.failYear), FDIC_FAILURES_FILTER_FIELDS));
+  if (inp.cert !== undefined)
+    terms.push(filterTerm("CERT", String(inp.cert), FDIC_FAILURES_FILTER_FIELDS));
+  return terms.join(" AND ");
+}
+
+/**
+ * ★F3 — normalize FDIC's `FAILDATE` (`M/D/YYYY`, e.g. `3/10/2023`) to ISO
+ * `YYYY-MM-DD`. Parse `^(\d{1,2})/(\d{1,2})/(\d{4})$`, then validate the calendar
+ * day with the EXACT 3-component Date.UTC round-trip (rejects JS's silent
+ * roll-overs like `2/30/2023`→Mar-02). On success → the padded ISO string
+ * (`normalized:true`). If the value does NOT match the pattern or fails the
+ * round-trip → surface the RAW upstream value UNCHANGED (`normalized:false`; NEVER
+ * null or fabricate a present date — the handler discloses the raw passthrough); a
+ * genuinely-absent value (null/undefined) → null. Live-confirmed 4115/4115 rows
+ * normalize (1934–2026), so the raw-passthrough branch is defensive-only. Exported
+ * for the fault fixtures.
+ */
+export function normFailDate(raw: unknown): { value: string | null; normalized: boolean } {
+  // A non-string (absent/null/numeric) → honest str coercion (null for absent);
+  // never String()-fabricate "null"/"undefined"/"[object Object]".
+  if (typeof raw !== "string") return { value: str(raw), normalized: false };
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(raw);
+  if (m) {
+    const mo = Number(m[1]);
+    const d = Number(m[2]);
+    const y = Number(m[3]);
+    const dt = new Date(Date.UTC(y, mo - 1, d));
+    if (dt.getUTCFullYear() === y && dt.getUTCMonth() + 1 === mo && dt.getUTCDate() === d) {
+      return {
+        value: `${m[3]}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
+        normalized: true,
+      };
+    }
+  }
+  // Present but unrecognized → surface the raw value verbatim (defensive; never taken live).
+  return { value: raw, normalized: false };
+}
+
+export type FdicFailure = {
+  name: string | null;
+  cert: number | null;
+  failDate: string | null;
+  failYear: string | null;
+  city: string | null;
+  state: string | null;
+  resolutionType: string | null;
+  resolutionFund: string | null;
+  estimatedLossUSD: number | null;
+  depositsUSD: number | null;
+  assetsUSD: number | null;
+  id: string | null;
+};
+
+function mapFailure(rec: Record<string, unknown>): FdicFailure {
+  return {
+    name: str(rec.NAME),
+    cert: num(rec.CERT),
+    failDate: normFailDate(rec.FAILDATE).value,
+    failYear: str(rec.FAILYR),
+    city: str(rec.CITY),
+    state: str(rec.PSTALP), // ★F1 — PSTALP, NOT STALP
+    resolutionType: str(rec.RESTYPE),
+    resolutionFund: str(rec.SAVR),
+    estimatedLossUSD: thousandsToUsd(rec.COST),
+    depositsUSD: thousandsToUsd(rec.QBFDEP),
+    assetsUSD: thousandsToUsd(rec.QBFASSET),
+    id: str(rec.ID),
+  };
+}
+
+// ─── failures disclosure notes ─────────────────────────────────────
+const FAIL_DATE_NOTE = "failDate is normalized from FDIC's M/D/YYYY to ISO YYYY-MM-DD.";
+const FAIL_COST_NOTE =
+  "COST is FDIC's estimated loss to the Deposit Insurance Fund; COST/QBFDEP/QBFASSET are $thousands, normalized here to whole USD (×1,000). A genuine 0 = a fully-assisted resolution with NO DIF loss (a real 0, not absence); a NEGATIVE value = a net DIF recovery/gain (NOT a loss); an absent value is null (never 0).";
+const FAIL_SCOPE_NOTE =
+  "Historical FDIC-insured institution failures / assistance transactions; a bank ABSENT here has no recorded FDIC failure (it may be active, acquired non-failed, or never FDIC-insured) — cross-check with fdic_search_institutions.";
+const FAIL_CERT_NOTE =
+  "To find a specific institution's failure, resolve its CERT via fdic_search_institutions, then filter here by `cert`; name/city are shown but not searchable on this endpoint (FDIC's /failures `search` param is ignored and would return the whole dataset).";
+
+/**
+ * Historical FDIC bank failures / assistance transactions (`/banks/failures`).
+ * Exact-key structured inputs: `state` (→ PSTALP filter, ★F1), `failYear` (→
+ * FAILYR), `cert` (→ CERT) → the `filters` param; plus `limit`/`offset`/`sortBy`/
+ * `sortOrder` (default FAILDATE DESC → most-recent failures first). Fixed field
+ * projection. NO name/city filter and NEVER a `search=` param (★F2). Consumes the
+ * IDENTICAL fetch → 3-envelope guard → pagination machinery as tools 1 & 2.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1); the 3-
+ * envelope drift-guard makes the ONLY honest empty `200 + total:0 + data:[]`,
+ * everything else THROWS (P2); COST/QBFDEP/QBFASSET are $thousands → whole USD
+ * ×1000 null-never-0 (P3; genuine 0 stays 0, negative = a net recovery, absent →
+ * null); failDate normalized M/D/YYYY→ISO (unrecognized → raw + disclosed, never
+ * nulled/fabricated); a projected field absent from all records → fieldsUnavailable
+ * (B); the snapshot build time is disclosed.
+ */
+export async function bankFailures(args: {
+  state?: string;
+  failYear?: number;
+  cert?: number;
+  limit?: number;
+  offset?: number;
+  sortBy?: string;
+  sortOrder?: string;
+}): Promise<MetaBundle> {
+  const limit = args.limit ?? 100;
+  const offset = args.offset ?? 0;
+  // Default FAILDATE DESC (most-recent first) when the server's Zod default did not
+  // supply one (defensive — the server always defaults sortBy=FAILDATE/DESC).
+  const sort = sortParams(
+    args.sortBy ?? "FAILDATE",
+    args.sortOrder ?? "DESC",
+    FAIL_SORT_FIELDS,
+    "failures",
+  );
+
+  const filters = buildFailFilters({ state: args.state, failYear: args.failYear, cert: args.cert });
+
+  const params = new URLSearchParams();
+  if (filters) params.set("filters", filters);
+  params.set("fields", FAIL_FIELDS);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  if (sort.sort_by) {
+    params.set("sort_by", sort.sort_by);
+    params.set("sort_order", sort.sort_order as string);
+  }
+  params.set("format", "json");
+
+  const body = await getFdic(ENDPOINT_FAILURES, params);
+  const env = parseEnvelope(body);
+  const records = env.records.map(mapFailure);
+  const returned = records.length;
+  const totalAvailable = env.totalAvailable;
+  const hasMore = offset + returned < totalAvailable;
+  const nextOffset = hasMore ? offset + returned : null;
+
+  const filtersApplied: string[] = [];
+  if (args.state !== undefined) filtersApplied.push("state");
+  if (args.failYear !== undefined) filtersApplied.push("failYear");
+  if (args.cert !== undefined) filtersApplied.push("cert");
+  if (sort.sort_by) filtersApplied.push("sort");
+
+  const notes: string[] = [
+    freshnessNote(env.indexName, env.indexCreated),
+    FAIL_DATE_NOTE,
+    FAIL_COST_NOTE,
+    FAIL_SCOPE_NOTE,
+    FAIL_CERT_NOTE,
+  ];
+  // ★F3 — disclose any present-but-unrecognized FAILDATE surfaced raw (defensive;
+  // live 4115/4115 normalize, so this branch essentially never fires).
+  const anyRawFailDate = env.records.some((rec) => {
+    const fd = normFailDate(rec.FAILDATE);
+    return !fd.normalized && fd.value !== null;
+  });
+  if (anyRawFailDate) {
+    notes.push(
+      "One or more FAILDATE values did not match FDIC's M/D/YYYY format (or failed the calendar round-trip) and were surfaced RAW (not normalized to ISO) — never nulled or fabricated.",
+    );
+  }
+  const fu = fieldsUnavailable(env.records, FAIL_PROJECTION);
+  if (fu.length > 0) {
+    notes.push(
+      `Requested field(s) ${fu.join(", ")} were not returned by FDIC for any record — possible schema drift / rename.`,
+    );
+  }
+
+  return withMeta(
+    { failures: records },
+    {
+      source: "api.fdic.gov/banks/failures (BankFind, keyless)",
+      keylessMode: true,
+      returned,
+      totalAvailable,
+      filtersApplied,
+      filtersDropped: [],
+      fieldsUnavailable: fu,
+      pagination: { offset, limit, hasMore, nextOffset },
+      notes,
+    } satisfies Partial<ResponseMeta>,
+  );
+}

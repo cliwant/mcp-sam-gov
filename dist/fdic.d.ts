@@ -222,4 +222,74 @@ export declare function institutionFinancials(args: {
     sortBy?: string;
     sortOrder?: string;
 }): Promise<MetaBundle>;
+declare const FDIC_FAILURES_FILTER_FIELDS: ReadonlySet<string>;
+export { FDIC_FAILURES_FILTER_FIELDS };
+/**
+ * Build the failures `filters` string — EXACT-KEY terms only: `state`→`PSTALP:<s>`
+ * (★F1), `failYear`→`FAILYR:<year>` (emit the integer's digits — FAILYR is a
+ * string field but the digits filter cleanly, live-verified), `cert`→`CERT:<int>`.
+ * There is NO name/city term (★F2 — /failures ignores `search` and NAME/CITY only
+ * filter as brittle exact-uppercase foot-guns). Terms joined with ` AND `. Returns
+ * "" when there is no structured filter clause. Exported for the fault fixtures.
+ */
+export declare function buildFailFilters(inp: {
+    state?: string;
+    failYear?: number;
+    cert?: number;
+}): string;
+/**
+ * ★F3 — normalize FDIC's `FAILDATE` (`M/D/YYYY`, e.g. `3/10/2023`) to ISO
+ * `YYYY-MM-DD`. Parse `^(\d{1,2})/(\d{1,2})/(\d{4})$`, then validate the calendar
+ * day with the EXACT 3-component Date.UTC round-trip (rejects JS's silent
+ * roll-overs like `2/30/2023`→Mar-02). On success → the padded ISO string
+ * (`normalized:true`). If the value does NOT match the pattern or fails the
+ * round-trip → surface the RAW upstream value UNCHANGED (`normalized:false`; NEVER
+ * null or fabricate a present date — the handler discloses the raw passthrough); a
+ * genuinely-absent value (null/undefined) → null. Live-confirmed 4115/4115 rows
+ * normalize (1934–2026), so the raw-passthrough branch is defensive-only. Exported
+ * for the fault fixtures.
+ */
+export declare function normFailDate(raw: unknown): {
+    value: string | null;
+    normalized: boolean;
+};
+export type FdicFailure = {
+    name: string | null;
+    cert: number | null;
+    failDate: string | null;
+    failYear: string | null;
+    city: string | null;
+    state: string | null;
+    resolutionType: string | null;
+    resolutionFund: string | null;
+    estimatedLossUSD: number | null;
+    depositsUSD: number | null;
+    assetsUSD: number | null;
+    id: string | null;
+};
+/**
+ * Historical FDIC bank failures / assistance transactions (`/banks/failures`).
+ * Exact-key structured inputs: `state` (→ PSTALP filter, ★F1), `failYear` (→
+ * FAILYR), `cert` (→ CERT) → the `filters` param; plus `limit`/`offset`/`sortBy`/
+ * `sortOrder` (default FAILDATE DESC → most-recent failures first). Fixed field
+ * projection. NO name/city filter and NEVER a `search=` param (★F2). Consumes the
+ * IDENTICAL fetch → 3-envelope guard → pagination machinery as tools 1 & 2.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1); the 3-
+ * envelope drift-guard makes the ONLY honest empty `200 + total:0 + data:[]`,
+ * everything else THROWS (P2); COST/QBFDEP/QBFASSET are $thousands → whole USD
+ * ×1000 null-never-0 (P3; genuine 0 stays 0, negative = a net recovery, absent →
+ * null); failDate normalized M/D/YYYY→ISO (unrecognized → raw + disclosed, never
+ * nulled/fabricated); a projected field absent from all records → fieldsUnavailable
+ * (B); the snapshot build time is disclosed.
+ */
+export declare function bankFailures(args: {
+    state?: string;
+    failYear?: number;
+    cert?: number;
+    limit?: number;
+    offset?: number;
+    sortBy?: string;
+    sortOrder?: string;
+}): Promise<MetaBundle>;
 //# sourceMappingURL=fdic.d.ts.map
