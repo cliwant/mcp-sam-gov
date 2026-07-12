@@ -84,17 +84,26 @@ export type Filing = {
     isXBRL: boolean;
 };
 /**
- * A company's recent SEC filings (from `filings.recent`, the ~1000 most recent),
- * optionally narrowed to specific `forms`, with offset pagination. HONESTY: the
- * response is COMPLETE only when `filings.files[]` (older shards) is empty; when
- * shards exist, `totalAvailable` is the grand total (recent + Σ shard counts),
+ * A company's SEC filings. By default (`fullHistory` off) returns the recent
+ * window (from `filings.recent` — up to 1 year OR 1000 filings, whichever is
+ * more), optionally narrowed to specific `forms`, with offset pagination. HONESTY:
+ * the response is COMPLETE only when `filings.files[]` (older shards) is empty;
+ * when shards exist, `totalAvailable` is the grand total (recent + Σ shard counts),
  * `hasMore:true`, and a note discloses that only the recent window was searched.
+ * With `fullHistory:true`, the older `files[]` shards are fetched (newest-first up
+ * to `maxShards`, default 10) and assembled (recent ++ shard001..N, descending
+ * preserved, NO re-sort) into the COMPLETE history — a capped/failed fan-out is
+ * disclosed as PARTIAL (never a capped set claimed complete). `totalAvailable`
+ * stays the grand total regardless of the cap (buildMeta forces complete:false
+ * when returned < total).
  */
 export declare function companyFilings(args: {
     cikOrTicker: string;
     forms?: string[];
     limit?: number;
     offset?: number;
+    fullHistory?: boolean;
+    maxShards?: number;
 }): Promise<MetaBundle>;
 /**
  * The default curated us-gaap concepts (F4 — NO EarningsPerShareBasic; its unit

@@ -339,7 +339,7 @@
   },
   {
     "name": "edgar_company_filings",
-    "description": "A company's recent SEC filings (keyless, from data.sec.gov submissions). Input `cikOrTicker` (CIK or resolvable ticker/name), optional `forms` (e.g. ['10-K','8-K']), `limit` (≤100, default 20), `offset`. Returns filings with the REAL primary-document archive URL. HONESTY: complete only when no older shards exist; otherwise totalAvailable = recent + Σ older-shard counts, hasMore:true, and a note discloses only the ~1000 most-recent filings were searched.",
+    "description": "A company's SEC filings (keyless, from data.sec.gov submissions). Input `cikOrTicker` (CIK or resolvable ticker/name), optional `forms` (e.g. ['10-K','8-K']), `limit` (≤100, default 20), `offset`, `fullHistory` (default false), `maxShards` (1..100, default 10). Returns filings with the REAL primary-document archive URL. By default returns the recent window (up to 1 year OR 1000 filings, whichever is more); set `fullHistory:true` to ALSO fetch the older filings.files[] shards (newest-first up to `maxShards`) and assemble the COMPLETE history (recent ++ shard001..N, descending, no re-sort). HONESTY: totalAvailable = recent + Σ ALL older-shard counts (the grand total, incl un-fetched shards — never recomputed down), so a capped/failed fan-out reads complete:false; a note discloses COMPLETE vs PARTIAL-BY-CAP (RAISE maxShards for older un-fetched shards — pagination does NOT reach them) vs PARTIAL-BY-FAILURE (a 404/bad-CIK/transient shard is skipped, missing filings disclosed, never fabricated); fullHistory serializes N shard GETs through the shared EDGAR throttle gate. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -361,6 +361,14 @@
         "offset": {
           "type": "number",
           "description": "0-based offset into the (form-filtered) recent filings, default 0."
+        },
+        "fullHistory": {
+          "type": "boolean",
+          "description": "When true, ALSO fetch the older filings.files[] submission shards (newest-first, up to maxShards) and assemble the COMPLETE filing history (recent ++ shard001..N, descending order preserved). Default false ⇒ recent window only (byte-identical to omitting it). A capped/failed fan-out is disclosed as PARTIAL — never a capped set claimed complete."
+        },
+        "maxShards": {
+          "type": "number",
+          "description": "Fan-out cap when fullHistory is true: at most this many older shards are fetched (newest-first), 1..100, default 10. Bounds wall-time (each shard is one throttle-gated GET, serialized through the SHARED edgar gate) + payload. When totalShards > maxShards the response is PARTIAL-BY-CAP (hasMore:true; older un-fetched shards reached by RAISING maxShards, not by nextOffset). Ignored when fullHistory is false."
         }
       },
       "required": [

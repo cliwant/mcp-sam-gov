@@ -354,6 +354,17 @@ type SubmissionsShard = {
 };
 
 /**
+ * The fixed grammar for a `filings.files[].name` older-submissions shard (ADR-0019).
+ * Live-confirmed 2026-07-12: `CIK0000320193-submissions-001.json`,
+ * `CIK0000019617-submissions-068.json`. This is the FIRST-pass SSRF grammar guard
+ * (SEC-format check); `fetchShard` ALSO builds a stronger CIK-BOUND regex from the
+ * resolved parent CIK (M3) so a name for ANY OTHER CIK is refused before any fetch.
+ * The `\d{1,4}` shard-number quantifier is bounded (a giant number just 404s); the
+ * `%`/`/`/`.`/`\`/`..` traversal characters are simply not in the allowed classes.
+ */
+const SHARD_NAME_RE = /^CIK\d{10}-submissions-\d{1,4}\.json$/;
+
+/**
  * Unroll the COLUMNAR `filings.recent` (parallel arrays; index i = one filing)
  * into `Filing[]`, constructing the primary-document ARCHIVE URL from the real
  * accession + primaryDocument. Alignment is strictly by index i.
@@ -415,17 +426,120 @@ async function fetchSubmissions(cik10: string): Promise<{
 }
 
 /**
- * A company's recent SEC filings (from `filings.recent`, the ~1000 most recent),
- * optionally narrowed to specific `forms`, with offset pagination. HONESTY: the
- * response is COMPLETE only when `filings.files[]` (older shards) is empty; when
- * shards exist, `totalAvailable` is the grand total (recent + Σ shard counts),
+ * The 7 parallel-array columns `zipRecent` reads by index i. The INTRA-shard
+ * shape guard (M1 — the REAL alignment guard, the `pts===data.length` analogue):
+ * a shard 200 body whose `accessionNumber` is missing/non-array, or any of these
+ * 7 arrays is not `=== accessionNumber.length`, would let `zipRecent` borrow a
+ * value from a shorter/absent column at index i → a fabricated (form,date,accession)
+ * tuple. So a non-columnar/ragged shard THROWS schema_drift (never emits rows).
+ */
+const SHARD_ZIP_COLUMNS = [
+  "accessionNumber",
+  "form",
+  "filingDate",
+  "reportDate",
+  "primaryDocument",
+  "primaryDocDescription",
+  "isXBRL",
+] as const;
+
+/**
+ * Fetch ONE older-submissions shard and return its `Filing[]` (ADR-0019). The
+ * shard `name` is SERVER-PROVIDED (from the parent `filings.files[].name`); the
+ * caller never constructs it from user input. Belt-and-suspenders, mirroring
+ * `buildFramesUrl` (S1/S2):
+ *  - **[M3] CIK-BIND + grammar validate BEFORE any URL is built.** The name must
+ *    match BOTH the fixed SEC grammar (`SHARD_NAME_RE`) AND a regex bound to THIS
+ *    filer's resolved `cik10` — so a drifted/hostile/MITM'd parent whose name
+ *    embeds a DIFFERENT CIK (`CIK9999999999-…`) or a traversal (`../`, `%2F`) is
+ *    NEVER fetched (thrown as `not_found` → the caller skips + discloses PARTIAL).
+ *  - Fixed host: build `${SUBMISSIONS_BASE}/${name}` and assert the parsed URL is
+ *    `https://data.sec.gov` (host-escape/downgrade guard).
+ *  - `getEdgar` → the shard body; **[M1]** assert the columnar shape (SHARD_ZIP_COLUMNS
+ *    all equal-length) or THROW schema_drift; then `zipRecent`.
+ * Throw taxonomy the caller relies on: `not_found` (bad/cross-CIK/host name OR a
+ * genuine 404) → skip+PARTIAL; `schema_drift`/`rate_limited`/other → re-throw loud.
+ */
+async function fetchShard(name: string, cik10: string): Promise<Filing[]> {
+  // [M3] CIK-bound grammar — ONLY a shard whose embedded CIK === this filer's CIK
+  // is eligible. cik10 is 10 zero-padded DIGITS (padCik strips non-digits), so it
+  // is safe to interpolate into a RegExp source (no metacharacters).
+  const cikBoundRe = new RegExp(`^CIK${cik10}-submissions-\\d{1,4}\\.json$`);
+  if (!SHARD_NAME_RE.test(name) || !cikBoundRe.test(name)) {
+    throw new ToolErrorCarrier({
+      kind: "not_found",
+      message: `edgar:submissions shard name ${JSON.stringify(name)} did not match the CIK-bound grammar ^CIK${cik10}-submissions-\\d{1,4}\\.json$ (SEC format change, or a cross-entity/hostile name) — refused before any fetch, counted as a skipped shard.`,
+      retryable: false,
+      upstreamEndpoint: "edgar:submissions",
+    });
+  }
+  const built = `${SUBMISSIONS_BASE}/${name}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(built);
+  } catch {
+    throw new ToolErrorCarrier({
+      kind: "not_found",
+      message: `edgar:submissions shard URL could not be constructed from ${JSON.stringify(name)} — refused before any fetch.`,
+      retryable: false,
+      upstreamEndpoint: "edgar:submissions",
+    });
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname !== "data.sec.gov") {
+    throw new ToolErrorCarrier({
+      kind: "not_found",
+      message: `edgar:submissions shard URL host/scheme is not https://data.sec.gov (${parsed.protocol}//${parsed.hostname}) — refused before any fetch (fixed-host assertion).`,
+      retryable: false,
+      upstreamEndpoint: "edgar:submissions",
+    });
+  }
+  const r = await getEdgar(built, "edgar:submissions");
+  const shard = (await r.json()) as SubmissionsRecent;
+  // [M1] Intra-shard columnar-shape guard (the real alignment guard).
+  const acc = shard?.accessionNumber;
+  if (!Array.isArray(acc)) {
+    throw new ToolErrorCarrier({
+      kind: "schema_drift",
+      message: `edgar:submissions shard ${name} returned HTTP 200 without a columnar accessionNumber[] array — the submissions shard envelope changed.`,
+      retryable: false,
+      upstreamEndpoint: "edgar:submissions",
+    });
+  }
+  for (const col of SHARD_ZIP_COLUMNS) {
+    const arr = shard[col];
+    if (!Array.isArray(arr) || arr.length !== acc.length) {
+      throw new ToolErrorCarrier({
+        kind: "schema_drift",
+        message: `edgar:submissions shard ${name} is not columnar: '${col}' is ${Array.isArray(arr) ? `length ${arr.length}` : "missing/non-array"} ≠ accessionNumber length ${acc.length}. Emitting index-aligned rows would fabricate (form,date,accession) tuples — refusing.`,
+        retryable: false,
+        upstreamEndpoint: "edgar:submissions",
+      });
+    }
+  }
+  return zipRecent(shard, cik10);
+}
+
+/**
+ * A company's SEC filings. By default (`fullHistory` off) returns the recent
+ * window (from `filings.recent` — up to 1 year OR 1000 filings, whichever is
+ * more), optionally narrowed to specific `forms`, with offset pagination. HONESTY:
+ * the response is COMPLETE only when `filings.files[]` (older shards) is empty;
+ * when shards exist, `totalAvailable` is the grand total (recent + Σ shard counts),
  * `hasMore:true`, and a note discloses that only the recent window was searched.
+ * With `fullHistory:true`, the older `files[]` shards are fetched (newest-first up
+ * to `maxShards`, default 10) and assembled (recent ++ shard001..N, descending
+ * preserved, NO re-sort) into the COMPLETE history — a capped/failed fan-out is
+ * disclosed as PARTIAL (never a capped set claimed complete). `totalAvailable`
+ * stays the grand total regardless of the cap (buildMeta forces complete:false
+ * when returned < total).
  */
 export async function companyFilings(args: {
   cikOrTicker: string;
   forms?: string[];
   limit?: number;
   offset?: number;
+  fullHistory?: boolean;
+  maxShards?: number;
 }): Promise<MetaBundle> {
   const resolved = await resolveCik(args.cikOrTicker);
   if (!resolved) {
@@ -448,29 +562,146 @@ export async function companyFilings(args: {
     throw e;
   }
 
-  const all = zipRecent(subm.recent, cik);
+  const fullHistory = args.fullHistory ?? false;
+  const maxShards = args.maxShards ?? 10;
+
+  const hasShards = subm.files.length > 0;
+  const totalShards = subm.files.length;
+  // Σ ALL files[].filingCount — the grand shard total, INCLUDING un-fetched shards.
+  // Authoritative from the PARENT payload alone; never recomputed down (M1).
+  const shardCount = subm.files.reduce((s, f) => s + (f.filingCount ?? 0), 0);
+
+  // ── Shard fan-out (gated STRICTLY on fullHistory && there are shards) ──
+  // Assemble `recent ++ shard001 ++ … ++ shardNNN` — descending date order is
+  // preserved by construction (recent newest, then each shard newest-first), so
+  // there is NO re-sort (a blind re-sort would risk breaking SEC's own tie order).
+  let assembled = zipRecent(subm.recent, cik);
+  let fetchedShards = 0;
+  let failedShards = 0;
+  let missingFilings = 0; // Σ (declared − actual) for partial/failed shards.
+  const shardNotes: string[] = [];
+  const fanoutRan = fullHistory && hasShards;
+  if (fanoutRan) {
+    // newest-first up to maxShards (files[] is ordered shard-001 newest → shard-NNN oldest).
+    const toFetch = subm.files.slice(0, maxShards);
+    for (const shardEntry of toFetch) {
+      const name = shardEntry.name ?? "";
+      const declared = shardEntry.filingCount ?? 0;
+      try {
+        const rows = await fetchShard(name, cik);
+        fetchedShards++;
+        assembled = assembled.concat(rows);
+        // [M1] filingCount !== length is INTER-document (parent vs a later shard
+        // fetch) and can be legit (recent→shard roll / upstream lag). Do NOT throw;
+        // use the ACTUAL fetched count and disclose the shortfall as partial.
+        if (rows.length < declared) {
+          missingFilings += declared - rows.length;
+          shardNotes.push(
+            `shard ${name} returned ${rows.length} of ${declared} declared filings (recent→shard roll or upstream lag); not fabricated.`,
+          );
+        }
+      } catch (e) {
+        const kind = e instanceof ToolErrorCarrier ? e.toolError.kind : "unknown";
+        // not_found = a genuine 404 OR a refused bad/cross-CIK/host name (0 fetch).
+        // Degrade to PARTIAL and continue; the declared filings are missing.
+        if (kind === "not_found") {
+          failedShards++;
+          missingFilings += declared;
+          continue;
+        }
+        // schema_drift / rate_limited / invalid_input / upstream_unavailable →
+        // fail LOUD (a shape break or a systemic UA/rate/outage fault is not a
+        // per-shard degrade — never a fake-partial).
+        throw e;
+      }
+    }
+  }
+  // Filings in the un-fetched (capped) older shards — reachable only by raising
+  // maxShards, NOT by nextOffset (the two-axis "more", M2).
+  const skippedFilings =
+    fanoutRan && totalShards > maxShards
+      ? subm.files.slice(maxShards).reduce((s, f) => s + (f.filingCount ?? 0), 0)
+      : 0;
+
   const forms = args.forms?.map((f) => f.trim().toUpperCase()).filter(Boolean);
   const filtered =
     forms && forms.length
-      ? all.filter((f) => f.form != null && forms.includes(f.form.toUpperCase()))
-      : all;
+      ? assembled.filter((f) => f.form != null && forms.includes(f.form.toUpperCase()))
+      : assembled;
 
   const limit = args.limit ?? 20;
   const offset = args.offset ?? 0;
   const page = filtered.slice(offset, offset + limit);
   const returned = page.length;
 
-  const hasShards = subm.files.length > 0;
-  const shardCount = subm.files.reduce((s, f) => s + (f.filingCount ?? 0), 0);
   const moreInWindow = offset + returned < filtered.length;
-  const hasMore = moreInWindow || hasShards;
+  // [M2/M4] Two "more" axes. When NOT fanning out, the beyond-window axis is
+  // today's "shards exist but were not fetched" (hasShards). When fanning out, it
+  // is the un-fetched-cap OR any failed shard (unfetchedOrFailed) — NOT the plain
+  // hasShards boolean. A mutation that sets hasMore from moreInWindow alone → RED.
+  const beyondWindow = fanoutRan
+    ? fetchedShards < totalShards || failedShards > 0
+    : hasShards;
+  const hasMore = moreInWindow || beyondWindow;
+  // nextOffset walks ONLY the assembled+fetched window; the older un-fetched shards
+  // are UNREACHABLE via paging (mirror the FTS beyond-window pattern: hasMore true
+  // while nextOffset is null).
+  const nextOffset = moreInWindow ? offset + returned : null;
+  // [M1] totalAvailable UNCHANGED — grand total when shards exist (incl un-fetched),
+  // else the filtered recent length. Never recomputed down to fetched rows.
   const totalAvailable = hasShards ? subm.recentCount + shardCount : filtered.length;
 
   const filtersApplied: string[] = [];
   if (forms && forms.length) filtersApplied.push("forms");
 
   const notes: string[] = [];
-  if (hasShards) {
+  if (fanoutRan) {
+    // allFetched = every shard the cap allowed was fetched WITHOUT a 404/skip.
+    // "complete" (for the COMPLETE note + the forms-note wording) additionally
+    // requires zero short-shard shortfalls (missingFilings 0).
+    const allFetched = failedShards === 0 && fetchedShards === totalShards;
+    const complete = allFetched && missingFilings === 0;
+    if (complete) {
+      notes.push(
+        `COMPLETE filing history: fetched all ${totalShards} older shard(s) plus the recent window (${subm.recentCount}) = ${totalAvailable} filings.`,
+      );
+    } else {
+      if (fetchedShards < totalShards) {
+        // PARTIAL-BY-CAP — split the two "more" axes explicitly (M2).
+        const unfetched = totalShards - fetchedShards;
+        notes.push(
+          `PARTIAL history (maxShards cap ${maxShards}): fetched the ${fetchedShards} newest of ${totalShards} shard(s). Paginate via nextOffset for MORE OF THIS fetched window (${fetchedShards} newest shard(s) + the recent ${subm.recentCount}); pagination will NOT reach the ${unfetched} older un-fetched shard(s) (${skippedFilings} filings) — RAISE maxShards (max 100) to fetch those.`,
+        );
+      }
+      if (failedShards > 0) {
+        // PARTIAL-BY-FAILURE (one or more shards 404'd / were skipped).
+        notes.push(
+          `PARTIAL history: ${failedShards} shard(s) could not be fetched (HTTP 404 / bad-or-cross-CIK name / transient); ${missingFilings} filing(s) are missing from this history. Not fabricated.`,
+        );
+      } else if (allFetched && missingFilings > 0) {
+        // All shards fetched, but some declared rows were absent (recent→shard
+        // roll / upstream lag) — a benign shortfall, disclosed per-shard below.
+        notes.push(
+          `Fetched all ${totalShards} older shard(s) plus the recent window (${subm.recentCount}), but ${missingFilings} declared filing(s) were absent from the returned shard body(ies) (recent→shard roll or upstream lag); disclosed per-shard below and NOT fabricated.`,
+        );
+      }
+    }
+    if (forms && forms.length) {
+      notes.push(
+        complete
+          ? "The form filter now spans the COMPLETE fetched history (recent + all shards); totalAvailable stays the grand UNFILTERED total, so complete may read false — an under-claim, NOT missing older matches."
+          : "Form filtering was applied across the fetched window (recent + fetched shards) — older matching filings may exist in the un-fetched/failed shards.",
+      );
+    }
+    // [M4] Shared-throttle contention: the fan-out serializes N shard GETs through
+    // the module-level edgar gate SHARED across all edgar tools.
+    notes.push(
+      `fullHistory serialized ${fetchedShards + failedShards} shard GET(s) through the shared EDGAR throttle gate (~${EDGAR_MIN_INTERVAL_MS}ms spacing, shared across ALL edgar tools) — a large fan-out adds latency to concurrent edgar tool calls.`,
+    );
+    notes.push(...shardNotes);
+  } else if (hasShards) {
+    // fullHistory OFF (default) with shards → today's INCOMPLETE note VERBATIM
+    // (backward-compat: byte-identical output when the flag is absent).
     notes.push(
       `INCOMPLETE HISTORY: only the ${subm.recentCount} most-recent filings (filings.recent) were fetched. ${subm.files.length} older shard(s) (~${shardCount} filings, filings.files[]) were NOT fetched, so this is NOT the full filing history.` +
         (forms && forms.length
@@ -499,7 +730,7 @@ export async function companyFilings(args: {
         offset,
         limit,
         hasMore,
-        nextOffset: moreInWindow ? offset + returned : null,
+        nextOffset,
       },
       notes,
     }),
