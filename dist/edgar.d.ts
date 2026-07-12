@@ -222,4 +222,63 @@ export declare function xbrlFrames(args: {
     offset?: number;
     includeStats?: boolean;
 }): Promise<MetaBundle>;
+export declare const MAX_INDEX_ROWS = 500000;
+/** One filing row from master.idx. CIK stays a STRING (never num-coerced). */
+export type FilingIndexRow = {
+    cik: string | null;
+    cikPadded: string | null;
+    companyName: string | null;
+    formType: string | null;
+    dateFiled: string | null;
+    filename: string | null;
+    filingUrl: string | null;
+};
+type ParsedFullIndex = {
+    rows: FilingIndexRow[];
+    malformedRows: number;
+    totalIsLowerBound: boolean;
+};
+/**
+ * Parse the raw master.idx body into `FilingIndexRow[]`.
+ *
+ * DRIFT keys on the ABSENCE of the `CIK|Company Name|Form Type|Date Filed|Filename`
+ * header + the `----` dashes boundary ONLY (M1) — a non-index / error / format-changed
+ * body served with HTTP 200 (e.g. an S3 error HTML page) → THROW `driftError`. A
+ * body WITH the header+dashes but ZERO data rows is a GENUINE-EMPTY quarter (2026/QTR4
+ * live) → returned to the caller (NOT thrown). A body WITH the header+dashes whose
+ * EVERY data row fails the 5-field split → THROW `driftError` (all-malformed = format
+ * drift). The fixed preamble (`Description:` …) BEFORE the header is skipped.
+ */
+export declare function parseFullIndex(body: string, maxRows?: number): ParsedFullIndex;
+/** For tests: evict the full-index bounded LRU (mirrors cache.ts `_clearCache` for
+ *  this dedicated cache, which the shared `_clearCache` does not touch). */
+export declare function _resetFullIndexCache(): void;
+/**
+ * Read the SEC EDGAR quarterly full-index for (year, quarter) and return the
+ * filings matching the given CLIENT-SIDE filters (form / CIK / company substring /
+ * date range), offset-paginated, with the EXACT total match count for the quarter.
+ *
+ * HONESTY (ADR-0026 v2):
+ *  - FULL-SCAN → `totalAvailable` is the EXACT filtered match count across the WHOLE
+ *    quarter (never a page length, never a byte-capped under-count — SEC ignores Range).
+ *  - A bounds-valid but unpublished quarter 403s (getEdgar mislabels it rate_limited);
+ *    TOOL-LOCAL reclassify to an AMBIGUOUS both-causes error (unpublished quarter OR
+ *    the 10 req/s rate-block) — never a bare rate-limit, never a fake-empty.
+ *  - Drift on header/dashes ABSENCE or an all-malformed body (THROW); header+0-rows ⇒
+ *    genuine-empty (complete:true). A future year / bad quarter ⇒ invalid_input, 0 fetch.
+ *  - CIK stays a STRING; every column via the module-local `str` (null-never-"").
+ *  - `companyContains` is a LITERAL case-insensitive substring (C110 N/A — no token split).
+ */
+export declare function filingIndex(args: {
+    year: number;
+    quarter: number;
+    formType?: string;
+    cik?: string | number;
+    companyContains?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    limit?: number;
+    offset?: number;
+}): Promise<MetaBundle>;
+export {};
 //# sourceMappingURL=edgar.d.ts.map
