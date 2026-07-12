@@ -1211,6 +1211,61 @@ const EdgarFilingIndexInput = z.object({
     .describe("0-based offset into the filtered matches (default 0)."),
 });
 
+// ─── EDGAR daily-index (ADR-0027) — input schema ─────────────────
+// The per-DAY sibling of edgar_filing_index. A single required ISO `date`
+// (YYYY-MM-DD) is the ONLY caller value that shapes the URL — the handler derives
+// year/quarter/yyyymmdd from it and re-validates them belt-and-suspenders in
+// edgar's buildDailyIndexUrl. dateFrom/dateTo are DROPPED (a single-day file has one
+// date). ALL other params are CLIENT-SIDE filters over the whole downloaded body
+// (ZERO query string reaches the wire). The date's EXACT calendar-day round-trip +
+// the future-date rejection are enforced at CALL time in the handler (M2), so the
+// tools/list snapshot stays deterministic across a day rollover.
+const EdgarDailyFilingIndexInput = z.object({
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .describe(
+      "Required calendar day ISO YYYY-MM-DD (>= 1994-01-01 — EDGAR daily-index begins 1994 Q1). The handler derives year/quarter/yyyymmdd. A malformed / non-real day (2024-02-30, non-leap 2023-02-29) or a FUTURE date is rejected as invalid_input with 0 fetch. TODAY is allowed (its index may not be posted until ~22:00 US-Eastern).",
+    ),
+  formType: z
+    .string()
+    .min(1)
+    .max(30)
+    .optional()
+    .describe(
+      "Optional CLIENT-SIDE filter: case-insensitive EXACT match on the Form Type column (e.g. '8-K', '10-K'). '8-K' does NOT match '8-K/A' — pass each amendment variant separately.",
+    ),
+  cik: z
+    .union([z.string().regex(/^\d{1,10}$/), z.number().int().nonnegative()])
+    .optional()
+    .describe(
+      "Optional CLIENT-SIDE filter: numeric SEC CIK (1-10 digits or a number), matched leading-zero-safe via padCik on both sides (so '320193' and '0000320193' match the same filer).",
+    ),
+  companyContains: z
+    .string()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe(
+      "Optional CLIENT-SIDE filter: case-insensitive LITERAL substring on the Company Name column. A multi-word value matches as ONE contiguous string (NOT AND/OR-tokenized).",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(1000)
+    .default(100)
+    .describe(
+      "Page size over the FILTERED, full-scanned matches (1..1000, default 100). Does NOT reduce the download — the whole day is scanned; this only windows the returned rows (page via _meta.pagination.nextOffset).",
+    ),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe("0-based offset into the filtered matches (default 0)."),
+});
+
 // ─── Socrata / SODA (keyless SLED + E-rate) — input schemas ──────
 // ADR-0004. First SLED source. `domain` is a curated allowlist ENUM (the SSRF
 // core — no free host); `datasetId` is a strict 4x4 with .length(9) (M2 — blocks
@@ -3078,7 +3133,7 @@ const TOOLS: ToolDef[] = [
     inputSchema: TreasuryAvgInterestRatesInput,
     handler: (input) => treasury.avgInterestRates(input),
   }),
-  // ━━━ SEC EDGAR — filings / XBRL facts / CIK / full-text / frames / full-index (keyless) (6) ━━━ ADR-0003 / ADR-0017 / ADR-0026
+  // ━━━ SEC EDGAR — filings / XBRL facts / CIK / full-text / frames / full-index / daily-index (keyless) (7) ━━━ ADR-0003 / ADR-0017 / ADR-0026 / ADR-0027
   defineTool({
     name: "edgar_lookup_cik",
     description:
@@ -3120,6 +3175,13 @@ const TOOLS: ToolDef[] = [
       "Bulk cross-filer SEC filing index for a quarter (keyless, from the www.sec.gov EDGAR full-index master.idx). Reads the WHOLE quarter's index (every filer's every filing — CIK|Company|Form|Date|Filename, ~370K rows), FULL-SCANS it, and returns offset-paginated filings matching CLIENT-SIDE filters with the EXACT total. Input `year` (>=1993, <= current year), `quarter` (1..4); optional `formType` (exact form, e.g. '8-K'), `cik` (numeric, leading-zero-safe), `companyContains` (LITERAL case-insensitive substring), `dateFrom`/`dateTo` (ISO YYYY-MM-DD), `limit` (<=1000, def 100), `offset`. Returns { year, quarter, indexFile, returned, totalAvailable, filings:[{ cik, cikPadded, companyName, formType, dateFiled, filename, filingUrl }] }. This is the BULK-ENUMERATION primitive (the per-filer edgar tools need a CIK you already hold; this sweeps a whole quarter by form/date/company, e.g. 'every 8-K in 2024 Q1'). HONESTY: totalAvailable is the EXACT match count over the full quarter scan — never a page length, never a byte-capped subset (SEC ignores HTTP Range); a 0-match result is a genuine EXACT ZERO (complete:true), NOT a truncation; a bounds-valid but unpublished quarter returns HTTP 403 and is surfaced as an AMBIGUOUS both-causes error (quarter-not-published OR the 10 req/s rate-block), never a bare rate-limit and never a fake-empty; a non-index / all-malformed body is refused as schema_drift; a future year / bad quarter is rejected pre-fetch (invalid_input, 0 fetch). The CURRENT quarter grows daily (totalAvailable is exact AS-OF-snapshot). filingUrl is a resolvable archive URL. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS — there is no authoritative CIK↔UEI join.",
     inputSchema: EdgarFilingIndexInput,
     handler: (input) => edgar.filingIndex(input),
+  }),
+  defineTool({
+    name: "edgar_daily_filing_index",
+    description:
+      "Per-DAY cross-filer SEC filing index (keyless, from the www.sec.gov EDGAR daily-index master.YYYYMMDD.idx). The per-day sibling of edgar_filing_index (~30× smaller): reads ONE calendar day's index (every filer's every filing that day — CIK|Company|Form|Date|File Name, ~8K rows), FULL-SCANS it, and returns offset-paginated filings matching CLIENT-SIDE filters with the EXACT total. Answers the monitoring/alerting question the quarterly tool cannot ('every 8-K filed on 2024-01-03', 'watch a CIK day-by-day'). Input `date` (required ISO YYYY-MM-DD, >=1994-01-01, not future); optional `formType` (exact form, e.g. '8-K'), `cik` (numeric, leading-zero-safe), `companyContains` (LITERAL case-insensitive substring), `limit` (<=1000, def 100), `offset`. Returns { found, date, year, quarter, indexFile, returned, totalAvailable, filings:[{ cik, cikPadded, companyName, formType, dateFiled, filename, filingUrl }] }. HONESTY: totalAvailable is the EXACT match count over the full day scan — never a page length, never a byte-capped subset (SEC ignores HTTP Range). The daily-index's pervasive-403 empty model is disambiguated via the quarter's index.json existence oracle, RECENCY-AWARE: a day NEWER than the newest published index (weekend/holiday/not-yet-disseminated recent trading day) ⇒ found:false, complete:FALSE, retryable not-yet-disseminated note (NEVER a confident empty); an unlisted day INSIDE the covered range (a real weekend/holiday) ⇒ found:false, complete:true genuine-absent; a LISTED day whose .idx 403s ⇒ honest rate_limited; the oracle itself inconclusive ⇒ ambiguous both-causes upstream_unavailable. A non-real/future date is rejected pre-fetch (invalid_input, 0 fetch); a non-index / all-malformed body is refused as schema_drift. dateFiled is normalized to ISO from the compact YYYYMMDD column. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS — there is no authoritative CIK↔UEI join.",
+    inputSchema: EdgarDailyFilingIndexInput,
+    handler: (input) => edgar.dailyFilingIndex(input),
   }),
   // ━━━ Socrata / SODA — keyless SLED + E-rate open data (2) ━━━ ADR-0004
   defineTool({

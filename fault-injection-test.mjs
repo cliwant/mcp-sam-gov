@@ -58,7 +58,7 @@ import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
-import { padCik as edgarPadCik, xbrlFrames, filingIndex, parseFullIndex, MAX_INDEX_ROWS, _resetFullIndexCache } from "./dist/edgar.js";
+import { padCik as edgarPadCik, xbrlFrames, filingIndex, parseFullIndex, MAX_INDEX_ROWS, _resetFullIndexCache, dailyFilingIndex, parseDailyIndex, _resetDailyIndexCache } from "./dist/edgar.js";
 import { num as socrataNum } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
@@ -6994,6 +6994,294 @@ async function testEdgarFilingIndexHonesty() {
   });
 }
 
+// §41f: SEC EDGAR edgar_daily_filing_index (ADR-0027) — the KEYLESS per-DAY
+// cross-filer daily-index (www.sec.gov/Archives/edgar/daily-index/<year>/QTR<n>/
+// master.YYYYMMDD.idx). All OFFLINE (mock fetch of the getEdgar `.text()`/`.json()`
+// body — a COMPACT .idx / index.json fixture, NOT an 8K-row body), deterministic,
+// non-vacuous: each assertion pins an honest value + names the load-bearing mutation
+// (a)-(m) that turns it RED. Driven through the REAL runTool dispatch except the SSRF /
+// date-round-trip direct-calls (fetch-spy) + the MAX_INDEX_ROWS ceiling (parser-level).
+//   (a) totalAvailable = the EXACT full-scan match count, NEVER the returned page length.
+//   (b) a formType filter's matches span LOW+HIGH CIK ⇒ the total counts BOTH ends.
+//   (c) ★the daily `File Name` header (WITH SPACE) is recognized — a `Filename`-keyed
+//       parser FALSE-DRIFTs on a valid daily index ⇒ RED (THE key new one).
+//   (d) header-ABSENT / all-malformed body ⇒ driftError (never "0 filings").
+//   (e) ★403-on-a-LISTED day ⇒ honest rate_limited throw (NOT a fake-empty/genuine-absent).
+//   (f) ★403-on-an-UNLISTED day INSIDE the covered range ⇒ genuine-absent found:false,
+//       complete:true (NOT thrown, NOT a fake scan).
+//   (g) a `|`-in-company-name row is COUNTED (bounded first-4-pipe split).
+//   (h) dateFiled NORMALIZED to ISO from the compact YYYYMMDD (raw/mis-handled ⇒ RED).
+//   (i) SSRF: URL is exactly .../<year>/QTR<quarter>/master.<yyyymmdd>.idx, ZERO query string.
+//   (j) ★future / 2024-02-30 / 2024-01-40 / non-leap 2023-02-29 ⇒ invalid_input, 0 GET.
+//   (k) companyContains is a LITERAL substring (case-insensitive), NOT AND/OR-tokenized.
+//   (l) MAX_INDEX_ROWS exceeded ⇒ totalIsLowerBound; the normal path never sets it.
+//   (m) ★M1 recency: an index.json whose newest master is 20260709 + a 403 for 20260710
+//       ⇒ complete:FALSE not-yet-disseminated, NOT complete:true genuine-absent.
+const isEdgarDailyIndex = (u) => /www\.sec\.gov\/Archives\/edgar\/daily-index\/.*master\.\d{8}\.idx/.test(u);
+const isEdgarDailyOracle = (u) => /www\.sec\.gov\/Archives\/edgar\/daily-index\/.*index\.json/.test(u);
+const DAILY_PREAMBLE =
+  "Description:           Daily Index of EDGAR Dissemination Feed\n" +
+  "Last Data Received:    Jan  3, 2024\n" +
+  "Comments:              webmaster@sec.gov\n" +
+  "Anonymous FTP:         ftp://ftp.sec.gov/edgar/\n \n";
+// ★ File Name WITH A SPACE + compact YYYYMMDD Date Filed (the DAILY shape; fact #2/#3).
+const DAILY_HEADER = "CIK|Company Name|Form Type|Date Filed|File Name\n";
+const DAILY_DASHES = "-".repeat(80) + "\n";
+const dailyBody = (rows) => DAILY_PREAMBLE + DAILY_HEADER + DAILY_DASHES + (rows.length ? rows.join("\n") + "\n" : "");
+// An index.json existence-oracle fixture from a list of yyyymmdd day strings.
+const oracleJson = (days) => ({ directory: { item: days.map((d) => ({ name: `master.${d}.idx`, type: "text.gif", size: "123" })) } });
+
+async function testEdgarDailyFilingIndexHonesty() {
+  section("41f. SEC EDGAR edgar_daily_filing_index — per-DAY full-scan EXACT total, daily File-Name header, M1 recency-aware 403 disambiguation via index.json oracle, M2 date round-trip, bounded pipe-split, SSRF, literal companyContains (ADR-0027, OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+  _resetDailyIndexCache();
+
+  // A COMPACT CIK-SORTED fixture: 8-K matches at the LOW (CIK 100) AND HIGH (999998/
+  // 999999) ends. Date Filed all compact `20240103`. A mix of forms (8-K, 10-Q, 4,
+  // one 8-K/A). TotalAvailable(8-K)=4 (100/300/999998/999999); 8-K/A(555)=1 distinct.
+  const rowsBase = [
+    "100|ALPHA CORP|8-K|20240103|edgar/data/100/0000000100-24-000001.txt",
+    "200|BETA LLC|10-Q|20240103|edgar/data/200/0000000200-24-000001.txt",
+    "300|GAMMA INC|8-K|20240103|edgar/data/300/0000000300-24-000001.txt",
+    "400|DELTA WIDGETS INC|4|20240103|edgar/data/400/0000000400-24-000001.txt",
+    "410|DELTA WIDGETS INC|4|20240103|edgar/data/410/0000000410-24-000001.txt",
+    "500|EPSILON LTD|8-K/A|20240103|edgar/data/500/0000000500-24-000001.txt",
+    "999998|OMEGA HOLDINGS|8-K|20240103|edgar/data/999998/0000999998-24-000001.txt",
+    "999999|ZETA TRUST|8-K|20240103|edgar/data/999999/0000999999-24-000001.txt",
+  ];
+  const TOTAL_ROWS = rowsBase.length; // 8
+  const TOTAL_8K = 4;
+
+  // (a)+(c)+(h)+(i) happy path — daily File-Name header recognized, EXACT total, ISO date, SSRF URL.
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: dailyBody(rowsBase) }) : failClosed()()), async (calls) => {
+    const r = await runTool("edgar_daily_filing_index", { date: "2024-01-03", limit: 3 }, sam);
+    const m = buildMeta(r.meta);
+    ok("41f(a/c) daily `File Name` header recognized ⇒ totalAvailable === 8 (EXACT full-scan), returned 3 (page); found:true — a `Filename`-keyed parser would FALSE-DRIFT ⇒ RED",
+      r.data.found === true && m.totalAvailable === TOTAL_ROWS && m.returned === 3 && r.data.filings.length === 3, JSON.stringify({ found: r.data.found, ta: m.totalAvailable, ret: m.returned }));
+    ok("41f(a) subset page ⇒ complete:false + hasMore:true + nextOffset:3 (never total→page.length)",
+      m.complete === false && m.pagination.hasMore === true && m.pagination.nextOffset === 3, JSON.stringify(m.pagination));
+    ok("41f(h) dateFiled NORMALIZED to ISO 2024-01-03 (from compact 20240103) — a raw/mis-handled date ⇒ RED",
+      r.data.filings.every((f) => f.dateFiled === "2024-01-03"), JSON.stringify(r.data.filings.map((f) => f.dateFiled)));
+    ok("41f preamble skipped: first filing is CIK-100 (cik '100', cikPadded '0000000100' STRING, filingUrl resolvable); indexFile echoed",
+      r.data.filings[0].cik === "100" && r.data.filings[0].cikPadded === "0000000100" && r.data.filings[0].filingUrl === "https://www.sec.gov/Archives/edgar/data/100/0000000100-24-000001.txt" && r.data.indexFile === "master.20240103.idx" && r.data.year === 2024 && r.data.quarter === 1, JSON.stringify(r.data.filings[0]));
+    ok("41f no totalIsLowerBound on the normal path",
+      m.totalIsLowerBound === undefined, JSON.stringify({ lb: m.totalIsLowerBound }));
+    const u = calls.find((c) => isEdgarDailyIndex(c.url))?.url;
+    ok("41f(i) SSRF: URL === https://www.sec.gov/Archives/edgar/daily-index/2024/QTR1/master.20240103.idx with ZERO query string (a filter-on-the-wire / wrong host ⇒ RED)",
+      u === "https://www.sec.gov/Archives/edgar/daily-index/2024/QTR1/master.20240103.idx" && !u.includes("?"), JSON.stringify(u));
+  });
+
+  // (b) byte-cap under-count guard — 8-K matches SPAN low (100) + high (999998/999999).
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: dailyBody(rowsBase) }) : failClosed()()), async (calls) => {
+    const r = await runTool("edgar_daily_filing_index", { date: "2024-01-03", formType: "8-K", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("41f(b) formType 8-K ⇒ totalAvailable === 4 (LOW CIK 100 AND HIGH 999998/999999 counted; 8-K ≠ 8-K/A) — a tail-truncation ⇒ under-count ⇒ RED",
+      m.totalAvailable === TOTAL_8K && r.data.filings.every((f) => f.formType === "8-K"), JSON.stringify({ ta: m.totalAvailable, forms: r.data.filings.map((f) => f.formType) }));
+    const r2 = await runTool("edgar_daily_filing_index", { date: "2024-01-03", formType: "8-K", limit: 2, offset: 2 }, sam);
+    ok("41f(b) last page (offset 2) returns CIK 999998/999999 8-Ks ⇒ exact-total offset pagination reaches the CIK-sorted tail",
+      r2.data.filings.map((f) => f.cik).join(",") === "999998,999999", JSON.stringify(r2.data.filings.map((f) => f.cik)));
+    const u = calls.find((c) => isEdgarDailyIndex(c.url))?.url;
+    ok("41f(b/i) the 8-K filter is CLIENT-SIDE — the URL carries NO ?formType= query string",
+      typeof u === "string" && !u.includes("?") && !/formType|8-K/.test(u), JSON.stringify(u));
+  });
+
+  // 8-K/A ≠ 8-K (distinct exact match).
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: dailyBody(rowsBase) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_daily_filing_index", { date: "2024-01-03", formType: "8-K/A" }, sam);
+    ok("41f formType '8-K/A' ⇒ exactly 1 match (CIK 500) — EXACT equality, NOT substring ('8-K' matches 4, '8-K/A' matches 1)",
+      buildMeta(r.meta).totalAvailable === 1 && r.data.filings[0].cik === "500", JSON.stringify({ ta: buildMeta(r.meta).totalAvailable }));
+  });
+
+  // (memoize) a REPEAT call for the SAME day (different filters) re-uses the cached text.
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: dailyBody(rowsBase) }) : failClosed()()), async (calls) => {
+    await runTool("edgar_daily_filing_index", { date: "2024-01-03", formType: "8-K" }, sam);
+    await runTool("edgar_daily_filing_index", { date: "2024-01-03", formType: "10-Q" }, sam);
+    ok("41f(cache) two calls for the SAME day ⇒ getEdgar fetched ONCE (bounded-LRU raw-text cache; a re-download per call ⇒ 2 fetches ⇒ RED)",
+      calls.filter((c) => isEdgarDailyIndex(c.url)).length === 1, JSON.stringify(calls.filter((c) => isEdgarDailyIndex(c.url)).length));
+  });
+
+  // (k) + (g) companyContains LITERAL substring + a `|`-in-company row is COUNTED.
+  const rowsPipe = rowsBase.concat(["555|BIG | DEAL CORP|8-K|20240103|edgar/data/555/0000000555-24-000001.txt"]);
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: dailyBody(rowsPipe) }) : failClosed()()), async () => {
+    const rHit = await runTool("edgar_daily_filing_index", { date: "2024-01-03", companyContains: "widgets inc" }, sam);
+    ok("41f(k) companyContains 'widgets inc' ⇒ 2 matches (DELTA WIDGETS INC ×2) — a LITERAL contiguous case-insensitive substring",
+      buildMeta(rHit.meta).totalAvailable === 2 && rHit.data.filings.every((f) => /DELTA WIDGETS INC/.test(f.companyName)), JSON.stringify({ ta: buildMeta(rHit.meta).totalAvailable }));
+    const rMiss = await runTool("edgar_daily_filing_index", { date: "2024-01-03", companyContains: "inc widgets" }, sam);
+    ok("41f(k) companyContains 'inc widgets' (reordered) ⇒ 0 matches (a token-AND/OR split ⇒ would match ⇒ RED) + a LITERAL-substring note",
+      buildMeta(rMiss.meta).totalAvailable === 0 && buildMeta(rMiss.meta).notes.some((n) => /LITERAL substring/i.test(n) && /NOT AND\/OR-tokenized/i.test(n)), JSON.stringify({ ta: buildMeta(rMiss.meta).totalAvailable }));
+    const rAll = await runTool("edgar_daily_filing_index", { date: "2024-01-03", limit: 1000 }, sam);
+    ok("41f(g) a `|`-in-company-name row is COUNTED (bounded split) ⇒ totalAvailable === 9 (8 base + the pipe row) — an exactly-5-else-malformed split under-counts to 8 ⇒ RED",
+      buildMeta(rAll.meta).totalAvailable === 9 && rAll.data.filings.some((f) => f.cik === "555"), JSON.stringify({ ta: buildMeta(rAll.meta).totalAvailable, has555: rAll.data.filings.some((f) => f.cik === "555") }));
+  });
+
+  // cik filter — leading-zero-safe (padCik both-sides): '300' and '0000000300' match the same filer.
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: dailyBody(rowsBase) }) : failClosed()()), async () => {
+    const rA = await runTool("edgar_daily_filing_index", { date: "2024-01-03", cik: "300" }, sam);
+    const rB = await runTool("edgar_daily_filing_index", { date: "2024-01-03", cik: "0000000300" }, sam);
+    ok("41f cik filter padCik both-sides: '300' and '0000000300' each match the CIK-300 row (1 match); cik stays a STRING",
+      buildMeta(rA.meta).totalAvailable === 1 && buildMeta(rB.meta).totalAvailable === 1 && rA.data.filings[0].cik === "300" && rA.data.filings[0].cikPadded === "0000000300", JSON.stringify({ a: buildMeta(rA.meta).totalAvailable, b: buildMeta(rB.meta).totalAvailable }));
+  });
+
+  // (c/genuine-empty) header+dashes+0-rows ⇒ GENUINE-EMPTY (found:true, complete:true), NOT drift.
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: dailyBody([]) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_daily_filing_index", { date: "2024-01-03", formType: "8-K" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41f(c) daily header+dashes+0-rows ⇒ GENUINE-EMPTY: found:true / filings:[] / totalAvailable:0 / complete:true (mutate to driftError on 0-rows ⇒ RED)",
+      r.data.found === true && r.data.filings.length === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ found: r.data.found, ta: m.totalAvailable, complete: m.complete }));
+  });
+
+  // (c/d) ★ a body with the FULL-INDEX `Filename` header (NO space) ⇒ driftError — the
+  // daily parser must NOT accept it (a `Filename`-keyed parser would parse it ⇒ RED).
+  _resetDailyIndexCache();
+  const WRONG_HEADER_BODY = DAILY_PREAMBLE + "CIK|Company Name|Form Type|Date Filed|Filename\n" + DAILY_DASHES + "100|ALPHA CORP|8-K|20240103|edgar/data/100/x.txt\n";
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: WRONG_HEADER_BODY }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_daily_filing_index", { date: "2024-01-03" }, sam));
+    ok("41f(c) a body with the FULL-INDEX 'Filename' header (no space) ⇒ schema_drift THROW (the daily parser keys on 'File Name' WITH a space; accepting 'Filename' ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (d) header-ABSENT body ⇒ driftError.
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: "<html><body>Service temporarily unavailable</body></html>\nnot a pipe index\n" }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_daily_filing_index", { date: "2024-01-03" }, sam));
+    ok("41f(d) header-ABSENT body ⇒ schema_drift THROW (a 200 non-index/error page is NEVER read as '0 filings')",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (d) all-malformed rows (daily header present, EVERY data row fails the 5-field split) ⇒ driftError.
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 200, json: dailyBody(["garbage-no-pipes", "another bad row", "still|only|three"]) }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_daily_filing_index", { date: "2024-01-03" }, sam));
+    ok("41f(d) daily header present but ALL data rows fail the 5-field split ⇒ schema_drift THROW (never '0 filings')",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (f) ★403-on-an-UNLISTED day INSIDE the covered range (a Saturday) ⇒ GENUINE-ABSENT
+  // found:false, complete:true. Oracle lists 20240103..20240329 (newest 20240329 > the
+  // requested Sat 20240106), the Sat is NOT among them ⇒ true genuine-absent.
+  _resetDailyIndexCache();
+  await withFetch((u) => {
+    if (isEdgarDailyOracle(u)) return mockResponse({ status: 200, json: oracleJson(["20240103", "20240104", "20240105", "20240108", "20240329"]) });
+    if (isEdgarDailyIndex(u)) return mockResponse({ status: 403, json: ACCESS_DENIED_XML, headers: { "content-type": "application/xml" } });
+    return failClosed()();
+  }, async (calls) => {
+    const r = await runTool("edgar_daily_filing_index", { date: "2024-01-06", formType: "8-K" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41f(f) 403 on a Saturday UNLISTED but INSIDE the covered range (< newest 20240329) ⇒ GENUINE-ABSENT: found:false / complete:true / totalAvailable:0 (NOT thrown, NOT a fake-empty scan) ⇒ mutate to complete:false or throw ⇒ RED",
+      r.data.found === false && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ found: r.data.found, ta: m.totalAvailable, complete: m.complete }));
+    ok("41f(f) genuine-absent note names 'genuine-absent' + 'complete:true' + not a rate-block",
+      m.notes.some((n) => /genuine-absent/i.test(n) && /NOT a rate-block/i.test(n)), JSON.stringify(m.notes.slice(0, 2)));
+    ok("41f(f) the oracle WAS consulted on the 403 path (index.json fetched)",
+      calls.some((c) => isEdgarDailyOracle(c.url)), JSON.stringify(calls.map((c) => c.url)));
+  });
+
+  // (e) ★403-on-a-LISTED day ⇒ honest rate_limited throw (the index EXISTS but the .idx
+  // 403'd = a rate-block). Oracle LISTS master.20240103.idx.
+  _resetDailyIndexCache();
+  await withFetch((u) => {
+    if (isEdgarDailyOracle(u)) return mockResponse({ status: 200, json: oracleJson(["20240103", "20240104", "20240329"]) });
+    if (isEdgarDailyIndex(u)) return mockResponse({ status: 403, json: ACCESS_DENIED_XML, headers: { "content-type": "application/xml" } });
+    return failClosed()();
+  }, async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_daily_filing_index", { date: "2024-01-03" }, sam));
+    const te = toToolError(error);
+    ok("41f(e) 403 on a LISTED day ⇒ THROW honest rate_limited (the index EXISTS, SEC rate-blocked the IP) — NOT a fake-empty, NOT a genuine-absent ⇒ mutate to found:false ⇒ RED",
+      threw && te.kind === "rate_limited" && te.upstreamStatus === 403 && /EXISTS/i.test(te.message), JSON.stringify({ kind: te.kind, st: te.upstreamStatus }));
+  });
+
+  // (m) ★M1 RECENCY — an index.json whose newest master is 20260709 + a 403 for a MORE-
+  // RECENT trading day (20260710, unlisted) ⇒ complete:FALSE not-yet-disseminated, NOT a
+  // confident complete:true genuine-absent. This is THE load-bearing M1 mutation.
+  _resetDailyIndexCache();
+  await withFetch((u) => {
+    if (isEdgarDailyOracle(u)) return mockResponse({ status: 200, json: oracleJson(["20260701", "20260702", "20260706", "20260707", "20260708", "20260709"]) });
+    if (isEdgarDailyIndex(u)) return mockResponse({ status: 403, json: ACCESS_DENIED_XML, headers: { "content-type": "application/xml" } });
+    return failClosed()();
+  }, async () => {
+    const r = await runTool("edgar_daily_filing_index", { date: "2026-07-10", formType: "8-K" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41f(m/M1) 403 on 2026-07-10 (NEWER than the oracle's newest 20260709) ⇒ found:false + complete:FALSE + not-yet-disseminated note (NOT complete:true genuine-absent — the marquee monitoring lie this closes) ⇒ mutate to complete:true ⇒ RED",
+      r.data.found === false && m.totalAvailable === 0 && m.complete === false, JSON.stringify({ found: r.data.found, complete: m.complete }));
+    ok("41f(m/M1) the note is the RETRYABLE not-yet-disseminated wording ('lag' / 'not be disseminated yet' / 'NOT a confirmed empty day'), NOT the genuine-absent wording",
+      m.notes.some((n) => /disseminated yet/i.test(n) && /NOT a confirmed empty day/i.test(n)), JSON.stringify(m.notes.slice(0, 1)));
+  });
+
+  // (m) oracle-inconclusive — the index.json ITSELF 403s ⇒ ambiguous both-causes upstream_unavailable.
+  _resetDailyIndexCache();
+  await withFetch((u) => {
+    if (isEdgarDailyOracle(u)) return mockResponse({ status: 403, json: ACCESS_DENIED_XML, headers: { "content-type": "application/xml" } });
+    if (isEdgarDailyIndex(u)) return mockResponse({ status: 403, json: ACCESS_DENIED_XML, headers: { "content-type": "application/xml" } });
+    return failClosed()();
+  }, async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_daily_filing_index", { date: "2024-01-06" }, sam));
+    const te = toToolError(error);
+    ok("41f(m) both the .idx AND the oracle 403 ⇒ ambiguous both-causes upstream_unavailable naming 'no published daily index' AND 'rate-limiting' (NEVER a fake-empty) — reclassify-off ⇒ bare rate_limited ⇒ RED",
+      threw && te.kind === "upstream_unavailable" && /no published daily index/i.test(te.message) && /rate-limiting/i.test(te.message), JSON.stringify({ kind: te.kind, msg: te.message.slice(0, 70) }));
+  });
+
+  // a REAL 429 (status 429, not 403) stays an HONEST rate_limited (NOT caught by the 403 reclassify).
+  _resetDailyIndexCache();
+  await withFetch((u) => (isEdgarDailyIndex(u) ? mockResponse({ status: 429 }) : failClosed()()), async (calls) => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_daily_filing_index", { date: "2024-01-03" }, sam));
+    ok("41f a REAL HTTP 429 ⇒ honest rate_limited (upstreamStatus 429 ≠ 403 ⇒ NOT reclassified, oracle NOT consulted) — a genuine rate-block is not swallowed",
+      threw && toToolError(error).kind === "rate_limited" && toToolError(error).upstreamStatus === 429 && !calls.some((c) => isEdgarDailyOracle(c.url)), JSON.stringify({ kind: toToolError(error).kind, st: toToolError(error).upstreamStatus }));
+  });
+
+  // (j) ★M2 date round-trip + future — Feb-30 / day-40 / non-leap-Feb-29 / a future date
+  // ⇒ invalid_input with 0 GET (direct handler call bypassing Zod + a fetch-spy).
+  await withFetch(failClosed(), async (calls) => {
+    const nextYear = new Date().getUTCFullYear() + 1;
+    const bads = [
+      { why: "Feb-30 2024-02-30 (JS rolls to Mar-01)", args: { date: "2024-02-30" } },
+      { why: "day-40 2024-01-40", args: { date: "2024-01-40" } },
+      { why: "non-leap 2023-02-29", args: { date: "2023-02-29" } },
+      { why: "month-13 2024-13-01", args: { date: "2024-13-01" } },
+      { why: "month-00 2024-00-10", args: { date: "2024-00-10" } },
+      { why: `future date ${nextYear}-01-01`, args: { date: `${nextYear}-01-01` } },
+      { why: "malformed '2024-1-3'", args: { date: "2024-1-3" } },
+    ];
+    for (const b of bads) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => dailyFilingIndex(b.args));
+      ok(`41f(j) M2 round-trip: ${b.why} ⇒ invalid_input, 0 fetch (a naive !isNaN(Date.UTC) impl fetches the rolled/overflow day ⇒ RED)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+    // TODAY is NOT rejected pre-fetch (it is reachable; the oracle handles not-yet-posted).
+    const today = new Date();
+    const todayIso = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, "0")}-${String(today.getUTCDate()).padStart(2, "0")}`;
+    const before = calls.length;
+    const { error } = await expectThrow(() => dailyFilingIndex({ date: todayIso }));
+    // today may fetch (then 403 → oracle) but must NOT be invalid_input, and DOES reach fetch.
+    ok("41f(j) TODAY is NOT pre-rejected as invalid_input (a future-guard that also blocks today ⇒ RED) — it reaches the fetch path",
+      (error === undefined || toToolError(error).kind !== "invalid_input") && calls.length > before, JSON.stringify({ todayIso, fetched: calls.length - before }));
+  });
+
+  // (i) SSRF direct-call bounds — a bad derived year (pre-1994) ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => dailyFilingIndex({ date: "1993-06-15" }));
+    ok("41f(i) SSRF bounds: a pre-1994 date (1993-06-15, before EDGAR daily-index begins) ⇒ invalid_input, 0 fetch (belt-and-suspenders builder guard)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+  });
+
+  // (l) MAX_INDEX_ROWS ceiling (parser-level, COMPACT fixture via the maxRows param):
+  // a body EXCEEDING the ceiling ⇒ totalIsLowerBound:true; the normal path never sets it.
+  const parsedCapped = parseDailyIndex(dailyBody(rowsBase), 3); // ceiling 3 < 8 data rows
+  ok("41f(l) parseDailyIndex maxRows=3 over 8 rows ⇒ scan STOPS at 3 + totalIsLowerBound:true (ceiling-hit-without-flag ⇒ RED)",
+    parsedCapped.rows.length === 3 && parsedCapped.totalIsLowerBound === true, JSON.stringify({ n: parsedCapped.rows.length, lb: parsedCapped.totalIsLowerBound }));
+  const parsedFull = parseDailyIndex(dailyBody(rowsBase)); // default ceiling 500000 » 8
+  ok(`41f(l) normal path (default ceiling ${MAX_INDEX_ROWS} » 8 rows) ⇒ all 8 parsed + totalIsLowerBound:false; dates normalized to ISO`,
+    parsedFull.rows.length === 8 && parsedFull.totalIsLowerBound === false && parsedFull.rows[0].dateFiled === "2024-01-03", JSON.stringify({ n: parsedFull.rows.length, lb: parsedFull.totalIsLowerBound, d: parsedFull.rows[0].dateFiled }));
+}
+
 // §42: Socrata / SODA source (ADR-0004) — SSRF (allowlist enum, 4x4 regex,
 // redirect:"error") + honesty (no-total count(*) companion, B2 hasMore, catalog
 // drift). All OFFLINE (mock fetch), deterministic, non-vacuous: every honesty
@@ -11440,6 +11728,7 @@ async function main() {
   await testEdgarFtsFilters();
   await testEdgarShardsHonesty();
   await testEdgarFilingIndexHonesty();
+  await testEdgarDailyFilingIndexHonesty();
   await testSocrataHonesty();
   await testDataSourcePortParity();
   await testThroughGate();
