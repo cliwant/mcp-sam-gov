@@ -52,6 +52,7 @@ export type FpdsSearchArgs = {
 export declare function buildQuery(args: FpdsSearchArgs): {
     q: string;
     filters: string[];
+    dropped: string[];
 };
 /**
  * Construct the SSRF-safe feed URL. Everything except `q`+`start` is fixed

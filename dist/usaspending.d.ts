@@ -60,7 +60,7 @@ export declare function searchIndividualAwards(args: {
     awards: {
         awardId: string;
         recipient: string | null;
-        amount: number;
+        amount: number | null;
         awardingAgency: string | null;
         awardingSubAgency: string | undefined;
         naicsCode: string | undefined;
@@ -83,7 +83,7 @@ export declare function searchAwardsByRecipient(args: {
     awards: {
         awardId: string;
         recipient: string | null;
-        amount: number;
+        amount: number | null;
         awardingAgency: string | null;
         awardingSubAgency: string | undefined;
         naicsCode: string | undefined;
@@ -107,7 +107,7 @@ export declare function searchSubawards(args: {
     subawards: {
         subAwardId: string;
         subRecipient: string;
-        amount: number;
+        amount: number | null;
         actionDate: string;
         naicsCode: string | undefined;
         naicsDescription: string | undefined;
@@ -179,7 +179,7 @@ export declare function analyzeIncumbent(args: {
     incumbentOtherAwards?: {
         awardId: string;
         recipient: string | null;
-        amount: number;
+        amount: number | null;
         awardingAgency: string | null;
         awardingSubAgency: string | undefined;
         naicsCode: string | undefined;
@@ -458,7 +458,7 @@ export declare function searchRecipients(args: {
     recipientLevel?: "P" | "C" | "R";
     limit?: number;
 }): Promise<MetaBundle<{
-    totalRecords: number;
+    totalRecords: number | null;
     recipients: {
         id: string;
         duns: string | undefined;
@@ -537,7 +537,7 @@ export declare function glossary(args: {
     limit?: number;
     search?: string;
 }): Promise<MetaBundle<{
-    totalRecords: number;
+    totalRecords: number | null;
     terms: {
         term: string;
         slug: string;

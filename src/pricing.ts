@@ -729,8 +729,9 @@ type CalcResp = {
 // Filters LIVE-VERIFIED to narrow via `filter=field:value` (2026-07-03):
 // business_size, education_level (uses SHORT CODES like BA/MA/AA/HS/PHD — the
 // returned field shows full words too, so codes≠displayed), min_years_experience,
-// experience_range, sin, price_range. security_clearance/worksite did NOT narrow
-// via filter and are treated as non-filterable here.
+// experience_range, sin. price_range / security_clearance / worksite did NOT
+// narrow via filter and are treated as non-filterable here (price_range re-
+// confirmed a no-op 2026-07-05 and again 2026-07-12 — see F1 in the handler).
 function median(sorted: number[]): number | null {
   if (sorted.length === 0) return null;
   const mid = Math.floor(sorted.length / 2);
@@ -785,8 +786,15 @@ export async function benchmarkLaborRates(args: {
     filtersApplied.push(`sin`);
   }
   if (args.priceRange) {
-    filters.push(`price_range:${args.priceRange}`);
-    filtersApplied.push(`priceRange`);
+    // F1 (P4 no-silent-filter, HIGH — money domain): CALC v3 IGNORES the
+    // price_range filter — it does NOT narrow the result set (LIVE-RE-CONFIRMED
+    // 2026-07-12: `search=labor_category:Paralegal` returns total {value:10,
+    // relation:"eq"} with the SAME rows whether price_range is absent, 1000-2000,
+    // or 200-300). Claiming it in filtersApplied — and advising an agent to use
+    // it to narrow — would be a money-domain lie (the distribution below is over
+    // the UN-narrowed set). So we do NOT send the no-op param, and disclose it as
+    // DROPPED (never applied) with a best-effort note (see the notes block).
+    filtersDropped.push("priceRange");
   }
 
   function buildUrl(matcher: "search" | "q", page: number): string {
@@ -971,11 +979,18 @@ export async function benchmarkLaborRates(args: {
     "The escalatedRate medians (nextYear/secondYear) are each vendor's own contracted escalation, NOT a market escalation index — treat them as a distribution, not a forecast.",
     statsExact
       ? `currentRate {min, median, max} are EXACT over all ${matchCount} matches — read directly at the quantile ranks of CALC's ascending price-sorted index, NOT a leading subsample. (min/median/max come from separate paged requests, so under an active CALC index refresh they could reflect slightly different snapshots.) escalatedRate medians and educationLevelsInSample are computed over a ${rows.length}-row sample covering the low, median, and high price points, so treat those two as representative estimates rather than exhaustive.`
-      : `currentRate.min is exact, but currentRate.median/max are computed over the ${rows.length} LOWEST-priced sampled row(s) and are a DOWNWARD-BIASED LOWER BOUND: CALC returns rows in ascending price order and the exact total was not known (saturated), so the true median/max are HIGHER than reported. Narrow with filters (businessSize, educationLevel code, minYearsExperience, sin, priceRange) or a more specific laborCategory to get an exact count and unbiased statistics.`,
+      : `currentRate.min is exact, but currentRate.median/max are computed over the ${rows.length} LOWEST-priced sampled row(s) and are a DOWNWARD-BIASED LOWER BOUND: CALC returns rows in ascending price order and the exact total was not known (saturated), so the true median/max are HIGHER than reported. Narrow with filters (businessSize, educationLevel code, minYearsExperience, sin) or a more specific laborCategory to get an exact count and unbiased statistics.`,
   ];
+  if (args.priceRange) {
+    // F1: disclose that priceRange was NOT applied (CALC v3 ignores it), so the
+    // agent never treats the distribution as narrowed to that price band.
+    notes.push(
+      "priceRange was NOT applied and is reported in _meta.filtersDropped: GSA CALC v3 IGNORES the price_range filter (it does not narrow the result set — live-verified), so the counts/distribution above are over the UN-narrowed set. To narrow, use businessSize / educationLevel (code) / minYearsExperience / sin, or a more specific laborCategory, instead.",
+    );
+  }
   if (saturated) {
     notes.push(
-      `matchCount is SATURATED: the API returned relation='${totalRelation}' at ${matchCount}, so the true match total is AT LEAST ${matchCount} (unknown exact). totalAvailable is null. Narrow with filters (businessSize, educationLevel code, minYearsExperience, sin, priceRange) or a more specific laborCategory for an exact count.`,
+      `matchCount is SATURATED: the API returned relation='${totalRelation}' at ${matchCount}, so the true match total is AT LEAST ${matchCount} (unknown exact). totalAvailable is null. Narrow with filters (businessSize, educationLevel code, minYearsExperience, sin) or a more specific laborCategory for an exact count.`,
     );
   }
   if (fuzzy) {
