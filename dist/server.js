@@ -41,6 +41,7 @@ import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
 import * as nsf from "./nsf.js";
+import * as clinicaltrials from "./clinicaltrials.js";
 import * as fema from "./fema.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
@@ -1522,6 +1523,61 @@ const NsfGetAwardInput = z.object({
         .regex(/^\d{5,9}$/)
         .describe("NSF award id — an all-digit id (5..9 digits; NSF ids are 7-digit numeric, live-verified). Returns the ONE full award record INCLUDING abstractText; a nonexistent id ⇒ found:false (never a fabricated record). e.g. '2545697'."),
 });
+// ─── ClinicalTrials.gov API v2 (ADR-0021, source #21) ────────────
+const ClinicaltrialsSearchStudiesInput = z.object({
+    "query.term": z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Broad free-text search across the study record. MULTI-WORD is AND-conjunctive — ALL tokens must co-occur ('breast cancer' = breast AND cancer; disclosed in _meta.notes). LIVE-CONFIRMED to narrow. e.g. 'cancer'."),
+    sponsor: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Lead-sponsor / collaborator NAME search (→ query.spons; a fuzzy full-text name search, NOT an exact-entity join — the name is free text, not a UEI). MULTI-WORD is AND-conjunctive. LIVE-CONFIRMED to narrow. e.g. 'Pfizer'."),
+    condition: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Condition / disease filter (→ query.cond). MULTI-WORD is AND-conjunctive. LIVE-CONFIRMED to narrow. e.g. 'diabetes'."),
+    location: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Study-location filter (→ query.locn), e.g. a country or city. LIVE-CONFIRMED to narrow. e.g. 'Germany'."),
+    overallStatus: z
+        .enum(clinicaltrials.CT_STATUSES)
+        .optional()
+        .describe("Recruitment/overall status (→ filter.overallStatus). A frozen 14-value enum (COMPLETED, RECRUITING, TERMINATED, …); an unlisted value LOUD-fails at HTTP 400 upstream, so it is rejected pre-fetch. LIVE-CONFIRMED to narrow. e.g. 'RECRUITING'."),
+    funderType: z
+        .enum(clinicaltrials.CT_FUNDER_TYPES)
+        .optional()
+        .describe("Funding-source facet (→ aggFilters=funderType:<v>) — the FEDERAL-funding axis. A frozen 4-value enum: nih, fed, industry, other (the B2G-relevant nih/fed narrow to federally-sponsored trials). An UNLISTED value silently returns totalCount:0 at HTTP 200 (a fake-empty trap), so it is rejected pre-fetch (invalid_input). funderType is an OVERLAPPING facet — counts MUST NOT be summed into a total."),
+    pageSize: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(20)
+        .describe("Studies per page, 1..1000, default 20 (ClinicalTrials.gov clamps a larger request to 1000)."),
+    pageToken: z
+        .string()
+        .min(1)
+        .max(4096)
+        .regex(clinicaltrials.CT_TOKEN_RE)
+        .optional()
+        .describe("Opaque continuation cursor — pass back the _meta.nextCursor from the previous page. Pagination is a cursor, NOT a numeric offset (offset/nextOffset are null); nextCursor:null means the last page. A bad token loud-fails at HTTP 400."),
+});
+const ClinicaltrialsGetStudyInput = z.object({
+    nctId: z
+        .string()
+        .regex(clinicaltrials.CT_NCT_RE)
+        .describe("NCT id — the form NCT followed by exactly 8 digits (e.g. NCT02403869). Returns the ONE full study record INCLUDING briefSummary; a nonexistent id ⇒ found:false (never a fabricated record). Injection-safe (validated before the path is built)."),
+});
 // Build a ToolDef whose `handler` is type-checked against the schema's inferred
 // input `I` at the call site (e.g. `input.searchText` is known-present). The
 // `I` binding is erased to `any` in the ToolDef[] array, so entries without a
@@ -2435,6 +2491,30 @@ const TOOLS = [
         description: "Fetch ONE NSF award by its numeric award id (keyless; api.nsf.gov/services/v1/awards.json). Input `awardId` (all-digit, 5..9 digits — NSF ids are 7-digit numeric, live-verified; numeric-only is injection-safe). Returns { found, award:{ …the FULL curated record INCLUDING abstractText… } } + honest _meta. A nonexistent id ⇒ a genuine empty (totalCount:0) ⇒ found:false / award:null (NEVER a fabricated record). HONESTY: NSF Awards are RESEARCH GRANTS, NOT procurement contracts (ueiNumber joins to SAM/USAspending but the award nature differs — disclosed every response); fundsObligatedAmt/estimatedTotalAmt arrive as STRINGS → number|null (a real $0 is 0, absent is null); a serviceNotification at HTTP 200 ⇒ invalid_input/upstream_unavailable THROWS; an outage/5xx ⇒ THROWS; a 200 body that isn't {response:{award,metadata}} ⇒ schema_drift (never a fabricated record).",
         inputSchema: NsfGetAwardInput,
         handler: (input) => nsf.getAward(input),
+    }),
+    // ━━━ ClinicalTrials.gov API v2 — keyless clinical-study registrations (2) ━━━ ADR-0021
+    // Source #21. The trial-REGISTRATION sibling of the research-GRANT sources (NIH
+    // RePORTER / NSF Awards): leadSponsor / collaborators / organization are the
+    // pharma/biotech/university/agency entities that ALSO receive federal money.
+    // SSRF surface = a compile-time host literal (CT_BASE) + a single audited getCT
+    // helper ([M2]); the single-study nctId is ^NCT\d{8}$-validated before the path
+    // is built. HONESTY: countTotal=true is ALWAYS sent (the exact filter-respecting
+    // uncapped total — a missing totalCount ⇒ schema_drift, NEVER studies.length);
+    // an OPAQUE nextPageToken cursor (terminal = token absent, passed back verbatim);
+    // funderType is a 4-value enum RE-VALIDATED IN THE HANDLER ([M1] — an invalid
+    // value silently fake-empties at HTTP 200); multi-word term/sponsor/condition is
+    // AND-tokenized (disclosed); trial≠federal-award caveat in every response.
+    defineTool({
+        name: "clinicaltrials_search_studies",
+        description: "Search federally-registered clinical-research studies with LEAD-SPONSOR / COLLABORATOR / ORGANIZATION / FUNDING-SOURCE entity enrichment (keyless; clinicaltrials.gov/api/v2/studies) — the trial-REGISTRATION axis of the research-funding entity layer (the sponsor/collaborator NAMES overlap the pharma/biotech/university/agency entities in NIH RePORTER / NSF Awards / SAM / USAspending). LIVE-CONFIRMED-narrowing filters ONLY, module-built into a URLSearchParams query (NO raw passthrough): query.term (broad free-text), sponsor (→query.spons — a fuzzy sponsor NAME search), condition (→query.cond), location (→query.locn), overallStatus (a frozen 14-value enum → filter.overallStatus), funderType (a frozen 4-value enum nih/fed/industry/other → aggFilters — the FEDERAL-funding axis), pageSize (1..1000, def 20), pageToken (the OPAQUE cursor). Returns { studies:[{ nctId, briefTitle, orgStudyId, organization:{ name, class }, leadSponsor:{ name, class }, collaborators:[{ name, class }], fundingClass, overallStatus, startDate, studyType, phases, conditions }] } (briefSummary EXCLUDED — use clinicaltrials_get_study) + honest _meta. HONESTY: countTotal=true is ALWAYS sent ⇒ totalAvailable = the EXACT filter-respecting UNCAPPED total (NEVER studies.length; a missing/non-number totalCount ⇒ schema_drift; a genuine 0 ⇒ 0, never null); pagination is an OPAQUE cursor (offset/nextOffset null; nextCursor = nextPageToken passed back verbatim as pageToken; terminal = token absent; a bad token ⇒ HTTP 400 THROWS). funderType is re-validated IN the handler — an UNLISTED value silently returns totalCount:0 at HTTP 200 (a fake-empty trap) ⇒ invalid_input pre-fetch (0 fetch); funderType is an OVERLAPPING facet (counts MUST NOT be summed). A MULTI-WORD query.term/sponsor/condition is AND-conjunctive (ALL tokens must co-occur — disclosed). A registered trial is NOT a federal award and leadSponsor.name is FREE TEXT (not a UEI) ⇒ a NOMINAL name match only (disclosed every response). Genuine-empty (totalCount:0, no token) ⇒ complete:true/total:0; a bad overallStatus/pageToken/nctId ⇒ HTTP 400/404 THROWS; an outage/5xx ⇒ THROWS (never a fake empty). Feed a row's nctId to clinicaltrials_get_study for the full record + briefSummary.",
+        inputSchema: ClinicaltrialsSearchStudiesInput,
+        handler: (input) => clinicaltrials.searchStudies(input),
+    }),
+    defineTool({
+        name: "clinicaltrials_get_study",
+        description: "Fetch ONE clinical study by its NCT id (keyless; clinicaltrials.gov/api/v2/studies/{nctId}). Input `nctId` (the form NCT followed by exactly 8 digits, e.g. NCT02403869 — validated before the path is built, injection-safe). Returns { found, nctId, study:{ …the FULL curated entity record INCLUDING briefSummary… } } + honest _meta. A nonexistent id ⇒ HTTP 404 ⇒ found:false / study:null (NEVER a fabricated record). HONESTY: a registered trial is NOT a federal award and leadSponsor.name is FREE TEXT (not a UEI) ⇒ a NOMINAL name match only (disclosed every response); a 200 body missing protocolSection ⇒ schema_drift; an outage/5xx ⇒ THROWS.",
+        inputSchema: ClinicaltrialsGetStudyInput,
+        handler: (input) => clinicaltrials.getStudy(input),
     }),
     // ━━━ EPA ECHO REST — keyless facility environmental compliance/enforcement (2) ━━━ ADR-0009
     // A NEW capability axis: facility & competitor environmental compliance-risk
