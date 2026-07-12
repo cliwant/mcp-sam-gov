@@ -58,7 +58,7 @@ import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
-import { padCik as edgarPadCik } from "./dist/edgar.js";
+import { padCik as edgarPadCik, xbrlFrames } from "./dist/edgar.js";
 import { num as socrataNum } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
@@ -6174,6 +6174,186 @@ async function testEdgarHonesty() {
   });
 }
 
+// §41b: SEC EDGAR XBRL FRAMES (ADR-0017 v1+v2) — the keyless cross-filer
+// cross-section tool. All OFFLINE (mock fetch), deterministic, non-vacuous: every
+// assertion pins a specific honest value + names the exact mutation that turns it
+// RED. Driven through the REAL runTool dispatch (Zod → handler → getEdgar over a
+// mocked fetch) AND direct handler calls (bypassing Zod, to exercise the
+// belt-and-suspenders URL builder). Load-bearing mutations locked RED:
+//   (a) totalAvailable = num(pts), NEVER a page length (rows.length/returned).
+//   (b) pts !== data.length (or data-not-array / pts-non-number) ⇒ schema_drift THROW.
+//   (c) 404 ⇒ found:false (NEVER a fake-empty complete/val:0).
+//   (d) SSRF: unit-slash / tag-traversal / bad-taxonomy / %2F ⇒ invalid_input, 0 fetch
+//       (Zod layer AND — S1/S2 — the builder re-check on a direct call).
+//   (e) num() null-never-0: real 0 survives; absent/""/"null" ⇒ null (rows) + excluded (stats).
+//   (f) includeStats over the FULL data[], NOT the client-side page.
+//   (g) all-non-finite ⇒ every stats field null (never 0/NaN/Infinity) — M3.
+//   + M1 completeness-note split (a subset page is never labeled "complete");
+//     per-dataset instant (no start) vs duration (adds start) row shape.
+const isEdgarFrames = (u) => /data\.sec\.gov\/api\/xbrl\/frames\//.test(u);
+async function testEdgarFramesHonesty() {
+  section("41b. SEC EDGAR xbrl_frames — pts-exact-total, drift THROW, 404 found:false, SSRF (S1/S2), null-never-0, stats over full set + M3 (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  const instantRow = (i) => ({ accn: `acc-${i}`, cik: 1000 + i, entityName: `Co ${i}`, loc: "US-XX", end: "2023-12-31", val: (i + 1) * 100 });
+  const durationRow = (i) => ({ accn: `acc-${i}`, cik: 1000 + i, entityName: `Co ${i}`, loc: "US-XX", start: "2023-01-01", end: "2023-12-31", val: (i + 1) * 100 });
+  const framesEnv = ({ tag = "Assets", uom = "USD", label = "Assets", description = "desc", pts, data }) =>
+    ({ taxonomy: "us-gaap", tag, ccp: "CY2023Q4I", uom, label, description, pts: pts ?? data.length, data });
+
+  // (a) + M1 — happy INSTANT path with a client-side window (pts=6, limit=2). The
+  // exact-total is SEC's pts (6), NOT the page length; the subset page is NEVER
+  // complete; the completeness note splits "fetched in FULL" from "THIS page N of M".
+  const instant6 = Array.from({ length: 6 }, (_, i) => instantRow(i));
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 200, json: framesEnv({ tag: "Assets", data: instant6 }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_xbrl_frames", { tag: "Assets", period: "CY2023Q4I", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b(a) totalAvailable === SEC pts 6 (NOT returned 2 / page length — mutate→rows.length/returned ⇒ RED)",
+      m.totalAvailable === 6 && m.returned === 2 && r.data.rows.length === 2, JSON.stringify({ ta: m.totalAvailable, r: m.returned, rows: r.data.rows.length }));
+    ok("41b(M1) subset page ⇒ complete:false + truncated:true + hasMore:true + nextOffset:2 (buildMeta-derived; a subset is NEVER complete)",
+      m.complete === false && m.truncated === true && m.pagination.hasMore === true && m.pagination.nextOffset === 2, JSON.stringify(m.pagination));
+    ok("41b instant row = {accn,cik,entityName,loc,end,val} with NO start key (instant concept); cik padded, val real",
+      !("start" in r.data.rows[0]) && r.data.rows[0].cik === "0000001000" && r.data.rows[0].val === 100 && r.data.rows[0].end === "2023-12-31", JSON.stringify(r.data.rows[0]));
+    ok("41b(M1) completeness note splits 'fetched in FULL' from 'THIS page 2 of 6'; NO note uses the word 'complete' for the subset (kill 'complete:true always')",
+      m.notes.some((n) => /fetched in FULL/i.test(n) && /2 of 6/.test(n)) && !m.notes.some((n) => /\bcomplete\b/i.test(n)), JSON.stringify(m.notes));
+    ok("41b uom echoed + SEMANTIC absence≠0 note + CIK↔UEI caveat on every frame",
+      r.data.uom === "USD" && m.notes.some((n) => /Absence from the frame/i.test(n)) && m.notes.some((n) => /CIK/.test(n) && /UEI/.test(n)), JSON.stringify(r.data.uom));
+  });
+
+  // Per-dataset DURATION shape + a FULL page (returned===total) ⇒ honest complete:true.
+  const duration4 = Array.from({ length: 4 }, (_, i) => durationRow(i));
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 200, json: framesEnv({ tag: "Revenues", label: "Revenues", data: duration4 }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_xbrl_frames", { tag: "Revenues", period: "CY2023", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b duration row ADDS start (duration concept — a per-row shape difference from instant)",
+      "start" in r.data.rows[0] && r.data.rows[0].start === "2023-01-01" && r.data.rows[0].end === "2023-12-31", JSON.stringify(r.data.rows[0]));
+    ok("41b full page (returned 4 === total 4, hasMore:false) ⇒ complete:true + truncated:false + nextOffset:null (the whole cross-section is on this page)",
+      m.complete === true && m.truncated === false && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.totalAvailable === 4 && m.returned === 4, JSON.stringify(m.pagination));
+  });
+
+  // (b) DRIFT GUARDS — schema_drift THROW, never a partial-as-complete / fake empty.
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 200, json: framesEnv({ data: instant6.slice(0, 2), pts: 6428 }) }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_xbrl_frames", { tag: "Assets", period: "CY2023Q4I" }, sam));
+    ok("41b(b) pts(6428) ≠ data.length(2) ⇒ schema_drift THROW (drop the guard ⇒ RED — refuses a truncated frame rather than presenting it as complete)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 200, json: { taxonomy: "us-gaap", pts: 5, data: null } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_xbrl_frames", { tag: "Assets", period: "CY2023Q4I" }, sam));
+    ok("41b(b) 200 with data NOT an array ⇒ schema_drift THROW (non-frames shape, never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 200, json: { taxonomy: "us-gaap", pts: "6", data: instant6 } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_xbrl_frames", { tag: "Assets", period: "CY2023Q4I" }, sam));
+    ok("41b(b) pts non-numeric (string '6') ⇒ schema_drift THROW (SEC's own count missing)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+
+  // (c) 404 ⇒ found:false, NEVER a fabricated empty complete/val:0.
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
+    const r = await runTool("edgar_xbrl_frames", { tag: "NotARealConcept", period: "CY2023Q4I" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b(c) 404 ⇒ found:false (honest not-found) — NOT a fake-empty with val:0 (map-404→fake-empty ⇒ RED)",
+      r.data.found === false && !JSON.stringify(r.data).includes('"val":0'), JSON.stringify(r.data));
+    ok("41b(c) 404 ⇒ semantic note (absence≠0; instant needs trailing 'I'; EPS uses USD-per-shares)",
+      m.notes.some((n) => /NOT a value of 0/i.test(n) && /trailing 'I'/.test(n) && /USD-per-shares/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // (d) SSRF — the Zod segment guard: bad segments ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const bads = [
+      { why: "unit slash 'USD/shares'", args: { taxonomy: "us-gaap", tag: "Assets", unit: "USD/shares", period: "CY2023Q4I" } },
+      { why: "tag traversal '../submissions/…'", args: { taxonomy: "us-gaap", tag: "../submissions/CIK0000320193", unit: "USD", period: "CY2023Q4I" } },
+      { why: "taxonomy not in enum 'evil'", args: { taxonomy: "evil", tag: "Assets", unit: "USD", period: "CY2023Q4I" } },
+      { why: "unit %2F (S2 — AWS decodes to '/')", args: { taxonomy: "us-gaap", tag: "Assets", unit: "USD%2Fshares", period: "CY2023Q4I" } },
+      { why: "bad period 'CY2023Q4X'", args: { taxonomy: "us-gaap", tag: "Assets", unit: "USD", period: "CY2023Q4X" } },
+    ];
+    for (const b of bads) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("edgar_xbrl_frames", b.args, sam));
+      ok(`41b(d) SSRF ${b.why} ⇒ invalid_input, 0 fetch (Zod enum/regex segment guard)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+  // (d/S1/S2) DIRECT handler calls bypassing Zod ⇒ the builder's belt-and-suspenders
+  // re-check (NOT the hostname assertion alone) rejects same-host traversal + encoded
+  // separators, 0 fetch. S1: a bare '..' segment would build a URL that new URL()
+  // normalizes to host=data.sec.gov (passing a hostname check) — the segment regex
+  // catches it FIRST. S2: %2F/%2E/%00/backslash are rejected by the `%`/`\`-free regex.
+  await withFetch(failClosed(), async (calls) => {
+    const bads = [
+      { why: "S1 same-host traversal: tag '..'", args: { tag: "..", period: "CY2023Q4I" } },
+      { why: "S1 traversal: tag '../submissions'", args: { tag: "../submissions", period: "CY2023Q4I" } },
+      { why: "S2 %2F in unit", args: { tag: "Assets", unit: "USD%2Fshares", period: "CY2023Q4I" } },
+      { why: "S2 %2E in unit", args: { tag: "Assets", unit: "USD%2E", period: "CY2023Q4I" } },
+      { why: "S2 %00 in tag", args: { tag: "Assets%00", period: "CY2023Q4I" } },
+      { why: "S2 backslash in unit", args: { tag: "Assets", unit: "USD\\shares", period: "CY2023Q4I" } },
+      { why: "taxonomy enum (direct)", args: { taxonomy: "evil", tag: "Assets", period: "CY2023Q4I" } },
+    ];
+    for (const b of bads) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => xbrlFrames(b.args));
+      ok(`41b(d/S1/S2) direct-call bypassing Zod: ${b.why} ⇒ invalid_input, 0 fetch (builder re-check, NOT hostname-only)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (e) num() null-never-0: a real 0 survives; absent/""/"null" ⇒ null (rows) and are
+  // EXCLUDED from stats (counted in nonFiniteExcluded). Mutate num→0-for-absent ⇒ RED.
+  const mixedRows = [
+    { accn: "m0", cik: 1, entityName: "Zero Co", loc: "US-XX", end: "2023-12-31", val: 0 },
+    { accn: "m1", cik: 2, entityName: "Absent Co", loc: "US-XX", end: "2023-12-31" },
+    { accn: "m2", cik: 3, entityName: "Empty Co", loc: "US-XX", end: "2023-12-31", val: "" },
+    { accn: "m3", cik: 4, entityName: "NullStr Co", loc: "US-XX", end: "2023-12-31", val: "null" },
+    { accn: "m4", cik: 5, entityName: "Neg Co", loc: "US-XX", end: "2023-12-31", val: -42 },
+  ];
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 200, json: framesEnv({ data: mixedRows }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_xbrl_frames", { tag: "Assets", period: "CY2023Q4I", includeStats: true }, sam);
+    const rows = r.data.rows;
+    ok("41b(e) real 0 survives as 0; absent/''/'null' ⇒ null (num null-never-0; mutate num→0-for-absent ⇒ RED)",
+      rows[0].val === 0 && rows[1].val === null && rows[2].val === null && rows[3].val === null && rows[4].val === -42, JSON.stringify(rows.map((x) => x.val)));
+    const s = r.data.stats;
+    ok("41b(e) stats EXCLUDE the 3 non-finite vals (nonFiniteExcluded=3); the real 0 & -42 are kept ⇒ count 2, min -42, max 0, sum -42",
+      s.count === 2 && s.nonFiniteExcluded === 3 && s.min === -42 && s.max === 0 && s.sum === -42, JSON.stringify(s));
+  });
+
+  // (f) includeStats over the FULL data[] (all 6), NOT the client-side page (2).
+  const vals6 = Array.from({ length: 6 }, (_, i) => instantRow(i)); // vals 100..600
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 200, json: framesEnv({ data: vals6 }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_xbrl_frames", { tag: "Assets", period: "CY2023Q4I", limit: 2, includeStats: true }, sam);
+    const s = r.data.stats;
+    ok("41b(f) includeStats over the FULL data[] (all 6), NOT the 2-row page ⇒ count 6, sum 2100, min 100, max 600 (compute-over-page ⇒ RED)",
+      r.data.rows.length === 2 && s.count === 6 && s.sum === 2100 && s.min === 100 && s.max === 600 && s.mean === 350, JSON.stringify({ pageRows: r.data.rows.length, s }));
+    // Linear interpolation (M2): sorted [100..600], n=6; p25 pos=1.25⇒225, median pos=2.5⇒350, p75 pos=3.75⇒475.
+    ok("41b(M2) linear-interpolated p25/median/p75 = 225/350/475 (exact pos=q*(n-1) formula; a nearest-rank method ⇒ RED)",
+      s.p25 === 225 && s.median === 350 && s.p75 === 475, JSON.stringify({ p25: s.p25, median: s.median, p75: s.p75 }));
+  });
+
+  // (g) M3 — all-non-finite ⇒ every stats field null (never 0/NaN/Infinity).
+  const allBad = [
+    { accn: "b0", cik: 1, entityName: "A", loc: "US", end: "2023-12-31", val: null },
+    { accn: "b1", cik: 2, entityName: "B", loc: "US", end: "2023-12-31", val: "" },
+    { accn: "b2", cik: 3, entityName: "C", loc: "US", end: "2023-12-31", val: "null" },
+  ];
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 200, json: framesEnv({ data: allBad }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_xbrl_frames", { tag: "Assets", period: "CY2023Q4I", includeStats: true }, sam);
+    const s = r.data.stats;
+    ok("41b(g) all-non-finite ⇒ count 0 AND every field null (min/max/sum/mean/median/p25/p75) — never 0/NaN/Infinity (naive reducer ⇒ RED)",
+      s.count === 0 && s.min === null && s.max === null && s.sum === null && s.mean === null && s.median === null && s.p25 === null && s.p75 === null && s.nonFiniteExcluded === 3, JSON.stringify(s));
+    ok("41b(g) a note discloses 'no finite values — no distribution computable'",
+      buildMeta(r.meta).notes.some((n) => /no finite values/i.test(n) && /no distribution computable/i.test(n)), JSON.stringify(buildMeta(r.meta).notes));
+  });
+
+  // Positive control: a VALID frame fetch is constructed on the fixed host with the
+  // segments in the path, in order (a builder mutation — wrong host/order ⇒ RED).
+  await withFetch((u) => (isEdgarFrames(u) ? mockResponse({ status: 200, json: framesEnv({ tag: "EntityPublicFloat", uom: "USD", data: instant6 }) }) : failClosed()()), async (calls) => {
+    await runTool("edgar_xbrl_frames", { taxonomy: "dei", tag: "EntityPublicFloat", unit: "USD", period: "CY2023Q4I", limit: 1 }, sam);
+    const url = calls.find((c) => isEdgarFrames(c.url))?.url;
+    const parsed = url ? new URL(url) : null;
+    ok("41b builder: https://data.sec.gov/api/xbrl/frames/dei/EntityPublicFloat/USD/CY2023Q4I.json (host+scheme+segment order; a mutation ⇒ RED)",
+      !!parsed && parsed.protocol === "https:" && parsed.hostname === "data.sec.gov" && parsed.pathname === "/api/xbrl/frames/dei/EntityPublicFloat/USD/CY2023Q4I.json", JSON.stringify(url));
+  });
+}
+
 // §42: Socrata / SODA source (ADR-0004) — SSRF (allowlist enum, 4x4 regex,
 // redirect:"error") + honesty (no-total count(*) companion, B2 hasMore, catalog
 // drift). All OFFLINE (mock fetch), deterministic, non-vacuous: every honesty
@@ -9170,6 +9350,7 @@ async function main() {
   await testRegistryDispatchHonesty();
   await testTreasuryHonesty();
   await testEdgarHonesty();
+  await testEdgarFramesHonesty();
   await testSocrataHonesty();
   await testDataSourcePortParity();
   await testThroughGate();
