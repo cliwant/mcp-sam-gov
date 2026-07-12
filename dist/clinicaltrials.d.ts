@@ -77,6 +77,9 @@ export declare const CT_STATUSES: readonly ["COMPLETED", "UNKNOWN", "RECRUITING"
 export type CtStatus = (typeof CT_STATUSES)[number];
 export declare const CT_FUNDER_TYPES: readonly ["nih", "fed", "industry", "other"];
 export type CtFunderType = (typeof CT_FUNDER_TYPES)[number];
+export declare const CT_FACET_FIELDS: readonly ["OverallStatus", "StudyType", "Phase", "LeadSponsorClass", "Sex", "DesignAllocation", "DesignPrimaryPurpose", "DesignInterventionModel", "DesignMasking", "DesignObservationalModel", "DesignTimePerspective"];
+export type CtFacetField = (typeof CT_FACET_FIELDS)[number];
+export declare const CT_FACET_ARRAY_FIELDS: ReadonlySet<string>;
 export declare const CT_NCT_RE: RegExp;
 export declare const CT_TOKEN_RE: RegExp;
 export type CtEntity = {
@@ -134,4 +137,44 @@ export declare function searchStudies(args: CtSearchArgs): Promise<MetaBundle>;
 export declare function getStudy(args: {
     nctId: string;
 }): Promise<MetaBundle>;
+export type CtFacetValue = {
+    /** The enum value (str — null-never-empty-string). */
+    value: string | null;
+    /** The EXACT per-value study count (num — null-never-0; a non-number ⇒ drift). */
+    studiesCount: number | null;
+};
+export type CtFacet = {
+    /** The requested/echoed field name (the `piece`). */
+    field: string;
+    /** The dotted upstream JSON path (the `field`), e.g. protocolSection.statusModule.overallStatus. */
+    fieldPath: string | null;
+    /** The echoed upstream `type` (asserted "ENUM"; else drift). */
+    valueType: string | null;
+    /** Distinct values that exist upstream (num — non-number ⇒ drift). */
+    uniqueValuesCount: number | null;
+    /** Studies with NO value for this field (num — null-never-0). */
+    missingStudiesCount: number | null;
+    /** values.length (== uniqueValuesCount for a COMPLETE ENUM facet). */
+    returned: number;
+    /** returned < uniqueValuesCount (the 250-cap surface; never true for v1 ENUMs). */
+    truncated: boolean;
+    /** true for an ARRAY-valued field (Phase) — counts OVERLAP, must not be summed. */
+    overlapping: boolean;
+    /** The EXACT per-value distribution. */
+    values: CtFacetValue[];
+};
+export type CtFacetArgs = {
+    fields: string[];
+};
+/**
+ * Aggregate / statistical view: EXACT per-value study counts over the WHOLE
+ * ClinicalTrials.gov registry for one or more whitelisted ENUM fields
+ * (studies-by-OverallStatus / by-Phase / by-LeadSponsorClass = the funding-source
+ * distribution / …). The aggregate SIBLING of clinicaltrials_search_studies (which
+ * gives the exact FILTERED total for a query) — this gives the exact WHOLE-REGISTRY
+ * distribution across a field's values. Reuses the shipped getCT verbatim (one new
+ * path constant), coerce.num/str, buildMeta/withMeta — ZERO new fetch/coerce/error/
+ * meta code.
+ */
+export declare function facetCounts(args: CtFacetArgs): Promise<MetaBundle>;
 //# sourceMappingURL=clinicaltrials.d.ts.map
