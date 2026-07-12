@@ -180,9 +180,23 @@ export function escapeSearch(v) {
  *  belt-and-suspenders field-guard directly (the tool functions only ever pass
  *  hardcoded fields, so this defense-in-depth check is otherwise unreachable). */
 export { INST_FILTER_FIELDS, FIN_FILTER_FIELDS, INST_SEARCH_FIELDS };
-/** A `filters` term `FIELD:VALUE` — asserts the field ∈ its allowlist (P4). The
- *  value is a constrained non-string (STALP/ACTIVE/CERT) → no quoting needed.
- *  Exported for the allowlist-bypass fault fixture (§7(b)). */
+/** A `filters` term `FIELD:VALUE` — asserts the field ∈ its allowlist (P4). A
+ *  NON-NUMERIC value is DOUBLE-QUOTED; a numeric value stays bare. This quoting is
+ *  LOAD-BEARING for correctness: the FDIC `filters` DSL is Lucene-style, so a
+ *  BAREWORD state code that collides with a boolean operator is mis-parsed. Live-
+ *  verified 2026-07-13: `PSTALP:OR` (Oregon, unquoted) → HTTP 400 parse_exception (a
+ *  HARD-FAIL that throws, NOT an honest empty), whereas `PSTALP:"OR"` → 4289 rows.
+ *  OR is the only 2-letter US state code that collides with a Lucene operator, but
+ *  quoting is EQUIVALENT for every non-operator value (live: `STALP:CA` === `STALP:"CA"`
+ *  === 1287; `PSTALP:CA`(failures) === 265; `PSTALP:CA`(history) === 35892) so it is
+ *  uniformly safe for all state filters and fixes all 4 FDIC tools at once (they all
+ *  call this). Numeric fields (CERT/CHANGECODE/FAILYR/EFFYEAR/ACTIVE) stay bare — the
+ *  values are `^\d+$` by construction and a number never collides with an operator.
+ *  The value is escaped backslash-first then `"` (defensive — `^[A-Z]{2}$`-constrained
+ *  state values contain neither, and no other field routes a free string through here).
+ *  This is the `filters`-DSL path ONLY; the `search` param (searchTerm/escapeSearch)
+ *  is a DIFFERENT surface and stays correctly UNQUOTED (C116). Exported for the
+ *  allowlist-bypass fault fixture (§7(b)). */
 export function filterTerm(field, value, allowed) {
     if (!allowed.has(field)) {
         throw new ToolErrorCarrier({
@@ -191,7 +205,13 @@ export function filterTerm(field, value, allowed) {
             retryable: false,
         });
     }
-    return `${field}:${value}`;
+    // ★OR-fix — a non-numeric value is double-quoted so a Lucene-operator-colliding
+    // state code (e.g. OR = Oregon) is parsed as a literal term, not a boolean
+    // operator (bare `PSTALP:OR` → live HTTP 400). Numeric values stay bare.
+    const emitted = /^\d+$/.test(value)
+        ? value
+        : `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    return `${field}:${emitted}`;
 }
 /** A `search` term `FIELD:<escaped>` (M1 route for NAME/CITY) — asserts the field
  *  ∈ the search allowlist and M2-escapes the value UNQUOTED (see escapeSearch: NO
