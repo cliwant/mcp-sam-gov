@@ -53,11 +53,12 @@
  *   =4253; and the hyphen/comma/slash/semicolon/plus/&/|/@/#/= forms all return the
  *   SAME OR union — while `.`/`:`/`_`/`'`/`\`/`*` do NOT split, and `~`/`(`/`)`
  *   loud-fail). The honest-looking (often saturated) totalCount + rows carry NO
- *   signal the tokens were unioned, so when `keyword` contains ANY confirmed
- *   splitter (NSF_KEYWORD_SPLIT_RE — whitespace + the confirmed punctuation set,
- *   NOT just whitespace) the module emits a MANDATORY `_meta.notes` line disclosing
- *   the OR-semantics. This closes the compound-token leak (e.g. "coral-reef" =
- *   coral OR reef, a far broader set than a caller intends).
+ *   signal the tokens were unioned, so when `keyword` splits into 2+ tokens on the
+ *   shared confirmed-splitter class (tokenizeForDisclosure / DISCLOSURE_SPLIT_RE —
+ *   whitespace + the confirmed punctuation set, NOT just whitespace) the module
+ *   emits a MANDATORY `_meta.notes` line disclosing the OR-semantics. This closes
+ *   the compound-token leak (e.g. "coral-reef" = coral OR reef, a far broader set
+ *   than a caller intends).
  *
  * ★ AMOUNTS are STRINGS → `coerce.num` (null-never-0): a real $0 → 0; absent/""/
  *   "null" → null (NEVER 0). `fundsObligatedAmt` (obligated to date) and
@@ -70,11 +71,17 @@
 import { ToolErrorCarrier } from "./errors.js";
 import { getJson, driftError } from "./datasource.js";
 import { num, str } from "./coerce.js";
+import { tokenizeForDisclosure } from "./disclosure.js";
 import { withMeta } from "./meta.js";
 // Re-export the shared honesty coercion (single audited copy in ./coerce.js —
 // ADR-0005 v2 FIX-C) so the fault suite's num-parity guard resolves the SAME
 // `num` (nsf.num === coerce.num === nih.num — a num regression fails together).
 export { num };
+// Re-export the shared disclosure tokenizer (single audited copy in
+// ./disclosure.js — ADR-0022) so the fault suite's parity guard resolves the SAME
+// function (nsf.tokenizeForDisclosure === clinicaltrials.tokenizeForDisclosure ===
+// disclosure.tokenizeForDisclosure — a class regression fails both suites at once).
+export { tokenizeForDisclosure } from "./disclosure.js";
 // ─── Fixed endpoint (SSRF core — compile-time CONSTANTS) ──────────
 const NSF_HOST = "api.nsf.gov";
 const NSF_PATH = "/services/v1/awards.json";
@@ -100,18 +107,14 @@ const MMDDYYYY_RE = /^(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])\/\d{4}$/;
 // to exactly 7 and risk rejecting an unsampled legitimate id); numeric-only is
 // the actual injection-safety property.
 const AWARD_ID_RE = /^\d{5,9}$/;
-// M1 — NSF's Elasticsearch analyzer OR-tokenizes a keyword on whitespace AND a
-// specific PUNCTUATION set, NOT whitespace alone. LIVE-verified 2026-07-12 (each
-// `wordA<delim>wordB` returned an OR union broader than either single term):
-// space + `- , / ; + & | @ # =` ALL SPLIT; `. : _ ' \ *` do NOT split (kept as one
-// token); `~ ( )` loud-fail as ES query-syntax special chars (already surfaced by
-// the loud-fail guard). So a single-token-LOOKING compound like "coral-reef" is
-// really coral OR reef (a far broader set) — detect multi-token on THIS class (not
-// just whitespace) so the mandatory OR-note is never skipped. The class is the
-// PRECISE confirmed-splitter set (no non-alnum superset — that would over-disclose
-// a union NSF did not make on `.`/`_`/`'`). `-` is placed last (literal); `/` is
-// escaped for the regex-literal delimiter.
-const NSF_KEYWORD_SPLIT_RE = /[\s,;+&|@#=\/-]+/;
+// M1 — a multi-token keyword is disclosed via the SHARED tokenizeForDisclosure
+// (src/disclosure.js, ADR-0022): NSF's Elasticsearch analyzer OR-tokenizes a
+// keyword on whitespace AND the confirmed PUNCTUATION set (space + `- , / ; + & |
+// @ # =` ALL split; `. : _ ' \ *` do NOT; `~ ( )` loud-fail upstream), so a
+// single-token-LOOKING compound like "coral-reef" is really coral OR reef — the
+// shared DISCLOSURE_SPLIT_RE class detects multi-token on THAT precise set (not a
+// whitespace-only split, and not a non-alnum superset that would over-disclose a
+// union NSF did not make on `.`/`_`/`'`) so the mandatory OR-note is never skipped.
 // ─── Frozen US state/territory 2-letter USPS enum (UPPERCASE-only) ─
 // Built FROM this array by the Zod enum in server.ts (single source of truth).
 // It is BOTH the awardeeStateCode value guard AND the silent-zero guard: LIVE,
@@ -419,14 +422,11 @@ export async function searchAwards(args) {
     if (args.keyword !== undefined) {
         params.set("keyword", args.keyword);
         filtersApplied.push("keyword");
-        // M1: split on NSF's REAL tokenizer delimiters (whitespace AND the confirmed
-        // punctuation splitters — NSF_KEYWORD_SPLIT_RE), so a compound like
-        // "coral-reef" (= coral OR reef) fires the OR-note instead of leaking as one
-        // token through a non-whitespace delimiter.
-        const tokens = args.keyword
-            .trim()
-            .split(NSF_KEYWORD_SPLIT_RE)
-            .filter((t) => t.length > 0);
+        // M1: tokenize on NSF's REAL tokenizer delimiters via the shared
+        // tokenizeForDisclosure (whitespace AND the confirmed punctuation splitters —
+        // DISCLOSURE_SPLIT_RE), so a compound like "coral-reef" (= coral OR reef) fires
+        // the OR-note instead of leaking as one token through a non-whitespace delimiter.
+        const tokens = tokenizeForDisclosure(args.keyword);
         if (tokens.length > 1)
             multiWordKeyword = tokens; // M1 OR-disclosure trigger
     }
