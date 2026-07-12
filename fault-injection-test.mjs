@@ -76,6 +76,10 @@ import {
   normFailDate as fdicNormFailDate,
   bankFailures as fdicBankFailures,
   FDIC_FAILURES_FILTER_FIELDS,
+  buildHistFilters as fdicBuildHistFilters,
+  normHistDate as fdicNormHistDate,
+  institutionHistory as fdicInstitutionHistory,
+  FDIC_HISTORY_FILTER_FIELDS,
 } from "./dist/fdic.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
@@ -8408,8 +8412,8 @@ async function testFdicHonesty() {
     fdicBuildSearch({ name: "zzz) OR (NAME:chase" }), "NAME:zzz\\) OR \\(NAME:chase");
 
   // (c) builders — filters (STALP/ACTIVE/CERT) + search (NAME/CITY phrase-quoted).
-  eq("58c buildInstFilters compound: STALP:VA AND ACTIVE:1 AND CERT:628 (structured — no free field)",
-    fdicBuildFilters({ state: "VA", activeOnly: true, cert: 628 }), "STALP:VA AND ACTIVE:1 AND CERT:628");
+  eq("58c buildInstFilters compound: STALP:\"VA\" AND ACTIVE:1 AND CERT:628 (★OR-fix: non-numeric state QUOTED, numeric ACTIVE/CERT bare — structured, no free field)",
+    fdicBuildFilters({ state: "VA", activeOnly: true, cert: 628 }), 'STALP:"VA" AND ACTIVE:1 AND CERT:628');
   eq("58c buildInstFilters activeOnly:false → ACTIVE:0 (not omitted)", fdicBuildFilters({ activeOnly: false }), "ACTIVE:0");
   eq("58c buildInstFilters no clauses → '' (⇒ no filters param)", fdicBuildFilters({}), "");
   eq("58c buildInstSearch single UNQUOTED: NAME:chase (no quotes — live full token-match set = 43)", fdicBuildSearch({ name: "chase" }), "NAME:chase");
@@ -8429,8 +8433,8 @@ async function testFdicHonesty() {
   await withFetch(fdicInstMock({ records: [{ NAME: "First Bank", CERT: 1 }], total: 9 }), async (calls) => {
     await runTool("fdic_search_institutions", { name: "first", state: "VA", activeOnly: true }, sam);
     const url = fdicInstUrl(calls);
-    ok("58d ★M1: name→search AND state/activeOnly→filters, cleanly SPLIT (filters=STALP:VA AND ACTIVE:1, search=NAME:first UNQUOTED); filters NEVER carries NAME",
-      !!url && url.searchParams.get("filters") === "STALP:VA AND ACTIVE:1" && url.searchParams.get("search") === "NAME:first" && !/NAME/.test(url.searchParams.get("filters") ?? ""),
+    ok("58d ★M1: name→search AND state/activeOnly→filters, cleanly SPLIT (filters=STALP:\"VA\" AND ACTIVE:1 — state QUOTED per OR-fix, search=NAME:first UNQUOTED); filters NEVER carries NAME",
+      !!url && url.searchParams.get("filters") === 'STALP:"VA" AND ACTIVE:1' && url.searchParams.get("search") === "NAME:first" && !/NAME/.test(url.searchParams.get("filters") ?? ""),
       JSON.stringify({ filters: url?.searchParams.get("filters"), search: url?.searchParams.get("search") }));
   });
   // ★M2-fix regression: a real brand-name bank (Axos, live: NAME:Axos→1, but the
@@ -8457,7 +8461,7 @@ async function testFdicHonesty() {
     ok("58e filterTerm('NOTAFIELD',…) ⇒ invalid_input (P4 belt-and-suspenders; remove the .has check ⇒ RED)", a.threw && toToolError(a.error).kind === "invalid_input", JSON.stringify({ threw: a.threw }));
     const b = await expectThrow(async () => fdicSearchTerm("NOTAFIELD", "x"));
     ok("58e searchTerm('NOTAFIELD',…) ⇒ invalid_input (search-field allowlist; remove the .has check ⇒ RED)", b.threw && toToolError(b.error).kind === "invalid_input", JSON.stringify({ threw: b.threw }));
-    eq("58e filterTerm positive: STALP is allowlisted ⇒ 'STALP:VA'", fdicFilterTerm("STALP", "VA", FDIC_INST_FILTER_FIELDS), "STALP:VA");
+    eq("58e filterTerm positive: STALP is allowlisted ⇒ 'STALP:\"VA\"' (★OR-fix: non-numeric value QUOTED)", fdicFilterTerm("STALP", "VA", FDIC_INST_FILTER_FIELDS), 'STALP:"VA"');
   }
   await withFetch(failClosed(), async (calls) => {
     const r = await expectThrow(() => fdicSearchInstitutions({ sortBy: "NOTAFIELD" }));
@@ -8479,12 +8483,23 @@ async function testFdicHonesty() {
     const url = fdicInstUrl(calls);
     const c = calls.find((x) => isFdicInst(x.url));
     ok("58f fixed host/path/https: https://api.fdic.gov/banks/institutions; filters is a query param (NOT the path); a builder mutation off-host ⇒ RED",
-      !!url && url.hostname === "api.fdic.gov" && url.protocol === "https:" && url.pathname === "/banks/institutions" && url.searchParams.get("filters") === "STALP:VA AND ACTIVE:1",
+      !!url && url.hostname === "api.fdic.gov" && url.protocol === "https:" && url.pathname === "/banks/institutions" && url.searchParams.get("filters") === 'STALP:"VA" AND ACTIVE:1',
       JSON.stringify(c?.url));
     ok("58f B1 redirect:'error' + keyless (NO headers key — byte-clean init) on the fdic fetch (drop redirect ⇒ RED)",
       !!c && c.init && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
     ok("58f fixed field projection on the wire: fields=NAME,CITY,STALP,CERT,ASSET,ACTIVE,ESTYMD,ID + format=json",
       url.searchParams.get("fields") === "NAME,CITY,STALP,CERT,ASSET,ACTIVE,ESTYMD,ID" && url.searchParams.get("format") === "json", JSON.stringify(url?.search));
+  });
+  // ★OR-fix regression guard (sibling tool) — institutions state:'OR' ⇒ emitted
+  // clause is QUOTED `STALP:"OR"` (live 189 rows) not the bare `STALP:OR` that
+  // lives-400s (Oregon collides with the Lucene OR operator).
+  await withFetch(fdicInstMock({ records: [{ NAME: "Oregon Bank", CERT: 1, ASSET: 1, STALP: "OR", CITY: "Portland", ACTIVE: 1, ESTYMD: "01/01/1900", ID: "1" }], total: 189 }), async (calls) => {
+    const r = await runTool("fdic_search_institutions", { state: "OR" }, sam);
+    const url = fdicInstUrl(calls);
+    const c = calls.find((x) => isFdicInst(x.url));
+    ok("58f ★OR-fix wire: state:'OR' ⇒ decoded filters === 'STALP:\"OR\"' (QUOTED) + raw URL carries STALP%3A%22OR%22, never bare STALP%3AOR (revert filterTerm ⇒ RED; live it is a HTTP 400)",
+      !!url && url.searchParams.get("filters") === 'STALP:"OR"' && !!c && /STALP%3A%22OR%22/.test(c.url) && !/STALP%3AOR/.test(c.url), JSON.stringify(url?.searchParams.get("filters")));
+    ok("58f ★OR-fix Oregon returns rows (totalAvailable 189) — NOT a thrown 400", r.data.institutions.length === 1 && buildMeta(r.meta).totalAvailable === 189 && r.data.institutions[0].state === "OR", JSON.stringify({ n: r.data.institutions.length, ta: buildMeta(r.meta).totalAvailable }));
   });
   await withFetch(failClosed(), async (calls) => {
     for (const [args, why] of [
@@ -8710,8 +8725,8 @@ async function testFdicFailuresHonesty() {
   ok("59 ★F3 normFailDate(null/undefined) → null (genuinely absent; never String()-fabricated 'null')", fdicNormFailDate(null).value === null && fdicNormFailDate(undefined).value === null, JSON.stringify([fdicNormFailDate(null), fdicNormFailDate(undefined)]));
 
   // (F1) buildFailFilters — state→PSTALP (NOT STALP), failYear→FAILYR, cert→CERT.
-  eq("59 ★F1 buildFailFilters state:'CA' → 'PSTALP:CA' (NOT 'STALP:CA' — STALP:CA is a live total-0 false-empty ⇒ map to STALP ⇒ RED)", fdicBuildFailFilters({ state: "CA" }), "PSTALP:CA");
-  eq("59 ★F1 buildFailFilters compound: PSTALP:CA AND FAILYR:2023 AND CERT:24735 (structured — no free field)", fdicBuildFailFilters({ state: "CA", failYear: 2023, cert: 24735 }), "PSTALP:CA AND FAILYR:2023 AND CERT:24735");
+  eq("59 ★F1 buildFailFilters state:'CA' → 'PSTALP:\"CA\"' (NOT 'STALP:…' — STALP:CA is a live total-0 false-empty ⇒ map to STALP ⇒ RED; ★OR-fix: state QUOTED)", fdicBuildFailFilters({ state: "CA" }), 'PSTALP:"CA"');
+  eq("59 ★F1 buildFailFilters compound: PSTALP:\"CA\" AND FAILYR:2023 AND CERT:24735 (★OR-fix: state QUOTED, numeric FAILYR/CERT bare — structured, no free field)", fdicBuildFailFilters({ state: "CA", failYear: 2023, cert: 24735 }), 'PSTALP:"CA" AND FAILYR:2023 AND CERT:24735');
   eq("59 ★F1 buildFailFilters failYear:2023 → 'FAILYR:2023' (the year's digits filter the string FAILYR field)", fdicBuildFailFilters({ failYear: 2023 }), "FAILYR:2023");
   eq("59 buildFailFilters no clauses → '' (⇒ no filters param)", fdicBuildFailFilters({}), "");
 
@@ -8721,7 +8736,7 @@ async function testFdicFailuresHonesty() {
     ok("59 ★F2 filterTerm('NAME',…,failuresAllowlist) ⇒ invalid_input (NAME is NOT filterable on /failures — add NAME to the allowlist ⇒ RED = the false-flood)", bad.threw && toToolError(bad.error).kind === "invalid_input", JSON.stringify({ threw: bad.threw }));
     const badStalp = await expectThrow(async () => fdicFilterTerm("STALP", "CA", FDIC_FAILURES_FILTER_FIELDS));
     ok("59 ★F1 filterTerm('STALP',…,failuresAllowlist) ⇒ invalid_input (STALP is NOT on the failures allowlist — only PSTALP is)", badStalp.threw && toToolError(badStalp.error).kind === "invalid_input", JSON.stringify({ threw: badStalp.threw }));
-    eq("59 ★F1 filterTerm positive: PSTALP IS allowlisted ⇒ 'PSTALP:CA'", fdicFilterTerm("PSTALP", "CA", FDIC_FAILURES_FILTER_FIELDS), "PSTALP:CA");
+    eq("59 ★F1 filterTerm positive: PSTALP IS allowlisted ⇒ 'PSTALP:\"CA\"' (★OR-fix: value QUOTED)", fdicFilterTerm("PSTALP", "CA", FDIC_FAILURES_FILTER_FIELDS), 'PSTALP:"CA"');
   }
 
   // (F1+F2 wire) end-to-end: state:'CA', failYear:2023 → filters=PSTALP:CA AND
@@ -8730,12 +8745,23 @@ async function testFdicFailuresHonesty() {
     const r = await runTool("fdic_bank_failures", { state: "CA", failYear: 2023 }, sam);
     const url = fdicFailUrl(calls);
     const c = calls.find((x) => isFdicFail(x.url));
-    ok("59 ★F1 wire: filters === 'PSTALP:CA AND FAILYR:2023' (PSTALP, NOT STALP; state→STALP ⇒ RED)", !!url && url.searchParams.get("filters") === "PSTALP:CA AND FAILYR:2023", JSON.stringify(url?.searchParams.get("filters")));
+    ok("59 ★F1 wire: filters === 'PSTALP:\"CA\" AND FAILYR:2023' (PSTALP, NOT STALP; state→STALP ⇒ RED; ★OR-fix: state QUOTED, FAILYR bare)", !!url && url.searchParams.get("filters") === 'PSTALP:"CA" AND FAILYR:2023', JSON.stringify(url?.searchParams.get("filters")));
     ok("59 ★F2 wire: NO `search=` param is EVER emitted on /failures (route name/city → search ⇒ RED = the 4115-row false-flood)", !!url && url.searchParams.get("search") === null, JSON.stringify({ search: url?.searchParams.get("search") }));
     ok("59 SSRF fixed host/path/https: https://api.fdic.gov/banks/failures; filters is a query param (NOT the path)", !!url && url.hostname === "api.fdic.gov" && url.protocol === "https:" && url.pathname === "/banks/failures", JSON.stringify(c?.url));
     ok("59 SSRF redirect:'error' + keyless (NO headers — byte-clean init) on the failures fetch (drop redirect ⇒ RED)", !!c && c.init && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
     ok("59 fixed field projection on the wire: fields=NAME,CERT,FAILDATE,FAILYR,CITY,PSTALP,COST,RESTYPE,SAVR,QBFDEP,QBFASSET,ID + format=json + sort_by=FAILDATE&sort_order=DESC (default)",
       url.searchParams.get("fields") === "NAME,CERT,FAILDATE,FAILYR,CITY,PSTALP,COST,RESTYPE,SAVR,QBFDEP,QBFASSET,ID" && url.searchParams.get("format") === "json" && url.searchParams.get("sort_by") === "FAILDATE" && url.searchParams.get("sort_order") === "DESC", JSON.stringify(url?.search));
+  });
+
+  // ★OR-fix regression guard (sibling tool) — failures state:'OR' ⇒ emitted clause
+  // is QUOTED `PSTALP:"OR"` (live 38 rows) not the bare `PSTALP:OR` that lives-400s.
+  await withFetch(fdicFailMock({ records: [{ ...FAIL_SVB, PSTALP: "OR" }], total: 38 }), async (calls) => {
+    const r = await runTool("fdic_bank_failures", { state: "OR" }, sam);
+    const url = fdicFailUrl(calls);
+    const c = calls.find((x) => isFdicFail(x.url));
+    ok("59 ★OR-fix wire: state:'OR' ⇒ decoded filters === 'PSTALP:\"OR\"' (QUOTED) + raw URL carries PSTALP%3A%22OR%22, never bare PSTALP%3AOR (revert filterTerm ⇒ RED; live it is a HTTP 400)",
+      !!url && url.searchParams.get("filters") === 'PSTALP:"OR"' && !!c && /PSTALP%3A%22OR%22/.test(c.url) && !/PSTALP%3AOR/.test(c.url), JSON.stringify(url?.searchParams.get("filters")));
+    ok("59 ★OR-fix Oregon returns rows (totalAvailable 38) — NOT a thrown 400", r.data.failures.length === 1 && buildMeta(r.meta).totalAvailable === 38 && r.data.failures[0].state === "OR", JSON.stringify({ n: r.data.failures.length, ta: buildMeta(r.meta).totalAvailable }));
   });
 
   // (F1 output + F3 date + F3 cost) end-to-end map: state←PSTALP, failDate ISO,
@@ -8861,6 +8887,256 @@ async function testFdicFailuresHonesty() {
     const m = buildMeta((await runTool("fdic_bank_failures", { state: "TX" }, sam)).meta);
     ok("59 B: COST absent from ALL records ⇒ COST ∈ fieldsUnavailable + a drift note (drop the returned-fields disclosure ⇒ RED)",
       m.fieldsUnavailable.includes("COST") && m.notes.some((n) => /COST/.test(n) && /not.*returned|schema drift/i.test(n)), JSON.stringify({ fu: m.fieldsUnavailable }));
+  });
+}
+
+// §60: FDIC BankFind /banks/history (ADR-0030) — the 4th FDIC tool
+// `fdic_institution_history` (source 23 unchanged; snapshot 90→91). The
+// institution-level structural-change event log — completes the FDIC entity cluster
+// (directory + financials + failures + history). Reuses the C116 adapter VERBATIM
+// (getFdic / parseEnvelope 3-envelope guard / filterTerm allowlist / sortParams
+// enum+Set.has / EXACT meta.total pagination / freshness), so this section pins ONLY
+// the NEW surface + a P1/P2/SSRF smoke through the new tool. All OFFLINE (mock
+// fetch), deterministic, NON-VACUOUS: every assertion pins a value and names the
+// mutation that turns it RED.
+//   (F1-analog) state → the PSTALP filter, NOT STALP (STALP:CA is a live total-0
+//        false-empty). Assert the spied filter is exactly `PSTALP:CA` + output state←PSTALP.
+//   (F2-analog) NO name/city input + NEVER a `search=` param (INSTNAME search on
+//        /history is a false-EMPTY total-0); the allowlist is {CERT,CHANGECODE,EFFYEAR,PSTALP}.
+//   (Q1) changeDescription === the co-served CHANGECODE_DESC (passthrough, NOT a hand-map).
+//   (Q2) normHistDate YYYY-MM-DDT00:00:00→ISO (exact round-trip; 2002-02-30 rejected
+//        → raw; an unparseable "2002-07-01"/"" → raw + disclosed, NOT null; 9999-* sentinel).
+//   (Q3) the ACQ_/OUT_/SUR_ CERT-triad: real CERT on a merger row, null (never 0,
+//        never from *_UNINUM's 0 sentinel) on a non-merger row; the triad is EXEMPT
+//        from fieldsUnavailable (event-conditional, not schema drift).
+//   (P1) totalAvailable === meta.total 13794 (not page length). (P2) 400/404/non-JSON/
+//        drift THROW; genuine total:0 ⇒ complete:true. (SSRF) fixed host/path/https +
+//        redirect:'error' + keyless + bounded l/o + non-int cert ⇒ invalid_input 0-fetch.
+const isFdicHist = (u) => /api\.fdic\.gov\/banks\/history\?/.test(u);
+const FDIC_HIST_INDEX = { name: "history_20260710090007", createTimestamp: "2026-07-10T10:22:11Z" };
+const fdicHistMock = (spec) => (u) => (isFdicHist(u) ? mockResponse({ status: 200, json: fdicBody({ ...spec, index: spec.index ?? FDIC_HIST_INDEX }) }) : failClosed()());
+const fdicHistUrl = (calls) => { const c = calls.find((x) => isFdicHist(x.url)); return c ? new URL(c.url) : null; };
+// A 520 location-change row (NON-merger: ACQ_/OUT_/SUR_ CERT ABSENT — only the
+// *_UNINUM:0 sentinel is present, which we deliberately DO NOT project) + a 223
+// merger row (ACQ_CERT:2155, OUT_CERT:20039, SUR_CERT:2155 + names populated).
+const HIST_520 = { CERT: 3510, INSTNAME: "Bank of America, National Association", PSTALP: "NC", CHANGECODE: 520, CHANGECODE_DESC: "Change in Physical Location (FO or BR)", EFFDATE: "2002-07-01T00:00:00", PROCDATE: "2003-06-11T00:00:00", EFFYEAR: "2002", TRANSNUM: 12345, ACQ_UNINUM: 0, OUT_UNINUM: 0, ID: "hist520" };
+const HIST_223 = { CERT: 3510, INSTNAME: "Bank of America, National Association", PSTALP: "NC", CHANGECODE: 223, CHANGECODE_DESC: "Merger -Without Assistance", EFFDATE: "1998-09-30T00:00:00", PROCDATE: "1998-10-15T00:00:00", EFFYEAR: "1998", TRANSNUM: 67890, ACQ_CERT: 2155, ACQ_INSTNAME: "Acquirer Bank, N.A.", OUT_CERT: 20039, OUT_INSTNAME: "Outgoing Bank", SUR_CERT: 2155, SUR_INSTNAME: "Acquirer Bank, N.A.", ACQ_UNINUM: 111, OUT_UNINUM: 222, ID: "hist223" };
+
+async function testFdicHistoryHonesty() {
+  section("60. FDIC BankFind /banks/history (ADR-0030) — the 4th FDIC tool: ★F1 state→PSTALP (NOT STALP false-empty) + ★F2 NO name/city, NEVER `search=` + ★Q1 changeDescription===CHANGECODE_DESC passthrough + ★Q2 normHistDate ISO-timestamp→ISO (exact round-trip; unparseable→raw; 9999 sentinel) + ★Q3 counterparty *_CERT-not-*_UNINUM null-never-0 + fieldsUnavailable EXEMPTS the triad + P1 exact-total + P2 3-envelope + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  // (Q2-unit) normHistDate — the exact Date.UTC round-trip, raw-passthrough, sentinel, never null-a-present-date.
+  eq("60 ★Q2 normHistDate('2002-07-01T00:00:00') → '2002-07-01' (strip time; surface raw ⇒ RED)", fdicNormHistDate("2002-07-01T00:00:00").value, "2002-07-01");
+  ok("60 ★Q2 normHistDate('2002-07-01T00:00:00').normalized === true", fdicNormHistDate("2002-07-01T00:00:00").normalized === true, JSON.stringify(fdicNormHistDate("2002-07-01T00:00:00")));
+  eq("60 ★Q2 normHistDate('1782-01-01T00:00:00') → '1782-01-01' (old rows conform — uniform old↔new)", fdicNormHistDate("1782-01-01T00:00:00").value, "1782-01-01");
+  ok("60 ★Q2 normHistDate('9999-12-31T00:00:00') (sentinel) round-trips to '9999-12-31', normalized:true (it is a valid calendar date; the handler discloses it separately)",
+    fdicNormHistDate("9999-12-31T00:00:00").value === "9999-12-31" && fdicNormHistDate("9999-12-31T00:00:00").normalized === true, JSON.stringify(fdicNormHistDate("9999-12-31T00:00:00")));
+  ok("60 ★Q2 normHistDate('2002-02-30T00:00:00') FAILS the round-trip → surfaced RAW (NOT a rolled '2002-03-02', NOT null; naive Date parse ⇒ RED = fabricated Mar-02)",
+    fdicNormHistDate("2002-02-30T00:00:00").value === "2002-02-30T00:00:00" && fdicNormHistDate("2002-02-30T00:00:00").normalized === false, JSON.stringify(fdicNormHistDate("2002-02-30T00:00:00")));
+  ok("60 ★Q2 normHistDate('2002-07-01') (no T00:00:00) → raw, normalized:false, NOT null (null-a-present-value ⇒ RED)",
+    fdicNormHistDate("2002-07-01").value === "2002-07-01" && fdicNormHistDate("2002-07-01").normalized === false, JSON.stringify(fdicNormHistDate("2002-07-01")));
+  ok("60 ★Q2 normHistDate('') → raw '' (present-but-empty surfaced, NOT null), normalized:false", fdicNormHistDate("").value === "" && fdicNormHistDate("").normalized === false, JSON.stringify(fdicNormHistDate("")));
+  ok("60 ★Q2 normHistDate(null/undefined) → null (genuinely absent; never String()-fabricated 'null')", fdicNormHistDate(null).value === null && fdicNormHistDate(undefined).value === null, JSON.stringify([fdicNormHistDate(null), fdicNormHistDate(undefined)]));
+
+  // (F1) buildHistFilters — cert→CERT, changeCode→CHANGECODE, effYear→EFFYEAR, state→PSTALP.
+  eq("60 ★F1 buildHistFilters state:'CA' → 'PSTALP:\"CA\"' (NOT 'STALP:…' — STALP:CA is a live total-0 false-empty ⇒ map to STALP ⇒ RED; ★OR-fix: state QUOTED)", fdicBuildHistFilters({ state: "CA" }), 'PSTALP:"CA"');
+  eq("60 ★F1 buildHistFilters cert:3510 → 'CERT:3510' (the PRIMARY lookup)", fdicBuildHistFilters({ cert: 3510 }), "CERT:3510");
+  eq("60 buildHistFilters compound: CERT:3510 AND CHANGECODE:223 AND EFFYEAR:1998 AND PSTALP:\"NC\" (★OR-fix: numeric CERT/CHANGECODE/EFFYEAR bare, state QUOTED — structured, no free field)", fdicBuildHistFilters({ cert: 3510, changeCode: 223, effYear: 1998, state: "NC" }), 'CERT:3510 AND CHANGECODE:223 AND EFFYEAR:1998 AND PSTALP:"NC"');
+  eq("60 buildHistFilters effYear:2018 → 'EFFYEAR:2018' (the year's digits filter the string EFFYEAR field)", fdicBuildHistFilters({ effYear: 2018 }), "EFFYEAR:2018");
+  eq("60 buildHistFilters no clauses → '' (⇒ no filters param)", fdicBuildHistFilters({}), "");
+
+  // (F2) the allowlist is {CERT,CHANGECODE,EFFYEAR,PSTALP}; NAME/CITY/STALP are rejected.
+  {
+    const bad = await expectThrow(async () => fdicFilterTerm("NAME", "x", FDIC_HISTORY_FILTER_FIELDS));
+    ok("60 ★F2 filterTerm('NAME',…,historyAllowlist) ⇒ invalid_input (NAME is NOT filterable on /history — add NAME to the allowlist ⇒ RED = the false-empty search)", bad.threw && toToolError(bad.error).kind === "invalid_input", JSON.stringify({ threw: bad.threw }));
+    const badStalp = await expectThrow(async () => fdicFilterTerm("STALP", "CA", FDIC_HISTORY_FILTER_FIELDS));
+    ok("60 ★F1 filterTerm('STALP',…,historyAllowlist) ⇒ invalid_input (STALP is NOT on the history allowlist — only PSTALP is)", badStalp.threw && toToolError(badStalp.error).kind === "invalid_input", JSON.stringify({ threw: badStalp.threw }));
+    eq("60 ★F1 filterTerm positive: PSTALP IS allowlisted ⇒ 'PSTALP:\"CA\"' (★OR-fix: value QUOTED)", fdicFilterTerm("PSTALP", "CA", FDIC_HISTORY_FILTER_FIELDS), 'PSTALP:"CA"');
+    eq("60 filterTerm positive: CHANGECODE IS allowlisted ⇒ 'CHANGECODE:223'", fdicFilterTerm("CHANGECODE", "223", FDIC_HISTORY_FILTER_FIELDS), "CHANGECODE:223");
+  }
+
+  // (F1+F2 wire) end-to-end: cert:3510, changeCode:223, state:'NC' → filters=CERT:3510
+  // AND CHANGECODE:223 AND PSTALP:NC, NO `search=` param EVER, fixed host/path/https,
+  // projection, sort_by=EFFDATE&sort_order=DESC (default).
+  await withFetch(fdicHistMock({ records: [HIST_223], total: 1 }), async (calls) => {
+    await runTool("fdic_institution_history", { cert: 3510, changeCode: 223, state: "NC" }, sam);
+    const url = fdicHistUrl(calls);
+    const c = calls.find((x) => isFdicHist(x.url));
+    ok("60 ★F1 wire: filters === 'CERT:3510 AND CHANGECODE:223 AND PSTALP:\"NC\"' (PSTALP, NOT STALP; state→STALP ⇒ RED; ★OR-fix: state QUOTED, numeric bare)", !!url && url.searchParams.get("filters") === 'CERT:3510 AND CHANGECODE:223 AND PSTALP:"NC"', JSON.stringify(url?.searchParams.get("filters")));
+    ok("60 ★F2 wire: NO `search=` param is EVER emitted on /history (route name/city → search ⇒ RED = a total-0 false-empty)", !!url && url.searchParams.get("search") === null, JSON.stringify({ search: url?.searchParams.get("search") }));
+    ok("60 SSRF fixed host/path/https: https://api.fdic.gov/banks/history; filters is a query param (NOT the path)", !!url && url.hostname === "api.fdic.gov" && url.protocol === "https:" && url.pathname === "/banks/history", JSON.stringify(c?.url));
+    ok("60 SSRF redirect:'error' + keyless (NO headers — byte-clean init) on the history fetch (drop redirect ⇒ RED)", !!c && c.init && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
+    ok("60 fixed field projection on the wire: fields=CERT,INSTNAME,PSTALP,CHANGECODE,CHANGECODE_DESC,EFFDATE,PROCDATE,EFFYEAR,TRANSNUM,ACQ_CERT,ACQ_INSTNAME,OUT_CERT,OUT_INSTNAME,SUR_CERT,SUR_INSTNAME,ID + format=json + sort_by=EFFDATE&sort_order=DESC (default)",
+      url.searchParams.get("fields") === "CERT,INSTNAME,PSTALP,CHANGECODE,CHANGECODE_DESC,EFFDATE,PROCDATE,EFFYEAR,TRANSNUM,ACQ_CERT,ACQ_INSTNAME,OUT_CERT,OUT_INSTNAME,SUR_CERT,SUR_INSTNAME,ID" && url.searchParams.get("format") === "json" && url.searchParams.get("sort_by") === "EFFDATE" && url.searchParams.get("sort_order") === "DESC", JSON.stringify(url?.search));
+  });
+  // state:'CA' alone → filters=PSTALP:"CA" (the load-bearing PSTALP mapping + OR-fix quoting in isolation).
+  await withFetch(fdicHistMock({ records: [HIST_520], total: 35892 }), async (calls) => {
+    await runTool("fdic_institution_history", { state: "CA" }, sam);
+    const url = fdicHistUrl(calls);
+    ok("60 ★F1 wire: state:'CA' alone ⇒ filters === 'PSTALP:\"CA\"' (never 'STALP:…'; ★OR-fix: QUOTED)", !!url && url.searchParams.get("filters") === 'PSTALP:"CA"', JSON.stringify(url?.searchParams.get("filters")));
+  });
+
+  // ★OR-fix regression guard — state:'OR' (Oregon) is the ONLY 2-letter US state
+  // code that collides with a Lucene boolean operator. Unquoted `PSTALP:OR` → live
+  // HTTP 400 (parse_exception) = a HARD-FAIL, NOT an empty. The quoted `PSTALP:"OR"`
+  // → live 4289 rows. Assert the emitted clause is QUOTED and the tool returns rows
+  // (RED if filterTerm reverts to unquoted — the URL would carry bare `PSTALP:OR`).
+  await withFetch(fdicHistMock({ records: [{ ...HIST_520, PSTALP: "OR" }], total: 4289 }), async (calls) => {
+    const r = await runTool("fdic_institution_history", { state: "OR" }, sam);
+    const url = fdicHistUrl(calls);
+    const c = calls.find((x) => isFdicHist(x.url));
+    ok("60 ★OR-fix wire: state:'OR' ⇒ decoded filters === 'PSTALP:\"OR\"' (QUOTED; revert filterTerm to bare `PSTALP:OR` ⇒ RED = decoded 'PSTALP:OR' ≠ expected, and live it is a HTTP 400 hard-fail)", !!url && url.searchParams.get("filters") === 'PSTALP:"OR"', JSON.stringify(url?.searchParams.get("filters")));
+    ok("60 ★OR-fix raw URL carries the URL-encoded quotes PSTALP%3A%22OR%22 and NEVER the bare PSTALP%3AOR", !!c && /PSTALP%3A%22OR%22/.test(c.url) && !/PSTALP%3AOR/.test(c.url), JSON.stringify(c?.url));
+    ok("60 ★OR-fix Oregon returns rows (totalAvailable 4289, returned 1) — NOT a thrown 400 (before the fix this hard-failed)", r.data.history.length === 1 && buildMeta(r.meta).totalAvailable === 4289 && r.data.history[0].state === "OR", JSON.stringify({ n: r.data.history.length, ta: buildMeta(r.meta).totalAvailable }));
+  });
+
+  // (Q1 + Q2 + Q3 output) end-to-end map on a MERGER row: changeDescription passthrough,
+  // effectiveDate/processDate ISO, the ACQ_/OUT_/SUR_ CERT-triad populated.
+  await withFetch(fdicHistMock({ records: [HIST_223], total: 1 }), async () => {
+    const r = await runTool("fdic_institution_history", { cert: 3510, changeCode: 223 }, sam);
+    const row = r.data.history[0];
+    ok("60 ★Q1 changeDescription === the co-served CHANGECODE_DESC 'Merger -Without Assistance' (passthrough; hand-map/mismap ⇒ RED)", row.changeDescription === "Merger -Without Assistance" && row.changeDescription === HIST_223.CHANGECODE_DESC, JSON.stringify(row.changeDescription));
+    ok("60 ★Q1 changeCode === num(CHANGECODE) 223 (the numeric code is authoritative)", row.changeCode === 223, JSON.stringify(row.changeCode));
+    eq("60 ★Q2 effectiveDate ISO: '1998-09-30T00:00:00' → '1998-09-30' (surface raw ⇒ RED)", row.effectiveDate, "1998-09-30");
+    eq("60 ★Q2 processDate ISO: '1998-10-15T00:00:00' → '1998-10-15'", row.processDate, "1998-10-15");
+    ok("60 ★Q3 acquirerCert === num(ACQ_CERT) 2155 (merger counterparty; use *_UNINUM ⇒ RED = 111)", row.acquirerCert === 2155, JSON.stringify(row.acquirerCert));
+    ok("60 ★Q3 outgoingCert 20039 + survivingCert 2155 + names populated (drop the triad ⇒ RED)", row.outgoingCert === 20039 && row.survivingCert === 2155 && row.acquirerName === "Acquirer Bank, N.A." && row.outgoingName === "Outgoing Bank" && row.survivingName === "Acquirer Bank, N.A.", JSON.stringify({ oc: row.outgoingCert, sc: row.survivingCert }));
+    ok("60 output: state←PSTALP 'NC', instName←INSTNAME, effYear←EFFYEAR '1998' (str), transNum←TRANSNUM 67890 (num), id←ID", row.state === "NC" && row.instName === "Bank of America, National Association" && row.effYear === "1998" && row.transNum === 67890 && row.id === "hist223", JSON.stringify({ st: row.state, ey: row.effYear, tn: row.transNum }));
+  });
+
+  // (Q3 null-never-0) end-to-end on a NON-merger (520) row: the counterparty triad is
+  // ABSENT → num/str → null (never 0, never surfaced from *_UNINUM's 0 sentinel).
+  await withFetch(fdicHistMock({ records: [HIST_520], total: 1393 }), async () => {
+    const r = await runTool("fdic_institution_history", { cert: 3510, changeCode: 520 }, sam);
+    const row = r.data.history[0];
+    ok("60 ★Q3 a 520 (branch/location) row ⇒ acquirerCert:null (ACQ_CERT absent → num → null; fabricate 0 ⇒ RED; surface ACQ_UNINUM:0 ⇒ RED)", row.acquirerCert === null, JSON.stringify(row.acquirerCert));
+    ok("60 ★Q3 outgoingCert:null + survivingCert:null + acquirerName:null (absent → null, an honest 'no counterparty' — never 0/'')", row.outgoingCert === null && row.survivingCert === null && row.acquirerName === null && row.outgoingName === null && row.survivingName === null, JSON.stringify({ oc: row.outgoingCert, sc: row.survivingCert, an: row.acquirerName }));
+    ok("60 ★Q3 NO *_UNINUM value (0) ever leaks into the output shape (the row carries ACQ_UNINUM:0 but the projection never surfaces it)", !("acquirerUninum" in row) && JSON.stringify(row).indexOf("Uninum") === -1, JSON.stringify(Object.keys(row)));
+    eq("60 ★Q2 the 520 row's effectiveDate '2002-07-01T00:00:00' → '2002-07-01'; changeDescription passthrough", row.effectiveDate, "2002-07-01");
+  });
+
+  // (Q3-NUANCE fieldsUnavailable) a page of ALL-NON-MERGER (520) rows ⇒ the ACQ_/OUT_/
+  // SUR_ triad is absent but is DELIBERATELY EXEMPT from fieldsUnavailable (it is
+  // event-conditional, NOT schema drift). A genuinely-missing always-present field
+  // (CHANGECODE_DESC) DOES surface in fieldsUnavailable.
+  await withFetch(fdicHistMock({ records: [HIST_520, { ...HIST_520, ID: "hist520b" }], total: 2 }), async () => {
+    const m = buildMeta((await runTool("fdic_institution_history", { cert: 3510, changeCode: 520 }, sam)).meta);
+    ok("60 ★Q3-NUANCE all-520 page: the counterparty triad ACQ_CERT/OUT_CERT/SUR_CERT is NOT in fieldsUnavailable (event-conditional, not drift; add them to HIST_PROJECTION ⇒ RED = a spurious drift alarm on the expected shape)",
+      !m.fieldsUnavailable.includes("ACQ_CERT") && !m.fieldsUnavailable.includes("OUT_CERT") && !m.fieldsUnavailable.includes("SUR_CERT") && !m.fieldsUnavailable.includes("ACQ_INSTNAME"), JSON.stringify(m.fieldsUnavailable));
+  });
+  await withFetch(fdicHistMock({ records: [
+    { CERT: 3510, INSTNAME: "X", PSTALP: "NC", CHANGECODE: 520, EFFDATE: "2002-07-01T00:00:00", PROCDATE: "2003-06-11T00:00:00", EFFYEAR: "2002", TRANSNUM: 1, ID: "a" },
+  ], total: 1 }), async () => {
+    const r = await runTool("fdic_institution_history", { cert: 3510 }, sam);
+    const m = buildMeta(r.meta);
+    ok("60 ★Q1/B CHANGECODE_DESC absent from ALL records ⇒ CHANGECODE_DESC ∈ fieldsUnavailable + a drift note AND changeDescription:null (never invented; drop the disclosure ⇒ RED)",
+      m.fieldsUnavailable.includes("CHANGECODE_DESC") && r.data.history[0].changeDescription === null && m.notes.some((n) => /CHANGECODE_DESC/.test(n) && /not.*returned|schema drift/i.test(n)), JSON.stringify({ fu: m.fieldsUnavailable, cd: r.data.history[0].changeDescription }));
+  });
+
+  // (Q2 date disclosure) an unrecognized EFFDATE is surfaced RAW + a note fires; a
+  // 9999 sentinel fires the sentinel note; a fully-normalized page fires neither.
+  await withFetch(fdicHistMock({ records: [{ ...HIST_520, EFFDATE: "07/01/2002" }], total: 1 }), async () => {
+    const r = await runTool("fdic_institution_history", { cert: 3510 }, sam);
+    const m = buildMeta(r.meta);
+    ok("60 ★Q2 an unparseable EFFDATE '07/01/2002' ⇒ effectiveDate surfaced RAW '07/01/2002' (NOT null) + a raw-passthrough disclosure note fires",
+      r.data.history[0].effectiveDate === "07/01/2002" && m.notes.some((n) => /surfaced RAW|did not match FDIC's YYYY-MM-DDT00:00:00/i.test(n)), JSON.stringify({ ed: r.data.history[0].effectiveDate, notes: m.notes }));
+  });
+  await withFetch(fdicHistMock({ records: [{ ...HIST_520, EFFDATE: "9999-12-31T00:00:00" }], total: 1 }), async () => {
+    const r = await runTool("fdic_institution_history", { cert: 3510 }, sam);
+    const m = buildMeta(r.meta);
+    ok("60 ★Q2 a 9999-12-31 sentinel EFFDATE ⇒ effectiveDate '9999-12-31' (round-trips) + a sentinel disclosure note fires",
+      r.data.history[0].effectiveDate === "9999-12-31" && m.notes.some((n) => /9999-\*|not-applicable|sentinel/i.test(n)), JSON.stringify({ ed: r.data.history[0].effectiveDate, notes: m.notes }));
+  });
+  await withFetch(fdicHistMock({ records: [HIST_223], total: 1 }), async () => {
+    const m = buildMeta((await runTool("fdic_institution_history", { cert: 3510, changeCode: 223 }, sam)).meta);
+    ok("60 ★Q2 a fully-normalized page ⇒ NO raw-passthrough note AND NO sentinel note (non-vacuity) but the standing ISO-timestamp→ISO + changeDescription + counterparty + scope notes ARE present",
+      !m.notes.some((n) => /surfaced RAW/i.test(n)) && !m.notes.some((n) => /sentinel/i.test(n)) && m.notes.some((n) => /YYYY-MM-DDT00:00:00 to ISO/.test(n)) && m.notes.some((n) => /CHANGECODE_DESC/.test(n)) && m.notes.some((n) => /merger counterparties/.test(n)), JSON.stringify(m.notes));
+    ok("60 the CERT-linkage/scope note (F2) is present (name/city shown-not-searchable; absent = no recorded structural change)",
+      m.notes.some((n) => /resolve its CERT via fdic_search_institutions|to find an institution's history/.test(n)) && m.notes.some((n) => /no recorded structural change/.test(n)), JSON.stringify(m.notes));
+    ok("60 source set INLINE (A1) to the history endpoint provenance (no synthesizeDefaultMeta branch)", m.source === "api.fdic.gov/banks/history (BankFind, keyless)", JSON.stringify(m.source));
+    ok("60 freshness: the history snapshot name + createTimestamp 2026-07-10T10:22:11Z are disclosed", m.notes.some((n) => /history_20260710090007/.test(n) && /2026-07-10T10:22:11Z/.test(n) && /snapshot/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // (sortBy allowlist) — unknown sortBy ⇒ invalid_input BEFORE fetch (0 fetch),
+  // both the module (Set.has) and the runTool (Zod enum) paths.
+  await withFetch(failClosed(), async (calls) => {
+    const r = await expectThrow(() => fdicInstitutionHistory({ sortBy: "NOTAFIELD" }));
+    ok("60 ★sortBy Set.has (module): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch (widen the Set ⇒ RED = sort_by=NOTAFIELD reaches the wire, live 400)", r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: r.threw ? toToolError(r.error).kind : null, fetches: calls.length }));
+    const rz = await expectThrow(() => runTool("fdic_institution_history", { sortBy: "NOTAFIELD" }, sam));
+    ok("60 ★sortBy Zod enum (runTool): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch (widen the enum ⇒ RED)", rz.threw && toToolError(rz.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: rz.threw ? toToolError(rz.error).kind : null, fetches: calls.length }));
+  });
+
+  // (SSRF bounds) — Zod bound/format guards ⇒ invalid_input, 0 fetch. The non-int
+  // cert guard is LOAD-BEARING (it prevents the live HTTP-200 total:0 false-empty).
+  await withFetch(failClosed(), async (calls) => {
+    for (const [args, why] of [
+      [{ limit: 5000 }, "limit>1000"],
+      [{ offset: -1 }, "offset<0"],
+      [{ offset: 200000 }, "offset>100000"],
+      [{ state: "california" }, "state not 2-upper"],
+      [{ cert: 0 }, "cert<1"],
+      [{ cert: 3.5 }, "cert non-int (guards the live HTTP-200 total:0 false-empty)"],
+      [{ effYear: 1000 }, "effYear<1782"],
+      [{ effYear: 3000 }, "effYear>currentUtcYear"],
+      [{ changeCode: 0 }, "changeCode<1"],
+    ]) {
+      const before = calls.length;
+      const r = await expectThrow(() => runTool("fdic_institution_history", args, sam));
+      ok(`60 SSRF Zod bound/format guard (${why}) ⇒ invalid_input, 0 fetch`, r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: r.threw ? toToolError(r.error).kind : null, added: calls.length - before }));
+    }
+  });
+
+  // (P1) totalAvailable === meta.total 13794 (NOT page length) — pagination is
+  // load-bearing (BofA CERT:3510 has 13,794 structural-change rows).
+  await withFetch(fdicHistMock({ records: [HIST_520], total: 13794 }), async () => {
+    const m = buildMeta((await runTool("fdic_institution_history", { cert: 3510, limit: 1 }, sam)).meta);
+    ok("60 ★P1 totalAvailable === meta.total 13794 (NOT records.length 1 — mutate→page length ⇒ RED); returned 1 ⇒ hasMore:true, nextOffset:1, complete:false",
+      m.totalAvailable === 13794 && m.returned === 1 && m.pagination.hasMore === true && m.pagination.nextOffset === 1 && m.complete === false, JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
+  });
+  // offset stability: total 13794 stable across offset 5000; last-page hasMore:false.
+  await withFetch(fdicHistMock({ records: [HIST_520], total: 13794 }), async () => {
+    const m = buildMeta((await runTool("fdic_institution_history", { cert: 3510, limit: 1, offset: 5000 }, sam)).meta);
+    ok("60 ★P1 offset 5000 + returned 1 < 13794 ⇒ hasMore:true, nextOffset:5001, complete:false (exact-total pagination stable across offset)",
+      m.totalAvailable === 13794 && m.pagination.hasMore === true && m.pagination.nextOffset === 5001 && m.complete === false, JSON.stringify(m.pagination));
+  });
+
+  // (P2) 3-envelope guard — 400 errors[] ⇒ invalid_input (detail not leaked);
+  // 404 ⇒ not_found; non-JSON ⇒ schema_drift; 200-missing-meta/data ⇒ drift.
+  const HIST_SECRET = "search_phase_execution_exception HIST_LEAK_5q";
+  await withFetch((u) => (isFdicHist(u) ? mockResponse({ status: 400, json: { errors: [{ status: 400, detail: HIST_SECRET }] } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_institution_history", { cert: 3510 }, sam));
+    const te = toToolError(r.error);
+    ok("60 ★P2 400 errors[] ⇒ invalid_input AND the raw ES `detail` is NOT leaked", r.threw && te.kind === "invalid_input" && !JSON.stringify(te).includes(HIST_SECRET), JSON.stringify({ kind: te.kind }));
+  });
+  await withFetch((u) => (isFdicHist(u) ? mockResponse({ status: 404, json: { message: "Cannot GET /banks/historz", statusCode: 404 } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_institution_history", { cert: 3510 }, sam));
+    ok("60 ★P2 404 {message,statusCode} ⇒ not_found THROW (never a fake empty)", r.threw && toToolError(r.error).kind === "not_found", JSON.stringify(toToolError(r.error).kind));
+  });
+  const histHtmlResp = () => ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON"); }, text: async () => "<html>down</html>" });
+  await withFetch((u) => (isFdicHist(u) ? histHtmlResp() : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_institution_history", { cert: 3510 }, sam));
+    ok("60 ★P2 200 non-JSON body ⇒ schema_drift (never a fake-empty)", r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(toToolError(r.error).kind));
+  });
+  for (const [json, why] of [
+    [{ errors: [{ status: 400 }] }, "meta+data missing (errors[] shape at 200)"],
+    [{ meta: { total: 5 }, data: "not-an-array" }, "data is a string"],
+    [{ meta: {}, data: [] }, "meta.total absent"],
+    [{ meta: { total: "5" }, data: [] }, "meta.total a string (typeof-check before num)"],
+  ]) {
+    await withFetch((u) => (isFdicHist(u) ? mockResponse({ status: 200, json }) : failClosed()()), async () => {
+      const r = await expectThrow(() => runTool("fdic_institution_history", { cert: 3510 }, sam));
+      ok(`60 ★P2 3-envelope: 200 with ${why} ⇒ schema_drift throw (never [] + complete:true)`, r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(toToolError(r.error).kind));
+    });
+  }
+
+  // (genuine-empty) — the ONLY honest empty: total:0 + data:[] ⇒ complete:true.
+  await withFetch(fdicHistMock({ records: [], total: 0 }), async () => {
+    const r = await runTool("fdic_institution_history", { cert: 999999999 }, sam);
+    const m = buildMeta(r.meta);
+    ok("60 genuine-empty (meta.total:0 + data:[]) ⇒ returned:0, totalAvailable:0, complete:true, truncated:false (a real no-match — the ONLY honest empty)",
+      r.data.history.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.returned === 0, JSON.stringify(m));
   });
 }
 
@@ -12279,6 +12555,7 @@ async function main() {
   await testFemaHonesty();
   await testFdicHonesty();
   await testFdicFailuresHonesty();
+  await testFdicHistoryHonesty();
   await testDatagovHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();

@@ -180,9 +180,23 @@ export function escapeSearch(v) {
  *  belt-and-suspenders field-guard directly (the tool functions only ever pass
  *  hardcoded fields, so this defense-in-depth check is otherwise unreachable). */
 export { INST_FILTER_FIELDS, FIN_FILTER_FIELDS, INST_SEARCH_FIELDS };
-/** A `filters` term `FIELD:VALUE` — asserts the field ∈ its allowlist (P4). The
- *  value is a constrained non-string (STALP/ACTIVE/CERT) → no quoting needed.
- *  Exported for the allowlist-bypass fault fixture (§7(b)). */
+/** A `filters` term `FIELD:VALUE` — asserts the field ∈ its allowlist (P4). A
+ *  NON-NUMERIC value is DOUBLE-QUOTED; a numeric value stays bare. This quoting is
+ *  LOAD-BEARING for correctness: the FDIC `filters` DSL is Lucene-style, so a
+ *  BAREWORD state code that collides with a boolean operator is mis-parsed. Live-
+ *  verified 2026-07-13: `PSTALP:OR` (Oregon, unquoted) → HTTP 400 parse_exception (a
+ *  HARD-FAIL that throws, NOT an honest empty), whereas `PSTALP:"OR"` → 4289 rows.
+ *  OR is the only 2-letter US state code that collides with a Lucene operator, but
+ *  quoting is EQUIVALENT for every non-operator value (live: `STALP:CA` === `STALP:"CA"`
+ *  === 1287; `PSTALP:CA`(failures) === 265; `PSTALP:CA`(history) === 35892) so it is
+ *  uniformly safe for all state filters and fixes all 4 FDIC tools at once (they all
+ *  call this). Numeric fields (CERT/CHANGECODE/FAILYR/EFFYEAR/ACTIVE) stay bare — the
+ *  values are `^\d+$` by construction and a number never collides with an operator.
+ *  The value is escaped backslash-first then `"` (defensive — `^[A-Z]{2}$`-constrained
+ *  state values contain neither, and no other field routes a free string through here).
+ *  This is the `filters`-DSL path ONLY; the `search` param (searchTerm/escapeSearch)
+ *  is a DIFFERENT surface and stays correctly UNQUOTED (C116). Exported for the
+ *  allowlist-bypass fault fixture (§7(b)). */
 export function filterTerm(field, value, allowed) {
     if (!allowed.has(field)) {
         throw new ToolErrorCarrier({
@@ -191,7 +205,13 @@ export function filterTerm(field, value, allowed) {
             retryable: false,
         });
     }
-    return `${field}:${value}`;
+    // ★OR-fix — a non-numeric value is double-quoted so a Lucene-operator-colliding
+    // state code (e.g. OR = Oregon) is parsed as a literal term, not a boolean
+    // operator (bare `PSTALP:OR` → live HTTP 400). Numeric values stay bare.
+    const emitted = /^\d+$/.test(value)
+        ? value
+        : `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    return `${field}:${emitted}`;
 }
 /** A `search` term `FIELD:<escaped>` (M1 route for NAME/CITY) — asserts the field
  *  ∈ the search allowlist and M2-escapes the value UNQUOTED (see escapeSearch: NO
@@ -721,6 +741,277 @@ export async function bankFailures(args) {
     }
     return withMeta({ failures: records }, {
         source: "api.fdic.gov/banks/failures (BankFind, keyless)",
+        keylessMode: true,
+        returned,
+        totalAvailable,
+        filtersApplied,
+        filtersDropped: [],
+        fieldsUnavailable: fu,
+        pagination: { offset, limit, hasMore, nextOffset },
+        notes,
+    });
+}
+// ═══════════════════════════════════════════════════════════════════
+// Tool 4: fdic_institution_history (ADR-0030) — the institution-level STRUCTURAL-
+// CHANGE event log (`/banks/history`): mergers, absorptions, consolidations,
+// failures, name/location/charter/regulator changes, branch open/close, trust-power
+// grants, FRS membership changes. It COMPLETES the FDIC entity cluster (institutions
+// directory + financials time-series + failures resolution events + history full
+// structural lineage). Reuses the C116-hardened adapter VERBATIM (getFdic /
+// parseEnvelope 3-envelope-guard / filter-field allowlist-by-construction / sortBy
+// enum+Set.has / EXACT meta.total pagination / snapshot-freshness). It does NOT use
+// searchTerm/escapeSearch (no name search) or thousandsToUsd (no money field). The
+// NEW surface is exactly four things, all live-verified 2026-07-13:
+//   ★F1-analog — the state field on /history is PSTALP, NOT STALP (live: `STALP:CA`
+//     → total 0 = the unknown-field false-empty landmine; `PSTALP:CA`→35892). We map
+//     state→PSTALP in the filter, the allowlist, the projection, and the output.
+//   ★F2-analog — the `search` param does NOT work for name on /history (live:
+//     `search=INSTNAME:chase` AND `search=INSTNAME:zzzznomatch` BOTH return total 0
+//     = a false-EMPTY). So this tool has NO name/city filter and NEVER emits
+//     `search=`. INSTNAME + the counterparty names are PROJECTED (surfaced per row)
+//     but not filterable; name-based lookup is the honest 2-step CERT linkage
+//     (resolve CERT in fdic_search_institutions → filter here by cert).
+//   ★Q1 — CHANGECODE is NOT opaque: FDIC co-serves an authoritative CHANGECODE_DESC
+//     INLINE in every record (27 distinct codes sampled, 0 nulls). We surface BOTH
+//     the numeric changeCode (authoritative) AND changeDescription = the co-served
+//     CHANGECODE_DESC PROJECTED verbatim (NOT a static embedded hand-map — strictly
+//     more honest, zero-drift, auto-covers every code). A null DESC (never observed)
+//     stays null via str, surfaced by fieldsUnavailable — never invented.
+//   ★Q2 — EFFDATE/PROCDATE are `YYYY-MM-DDT00:00:00` (a THIRD date format in this
+//     source): normHistDate strips the time + does an EXACT Date.UTC round-trip → ISO
+//     YYYY-MM-DD (an unrecognized value is surfaced RAW + disclosed, never nulled/
+//     fabricated); a 9999-* value is FDIC's "not-applicable/open" sentinel (surfaced
+//     verbatim + disclosed).
+//   ★Q3 — the ACQ_/OUT_/SUR_ counterparty CERT-triad is the headline value: on a
+//     merger/failure row it carries the acquiring/outgoing/surviving institution's
+//     CERT + INSTNAME, and each CERT links straight back to the CERT-keyed tools. On
+//     a NON-merger row (e.g. a 520 location change) the *_CERT/*_INSTNAME fields are
+//     live-verified ABSENT → num/str pass them through as null (an honest "no
+//     counterparty"), NEVER a fabricated 0. We use *_CERT (the clean null-when-N/A
+//     linkage key), NOT *_UNINUM (which carries a 0 sentinel for "none" = a
+//     misleading fake identifier; live: ACQ_UNINUM:0 on a 520 row).
+// ═══════════════════════════════════════════════════════════════════
+// Fixed endpoint constant — the TOOL chooses it; NO caller value on the path (SSRF core).
+const ENDPOINT_HISTORY = "history";
+// Fixed field projection on the wire (all 16 fields; every one live-verified valid).
+// The counterparty triad ACQ_/OUT_/SUR_ is REQUESTED here but is event-conditional
+// (absent on non-merger rows) — it is deliberately EXCLUDED from HIST_PROJECTION
+// (the fieldsUnavailable check) below.
+const HIST_FIELDS = "CERT,INSTNAME,PSTALP,CHANGECODE,CHANGECODE_DESC,EFFDATE,PROCDATE,EFFYEAR,TRANSNUM,ACQ_CERT,ACQ_INSTNAME,OUT_CERT,OUT_INSTNAME,SUR_CERT,SUR_INSTNAME,ID";
+// ★Q3-NUANCE — the fieldsUnavailable "projected-field-absent-from-ALL-records"
+// check is scoped to the ALWAYS-PRESENT fields ONLY. The ACQ_/OUT_/SUR_ counterparty
+// triad is LEGITIMATELY event-conditional (a page of all-non-merger rows — e.g.
+// branch closings — would correctly omit them), so including them here would fire a
+// spurious "schema drift" on the expected shape. Their nullness is disclosed via
+// COUNTERPARTY_NOTE (Q3), NOT fieldsUnavailable.
+const HIST_PROJECTION = [
+    "CERT",
+    "INSTNAME",
+    "PSTALP",
+    "CHANGECODE",
+    "CHANGECODE_DESC",
+    "EFFDATE",
+    "PROCDATE",
+    "EFFYEAR",
+    "TRANSNUM",
+    "ID",
+];
+// ★F1-analog — the history filter-FIELD allowlist (P4 belt-and-suspenders). The
+// state field is PSTALP (NOT STALP — a false-empty landmine). NAME/CITY are NOT
+// here (F2-analog — /history has no working name/city filter). These fields carry
+// only constrained non-string values (PSTALP a 2-letter code, EFFYEAR a year, CERT
+// / CHANGECODE ints) → no quoting needed.
+const FDIC_HISTORY_FILTER_FIELDS = new Set([
+    "CERT",
+    "CHANGECODE",
+    "EFFYEAR",
+    "PSTALP",
+]);
+// sortBy allowlist (mirrors the server's Zod enum; a Set.has recheck in sortParams
+// → an unknown sort field is invalid_input BEFORE fetch; live `sort_by=NOTAFIELD`
+// → 400, so the pre-fetch guard is load-bearing).
+const HIST_SORT_FIELDS = new Set([
+    "EFFDATE",
+    "PROCDATE",
+    "CHANGECODE",
+    "TRANSNUM",
+]);
+// Exported so the fault suite can drive the belt-and-suspenders field-guard directly.
+export { FDIC_HISTORY_FILTER_FIELDS };
+/**
+ * Build the history `filters` string — EXACT-KEY terms only: `cert`→`CERT:<int>`
+ * (the PRIMARY lookup), `changeCode`→`CHANGECODE:<int>`, `effYear`→`EFFYEAR:<year>`
+ * (emit the integer's digits — EFFYEAR is a string field but the digits filter
+ * cleanly, live-verified), `state`→`PSTALP:<state>` (★F1-analog — PSTALP, NEVER
+ * STALP). There is NO name/city term (★F2-analog — /history's `search` param
+ * returns 0 for INSTNAME; this tool never emits `search=`). Terms joined with
+ * ` AND `. Returns "" when there is no structured filter clause. Exported for the
+ * fault fixtures.
+ */
+export function buildHistFilters(inp) {
+    const terms = [];
+    if (inp.cert !== undefined)
+        terms.push(filterTerm("CERT", String(inp.cert), FDIC_HISTORY_FILTER_FIELDS));
+    if (inp.changeCode !== undefined)
+        terms.push(filterTerm("CHANGECODE", String(inp.changeCode), FDIC_HISTORY_FILTER_FIELDS));
+    if (inp.effYear !== undefined)
+        terms.push(filterTerm("EFFYEAR", String(inp.effYear), FDIC_HISTORY_FILTER_FIELDS));
+    if (inp.state !== undefined)
+        terms.push(filterTerm("PSTALP", inp.state, FDIC_HISTORY_FILTER_FIELDS));
+    return terms.join(" AND ");
+}
+/**
+ * ★Q2 — normalize FDIC's `EFFDATE`/`PROCDATE` (`YYYY-MM-DDT00:00:00`, e.g.
+ * `2002-07-01T00:00:00`) to ISO `YYYY-MM-DD`. Match
+ * `^(\d{4})-(\d{2})-(\d{2})T00:00:00$`, extract y/m/d, then validate the calendar
+ * day with the EXACT 3-component Date.UTC round-trip (`getUTCFullYear/Month+1/Date`
+ * all match — rejects JS's silent roll-overs). On success → the ISO date
+ * (`normalized:true`; the month/day are already zero-padded by the `\d{2}` capture).
+ * If the value does NOT match the pattern or fails the round-trip → surface the RAW
+ * upstream value UNCHANGED (`normalized:false`; NEVER null or fabricate a present
+ * date — the handler discloses the raw passthrough); a genuinely-absent value
+ * (null/undefined/"") → str-coerced (null for absent, "" preserved). Live-confirmed
+ * 0/2000 nulls and 0 non-`T00:00:00` and old rows (1782 → `1782-01-01T00:00:00`)
+ * conform, so the raw-passthrough branch is defensive-only. The `9999-12-31T00:00:00`
+ * sentinel round-trips fine to `9999-12-31` (disclosed by the handler's sentinel
+ * note). Exported for the fault fixtures.
+ */
+export function normHistDate(raw) {
+    // A non-string (absent/null/numeric) → honest str coercion (null for absent);
+    // never String()-fabricate "null"/"undefined"/"[object Object]".
+    if (typeof raw !== "string")
+        return { value: str(raw), normalized: false };
+    const m = /^(\d{4})-(\d{2})-(\d{2})T00:00:00$/.exec(raw);
+    if (m) {
+        const y = Number(m[1]);
+        const mo = Number(m[2]);
+        const d = Number(m[3]);
+        const dt = new Date(Date.UTC(y, mo - 1, d));
+        if (dt.getUTCFullYear() === y && dt.getUTCMonth() + 1 === mo && dt.getUTCDate() === d) {
+            return { value: `${m[1]}-${m[2]}-${m[3]}`, normalized: true };
+        }
+    }
+    // Present but unrecognized → surface the raw value verbatim (defensive; never taken live).
+    return { value: raw, normalized: false };
+}
+function mapHistory(rec) {
+    return {
+        cert: num(rec.CERT),
+        instName: str(rec.INSTNAME),
+        state: str(rec.PSTALP), // ★F1-analog — PSTALP, NOT STALP
+        changeCode: num(rec.CHANGECODE),
+        // ★Q1 — changeDescription is FDIC's OWN co-served CHANGECODE_DESC, passed
+        // through verbatim (NOT a hand-map); the numeric changeCode is authoritative.
+        changeDescription: str(rec.CHANGECODE_DESC),
+        effectiveDate: normHistDate(rec.EFFDATE).value,
+        processDate: normHistDate(rec.PROCDATE).value,
+        effYear: str(rec.EFFYEAR),
+        transNum: num(rec.TRANSNUM),
+        // ★Q3 — counterparty triad from *_CERT (NOT *_UNINUM's 0 sentinel). On a
+        // non-merger row these are ABSENT → num/str → null (never a fabricated 0/"").
+        acquirerCert: num(rec.ACQ_CERT),
+        acquirerName: str(rec.ACQ_INSTNAME),
+        outgoingCert: num(rec.OUT_CERT),
+        outgoingName: str(rec.OUT_INSTNAME),
+        survivingCert: num(rec.SUR_CERT),
+        survivingName: str(rec.SUR_INSTNAME),
+        id: str(rec.ID),
+    };
+}
+// ─── history disclosure notes ──────────────────────────────────────
+const HIST_DATE_NOTE = "effectiveDate/processDate are normalized from FDIC's YYYY-MM-DDT00:00:00 to ISO YYYY-MM-DD.";
+const HIST_CHANGEDESC_NOTE = "changeDescription is FDIC's own CHANGECODE_DESC, co-served with the numeric code in each record; the numeric changeCode is authoritative.";
+const HIST_COUNTERPARTY_NOTE = "acquirer/outgoing/surviving identify the merger counterparties; each Cert links back to fdic_search_institutions / fdic_institution_financials / fdic_bank_failures; null = no counterparty for this event type.";
+const HIST_SCOPE_NOTE = "Structural-change events for FDIC-insured institutions; a bank ABSENT here (for a given CERT) has no recorded structural change — cross-check with fdic_search_institutions. Name/city are surfaced (instName + counterparty names) but NOT searchable on this endpoint (FDIC's /history `search` param returns 0 for INSTNAME); to find an institution's history, resolve its CERT via fdic_search_institutions, then filter here by `cert`.";
+/**
+ * Institution-level structural-change event log (`/banks/history`). Exact-key
+ * structured inputs: `cert` (→ CERT filter, the PRIMARY lookup), `changeCode` (→
+ * CHANGECODE), `effYear` (→ EFFYEAR), `state` (→ PSTALP filter, ★F1-analog) → the
+ * `filters` param; plus `limit`/`offset`/`sortBy`/`sortOrder` (default EFFDATE DESC
+ * → newest structural change first). Fixed field projection. NO name/city filter and
+ * NEVER a `search=` param (★F2-analog). Consumes the IDENTICAL fetch → 3-envelope
+ * guard → pagination machinery as tools 1–3.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1; live: CERT 3510
+ * → total 13794, stable across offset); the 3-envelope drift-guard makes the ONLY
+ * honest empty `200 + total:0 + data:[]`, everything else THROWS (P2); changeDescription
+ * is FDIC's co-served CHANGECODE_DESC passed through verbatim (Q1, never hand-mapped);
+ * effectiveDate/processDate normalized YYYY-MM-DDT00:00:00→ISO (unrecognized → raw +
+ * disclosed, never nulled/fabricated; 9999-* sentinel disclosed) (Q2); the ACQ_/OUT_/
+ * SUR_ counterparty CERT-triad is null-never-0 and uses *_CERT not *_UNINUM's 0
+ * sentinel (Q3); a projected always-present field absent from all records →
+ * fieldsUnavailable (B); the snapshot build time is disclosed.
+ */
+export async function institutionHistory(args) {
+    const limit = args.limit ?? 100;
+    const offset = args.offset ?? 0;
+    // Default EFFDATE DESC (newest structural change first) when the server's Zod
+    // default did not supply one (defensive — the server always defaults sortBy=EFFDATE/DESC).
+    const sort = sortParams(args.sortBy ?? "EFFDATE", args.sortOrder ?? "DESC", HIST_SORT_FIELDS, "history");
+    const filters = buildHistFilters({
+        cert: args.cert,
+        changeCode: args.changeCode,
+        effYear: args.effYear,
+        state: args.state,
+    });
+    const params = new URLSearchParams();
+    if (filters)
+        params.set("filters", filters);
+    params.set("fields", HIST_FIELDS);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    if (sort.sort_by) {
+        params.set("sort_by", sort.sort_by);
+        params.set("sort_order", sort.sort_order);
+    }
+    params.set("format", "json");
+    const body = await getFdic(ENDPOINT_HISTORY, params);
+    const env = parseEnvelope(body);
+    const records = env.records.map(mapHistory);
+    const returned = records.length;
+    const totalAvailable = env.totalAvailable;
+    const hasMore = offset + returned < totalAvailable;
+    const nextOffset = hasMore ? offset + returned : null;
+    const filtersApplied = [];
+    if (args.cert !== undefined)
+        filtersApplied.push("cert");
+    if (args.changeCode !== undefined)
+        filtersApplied.push("changeCode");
+    if (args.effYear !== undefined)
+        filtersApplied.push("effYear");
+    if (args.state !== undefined)
+        filtersApplied.push("state");
+    if (sort.sort_by)
+        filtersApplied.push("sort");
+    const notes = [
+        freshnessNote(env.indexName, env.indexCreated),
+        HIST_DATE_NOTE,
+        HIST_CHANGEDESC_NOTE,
+        HIST_COUNTERPARTY_NOTE,
+        HIST_SCOPE_NOTE,
+    ];
+    // ★Q2 — disclose any present-but-unrecognized EFFDATE/PROCDATE surfaced raw
+    // (defensive; live all conform, so this branch essentially never fires).
+    const anyRawDate = env.records.some((rec) => ["EFFDATE", "PROCDATE"].some((f) => {
+        const nd = normHistDate(rec[f]);
+        return !nd.normalized && nd.value !== null && nd.value !== "";
+    }));
+    if (anyRawDate) {
+        notes.push("One or more effectiveDate/processDate values did not match FDIC's YYYY-MM-DDT00:00:00 format (or failed the calendar round-trip) and were surfaced RAW (not normalized to ISO) — never nulled or fabricated.");
+    }
+    // ★Q2 sentinel — a 9999-* effectiveDate/processDate is FDIC's "not-applicable /
+    // open" sentinel (normally on the un-projected ACQDATE/ENDDATE, but flagged here
+    // should it ever surface on the projected dates). It round-trips to itself.
+    const anySentinel = env.records.some((rec) => ["EFFDATE", "PROCDATE"].some((f) => typeof rec[f] === "string" && rec[f].startsWith("9999")));
+    if (anySentinel) {
+        notes.push("One or more effectiveDate/processDate values carry FDIC's 9999-* 'not-applicable / open' sentinel — surfaced verbatim, not treated as a real event date.");
+    }
+    const fu = fieldsUnavailable(env.records, HIST_PROJECTION);
+    if (fu.length > 0) {
+        notes.push(`Requested field(s) ${fu.join(", ")} were not returned by FDIC for any record — possible schema drift / rename.`);
+    }
+    return withMeta({ history: records }, {
+        source: "api.fdic.gov/banks/history (BankFind, keyless)",
         keylessMode: true,
         returned,
         totalAvailable,
