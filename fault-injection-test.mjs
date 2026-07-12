@@ -6623,8 +6623,10 @@ async function testEdgarShardsHonesty() {
     const shardCalls = calls.filter((c) => isEdgarShardSubm(c.url));
     ok("41d(d) maxShards:2 on a 5-shard filer ⇒ EXACTLY 2 shard GETs (fetch-spy ≤ cap; fetch-all-5 ⇒ RED)",
       shardCalls.length === 2, JSON.stringify({ shard: shardCalls.length }));
-    ok("41d(d) maxShards cap ⇒ PARTIAL-BY-CAP note (names 3 un-fetched shards / 6 filings) + hasMore:true + complete:false (claim-complete ⇒ RED)",
-      m.notes.some((n) => /PARTIAL history \(maxShards cap 2\): fetched the 2 newest of 5 shard/.test(n) && /3 older un-fetched shard\(s\) \(6 filings\)/.test(n)) && m.pagination.hasMore === true && m.complete === false, JSON.stringify(m.notes));
+    ok("41d(d) CAP-only ⇒ PARTIAL-BY-CAP note w/ the CAPPED counts (3 older shard(s) (6 filings) were NOT attempted) + 'RAISE maxShards' + hasMore:true + complete:false (claim-complete ⇒ RED)",
+      m.notes.some((n) => /PARTIAL history \(maxShards cap 2\): the cap limited the fan-out to the newest 2 of 5 shard/.test(n) && /3 older shard\(s\) \(6 filings\) were NOT attempted/.test(n) && /RAISE maxShards \(max 100\)/.test(n)) && m.pagination.hasMore === true && m.complete === false, JSON.stringify(m.notes));
+    ok("41d(d) CAP-only (no failure) ⇒ NO PARTIAL-BY-FAILURE note present ('could not be fetched' must NOT appear when nothing 404'd)",
+      !m.notes.some((n) => /could not be fetched/.test(n)), JSON.stringify(m.notes.filter((n) => /PARTIAL/.test(n))));
     ok("41d(f) totalAvailable = recent(2) + Σ ALL filingCount(5×2=10) = 12 (NOT the fetched 2+4=6) — recompute-down ⇒ RED",
       m.totalAvailable === 12, JSON.stringify({ total: m.totalAvailable }));
   });
@@ -6641,9 +6643,12 @@ async function testEdgarShardsHonesty() {
       r.data.filings.length === 4 && m.pagination.hasMore === true && m.pagination.nextOffset === null, JSON.stringify({ len: r.data.filings.length, hasMore: m.pagination.hasMore, nextOffset: m.pagination.nextOffset }));
   });
 
-  // (e) PER-SHARD 404 ⇒ PARTIAL (failedShards≥1, assembly continues), NOT throw out
-  // of the whole call. shard001 ⇒ 200, shard002 ⇒ 404. A mutation that lets the 404
-  // abort the whole call ⇒ RED.
+  // (e) PURE-FAILURE-within-cap — totalShards(2) ≤ maxShards(default 10) so the cap
+  // NEVER bites; ONE shard 404s. ⇒ PARTIAL (failedShards≥1, assembly continues), NOT
+  // throw. The note MUST be PARTIAL-BY-FAILURE ONLY: it must NOT say "maxShards cap"
+  // and must NOT advise "RAISE maxShards" (raising the cap re-hits the same 404). This
+  // is the coordinator's note-attribution fix: RED under the old fetchedShards<total-
+  // gated cap note (which fired here with an incoherent "1 older un-fetched (0 filings)").
   await withFetch(shardHandler(
     parentEnv(recent2, [{ name: shardName(1), filingCount: 2 }, { name: shardName(2), filingCount: 2 }]),
     { "1": colBlock(["S1-0", "S1-1"], "4", "1999"), "2": 404 },
@@ -6654,10 +6659,32 @@ async function testEdgarShardsHonesty() {
     const r = await runTool("edgar_company_filings", { cikOrTicker: "320193", fullHistory: true, limit: 100 }, sam);
     const m = buildMeta(r.meta);
     const shardCalls = calls.filter((c) => isEdgarShardSubm(c.url));
-    ok("41d(e) 404 shard ⇒ PARTIAL-BY-FAILURE note (1 shard failed, 2 filings missing, 'Not fabricated') + hasMore:true; shard001 rows STILL present",
-      m.notes.some((n) => /PARTIAL history: 1 shard\(s\) could not be fetched/.test(n) && /2 filing\(s\) are missing/.test(n) && /Not fabricated/.test(n)) && m.pagination.hasMore === true && r.data.filings.some((f) => f.accession === "S1-0"), JSON.stringify(m.notes));
+    ok("41d(e) 404 shard ⇒ PARTIAL-BY-FAILURE note (1 ATTEMPTED shard failed, 2 filings missing, 'Not fabricated', 'raising maxShards will NOT') + hasMore:true; shard001 rows STILL present",
+      m.notes.some((n) => /PARTIAL history: 1 attempted shard\(s\) could not be fetched/.test(n) && /2 filing\(s\) are missing/.test(n) && /Not fabricated/.test(n) && /raising maxShards will NOT/.test(n)) && m.pagination.hasMore === true && r.data.filings.some((f) => f.accession === "S1-0"), JSON.stringify(m.notes));
+    ok("41d(e) PURE-FAILURE (cap did NOT bite) ⇒ NO 'maxShards cap' misattribution AND NO 'RAISE maxShards' advice in ANY note — RED under the old fetchedShards<totalShards-gated cap note",
+      !m.notes.some((n) => /maxShards cap/.test(n)) && !m.notes.some((n) => /RAISE maxShards/.test(n)), JSON.stringify(m.notes.filter((n) => /PARTIAL|maxShards/.test(n))));
     ok("41d(e) totalAvailable STILL recent(2)+Σall(2+2=4)=6 despite the 404 (the failed shard's declared count is NOT dropped)",
       m.totalAvailable === 6, JSON.stringify({ total: m.totalAvailable, shardAttempts: shardCalls.length }));
+  });
+
+  // (e2) BOTH causes co-occur — totalShards(5) > maxShards(2) (cap bites: 3 un-attempted)
+  // AND one of the 2 ATTEMPTED shards 404s. ⇒ BOTH notes present, each with its OWN
+  // correct attribution + counts: CAP names 3 older un-attempted shards (Σ 6) + RAISE
+  // maxShards; FAILURE names 1 attempted shard (2 filings) + retry/NOT-raise. A mutation
+  // that conflates the two counts or drops one note ⇒ RED.
+  const both5 = parentEnv(recent2, Array.from({ length: 5 }, (_, i) => ({ name: shardName(i + 1), filingCount: 2 })));
+  await withFetch(shardHandler(both5, { "1": colBlock(["S1-0", "S1-1"], "4", "1999"), "2": 404 }), async (calls) => {
+    const r = await runTool("edgar_company_filings", { cikOrTicker: "320193", fullHistory: true, maxShards: 2, limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    const shardCalls = calls.filter((c) => isEdgarShardSubm(c.url));
+    ok("41d(e2) BOTH: maxShards:2 on 5 shards w/ shard002 404 ⇒ EXACTLY 2 shard GETs attempted (cap) — fetch-all-5 ⇒ RED",
+      shardCalls.length === 2, JSON.stringify({ shard: shardCalls.length }));
+    ok("41d(e2) BOTH: PARTIAL-BY-CAP note names the 3 un-attempted older shards (6 filings) + RAISE maxShards (NOT the 1 failed / 2 filings)",
+      m.notes.some((n) => /maxShards cap 2\): the cap limited the fan-out to the newest 2 of 5 shard/.test(n) && /3 older shard\(s\) \(6 filings\) were NOT attempted/.test(n) && /RAISE maxShards/.test(n)), JSON.stringify(m.notes.filter((n) => /PARTIAL/.test(n))));
+    ok("41d(e2) BOTH: SEPARATE PARTIAL-BY-FAILURE note names the 1 attempted-and-404'd shard (2 filings) + retry/NOT-raise — counts NOT conflated with the cap's 3/6",
+      m.notes.some((n) => /PARTIAL history: 1 attempted shard\(s\) could not be fetched/.test(n) && /2 filing\(s\) are missing/.test(n) && /raising maxShards will NOT/.test(n)), JSON.stringify(m.notes.filter((n) => /could not be fetched/.test(n))));
+    ok("41d(e2) BOTH: hasMore:true + complete:false + totalAvailable = 2+Σall(5×2=10)=12 (grand declared, cap+failure both un-recomputed)",
+      m.pagination.hasMore === true && m.complete === false && m.totalAvailable === 12, JSON.stringify({ hasMore: m.pagination.hasMore, complete: m.complete, total: m.totalAvailable }));
   });
 
   // (c) SSRF — a files[].name with `../`/`%2F`/traversal ⇒ NEVER fetched, counted as
@@ -6677,7 +6704,7 @@ async function testEdgarShardsHonesty() {
       const stray = calls.find((c) => !isEdgarParentSubm(c.url) && c.url !== GOOD_SHARD);
       const m = threw ? null : buildMeta(value.meta);
       ok(`41d(c) SSRF bad name ${JSON.stringify(bad)} ⇒ NO fetch of ANY url other than parent+good-shard (normalization-robust) + no throw + PARTIAL-BY-FAILURE — a raw/normalized fetch or a throw ⇒ RED`,
-        threw === false && stray === undefined && m.notes.some((n) => /PARTIAL history: 1 shard\(s\) could not be fetched/.test(n)) && value.data.filings.some((f) => f.accession === "S1-0"),
+        threw === false && stray === undefined && m.notes.some((n) => /PARTIAL history: 1 attempted shard\(s\) could not be fetched/.test(n)) && value.data.filings.some((f) => f.accession === "S1-0"),
         JSON.stringify({ threw, stray: stray?.url }));
     });
   }
@@ -6696,7 +6723,7 @@ async function testEdgarShardsHonesty() {
     const fetchedWrong = calls.some((c) => c.url.includes("CIK9999999999"));
     const m = threw ? null : buildMeta(value.meta);
     ok("41d(M3) wrong-CIK name CIK9999999999-submissions-001.json ⇒ 0 GET of it (CIK-bound regex) AND no stray fetch + PARTIAL — a static-grammar-only bind ⇒ RED",
-      threw === false && fetchedWrong === false && stray === undefined && m.notes.some((n) => /PARTIAL history: 1 shard\(s\) could not be fetched/.test(n)) && value.data.filings.some((f) => f.accession === "S1-0"),
+      threw === false && fetchedWrong === false && stray === undefined && m.notes.some((n) => /PARTIAL history: 1 attempted shard\(s\) could not be fetched/.test(n)) && value.data.filings.some((f) => f.accession === "S1-0"),
       JSON.stringify({ threw, fetchedWrong, stray: stray?.url }));
   });
 

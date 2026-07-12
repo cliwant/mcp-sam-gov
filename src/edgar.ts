@@ -577,8 +577,9 @@ export async function companyFilings(args: {
   // there is NO re-sort (a blind re-sort would risk breaking SEC's own tie order).
   let assembled = zipRecent(subm.recent, cik);
   let fetchedShards = 0;
-  let failedShards = 0;
-  let missingFilings = 0; // Σ (declared − actual) for partial/failed shards.
+  let failedShards = 0; // shards ATTEMPTED (within the cap) that 404'd / were refused.
+  let failedFilings = 0; // Σ declared filingCount of those FAILED shards.
+  let shortfallFilings = 0; // Σ (declared − actual) for SHORT (but fetched) shards.
   const shardNotes: string[] = [];
   const fanoutRan = fullHistory && hasShards;
   if (fanoutRan) {
@@ -595,7 +596,7 @@ export async function companyFilings(args: {
         // fetch) and can be legit (recent→shard roll / upstream lag). Do NOT throw;
         // use the ACTUAL fetched count and disclose the shortfall as partial.
         if (rows.length < declared) {
-          missingFilings += declared - rows.length;
+          shortfallFilings += declared - rows.length;
           shardNotes.push(
             `shard ${name} returned ${rows.length} of ${declared} declared filings (recent→shard roll or upstream lag); not fabricated.`,
           );
@@ -603,10 +604,11 @@ export async function companyFilings(args: {
       } catch (e) {
         const kind = e instanceof ToolErrorCarrier ? e.toolError.kind : "unknown";
         // not_found = a genuine 404 OR a refused bad/cross-CIK/host name (0 fetch).
-        // Degrade to PARTIAL and continue; the declared filings are missing.
+        // Degrade to PARTIAL and continue; the declared filings are missing. This is
+        // a FAILURE of an ATTEMPTED shard — NOT the maxShards cap (see cappedShards).
         if (kind === "not_found") {
           failedShards++;
-          missingFilings += declared;
+          failedFilings += declared;
           continue;
         }
         // schema_drift / rate_limited / invalid_input / upstream_unavailable →
@@ -616,10 +618,13 @@ export async function companyFilings(args: {
       }
     }
   }
-  // Filings in the un-fetched (capped) older shards — reachable only by raising
-  // maxShards, NOT by nextOffset (the two-axis "more", M2).
-  const skippedFilings =
-    fanoutRan && totalShards > maxShards
+  // CAP remainder — the older shards the maxShards cap NEVER ATTEMPTED (totalShards >
+  // maxShards). These are the ONLY shards reachable by RAISING maxShards; a shard that
+  // was attempted-and-404'd is a FAILURE (failedShards), NOT a cap remainder, and
+  // raising the cap will NOT recover it. Keeping the two causes separate is the fix.
+  const cappedShards = fanoutRan && totalShards > maxShards ? totalShards - maxShards : 0;
+  const cappedFilings =
+    cappedShards > 0
       ? subm.files.slice(maxShards).reduce((s, f) => s + (f.filingCount ?? 0), 0)
       : 0;
 
@@ -637,10 +642,12 @@ export async function companyFilings(args: {
   const moreInWindow = offset + returned < filtered.length;
   // [M2/M4] Two "more" axes. When NOT fanning out, the beyond-window axis is
   // today's "shards exist but were not fetched" (hasShards). When fanning out, it
-  // is the un-fetched-cap OR any failed shard (unfetchedOrFailed) — NOT the plain
-  // hasShards boolean. A mutation that sets hasMore from moreInWindow alone → RED.
+  // is the CAP remainder OR any FAILED shard (cappedShards>0 || failedShards>0 —
+  // equivalent to fetchedShards<totalShards but attributed to its actual cause),
+  // NOT the plain hasShards boolean. A mutation that sets hasMore from moreInWindow
+  // alone → RED.
   const beyondWindow = fanoutRan
-    ? fetchedShards < totalShards || failedShards > 0
+    ? cappedShards > 0 || failedShards > 0
     : hasShards;
   const hasMore = moreInWindow || beyondWindow;
   // nextOffset walks ONLY the assembled+fetched window; the older un-fetched shards
@@ -656,33 +663,40 @@ export async function companyFilings(args: {
 
   const notes: string[] = [];
   if (fanoutRan) {
-    // allFetched = every shard the cap allowed was fetched WITHOUT a 404/skip.
-    // "complete" (for the COMPLETE note + the forms-note wording) additionally
-    // requires zero short-shard shortfalls (missingFilings 0).
-    const allFetched = failedShards === 0 && fetchedShards === totalShards;
-    const complete = allFetched && missingFilings === 0;
+    // The THREE independent PARTIAL causes, attributed + disclosed SEPARATELY (each
+    // only when it actually applies): (1) the maxShards CAP skipped older shards
+    // (cappedShards) → RAISE maxShards; (2) an ATTEMPTED shard FAILED/404'd
+    // (failedShards) → retry may recover, raising maxShards will NOT; (3) a fetched
+    // shard was SHORT (shortfallFilings) → benign roll/lag. "complete" needs all three
+    // absent. Misattributing a failure to the cap (and advising "raise maxShards") is
+    // the defect this split fixes.
+    const complete = cappedShards === 0 && failedShards === 0 && shortfallFilings === 0;
     if (complete) {
       notes.push(
         `COMPLETE filing history: fetched all ${totalShards} older shard(s) plus the recent window (${subm.recentCount}) = ${totalAvailable} filings.`,
       );
     } else {
-      if (fetchedShards < totalShards) {
-        // PARTIAL-BY-CAP — split the two "more" axes explicitly (M2).
-        const unfetched = totalShards - fetchedShards;
+      if (cappedShards > 0) {
+        // PARTIAL-BY-CAP — ONLY the un-attempted older shards the cap skipped; the
+        // "RAISE maxShards" advice appears ONLY here (it recovers cap remainder, not
+        // a 404). The counts are the CAPPED counts, never a failed-shard count.
         notes.push(
-          `PARTIAL history (maxShards cap ${maxShards}): fetched the ${fetchedShards} newest of ${totalShards} shard(s). Paginate via nextOffset for MORE OF THIS fetched window (${fetchedShards} newest shard(s) + the recent ${subm.recentCount}); pagination will NOT reach the ${unfetched} older un-fetched shard(s) (${skippedFilings} filings) — RAISE maxShards (max 100) to fetch those.`,
+          `PARTIAL history (maxShards cap ${maxShards}): the cap limited the fan-out to the newest ${maxShards} of ${totalShards} shard(s); ${cappedShards} older shard(s) (${cappedFilings} filings) were NOT attempted. Paginate via nextOffset for MORE OF THIS fetched window (the fetched shard(s) + the recent ${subm.recentCount}); pagination will NOT reach the un-attempted older shard(s) — RAISE maxShards (max 100) to fetch them.`,
         );
       }
       if (failedShards > 0) {
-        // PARTIAL-BY-FAILURE (one or more shards 404'd / were skipped).
+        // PARTIAL-BY-FAILURE — shards that WERE attempted (within the cap) but 404'd /
+        // errored. NOT a cap issue → do NOT advise raising maxShards (a re-fetch hits
+        // the same 404); a retry may recover a transient failure.
         notes.push(
-          `PARTIAL history: ${failedShards} shard(s) could not be fetched (HTTP 404 / bad-or-cross-CIK name / transient); ${missingFilings} filing(s) are missing from this history. Not fabricated.`,
+          `PARTIAL history: ${failedShards} attempted shard(s) could not be fetched (HTTP 404 / bad-or-cross-CIK name / transient); ${failedFilings} filing(s) are missing from this history. Not fabricated — a retry may recover a transient failure (raising maxShards will NOT recover a shard that 404'd).`,
         );
-      } else if (allFetched && missingFilings > 0) {
-        // All shards fetched, but some declared rows were absent (recent→shard
-        // roll / upstream lag) — a benign shortfall, disclosed per-shard below.
+      }
+      if (shortfallFilings > 0) {
+        // A fetched shard returned fewer rows than its parent-declared filingCount
+        // (recent→shard roll / upstream lag) — a benign shortfall, per-shard below.
         notes.push(
-          `Fetched all ${totalShards} older shard(s) plus the recent window (${subm.recentCount}), but ${missingFilings} declared filing(s) were absent from the returned shard body(ies) (recent→shard roll or upstream lag); disclosed per-shard below and NOT fabricated.`,
+          `${shortfallFilings} declared filing(s) were absent from otherwise-fetched shard body(ies) (recent→shard roll or upstream lag); disclosed per-shard below and NOT fabricated.`,
         );
       }
     }
@@ -690,7 +704,7 @@ export async function companyFilings(args: {
       notes.push(
         complete
           ? "The form filter now spans the COMPLETE fetched history (recent + all shards); totalAvailable stays the grand UNFILTERED total, so complete may read false — an under-claim, NOT missing older matches."
-          : "Form filtering was applied across the fetched window (recent + fetched shards) — older matching filings may exist in the un-fetched/failed shards.",
+          : "Form filtering was applied across the fetched window (recent + fetched shards) — older matching filings may exist in the un-attempted/failed shards.",
       );
     }
     // [M4] Shared-throttle contention: the fan-out serializes N shard GETs through
