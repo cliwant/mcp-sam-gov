@@ -24,7 +24,7 @@
  *        personal email. Override via EDGAR_USER_AGENT.
  *   F2 — `edgar_full_text_search` has NO `size` param: efts ignores it (5/20/100/
  *        200 all return 100), so page size is a fixed 100. Pagination is by `from`.
- *   F3 — FTS window overflow: `from >= 9900` (from+100 > 10000) is rejected as
+ *   F3 — FTS window overflow: `from > 9900` (from+100 > 10000) is rejected as
  *        invalid_input BEFORE the fetch; and after r.json(), a missing `hits.hits`
  *        (SEC returns HTTP 200 + `{message:"Internal server error"}` past the
  *        window) is thrown as schema_drift, never crashed on.
@@ -740,33 +740,64 @@ function mapFtsHit(hit: {
 
 const FTS_PAGE_SIZE = 100; // F2 — efts ignores `size`; it is fixed at 100/page.
 const FTS_WINDOW = 10_000; // upstream hard cap: from + 100 must be ≤ 10000.
-const FTS_MAX_FROM = FTS_WINDOW - FTS_PAGE_SIZE; // 9900 → from ≥ 9900 is invalid.
+const FTS_MAX_FROM = FTS_WINDOW - FTS_PAGE_SIZE; // 9900 → from > 9900 is invalid (9900 is the valid final page).
 
 /**
  * Full-text search across EDGAR filings (2001-present). F2 — NO `size` param
- * (efts always returns 100/page); pagination is by `from`. F3 — `from >= 9900`
+ * (efts always returns 100/page); pagination is by `from`. F3 — `from > 9900`
  * is rejected as invalid_input BEFORE the fetch (from+100 would exceed the 10000
- * window, which efts answers with HTTP 200 + an error body), and a response
- * missing `hits.hits` is thrown as schema_drift (never crashed on). F5 —
- * `hits.total.relation === "gte"` (true total unknown, ≥10000) surfaces as
- * `totalIsLowerBound:true`.
+ * window, which efts answers with HTTP 200 + an error body; from=9900 itself is a
+ * VALID final page), and a response missing `hits.hits` is thrown as schema_drift
+ * (never crashed on). F5 — `hits.total.relation === "gte"` (true total unknown,
+ * ≥10000) surfaces as `totalIsLowerBound:true`. ADR-0018 — optional `ciks` (pin
+ * filings BY entities, exact 10-digit CIK) + `entityName` (fuzzy filer-name)
+ * narrowing filters; a no-digit/CIK-0 `ciks` entry is rejected pre-fetch (M1).
  */
 export async function fullTextSearch(args: {
   q: string;
   forms?: string[];
   startdt?: string;
   enddt?: string;
+  ciks?: string[];
+  entityName?: string;
   from?: number;
 }): Promise<MetaBundle> {
   const from = args.from ?? 0;
-  if (from >= FTS_MAX_FROM) {
+  // Off-by-one fix (ADR-0018): `from=9900` is a VALID final page (from+100=10000,
+  // the exact ES window boundary — live-confirmed). Only `from > 9900` overflows.
+  if (from > FTS_MAX_FROM) {
     throw new ToolErrorCarrier({
       kind: "invalid_input",
-      message: `EDGAR full-text search 'from' (${from}) is out of range: the paging window is from+100 ≤ ${FTS_WINDOW}, so 'from' must be < ${FTS_MAX_FROM}. Narrow the query with forms/startdt/enddt instead of paging past ${FTS_WINDOW} results.`,
+      message: `EDGAR full-text search 'from' (${from}) is out of range: the paging window is from+100 ≤ ${FTS_WINDOW}, so 'from' must be <= ${FTS_MAX_FROM}. Narrow the query with forms/startdt/enddt instead of paging past ${FTS_WINDOW} results.`,
       retryable: false,
       upstreamEndpoint: "edgar:fts",
     });
   }
+
+  // ── Entity filters (ADR-0018) — normalize BEFORE any fetch. ──
+  // M1 (fake-empty landmine): each `ciks` entry is reduced to digits; an entry
+  // that yields NO digits (a ticker/garbage like "AAPL"/"../") OR an all-zeros
+  // value ("0"/"0000000000") pads to the NON-EXISTENT CIK 0000000000, which efts
+  // answers with a LIVE 0/eq fake-empty. Reject BOTH explicitly here (0 fetch) —
+  // NEVER `.map(padCik).filter(Boolean)` (padCik("AAPL")="0000000000" is truthy).
+  // Whitespace-only/empty entries are silently dropped (probe 10 — an empty CIK
+  // is ignored upstream anyway).
+  const ciks: string[] = [];
+  for (const raw of args.ciks ?? []) {
+    const s = raw == null ? "" : String(raw).trim();
+    if (s === "") continue; // drop empty/whitespace entries
+    const digits = s.replace(/\D/g, "");
+    if (digits.replace(/0/g, "") === "") {
+      throw new ToolErrorCarrier({
+        kind: "invalid_input",
+        message: `EDGAR full-text search 'ciks' entry ${JSON.stringify(raw)} is not a valid SEC CIK: 'ciks' takes NUMERIC CIKs only (each is zero-padded to 10 digits; CIK 0 / a ticker / a company name is rejected — it would silently return 0 matches). For a ticker or company name, use 'entityName' or resolve the CIK first with edgar_lookup_cik (by name/ticker).`,
+        retryable: false,
+        upstreamEndpoint: "edgar:fts",
+      });
+    }
+    ciks.push(digits.padStart(10, "0"));
+  }
+  const entityName = args.entityName?.trim() ?? "";
 
   const params = new URLSearchParams();
   params.set("q", args.q);
@@ -777,6 +808,10 @@ export async function fullTextSearch(args: {
     if (args.startdt) params.set("startdt", args.startdt);
     if (args.enddt) params.set("enddt", args.enddt);
   }
+  // Whitelisted entity filters — set (and echo in filtersApplied) ONLY when a
+  // live-honored value was actually sent (silent-drop guard; probe 7).
+  if (ciks.length) params.set("ciks", ciks.join(","));
+  if (entityName) params.set("entityName", entityName);
   if (from > 0) params.set("from", String(from));
 
   const r = await getEdgar(`${FTS_URL}?${params.toString()}`, "edgar:fts");
@@ -803,17 +838,37 @@ export async function fullTextSearch(args: {
   const nextFrom = from + FTS_PAGE_SIZE;
   // More results exist AND the next page is still inside the 10000 window.
   const hasMore = from + returned < totalAvailable && nextFrom < FTS_WINDOW;
-  // The next page is only reachable if it does not trip the `from >= 9900` guard.
-  const nextOffset = hasMore && nextFrom < FTS_MAX_FROM ? nextFrom : null;
+  // The next page is only reachable if it does not trip the `from > 9900` guard.
+  // Off-by-one fix (ADR-0018): `<=` so pagination can reach the final `from=9900`
+  // page (nextFrom=9900) instead of stopping one page short.
+  const nextOffset = hasMore && nextFrom <= FTS_MAX_FROM ? nextFrom : null;
 
   const filtersApplied: string[] = ["q"];
   if (forms && forms.length) filtersApplied.push("forms");
   if (args.startdt || args.enddt) filtersApplied.push("dateRange");
+  if (ciks.length) filtersApplied.push("ciks");
+  if (entityName) filtersApplied.push("entityName");
 
   const notes: string[] = [
     "EDGAR full-text search covers 2001-present only (earlier filings are not indexed).",
     "Page size is fixed at 100 (the efts `size` param is ignored); paginate via `from`.",
   ];
+  // Entity-filter semantics (ADR-0018) — emitted only when the filter was applied.
+  if (ciks.length) {
+    notes.push(
+      "Results are pinned to the supplied CIK(s) (exact 10-digit match). A 0-result set may mean the CIK is wrong OR the entity has no matching filings in the query/form/date window — it is NOT proof of absence; verify the CIK via edgar_lookup_cik (by name/ticker) or on SEC EDGAR directly.",
+    );
+  }
+  if (entityName) {
+    notes.push(
+      "entityName is a FUZZY filer-name filter (it can match related entities, e.g. multiple 'Apple*' filers) — it is NOT a CIK-exact pin; combine with ciks for an exact-entity result.",
+    );
+  }
+  if (returned === 0 && (ciks.length || entityName)) {
+    notes.push(
+      "0 results with ciks/entityName applied is NOT proof of absence — a wrong CIK, a too-fuzzy/mismatched entityName, or a genuine no-match are indistinguishable here; verify the identifier via edgar_lookup_cik (by name/ticker) or on SEC EDGAR directly.",
+    );
+  }
   if (isLowerBound) {
     notes.push(
       `totalAvailable is a LOWER BOUND: SEC reported hits.total.relation="gte" with the value pinned at ${totalAvailable}; the true match count is UNKNOWN and ≥ ${totalAvailable}. See totalIsLowerBound. Narrow the query for an exact count.`,

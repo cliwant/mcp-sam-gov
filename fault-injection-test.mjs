@@ -6148,11 +6148,21 @@ async function testEdgarHonesty() {
       r.data.results.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false, JSON.stringify(m));
   });
 
-  // (h) FTS window overflow. from ≥ 9900 ⇒ invalid_input BEFORE any fetch (F3 input guard);
-  // HTTP 200 + {message:...} (no hits.hits) ⇒ schema_drift, not a crash (F8).
+  // (h) FTS window overflow — OFF-BY-ONE FIX (ADR-0018 M2). The bundled fix makes
+  // from=9900 a VALID final page (from+100=10000, live-confirmed): it MUST FETCH,
+  // NOT reject. The reject boundary MOVED to from=9901 (invalid_input BEFORE any
+  // fetch, F3 input guard). This UPDATES the prior 41h probe that asserted the
+  // buggy from=9900 reject. HTTP 200 + {message:...} (no hits.hits) ⇒ schema_drift (F8).
+  await withFetch((u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: ftsEnv(10000, "gte", [ftsHit]) }) : failClosed()()), async (calls) => {
+    const r = await runTool("edgar_full_text_search", { q: "x", from: 9900 }, sam);
+    // Mutation (d): keeping `from >= 9900` (rejects 9900) ⇒ RED (0 calls / throws).
+    ok("41h from=9900 now VALID (off-by-one fix, M2) ⇒ FETCHES (1 call, outgoing from=9900), NOT invalid_input — final-page rows 9900-9999 reachable",
+      calls.length === 1 && /[?&]from=9900(?:&|$)/.test(calls[0].url) && r.data.results.length === 1, JSON.stringify({ calls: calls.length, url: calls[0]?.url }));
+  });
   await withFetch(failClosed(), async (calls) => {
-    const { threw, error } = await expectThrow(() => runTool("edgar_full_text_search", { q: "x", from: 9900 }, sam));
-    ok("41h from=9900 ⇒ invalid_input BEFORE any fetch (window guard, F3) — NO network call made",
+    const { threw, error } = await expectThrow(() => runTool("edgar_full_text_search", { q: "x", from: 9901 }, sam));
+    // Mutation (d): over-loosening to let from>=9901 fetch ⇒ RED (calls.length>0).
+    ok("41h from=9901 ⇒ invalid_input BEFORE any fetch (window guard, F3) — NO network call (reject boundary is now `from > 9900`)",
       threw && error?.toolError?.kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: error?.toolError?.kind, calls: calls.length }));
   });
   await withFetch((u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: { message: "Internal server error" } }) : failClosed()()), async () => {
@@ -6351,6 +6361,143 @@ async function testEdgarFramesHonesty() {
     const parsed = url ? new URL(url) : null;
     ok("41b builder: https://data.sec.gov/api/xbrl/frames/dei/EntityPublicFloat/USD/CY2023Q4I.json (host+scheme+segment order; a mutation ⇒ RED)",
       !!parsed && parsed.protocol === "https:" && parsed.hostname === "data.sec.gov" && parsed.pathname === "/api/xbrl/frames/dei/EntityPublicFloat/USD/CY2023Q4I.json", JSON.stringify(url));
+  });
+}
+
+// §41c: SEC EDGAR edgar_full_text_search ENTITY FILTERS (ADR-0018 v1+v2) — the
+// ciks (exact-entity pin) + entityName (fuzzy filer-name) narrowing filters, plus
+// the bundled FTS_MAX_FROM off-by-one fix (mutation (d) lives in §41h). All OFFLINE
+// (mock fetch), deterministic, non-vacuous: every assertion pins an honest value +
+// names the mutation that turns it RED. Driven through the REAL runTool dispatch
+// (Zod → handler → getEdgar over a spied fetch) so the outgoing efts URL is
+// asserted directly. Load-bearing mutations locked RED (ADR-0018 §MAKER a-g):
+//   (a) filtersApplied lists ONLY live-honored, actually-sent filters (silent-drop).
+//   (b) padCik load-bearing: ciks:["320193"] ⇒ outgoing ciks=0000320193 (fake-empty guard).
+//   (c)/M1 no-digit / CIK-0 entry (AAPL/0/../ /ZZZ/00/0000000000) ⇒ invalid_input,
+//       0 fetch, and NEVER an outgoing ciks=0000000000 (the fake-empty landmine).
+//   (e) nextOffset final-page reachability (total>9900, from=9800 ⇒ nextOffset 9900, not null).
+//   (f) F5 relation gte WITH a filter ⇒ totalIsLowerBound:true (never hardcoded exact).
+//   (g) genuine 0/eq (bad CIK) ⇒ returned:0 + "0 ≠ absence, verify" note (never error/fake row).
+//   + backward-compat: NEITHER filter ⇒ byte-identical outgoing efts query.
+async function testEdgarFtsFilters() {
+  section("41c. SEC EDGAR edgar_full_text_search ENTITY FILTERS — ciks/entityName narrowing, silent-drop guard, padCik fake-empty, M1 no-digit/CIK-0 reject, off-by-one nextOffset, F5 gte-with-filter, genuine-empty, backward-compat (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  const ftsEnv = (tv, rel, hits) => ({ hits: { total: { value: tv, relation: rel }, hits } });
+  const ftsHit = { _id: "0000320193-24-000123:aapl.htm", _source: { ciks: ["0000320193"], display_names: ["Apple Inc. (AAPL) (CIK 0000320193)"], form: "10-K", file_date: "2024-11-01", adsh: "0000320193-24-000123" } };
+  const ftsOk = (u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: ftsEnv(15, "eq", [ftsHit]) }) : failClosed()());
+
+  // (b) padCik is LOAD-BEARING (probe 9: unpadded ciks=320193 ⇒ LIVE 0/eq fake-empty).
+  // ciks:["320193"] MUST go out as ciks=0000320193 (padStart applied) — skip padStart ⇒ RED.
+  await withFetch(ftsOk, async (calls) => {
+    const r = await runTool("edgar_full_text_search", { q: "\"artificial intelligence\"", ciks: ["320193"] }, sam);
+    const m = buildMeta(r.meta);
+    const u = calls[0].url;
+    ok("41c(b) ciks:['320193'] ⇒ outgoing efts URL has ciks=0000320193 (padCik zero-pad; skip padStart ⇒ live fake-empty ⇒ RED)",
+      calls.length === 1 && /[?&]ciks=0000320193(?:&|$)/.test(u), JSON.stringify(u));
+    // (a) filtersApplied includes "ciks" ONLY because a valid CIK was actually sent.
+    ok("41c(a) a VALID ciks ⇒ filtersApplied includes 'ciks' (live-honored, actually-sent filter)",
+      m.filtersApplied.includes("ciks"), JSON.stringify(m.filtersApplied));
+    ok("41c ciks applied ⇒ note discloses the EXACT 10-digit pin + '0 ≠ absence, verify via edgar_lookup_cik'",
+      m.notes.some((n) => /exact 10-digit match/i.test(n) && /NOT proof of absence/i.test(n) && /edgar_lookup_cik/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // Multi-CIK ⇒ ONE comma-joined ciks value (probe 2), each zero-padded.
+  await withFetch(ftsOk, async (calls) => {
+    await runTool("edgar_full_text_search", { q: "x", ciks: ["320193", "789019"] }, sam);
+    const decoded = decodeURIComponent(new URL(calls[0].url).search);
+    ok("41c multi-CIK ⇒ ONE comma-joined ciks value, each 10-padded (ciks=0000320193,0000789019)",
+      /ciks=0000320193,0000789019(?:&|$)/.test(decoded), JSON.stringify(decoded));
+  });
+
+  // entityName ⇒ set + filtersApplied + FUZZY note (probe 4). Trimmed.
+  await withFetch(ftsOk, async (calls) => {
+    const r = await runTool("edgar_full_text_search", { q: "x", entityName: "  Apple  " }, sam);
+    const m = buildMeta(r.meta);
+    const decoded = decodeURIComponent(new URL(calls[0].url).search);
+    ok("41c entityName='  Apple  ' ⇒ TRIMMED to entityName=Apple in the outgoing query",
+      /(?:[?&])entityName=Apple(?:&|$)/.test(decoded), JSON.stringify(decoded));
+    ok("41c(a) entityName ⇒ filtersApplied includes 'entityName' + a FUZZY-filter note (not CIK-exact)",
+      m.filtersApplied.includes("entityName") && m.notes.some((n) => /FUZZY/i.test(n) && /not.*CIK-exact/i.test(n)), JSON.stringify({ f: m.filtersApplied, notes: m.notes }));
+  });
+
+  // (a) SILENT-DROP GUARD — empty/whitespace/absent filters NEVER appear in
+  // filtersApplied and are NEVER added to the outgoing query (probe 7/10).
+  await withFetch(ftsOk, async (calls) => {
+    const r = await runTool("edgar_full_text_search", { q: "x", ciks: ["   ", ""], entityName: "   " }, sam);
+    const m = buildMeta(r.meta);
+    const search = new URL(calls[0].url).search;
+    ok("41c(a) all-whitespace/empty ciks + whitespace entityName ⇒ DROPPED: filtersApplied has NEITHER; outgoing query has no ciks=/entityName= (echo a dropped filter ⇒ RED)",
+      calls.length === 1 && !m.filtersApplied.includes("ciks") && !m.filtersApplied.includes("entityName") && !/ciks=/.test(search) && !/entityName=/.test(search), JSON.stringify({ f: m.filtersApplied, search }));
+  });
+
+  // BACKWARD-COMPAT (load-bearing) — NEITHER ciks NOR entityName ⇒ the outgoing efts
+  // query is BYTE-IDENTICAL to today (only q). A new param leaking in ⇒ RED.
+  await withFetch(ftsOk, async (calls) => {
+    await runTool("edgar_full_text_search", { q: "test" }, sam);
+    ok("41c backward-compat: no ciks/entityName ⇒ outgoing query is exactly '?q=test' (byte-identical; a leaked new param ⇒ RED)",
+      new URL(calls[0].url).search === "?q=test", JSON.stringify(new URL(calls[0].url).search));
+  });
+
+  // (c)/M1 — the FAKE-EMPTY LANDMINE. A no-digit ("AAPL"/"ZZZ"/"../") OR CIK-0
+  // ("0"/"00"/"0000000000") entry MUST be invalid_input BEFORE any fetch (0 calls)
+  // AND MUST NEVER produce an outgoing ciks=0000000000 (padCik('AAPL')='0000000000'
+  // is truthy — a naive .map(padCik).filter(Boolean) ships the exact 0/eq lie ⇒ RED).
+  for (const bad of ["AAPL", "0", "../", "ZZZ", "0000000000", "00"]) {
+    await withFetch(ftsOk, async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("edgar_full_text_search", { q: "x", ciks: [bad] }, sam));
+      ok(`41c(c/M1) ciks:[${JSON.stringify(bad)}] ⇒ invalid_input, 0 fetch, and NEVER an outgoing ciks=0000000000`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === 0 && !calls.some((c) => /ciks=0+(?:&|,|$)/.test(c.url)), JSON.stringify({ kind: toToolError(error).kind, calls: calls.length }));
+    });
+  }
+  // A mixed list (one good + one bad CIK) ⇒ still rejected (fail-closed, 0 fetch).
+  await withFetch(ftsOk, async (calls) => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_full_text_search", { q: "x", ciks: ["320193", "AAPL"] }, sam));
+    ok("41c(c/M1) mixed ['320193','AAPL'] ⇒ invalid_input, 0 fetch (one bad entry fails the whole request — never a silent partial)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: toToolError(error).kind, calls: calls.length }));
+  });
+
+  // (e) OFF-BY-ONE nextOffset reachability — total>9900, page ending at from=9800 ⇒
+  // nextOffset MUST be 9900 (reachable), not null. Keeping `nextFrom < FTS_MAX_FROM` ⇒ RED.
+  await withFetch((u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: ftsEnv(10000, "gte", [ftsHit]) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_full_text_search", { q: "x", from: 9800 }, sam);
+    const m = buildMeta(r.meta);
+    ok("41c(e) total>9900, page from=9800 ⇒ pagination.nextOffset === 9900 (final page reachable; `nextFrom < FTS_MAX_FROM` ⇒ null ⇒ RED)",
+      m.pagination.nextOffset === 9900 && m.pagination.hasMore === true, JSON.stringify(m.pagination));
+  });
+
+  // (f) F5 — relation "gte" WITH a filter applied ⇒ totalIsLowerBound:true. A broad
+  // entityName / large ciks list can still be gte (live-confirmed q=the&entityName=Inc
+  // ⇒ 10000/gte). Hardcoding "exact" because filters usually narrow ⇒ RED.
+  await withFetch((u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: ftsEnv(10000, "gte", [ftsHit, ftsHit]) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_full_text_search", { q: "the", ciks: ["320193"] }, sam);
+    const m = buildMeta(r.meta);
+    ok("41c(f) relation 'gte' WITH ciks applied ⇒ totalIsLowerBound:true + a LOWER-BOUND note (never hardcoded exact ⇒ RED)",
+      m.totalIsLowerBound === true && m.totalAvailable === 10000 && m.notes.some((n) => /LOWER BOUND|≥/.test(n)), JSON.stringify({ lb: m.totalIsLowerBound, ta: m.totalAvailable }));
+  });
+
+  // (g) GENUINE-EMPTY (bad CIK) — 0/eq ⇒ honest returned:0 / complete:true + the
+  // "0 ≠ absence, verify the identifier" note. NEVER an error, NEVER a fabricated row.
+  await withFetch((u) => (isEdgarFts(u) ? mockResponse({ status: 200, json: ftsEnv(0, "eq", []) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_full_text_search", { q: "x", ciks: ["9999999999"] }, sam);
+    const m = buildMeta(r.meta);
+    ok("41c(g) bad-CIK 0/eq ⇒ results:[] + returned:0 + totalAvailable:0 + complete:true (honest empty, NOT an error/fake row)",
+      r.data.results.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify(m));
+    ok("41c(g) bad-CIK 0 ⇒ a note says a 0 with ciks/entityName applied is NOT proof of absence + verify via edgar_lookup_cik (throw/fabricate ⇒ RED)",
+      m.notes.some((n) => /NOT proof of absence/i.test(n) && /edgar_lookup_cik/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // .max(50) Zod cap (ADR-0018 minor / Open-Q4; a 50-CIK ≈549-char request is
+  // live-verified HTTP 200). 50 accepted; 51 ⇒ invalid_input (URL-length bound).
+  await withFetch(ftsOk, async (calls) => {
+    const fifty = Array.from({ length: 50 }, (_, i) => String(320193 + i));
+    await runTool("edgar_full_text_search", { q: "x", ciks: fifty }, sam);
+    ok("41c 50-CIK list ACCEPTED (Zod .max(50); live-verified 549-char request ⇒ HTTP 200) ⇒ fetches once",
+      calls.length === 1 && /ciks=/.test(calls[0].url), JSON.stringify({ calls: calls.length }));
+    const { threw, error } = await expectThrow(() => runTool("edgar_full_text_search", { q: "x", ciks: Array.from({ length: 51 }, (_, i) => String(320193 + i)) }, sam));
+    ok("41c 51-CIK list ⇒ invalid_input (Zod .max(50) URL-length bound), no additional fetch",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === 1, JSON.stringify(toToolError(error).kind));
   });
 }
 
@@ -9351,6 +9498,7 @@ async function main() {
   await testTreasuryHonesty();
   await testEdgarHonesty();
   await testEdgarFramesHonesty();
+  await testEdgarFtsFilters();
   await testSocrataHonesty();
   await testDataSourcePortParity();
   await testThroughGate();
