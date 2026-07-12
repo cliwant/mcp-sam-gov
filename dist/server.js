@@ -44,6 +44,7 @@ import * as nsf from "./nsf.js";
 import * as clinicaltrials from "./clinicaltrials.js";
 import * as census from "./census.js";
 import * as fema from "./fema.js";
+import * as fdic from "./fdic.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
@@ -1120,6 +1121,91 @@ const CkanDiscoverDatasetsInput = z.object({
         .max(100)
         .default(20)
         .describe("Max datasets (packages) to return, 1..100, default 20."),
+});
+// ─── FDIC BankFind Suite (keyless institution directory + financials) ──────────
+// ADR-0028. First OFF-EDGAR entity source. KEYLESS, fixed host api.fdic.gov +
+// FIXED endpoint constants (the SSRF core — no free host/path). Structured
+// inputs → a server-side filters/search builder (NAME/CITY route through FDIC's
+// full-text `search`, NOT `filters` — M1). name/city char-class is a sanity
+// boundary; the injection defense is the module's backslash-first phrase-escape
+// (M2). sortBy is a Zod enum + a Set.has recheck in the builder (an unknown sort
+// field is invalid_input before fetch).
+// name/city char-class — includes `( ) #` so real bank names like 'Mizuho Bank
+// (USA)' are NOT false-rejected (S2); these are literal inside the phrase-quoted
+// + escaped `search` value, never ES metachars there.
+const FdicNameCity = z
+    .string()
+    .regex(/^[A-Za-z0-9 .,&'\/()#\-]+$/)
+    .describe("Free-text bank name / city fragment (letters, digits, spaces and . , & ' / ( ) # -). Matched by FDIC's case-insensitive full-text `search` (token match; a multi-word value is matched per-token, may be broader than a literal substring).");
+const FdicSearchInstitutionsInput = z.object({
+    state: z
+        .string()
+        .regex(/^[A-Z]{2}$/)
+        .optional()
+        .describe("Filter by 2-letter US state code (uppercase; → STALP filter). e.g. 'VA'."),
+    activeOnly: z
+        .boolean()
+        .optional()
+        .describe("Filter to active (true → ACTIVE:1) or inactive (false → ACTIVE:0) institutions; omit for both."),
+    cert: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Filter by FDIC certificate number (the STABLE entity key; → CERT filter)."),
+    name: FdicNameCity.optional().describe("Filter by institution NAME via FDIC full-text `search` (case-insensitive token match; NOT case-sensitive exact-keyword — that is why we route to `search`, not `filters`)."),
+    city: FdicNameCity.optional().describe("Filter by CITY via FDIC full-text `search` (case-insensitive token match)."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page, 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(100000)
+        .default(0)
+        .describe("0-based row offset for pagination, 0..100000, default 0."),
+    sortBy: z
+        .enum(["NAME", "CERT", "ASSET", "ESTYMD", "STALP", "CITY", "ACTIVE"])
+        .optional()
+        .describe("Optional sort field (an allowlisted enum; an unknown field is rejected before fetch)."),
+    sortOrder: z
+        .enum(["ASC", "DESC"])
+        .default("ASC")
+        .describe("Sort direction when sortBy is set, ASC (default) or DESC."),
+});
+const FdicInstitutionFinancialsInput = z.object({
+    cert: z
+        .number()
+        .int()
+        .min(1)
+        .describe("REQUIRED FDIC certificate number of the institution (→ CERT filter). From fdic_search_institutions."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page, 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(100000)
+        .default(0)
+        .describe("0-based row offset for pagination, 0..100000, default 0."),
+    sortBy: z
+        .enum(["REPDTE", "ASSET", "DEP", "NETINC"])
+        .default("REPDTE")
+        .describe("Sort field (allowlisted enum; default REPDTE = report date)."),
+    sortOrder: z
+        .enum(["ASC", "DESC"])
+        .default("DESC")
+        .describe("Sort direction, default DESC (newest quarter first)."),
 });
 // ─── OpenFEMA (keyless disaster declarations + emergency-assistance spend) ──────
 // ADR-0016. KEYLESS, fixed host www.fema.gov + a PINNED dataset registry
@@ -2624,6 +2710,19 @@ const TOOLS = [
         description: "Find CKAN datastore resource ids by keyword via package_search (keyless). Input `host` (allowlisted enum), `q` (e.g. 'procurement', 'checkbook'), `limit` (≤100, def 20). Returns per-resource rows [{ resourceId, name, datasetTitle, format, datastoreActive }] + totalAvailable = the matching DATASET count. Feed a datastoreActive:true result's `resourceId` to ckan_query (a datastoreActive:false resource is a raw file blob NOT in the datastore, not queryable).",
         inputSchema: CkanDiscoverDatasetsInput,
         handler: (input) => ckan.discoverDatasets(input),
+    }),
+    // ━━━ FDIC BankFind Suite — keyless institution directory + financials (2) ━━━ ADR-0028
+    defineTool({
+        name: "fdic_search_institutions",
+        description: "Search the FDIC-insured-institution directory (keyless FDIC BankFind, api.fdic.gov/banks/institutions) — a regulated-entity directory for B2G counterparty / bank due-diligence. Structured filters: `state` (2-letter, → STALP), `activeOnly` (→ ACTIVE 1/0), `cert` (→ CERT, the STABLE entity key), plus `name`/`city` matched via FDIC's case-insensitive full-text `search` param (NOT `filters` — `filters=NAME:\"chase\"` is case-sensitive exact-keyword and returns a false-empty; `search=NAME:chase` finds JPMorgan Chase etc.). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum NAME/CERT/ASSET/ESTYMD/STALP/CITY/ACTIVE), `sortOrder` (ASC/DESC). Returns { institutions:[{ name, city, state, cert, assetUSD, active, establishedDate, id }] }. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); ASSET is published in $thousands and normalized to whole USD ×1000 (null-never-0 — a real 0 stays 0, absent → null); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); a multi-word name/city is matched per-token (disclosed); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
+        inputSchema: FdicSearchInstitutionsInput,
+        handler: (input) => fdic.searchInstitutions(input),
+    }),
+    defineTool({
+        name: "fdic_institution_financials",
+        description: "Quarterly financial time-series for ONE FDIC-insured institution by certificate number (keyless FDIC BankFind, api.fdic.gov/banks/financials). Input `cert` (REQUIRED FDIC certificate number, from fdic_search_institutions), `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum REPDTE/ASSET/DEP/NETINC, def REPDTE), `sortOrder` (def DESC → newest quarter first). Returns { cert, financials:[{ cert, reportDate, assetUSD, depositsUSD, netIncomeUSD, id }] } (e.g. CERT 10363 → 169 quarterly rows). HONESTY: totalAvailable is the EXACT meta.total (stable across offset — page via offset for the full history); ASSET/DEP/NETINC are published in $thousands and normalized to whole USD ×1000 (null-never-0); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope THROWS (never a fake empty); the snapshot build time is disclosed.",
+        inputSchema: FdicInstitutionFinancialsInput,
+        handler: (input) => fdic.institutionFinancials(input),
     }),
     // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (2) ━━━ ADR-0016
     defineTool({
