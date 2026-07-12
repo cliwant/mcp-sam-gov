@@ -9300,6 +9300,20 @@ async function testFdicSummaryHonesty() {
     ok("61 source set INLINE (A1) to the summary endpoint provenance (no synthesizeDefaultMeta branch)", m.source === "api.fdic.gov/banks/summary (BankFind, keyless)", JSON.stringify(m.source));
   });
 
+  // (C119 follow-up) roll-up/territory rows STRUCTURALLY omit count fields (BANKS/OFFICES/
+  // BRANCHES/NUMEMP) — the fieldsUnavailable disclosure must NOT falsely diagnose that as
+  // "possible schema drift / rename" (the old wording), but MUST still list the absent
+  // fields honestly. A single SI-Guam row omits all 4 count keys → they are absent from
+  // ALL records → fieldsUnavailable includes them.
+  await withFetch(fdicSummaryMock({ records: [SUM_GU_NULL], total: 1 }), async () => {
+    const m = buildMeta((await runTool("fdic_industry_summary", { year: 2023, state: "GU", charterClass: "SI" }, sam)).meta);
+    ok("61 ★C119 fieldsUnavailable still lists the structurally-absent count fields (honest disclosure retained)",
+      m.fieldsUnavailable.includes("BANKS") && m.fieldsUnavailable.includes("OFFICES"), JSON.stringify(m.fieldsUnavailable));
+    ok("61 ★C119 the absence note is softened to 'structural absence' (NOT falsely 'possible schema drift / rename') — revert wording ⇒ RED",
+      m.notes.some((n) => /structural absence/.test(n) && /roll-up or territory rows/.test(n)) &&
+      !m.notes.some((n) => /possible schema drift \/ rename/.test(n)), JSON.stringify(m.notes.filter((n) => /schema|structural|not returned/.test(n))));
+  });
+
   // (P1) totalAvailable === meta.total 121 (NOT page length) — pagination is load-bearing.
   await withFetch(fdicSummaryMock({ records: [SUM_USA_CB, SUM_CA_CB], total: 121 }), async () => {
     const m = buildMeta((await runTool("fdic_industry_summary", { year: 2023, limit: 2 }, sam)).meta);
