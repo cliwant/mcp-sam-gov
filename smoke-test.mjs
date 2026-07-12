@@ -752,6 +752,49 @@ const tests = [
           ),
       ),
   },
+  // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (ADR-0016)
+  // Live-hits www.fema.gov/api/open/v2 (keyless, no key/token/header). The module
+  // ALWAYS sends $inlinecount=allpages, so a passing verify + checkMeta proves the
+  // entity-keyed envelope + the EXACT metadata.count total path are intact against
+  // the live API. A live transient (5xx/timeout/429) is TOLERATED as a pass-with-note.
+  {
+    // PA-details: state='LA' + damageCategoryCode='B' narrows the ~800k set; each
+    // row MUST carry the real `stateAbbreviation` field (the M1 per-dataset field).
+    name: "fema_search_public_assistance",
+    args: { state: "LA", damageCategoryCode: "B", limit: 3 },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      r.dataset === "PublicAssistanceFundedProjectsDetails" &&
+      Array.isArray(r.rows) &&
+      r.rows.length >= 1 &&
+      r.rows.length <= 3 &&
+      r.rows.every(
+        (row) =>
+          row !== null &&
+          typeof row === "object" &&
+          row.stateAbbreviation === "LA" &&
+          (row.projectAmount === null || typeof row.projectAmount === "number"),
+      ),
+  },
+  {
+    // Declarations: state='CA' narrows to ~1.7k. Each row MUST carry the real
+    // `state` field (proving the INVERSE per-dataset mapping vs PA-details).
+    name: "fema_disaster_declarations",
+    args: { state: "CA", limit: 3 },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      r.dataset === "DisasterDeclarationsSummaries" &&
+      Array.isArray(r.rows) &&
+      r.rows.length >= 1 &&
+      r.rows.length <= 3 &&
+      r.rows.every(
+        (row) => row !== null && typeof row === "object" && row.state === "CA",
+      ),
+  },
   // ━━━ FPDS-NG — federal contract AWARD ACTIONS (keyless ATOM, ADR-0012)
   // The FIRST XML/ATOM source. Live-hits www.fpds.gov/ezsearch/FEEDS/ATOM (keyless,
   // no key/cookie). NAICS 541511 (custom computer programming) is a broad,

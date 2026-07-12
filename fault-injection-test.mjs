@@ -66,6 +66,7 @@ import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments
 import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
+import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
 import { getJson, getText, isRedirectError, driftError, throughGate } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
@@ -6997,6 +6998,221 @@ async function testCkanHonesty() {
   });
 }
 
+// §52: OpenFEMA source (ADR-0016) — keyless disaster declarations + emergency-
+// assistance spend. SSRF (fixed host www.fema.gov + a PINNED {entityName, version}
+// registry + a module-built per-tool $filter field whitelist with OData quote-
+// escaping) + the $inlinecount=allpages total-honesty crux (totalAvailable = the
+// EXACT filtered metadata.count, NEVER the page length) + the entity-keyed envelope
+// guard + the 200-HTML maintenance-page guard (OQ1). All OFFLINE (mock fetch),
+// deterministic, NON-VACUOUS: every honesty assertion pins a value and names the
+// mutation that turns it RED. Driven through the REAL runTool + the exported
+// buildFilter/escapeODataString/num.
+//   (a) num parity fema.num===coerce.num + null-never-0.
+//   (b) $filter builder: the live-verified ADR compound string, quote-doubling,
+//       boolean rendering, and un-whitelisted-field ⇒ invalid_input (SSRF/injection).
+//   (c) $inlinecount=allpages ALWAYS present + redirect:'error' + keyless + fixed
+//       host/version/path + per-dataset state field mapping (M1).
+//   (d) totalAvailable === metadata.count (NEVER rows.length) + byte-cap note.
+//   (e) typeof count !== number ⇒ schema_drift.
+//   (f) entity-keyed body[entityName] not array / missing ⇒ schema_drift.
+//   (g) 200 non-JSON (SyntaxError) ⇒ schema_drift (OQ1 call-site guard).
+//   (h) genuine-empty (count:0, []) ⇒ complete:true/total:0 (count:0 ≡ genuine, always-inlinecount).
+//   (i) 503 ⇒ upstream_unavailable; bad $filter 400 ⇒ invalid_input surfaced.
+//   (j) $top>1000 / $skip<0 ⇒ invalid_input, 0 fetch (Zod).
+//   (k) num null-never-0 on amounts (0 stays 0; ''/'null'/absent ⇒ null).
+//   (l) pagination mid-page / last page (exact hasMore).
+//   (m) deep-offset (>100000) disclosure note (OQ2).
+//   (n) registry pins {entityName, version} (version never a caller param).
+//   (o) declarations compound: str-quoted / bare-number / bare-boolean.
+async function testFemaHonesty() {
+  section("52. OpenFEMA (ADR-0016) — SSRF (fixed host + pinned {entity,version} registry + module-built $filter whitelist) + $inlinecount EXACT-total honesty + entity-keyed envelope + 200-HTML guard (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  const PA = "PublicAssistanceFundedProjectsDetails";
+  const DD = "DisasterDeclarationsSummaries";
+  const isFema = (u) => /www\.fema\.gov\/api\/open\//.test(u);
+  const isFemaPa = (u) => new RegExp(`/api/open/v2/${PA}\\?`).test(u);
+  const isFemaDd = (u) => new RegExp(`/api/open/v2/${DD}\\?`).test(u);
+  const femaBody = (entity, rows, count) => ({ metadata: { count, top: 100, skip: 0, entityname: entity, version: "v2" }, [entity]: rows });
+  const femaMock = (entity, rows, count) => (u) => (isFema(u) ? mockResponse({ status: 200, json: femaBody(entity, rows, count) }) : failClosed()());
+  const getFilter = (calls, pred) => { const c = calls.find((x) => pred(x.url)); return c ? new URL(c.url).searchParams.get("$filter") : null; };
+
+  // (a) num parity + null-never-0 (shared choke point).
+  ok("52a num parity: fema.num === coerce.num (single audited copy — a num regression fails here too)", femaNum === coerceNum, `${femaNum === coerceNum}`);
+  ok("52a num null-never-0: num(0)===0; num('')/num('null')/num(undefined)===null",
+    femaNum(0) === 0 && femaNum("") === null && femaNum("null") === null && femaNum(undefined) === null,
+    JSON.stringify([femaNum(0), femaNum(""), femaNum("null"), femaNum(undefined)]));
+
+  // (b) $filter builder — module-built, per-tool whitelist, OData-escaped. The
+  // exact ADR compound is the live 869-count query (LA + B + projectAmount ge 1e6).
+  eq("52b buildFilter compound === the live-verified ADR string (the 869-count query)",
+    femaBuildFilter("public_assistance", [
+      { field: "stateAbbreviation", op: "eq", type: "string", value: "LA" },
+      { field: "damageCategoryCode", op: "eq", type: "string", value: "B" },
+      { field: "projectAmount", op: "ge", type: "number", value: 1000000 },
+    ]),
+    "stateAbbreviation eq 'LA' and damageCategoryCode eq 'B' and projectAmount ge 1000000");
+  eq("52b escapeODataString doubles a single-quote (O'Brien → O''Brien) — zero injection surface", femaEscape("O'Brien"), "O''Brien");
+  eq("52b buildFilter quote-escape: applicantId O'Brien → applicantId eq 'O''Brien' (mutate the escape away ⇒ RED)",
+    femaBuildFilter("public_assistance", [{ field: "applicantId", op: "eq", type: "string", value: "O'Brien" }]),
+    "applicantId eq 'O''Brien'");
+  eq("52b buildFilter boolean renders unquoted true/false (paProgramDeclared eq true)",
+    femaBuildFilter("disaster_declarations", [{ field: "paProgramDeclared", op: "eq", type: "boolean", value: true }]),
+    "paProgramDeclared eq true");
+  {
+    const { threw, error } = await expectThrow(async () =>
+      femaBuildFilter("disaster_declarations", [{ field: "stateAbbreviation", op: "eq", type: "string", value: "CA" }]));
+    ok("52b un-whitelisted field ⇒ invalid_input (stateAbbreviation is NOT a declarations field — the per-dataset whitelist; mutate the check away ⇒ RED)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify({ threw, kind: threw ? toToolError(error).kind : null }));
+  }
+  {
+    const { threw, error } = await expectThrow(async () =>
+      femaBuildFilter("public_assistance", [{ field: "evilField eq 'x' or 1", op: "eq", type: "string", value: "x" }]));
+    ok("52b filter-injection via a bogus field name ⇒ invalid_input, NO filter string built (SSRF/injection safety — no raw $filter passthrough)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify({ threw }));
+  }
+
+  // (c) $inlinecount ALWAYS present + redirect:'error' + keyless + fixed host/path
+  // + per-dataset state field mapping (M1), both tools.
+  await withFetch(femaMock(PA, [{ disasterNumber: 3638 }], 803904), async (calls) => {
+    await runTool("fema_search_public_assistance", { state: "LA" }, sam);
+    const c = calls.find((x) => isFemaPa(x.url));
+    const url = c ? new URL(c.url) : null;
+    ok("52c PA fetch on https://www.fema.gov/api/open/v2/PublicAssistanceFundedProjectsDetails (fixed host/version/path; a builder mutation off-host ⇒ RED)",
+      !!url && url.hostname === "www.fema.gov" && url.protocol === "https:" && url.pathname === `/api/open/v2/${PA}`, JSON.stringify(c?.url));
+    ok("52c $inlinecount=allpages ALWAYS on the query (WITHOUT it metadata.count is a 0 sentinel — drop the params.set ⇒ RED = a false totalAvailable:0 on a full page)",
+      !!url && url.searchParams.get("$inlinecount") === "allpages", JSON.stringify(url?.search));
+    ok("52c PA maps state→stateAbbreviation (per-dataset field names DIFFER — M1; the real live field)",
+      !!url && url.searchParams.get("$filter") === "stateAbbreviation eq 'LA'", JSON.stringify(url?.searchParams.get("$filter")));
+    ok("52c B1 redirect:'error' + keyless (NO headers key) on the fema fetch (drop redirect ⇒ RED)",
+      !!c && c.init && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
+  });
+  await withFetch(femaMock(DD, [{ state: "CA" }], 1689), async (calls) => {
+    await runTool("fema_disaster_declarations", { state: "CA" }, sam);
+    const url = new URL(calls.find((x) => isFemaDd(x.url)).url);
+    ok("52c DD $inlinecount always present + state→state (NOT stateAbbreviation — the INVERSE mapping; a maker copying field names across tools ⇒ RED)",
+      url.searchParams.get("$inlinecount") === "allpages" && url.searchParams.get("$filter") === "state eq 'CA'",
+      JSON.stringify({ ic: url.searchParams.get("$inlinecount"), f: url.searchParams.get("$filter") }));
+  });
+
+  // (d) ★ totalAvailable === metadata.count, NEVER the page length.
+  await withFetch(femaMock(PA, [{ disasterNumber: 3638 }], 803904), async () => {
+    const r = await runTool("fema_search_public_assistance", { state: "LA", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("52d totalAvailable === metadata.count 803904 (NOT rows.length 1 — mutate totalAvailable→rows.length ⇒ RED); returned 1 ⇒ hasMore:true, truncated:true, complete:false, nextOffset:1",
+      m.totalAvailable === 803904 && m.returned === 1 && m.pagination.hasMore === true && m.truncated === true && m.complete === false && m.pagination.nextOffset === 1,
+      JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
+    ok("52d exact count carries NO totalIsLowerBound / totalIsEstimated hedge (the count is EXACT)", m.totalIsLowerBound === undefined && m.totalIsEstimated === undefined, JSON.stringify(m));
+    ok("52d byte-cap disclosure note (returned 1 < limit 100 while hasMore — metadata.count authoritative, page via $skip)",
+      m.notes.some((n) => /byte-truncate/i.test(n) && /authoritative/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // (e) typeof metadata.count !== number ⇒ schema_drift (never a silent 0/null).
+  await withFetch((u) => (isFema(u) ? mockResponse({ status: 200, json: femaBody(PA, [{ x: 1 }], "803904") }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fema_search_public_assistance", { state: "LA" }, sam));
+    ok("52e metadata.count '803904' (string) ⇒ schema_drift (typeof-check BEFORE num — mutate the guard away ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : null));
+  });
+
+  // (f) entity-keyed envelope: body[entityName] not an array / missing ⇒ schema_drift.
+  await withFetch((u) => (isFema(u) ? mockResponse({ status: 200, json: { metadata: { count: 5 }, [PA]: "not-an-array" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fema_search_public_assistance", { state: "LA" }, sam));
+    ok("52f body[entityName] is a string (not an array) ⇒ schema_drift (entity-keyed guard — never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : null));
+  });
+  await withFetch((u) => (isFema(u) ? mockResponse({ status: 200, json: { metadata: { count: 5 } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fema_disaster_declarations", { state: "CA" }, sam));
+    ok("52f entity key MISSING entirely ⇒ schema_drift", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : null));
+  });
+
+  // (g) ★ 200-HTML maintenance page (json() throws SyntaxError) ⇒ schema_drift (OQ1).
+  const htmlResp = () => ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON"); }, text: async () => "<html>down</html>" });
+  await withFetch((u) => (isFema(u) ? htmlResp() : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fema_search_public_assistance", { state: "LA" }, sam));
+    ok("52g 200 non-JSON (Drupal maintenance HTML → SyntaxError) ⇒ schema_drift (OQ1 call-site guard — an honest THROW, never a fake-empty; remove the SyntaxError catch ⇒ RED=unknown)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : null));
+  });
+
+  // (h) genuine-empty (count:0, []) ⇒ complete:true/total:0. Because we ALWAYS send
+  // $inlinecount, count:0 ≡ a GENUINE zero (never the no-inlinecount sentinel).
+  await withFetch(femaMock(DD, [], 0), async () => {
+    const r = await runTool("fema_disaster_declarations", { state: "ZZ" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52h genuine-empty (count:0, []) ⇒ complete:true, truncated:false, totalAvailable:0, returned:0 (count:0 ≡ genuinely zero because $inlinecount is always on)",
+      r.data.rows.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.returned === 0, JSON.stringify(m));
+  });
+
+  // (i) outage/error taxonomy: 503 ⇒ upstream_unavailable (never a fake empty);
+  // a bad $filter 400 ⇒ invalid_input surfaced (OpenFEMA errors LOUDLY, unlike ECHO).
+  await withFetch((u) => (isFema(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fema_search_public_assistance", { state: "LA" }, sam));
+    ok("52i 503 ⇒ throws upstream_unavailable, retryable (NOT a fake empty rows[])", threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify(threw ? toToolError(error).kind : null));
+  });
+  await withFetch((u) => (isFema(u) ? mockResponse({ status: 400, json: { error: [{ name: "OData Query Parser Error" }] } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fema_disaster_declarations", { state: "CA" }, sam));
+    ok("52i upstream HTTP 400 (bad $filter edge) ⇒ invalid_input surfaced (never a silent unfiltered set — no ECHO silent-filter trap)", threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : null));
+  });
+
+  // (j) input guards: $top>1000 / $skip<0 ⇒ invalid_input, 0 fetch (Zod).
+  await withFetch(failClosed(), async (calls) => {
+    for (const [label, args] of [["limit 1001", { state: "LA", limit: 1001 }], ["offset -1", { state: "LA", offset: -1 }]]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("fema_search_public_assistance", args, sam));
+      ok(`52j ${label} ⇒ invalid_input, 0 fetch (Zod $top≤1000 / $skip≥0)`, threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : null, added: calls.length - before }));
+    }
+  });
+
+  // (k) num null-never-0 on amounts: a real 0 STAYS 0; ''/'null'/absent ⇒ null.
+  await withFetch(femaMock(PA, [{ projectAmount: 0, federalShareObligated: "", totalObligated: "null", mitigationAmount: 12345.67 }], 1), async () => {
+    const r = await runTool("fema_search_public_assistance", { disasterNumber: 3638 }, sam);
+    const row = r.data.rows[0];
+    ok("52k amounts: projectAmount 0 STAYS 0 (regression guard against nulling a true zero); ''⇒null; 'null'⇒null; a real 12345.67 passes through",
+      row.projectAmount === 0 && row.federalShareObligated === null && row.totalObligated === null && row.mitigationAmount === 12345.67, JSON.stringify(row));
+  });
+  await withFetch(femaMock(PA, [{ disasterNumber: 3638 }], 1), async () => {
+    const r = await runTool("fema_search_public_assistance", { disasterNumber: 3638 }, sam);
+    const row = r.data.rows[0];
+    ok("52k an ABSENT amount field is materialized as explicit null (honest 'unknown', never 0)",
+      row.projectAmount === null && row.federalShareObligated === null && row.totalObligated === null && row.mitigationAmount === null, JSON.stringify(row));
+  });
+
+  // (l) pagination: mid-page (full page, more remain) vs last page (exact hasMore).
+  const page100 = Array.from({ length: 100 }, (_, i) => ({ disasterNumber: i }));
+  await withFetch(femaMock(PA, page100, 250), async () => {
+    const r = await runTool("fema_search_public_assistance", { state: "LA", limit: 100, offset: 0 }, sam);
+    const m = buildMeta(r.meta);
+    ok("52l mid-page (offset 0, returned 100, count 250) ⇒ hasMore:true, nextOffset:100, truncated:true, and NO byte-cap note (returned===limit)",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 100 && m.truncated === true && !m.notes.some((n) => /byte-truncate/i.test(n)), JSON.stringify(m.pagination));
+  });
+  const page50 = Array.from({ length: 50 }, (_, i) => ({ disasterNumber: i }));
+  await withFetch(femaMock(PA, page50, 250), async () => {
+    const r = await runTool("fema_search_public_assistance", { state: "LA", limit: 100, offset: 200 }, sam);
+    const m = buildMeta(r.meta);
+    ok("52l last page (offset 200 + returned 50 === count 250) ⇒ hasMore:false, nextOffset:null (mutate hasMore to offset+returned<=total ⇒ RED)",
+      m.totalAvailable === 250 && m.pagination.hasMore === false && m.pagination.nextOffset === null, JSON.stringify(m.pagination));
+  });
+
+  // (m) deep-offset (>100000) disclosure note (OQ2).
+  await withFetch(femaMock(PA, [{ disasterNumber: 1 }], 803904), async () => {
+    const r = await runTool("fema_search_public_assistance", { state: "LA", offset: 100001 }, sam);
+    const m = buildMeta(r.meta);
+    ok("52m deep offset (>100000) ⇒ a disclosing note about deep $skip degradation (OQ2)", m.notes.some((n) => /deep offset/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // (n) registry pins {entityName, version} — the SSRF single source of truth
+  // (version is PINNED, never a caller param — HMA's live v2→v4 drift is why).
+  ok("52n FEMA_DATASETS pins PA→{PublicAssistanceFundedProjectsDetails,v2} and declarations→{DisasterDeclarationsSummaries,v2} (version pinned, never a caller param)",
+    FEMA_DATASETS.public_assistance.entityName === PA && FEMA_DATASETS.public_assistance.version === "v2" && FEMA_DATASETS.disaster_declarations.entityName === DD && FEMA_DATASETS.disaster_declarations.version === "v2",
+    JSON.stringify({ pa: FEMA_DATASETS.public_assistance.entityName, dd: FEMA_DATASETS.disaster_declarations.entityName }));
+
+  // (o) declarations compound: str-quoted / bare-number / bare-boolean in the live query.
+  await withFetch(femaMock(DD, [{ state: "TX" }], 5), async (calls) => {
+    await runTool("fema_disaster_declarations", { state: "TX", declarationType: "DR", fyDeclared: 2024, paProgramDeclared: true }, sam);
+    eq("52o compound declarations $filter: state str-quoted, declarationType str-quoted, fyDeclared bare number, paProgramDeclared bare boolean",
+      getFilter(calls, isFemaDd), "state eq 'TX' and declarationType eq 'DR' and fyDeclared eq 2024 and paProgramDeclared eq true");
+  });
+}
+
 // §45: api.data.gov KEYED trio (ADR-0007) — Regulations.gov + Congress.gov. The
 // project's FIRST keyed source. The load-bearing guarantee is the KEY-NEVER-LEAKS
 // discipline (§2): the secret rides ONLY in the X-Api-Key header, never the URL /
@@ -8958,6 +9174,7 @@ async function main() {
   await testDataSourcePortParity();
   await testThroughGate();
   await testCkanHonesty();
+  await testFemaHonesty();
   await testDatagovHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
