@@ -68,6 +68,9 @@ import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBui
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
 import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward, tokenizeForDisclosure as nsfTok } from "./dist/nsf.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
+import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
+import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
+import { readFileSync as censusReadFile } from "node:fs";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
@@ -10235,6 +10238,306 @@ async function testClinicaltrialsHonesty() {
   ok("53-parity clinicaltrials.num === coerce.num (one shared audited impl — NO local num/str in clinicaltrials.ts)", ctNum === coerceNum, "clinicaltrials.num diverged from coerce.num");
 }
 
+// §55-census: US Census Geocoder (geocoding.geo.census.gov/geocoder/geographies/…,
+// ADR-0023, source #22 — the NEW territory/geospatial domain on the getJson GET port).
+// NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the mutation
+// that turns it RED (the ADR §load-bearing mutations a–i + [B1] multi-key + [M1]
+// sentinel-drift + [M2] vintage-union + leading-zero-str + parity):
+//   [B1]      a fixture with BOTH 111th+113th Congressional Districts (DISTINCT GEOIDs)
+//             ⇒ the response surfaces BOTH (chosen + alternates[]) + a mandatory note;
+//             a silent single-pick ⇒ RED.
+//   [M1]      a non-empty geographies missing a SENTINEL (Census Tracts) ⇒ driftError;
+//             missing an OPTIONAL (Census Blocks) ⇒ honest null (NOT drift) ⇒ RED if the
+//             guard fires on the optional layer or misses the sentinel.
+//   (geoid)   a leading-zero GEOID '01'/'0102' survives as the STRING (num() ⇒ RED).
+//   (empty)   addressMatches:[] / geographies:{} ⇒ matched:0/complete (NOT error); a 400
+//             ⇒ THROWS; conflate ⇒ RED.
+//   (caveat)  the NOT-a-HUBZone/OZ caveat in EVERY response (drop ⇒ RED).
+//   (finite)  x=NaN/Infinity ⇒ invalid_input PRE-fetch, 0 fetch ⇒ RED if fetched.
+//   (echo)    vintageResolved (result.input echo) + the moving-vintage note (drop ⇒ RED).
+//   (multi)   addressMatches.length>1 ⇒ ALL surfaced + matchCount + note (collapse ⇒ RED).
+//   (ssrf)    fixed host + frozen path Set + URLSearchParams containment + format=json.
+//   (parity)  census.num === coerce.num.
+const CENSUS_ONELINE_RE = /geocoding\.geo\.census\.gov\/geocoder\/geographies\/onelineaddress/;
+const CENSUS_COORD_RE = /geocoding\.geo\.census\.gov\/geocoder\/geographies\/coordinates/;
+const isCensus = (u) => CENSUS_ONELINE_RE.test(u) || CENSUS_COORD_RE.test(u);
+const censusMock = (body, status = 200) => (u) => (isCensus(u) ? mockResponse({ status, json: body }) : failClosed()());
+const censusQuery = (calls) => new URL(calls.find((x) => isCensus(x.url)).url).searchParams;
+const censusFirstUrl = (calls) => calls.find((x) => isCensus(x.url)).url;
+// A geographies object with the 4 sentinels + optional layers (verbatim live shape).
+const CG = () => ({
+  "States": [{ GEOID: "01", NAME: "Alabama" }],
+  "Combined Statistical Areas": [{ GEOID: "388", NAME: "Montgomery-Selma, AL CSA" }],
+  "Incorporated Places": [{ GEOID: "0151000", NAME: "Montgomery city" }],
+  "Counties": [{ GEOID: "01101", NAME: "Montgomery County" }],
+  "2024 State Legislative Districts - Upper": [{ GEOID: "01026", NAME: "State Senate District 26" }],
+  "2024 State Legislative Districts - Lower": [{ GEOID: "01077", NAME: "State House District 77" }],
+  "2020 Census Blocks": [{ GEOID: "011010002001004", NAME: "Block 1004" }],
+  "Census Tracts": [{ GEOID: "01101000200", NAME: "Census Tract 2" }],
+  "119th Congressional Districts": [{ GEOID: "0102", NAME: "Congressional District 2" }],
+});
+// The live Census2010_Current multi-key shape: 111th (iterates FIRST) + 113th
+// Congressional Districts with DISTINCT GEOIDs (Montgomery AL was redistricted).
+const CG_MULTIKEY = () => ({
+  "States": [{ GEOID: "01", NAME: "Alabama" }],
+  "Counties": [{ GEOID: "01101", NAME: "Montgomery County" }],
+  "Census Tracts": [{ GEOID: "01101000200", NAME: "Census Tract 2" }],
+  "111th Congressional Districts": [{ GEOID: "0103", NAME: "Congressional District 3" }],
+  "113th Congressional Districts": [{ GEOID: "0102", NAME: "Congressional District 2" }],
+  "2010 State Legislative Districts - Upper": [{ GEOID: "01026", NAME: "SD 26 (2010)" }],
+  "2012 State Legislative Districts - Upper": [{ GEOID: "01027", NAME: "SD 27 (2012)" }],
+});
+const oneMatch = (geographies = CG()) => ({
+  matchedAddress: "600 DEXTER AVE, MONTGOMERY, AL, 36104",
+  coordinates: { x: -86.301883, y: 32.377612 },
+  tigerLine: { tigerLineId: "59653473", side: "L" },
+  addressComponents: { fromAddress: "600", streetName: "DEXTER", suffixType: "AVE", city: "MONTGOMERY", state: "AL", zip: "36104" },
+  geographies,
+});
+const addrBody = (matches, benchmarkName = "Public_AR_Current", vintageName = "Current_Current") => ({
+  result: { input: { benchmark: { benchmarkName }, vintage: { vintageName } }, addressMatches: matches },
+});
+const coordBody = (geographies, benchmarkName = "Public_AR_Current", vintageName = "Current_Current") => ({
+  result: { input: { location: { x: -86.301883, y: 32.377612 }, benchmark: { benchmarkName }, vintage: { vintageName } }, geographies },
+});
+
+async function testCensusHonesty() {
+  section("§55. US Census Geocoder (ADR-0023, source #22 — the NEW territory/geospatial domain on the getJson GET port) — [B1] multi-key-per-suffix (111th+113th CDs, DISTINCT GEOIDs, both surfaced) + [M1] 4-sentinel drift-guard (optional-null vs drift) + [M2] vintage-union enum + leading-zero-str GEOIDs + genuine-empty vs LOUD-400 + moving-vintage echo + NOT-a-HUBZone/OZ caveat + coordinate finiteness + SSRF (fixed host / 2 fixed paths / URLSearchParams / format=json) (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (geoid) leading-zero GEOIDs survive as STRINGS; vintage echo + caveat present. ──
+  await withFetch(censusMock(addrBody([oneMatch()])), async (calls) => {
+    const r = await runTool("census_geocode_address", { address: "600 Dexter Ave, Montgomery, AL 36104" }, sam);
+    const m = buildMeta(r.meta);
+    const g = r.data.matches[0].geographies;
+    ok("55geoid leading-zero GEOIDs survive as the STRINGS '01'/'01101'/'01101000200'/'0102' (num() would corrupt '01'→1 — GEOIDs are coerce.str, NEVER num) ⇒ mutate a GEOID to num() ⇒ RED",
+      g.state.geoid === "01" && typeof g.state.geoid === "string" && g.county.geoid === "01101" && g.censusTract.geoid === "01101000200" && g.congressionalDistrict.geoid === "0102" && g.censusBlock.geoid === "011010002001004",
+      JSON.stringify({ s: g.state.geoid, c: g.county.geoid, t: g.censusTract.geoid, cd: g.congressionalDistrict.geoid }));
+    ok("55geoid the RAW vintage-versioned layerKey is surfaced ('119th Congressional Districts', '2020 Census Blocks') so the session/vintage is visible (a literal-key mapper hides it)",
+      g.congressionalDistrict.layerKey === "119th Congressional Districts" && g.censusBlock.layerKey === "2020 Census Blocks", JSON.stringify({ cd: g.congressionalDistrict.layerKey, blk: g.censusBlock.layerKey }));
+    ok("55geoid matchCount:1, returned:1, complete:true + the query sent benchmark + vintage + format=json ALWAYS (module-set, never a caller arg)",
+      r.data.matchCount === 1 && m.returned === 1 && m.complete === true && (() => { const q = censusQuery(calls); return q.get("benchmark") === "Public_AR_Current" && q.get("vintage") === "Current_Current" && q.get("format") === "json"; })(), JSON.stringify({ mc: r.data.matchCount }));
+  });
+
+  // ── (echo) vintageResolved (result.input echo) + the mandatory moving-vintage note. ──
+  await withFetch(censusMock(addrBody([oneMatch()], "Public_AR_Current", "Current_Current")), async () => {
+    const r = await runTool("census_geocode_address", { address: "600 Dexter Ave, Montgomery, AL 36104" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55echo vintageResolved echoes result.input.benchmark.benchmarkName + result.input.vintage.vintageName (the ACTUAL resolved pair) + a mandatory 'MOVING vintage' note ⇒ drop the echo/note ⇒ RED",
+      r.data.vintageResolved.benchmark === "Public_AR_Current" && r.data.vintageResolved.vintage === "Current_Current" && m.notes.some((n) => /MOVING vintage/.test(n) && /Resolved to benchmark/.test(n)), JSON.stringify({ vr: r.data.vintageResolved }));
+  });
+
+  // ── (caveat) the NOT-a-HUBZone/OZ caveat in EVERY response (search + empty + coords). ──
+  const hasCaveat = (m) => m.notes.some((n) => /NOMINAL input, NOT an authoritative HUBZone \/ Opportunity-Zone \/ set-aside determination/.test(n));
+  await withFetch(censusMock(addrBody([oneMatch()])), async () => {
+    const r = await runTool("census_geocode_address", { address: "600 Dexter Ave, Montgomery, AL 36104" }, sam);
+    ok("55caveat the NOT-a-HUBZone/OZ-determination caveat is present on a normal address response ⇒ drop it ⇒ RED (the killer honesty fact)", hasCaveat(buildMeta(r.meta)), JSON.stringify(buildMeta(r.meta).notes));
+  });
+
+  // ── [B1] MULTI-KEY per suffix (the BLOCKER): BOTH 111th+113th CDs surfaced. ──
+  await withFetch(censusMock(addrBody([oneMatch(CG_MULTIKEY())], "Public_AR_Current", "Census2010_Current")), async () => {
+    const r = await runTool("census_geocode_address", { address: "600 Dexter Ave, Montgomery, AL 36104", vintage: "Census2010_Current" }, sam);
+    const m = buildMeta(r.meta);
+    const cd = r.data.matches[0].geographies.congressionalDistrict;
+    ok("55B1 vintage=Census2010_Current returns TWO /Congressional Districts$/ keys (111th=0103 + 113th=0102, DISTINCT GEOIDs) ⇒ the CHOSEN is the HIGHEST session (113th/0102, NOT the first-iterated 111th) — a first-wins single-pick ⇒ RED",
+      cd.layerKey === "113th Congressional Districts" && cd.geoid === "0102", JSON.stringify({ chosen: cd.layerKey, geoid: cd.geoid }));
+    ok("55B1 the DROPPED 111th CD (GEOID 0103) is SURFACED in alternates[] (never silently dropped — a redistricted place carries DISTINCT GEOIDs across sessions) ⇒ drop alternates ⇒ RED",
+      Array.isArray(cd.alternates) && cd.alternates.length === 1 && cd.alternates[0].layerKey === "111th Congressional Districts" && cd.alternates[0].geoid === "0103", JSON.stringify(cd.alternates));
+    ok("55B1 a MANDATORY multi-key note names ALL matched keys ('111th Congressional Districts' + '113th Congressional Districts') + the chosen one ⇒ omit the note ⇒ RED (a silent single-pick is a data-lie by omission)",
+      m.notes.some((n) => /returned 2 "Congressional Districts" layers/.test(n) && /111th Congressional Districts/.test(n) && /113th Congressional Districts/.test(n)), JSON.stringify(m.notes.filter((n) => /Congressional Districts/.test(n))));
+    ok("55B1 the multi-key handling ALSO covers the SLD-Upper suffix (2010 + 2012 State Legislative Districts - Upper) — chosen 2012/01027, alternate 2010/01026 (same ambiguity class as CD)",
+      r.data.matches[0].geographies.stateLegislativeUpper.layerKey === "2012 State Legislative Districts - Upper" && (r.data.matches[0].geographies.stateLegislativeUpper.alternates || []).length === 1, JSON.stringify(r.data.matches[0].geographies.stateLegislativeUpper));
+  });
+  // [B1] a mutation-detector: prove the mapper does NOT collapse via the direct export.
+  {
+    const { geo, notes } = censusMapGeo(CG_MULTIKEY(), "census:test", "Census2010_Current");
+    ok("55B1 (direct mapGeographies) >1 key per suffix ⇒ chosen 113th + alternates[111th] + a note; NEVER a single object with the other silently dropped",
+      geo.congressionalDistrict.layerKey === "113th Congressional Districts" && geo.congressionalDistrict.alternates[0].layerKey === "111th Congressional Districts" && notes.some((n) => /returned 2 "Congressional Districts"/.test(n)), JSON.stringify({ chosen: geo.congressionalDistrict.layerKey, alt: geo.congressionalDistrict.alternates.map((a) => a.layerKey) }));
+  }
+
+  // ── [M1] sentinel drift-guard scoped to the 4 sentinels (optional-null vs drift). ──
+  {
+    // A SENTINEL (Census Tracts) missing from a NON-EMPTY geographies ⇒ schema_drift.
+    const noTract = CG();
+    delete noTract["Census Tracts"];
+    await withFetch(censusMock(addrBody([oneMatch(noTract)])), async () => {
+      const { threw, error } = await expectThrow(() => runTool("census_geocode_address", { address: "x, y, z 00000" }, sam));
+      ok("55M1 a NON-EMPTY geographies MISSING a SENTINEL (Census Tracts) ⇒ driftError (schema_drift THROWS — the layer-key suffix may have changed) ⇒ remove Census Tracts from the sentinel set ⇒ RED (a silently-absent sentinel)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+  }
+  {
+    // An OPTIONAL layer (Census Blocks) missing ⇒ honest null, NOT drift (ACS2023
+    // legitimately omits Census Blocks live).
+    const noBlock = CG();
+    delete noBlock["2020 Census Blocks"];
+    await withFetch(censusMock(addrBody([oneMatch(noBlock)], "Public_AR_Current", "ACS2023_Current")), async () => {
+      const r = await runTool("census_geocode_address", { address: "600 Dexter Ave, Montgomery, AL 36104", vintage: "ACS2023_Current" }, sam);
+      const g = r.data.matches[0].geographies;
+      ok("55M1 a NON-EMPTY geographies MISSING an OPTIONAL layer (Census Blocks — ACS2023 legitimately omits it) ⇒ censusBlock:null, NOT drift; the 4 sentinels still resolve ⇒ fire driftError on the optional layer ⇒ RED (a false-positive on honest data)",
+        g.censusBlock === null && g.state.geoid === "01" && g.censusTract.geoid === "01101000200" && g.congressionalDistrict.geoid === "0102", JSON.stringify({ blk: g.censusBlock, tract: g.censusTract?.geoid }));
+    });
+  }
+
+  // ── (empty) genuine-empty (addressMatches:[] / geographies:{}) ⇒ matched:0/complete
+  //    (NOT error); a 400/500 ⇒ THROWS (three DISTINCT shapes). ──
+  await withFetch(censusMock(addrBody([])), async () => {
+    const r = await runTool("census_geocode_address", { address: "zzzznotarealaddress99999 nowhere" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55empty genuine-empty addressMatches:[] ⇒ matches:[], matchCount:0, returned:0, totalAvailable:0, complete:true, truncated:false (an honest not-found, NOT thrown) + STILL carries the caveat + a 'no address match' note",
+      r.data.matchCount === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && hasCaveat(m) && m.notes.some((n) => /No address match/.test(n)), JSON.stringify({ mc: r.data.matchCount, ta: m.totalAvailable, c: m.complete }));
+  });
+  await withFetch(censusMock(coordBody({})), async () => {
+    const r = await runTool("census_geographies_by_coordinates", { longitude: -30.0, latitude: 0.0 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55empty out-of-US point geographies:{} ⇒ found:false, all canonical layers null, matchCount:0/returned:0, complete:true (an honest empty OBJECT, NOT drift, NOT thrown) + caveat + a 'not within a US Census geography' note",
+      r.data.found === false && r.data.geographies.state === null && r.data.geographies.censusTract === null && r.data.geographies.congressionalDistrict === null && m.returned === 0 && m.complete === true && hasCaveat(m) && m.notes.some((n) => /not within a US Census geography/.test(n)), JSON.stringify({ found: r.data.found, st: r.data.geographies.state }));
+  });
+  await withFetch(censusMock({ errors: ["Invalid benchmark in request"], status: "400" }, 400), async () => {
+    const { threw, error } = await expectThrow(() => runTool("census_geocode_address", { address: "x, y, z 00000" }, sam));
+    ok("55empty a LOUD upstream HTTP 400 (e.g. an invalid (benchmark,vintage) pair the union enum allowed but this benchmark rejects) ⇒ invalid_input THROWS (getJson taxonomy) — read the {}/[] as an empty result ⇒ RED (the three shapes must stay distinct)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(censusMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("census_geographies_by_coordinates", { longitude: -86.3, latitude: 32.3 }, sam));
+    ok("55empty 503 ⇒ upstream_unavailable THROWS (a DOWN geocoder is NEVER a found:false/returned:0 — getJson/fetchWithRetry throws)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (multi) multi-match: addressMatches.length>1 ⇒ ALL surfaced + matchCount + note. ──
+  await withFetch(censusMock(addrBody([
+    { ...oneMatch(), matchedAddress: "100 MAIN ST, SPRINGFIELD, MA, 01105", geographies: { ...CG(), "States": [{ GEOID: "25", NAME: "Massachusetts" }] } },
+    { ...oneMatch(), matchedAddress: "100 MAIN ST, SPRINGFIELD, VT, 05156", geographies: { ...CG(), "States": [{ GEOID: "50", NAME: "Vermont" }] } },
+  ])), async () => {
+    const r = await runTool("census_geocode_address", { address: "100 Main St, Springfield" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55multi 2 addressMatches ⇒ BOTH surfaced (each with its OWN matchedAddress + geographies: MA/25 and VT/50), matchCount:2, returned:2 — collapse to the first match ⇒ RED (the multi-match honesty surface)",
+      r.data.matchCount === 2 && r.data.matches.length === 2 && r.data.matches[0].geographies.state.geoid === "25" && r.data.matches[1].geographies.state.geoid === "50", JSON.stringify({ mc: r.data.matchCount, states: r.data.matches.map((x) => x.geographies.state.geoid) }));
+    ok("55multi a mandatory multi-match note fires ('2 addresses matched — the geographies are listed PER match') ⇒ drop it ⇒ RED",
+      m.notes.some((n) => /2 addresses matched/.test(n)), JSON.stringify(m.notes.filter((n) => /matched/.test(n))));
+  });
+
+  // ── (finite) coordinate finiteness re-guard: NaN/Infinity ⇒ invalid_input, 0 fetch. ──
+  for (const [lon, lat, label] of [[NaN, 0, "x=NaN"], [Infinity, 0, "x=Infinity"], [0, NaN, "y=NaN"], [200, 0, "x=200 (out of range)"]]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => censusCoords({ longitude: lon, latitude: lat }));
+      ok(`55finite DIRECT handler ${label} ⇒ invalid_input, 0 fetch (the Number.isFinite + range re-guard PRE-fetch — a live x=NaN is a misclassified upstream 500 the guard prevents) ⇒ remove the finiteness re-guard ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // Missing coordinate ⇒ invalid_input (both x/longitude and y/latitude are required).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => censusCoords({ longitude: -86.3 }));
+    ok("55finite a MISSING latitude (only longitude given) ⇒ invalid_input, 0 fetch (both are required)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+
+  // ── (enum) benchmark/vintage in-handler re-guard (belt-and-suspenders behind Zod). ──
+  for (const bad of ["BOGUS_BENCHMARK", "public_ar_current", ""]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => censusGeocode({ address: "x", benchmark: bad }));
+      ok(`55enum DIRECT handler benchmark:${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (the in-handler enum re-guard closes a direct call that bypasses Zod) ⇒ remove the re-guard ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => censusGeocode({ address: "x", vintage: "NOT_A_VINTAGE" }));
+    ok("55enum DIRECT handler vintage:'NOT_A_VINTAGE' ⇒ invalid_input, 0 fetch (the vintage re-guard mirrors benchmark)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+  // [M2] a VALID non-default pair (Public_AR_Census2020 + Census2020_Census2020) is NOT
+  //      Zod/enum-rejected (the union enum) — it fetches and resolves.
+  await withFetch(censusMock(addrBody([oneMatch()], "Public_AR_Census2020", "Census2020_Census2020")), async (calls) => {
+    const r = await runTool("census_geocode_address", { address: "600 Dexter Ave, Montgomery, AL 36104", benchmark: "Public_AR_Census2020", vintage: "Census2020_Census2020" }, sam);
+    ok("55M2 the VALID non-default pair Public_AR_Census2020 + Census2020_Census2020 is ACCEPTED (the union CENSUS_VINTAGES enum contains Census2020_Census2020) + sent verbatim + vintageResolved echoes it ⇒ a flat 11-value enum that rejects it ⇒ RED",
+      r.data.vintageResolved.benchmark === "Public_AR_Census2020" && r.data.vintageResolved.vintage === "Census2020_Census2020" && censusQuery(calls).get("vintage") === "Census2020_Census2020", JSON.stringify(r.data.vintageResolved));
+  });
+  ok("55M2 CENSUS_VINTAGES is the UNION across benchmarks (contains BOTH Current_Current AND Census2020_Census2020 AND LUCA_Current) — 25 distinct; CENSUS_BENCHMARKS has the 4 live benchmarks",
+    CENSUS_VINTAGES.includes("Current_Current") && CENSUS_VINTAGES.includes("Census2020_Census2020") && CENSUS_VINTAGES.includes("LUCA_Current") && CENSUS_VINTAGES.length === 25 && CENSUS_BENCHMARKS.length === 4, JSON.stringify({ nv: CENSUS_VINTAGES.length, nb: CENSUS_BENCHMARKS.length }));
+
+  // ── (coords) the coordinates tool returns geographies DIRECTLY (no addressMatches). ──
+  await withFetch(censusMock(coordBody(CG())), async (calls) => {
+    const r = await runTool("census_geographies_by_coordinates", { longitude: -86.301883, latitude: 32.377612 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55coords a point ⇒ found:true, geographies mapped DIRECTLY (no addressMatches wrapper), CD 0102 / tract 01101000200, coordinates echoed from result.input.location, returned:1/complete:true + caveat",
+      r.data.found === true && r.data.geographies.congressionalDistrict.geoid === "0102" && r.data.geographies.censusTract.geoid === "01101000200" && r.data.coordinates.x === -86.301883 && m.returned === 1 && m.complete === true && hasCaveat(m), JSON.stringify({ found: r.data.found, coords: r.data.coordinates }));
+    ok("55coords the `x`/`y` aliases work too (x=longitude, y=latitude) — sent as String() in the URLSearchParams; redirect:'error' set",
+      censusQuery(calls).get("x") === "-86.301883" && censusQuery(calls).get("y") === "32.377612" && calls.find((c) => isCensus(c.url)).init.redirect === "error", JSON.stringify({ x: censusQuery(calls).get("x") }));
+  });
+  await withFetch(censusMock(coordBody(CG())), async (calls) => {
+    await runTool("census_geographies_by_coordinates", { x: -86.301883, y: 32.377612 }, sam);
+    ok("55coords the `x`/`y` API-native names are accepted as aliases of longitude/latitude", censusQuery(calls).get("x") === "-86.301883", censusFirstUrl(calls));
+  });
+
+  // ── (ssrf) fixed host + frozen 2-member path Set + URLSearchParams containment. ──
+  await withFetch(censusMock(addrBody([])), async (calls) => {
+    await runTool("census_geocode_address", { address: "600 Dexter Ave&benchmark=BOGUS&x=-1#frag" }, sam);
+    const q = censusQuery(calls);
+    ok("55ssrf an embedded &/=/# in `address` stays INSIDE the URLSearchParams-encoded value (no param smuggle) ⇒ address carries the literal, benchmark stays the module 'Public_AR_Current', no injected x, format=json ⇒ raw-concat the address ⇒ RED",
+      q.get("address") === "600 Dexter Ave&benchmark=BOGUS&x=-1#frag" && q.get("benchmark") === "Public_AR_Current" && q.get("x") === null && q.get("format") === "json", JSON.stringify({ addr: q.get("address"), b: q.get("benchmark"), x: q.get("x") }));
+    ok("55ssrf every census fetch is to geocoding.geo.census.gov over https (the fixed host — the caller never supplies a host/path)",
+      calls.every((c) => !isCensus(c.url) || (new URL(c.url).hostname === "geocoding.geo.census.gov" && new URL(c.url).protocol === "https:")), "off-host census fetch");
+  });
+  // The frozen path-Set guard: a path outside the 2 members ⇒ invalid_input, 0 fetch.
+  for (const badPath of ["/geographies/addressbatch", "/locations/onelineaddress", "../evil", "/geographies/onelineaddress/../.."]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => censusGet(badPath, new URLSearchParams({ address: "x" })));
+      ok(`55ssrf censusGet path ${JSON.stringify(badPath)} (outside the frozen 2-member Set) ⇒ invalid_input, 0 fetch (the path-injection guard) ⇒ widen the Set ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // A valid path builds the fixed host URL + ALWAYS appends format=json.
+  await withFetch(censusMock(addrBody([oneMatch()])), async (calls) => {
+    await censusGet("/geographies/onelineaddress", new URLSearchParams({ address: "x", benchmark: "Public_AR_Current", vintage: "Current_Current" }));
+    const u = new URL(censusFirstUrl(calls));
+    ok("55ssrf a valid path builds https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress + format=json ALWAYS appended by censusGet (never a caller arg)",
+      u.hostname === "geocoding.geo.census.gov" && u.pathname === "/geocoder/geographies/onelineaddress" && u.searchParams.get("format") === "json", censusFirstUrl(calls));
+  });
+
+  // ── (drift) a 200 missing `result`, or addressMatches non-array, or geographies
+  //    non-object ⇒ schema_drift (never a fabricated empty). ──
+  await withFetch(censusMock({ notResult: true }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("census_geocode_address", { address: "x, y, z 00000" }, sam));
+    ok("55drift a 200 missing `result` ⇒ schema_drift THROWS (never a fabricated all-null response)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(censusMock({ result: { addressMatches: "not-an-array" } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("census_geocode_address", { address: "x, y, z 00000" }, sam));
+    ok("55drift addressMatches non-array ⇒ schema_drift (never read as empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(censusMock({ result: { geographies: [] } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("census_geographies_by_coordinates", { longitude: -86.3, latitude: 32.3 }, sam));
+    ok("55drift coordinates geographies is an ARRAY (not an object) with no error ⇒ schema_drift (an empty OBJECT {} is genuine-empty, but a non-object is drift)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (str) a blank/'null' GEOID coerces to null, never '' (null-never-empty-string). ──
+  await withFetch(censusMock(addrBody([oneMatch({ ...CG(), "Incorporated Places": [{ GEOID: "", NAME: "null" }] })])), async () => {
+    const r = await runTool("census_geocode_address", { address: "600 Dexter Ave, Montgomery, AL 36104" }, sam);
+    const place = r.data.matches[0].geographies.place;
+    ok("55str a blank GEOID '' ⇒ null and NAME 'null' ⇒ null (coerce.str — a blank masquerading as a real (blank) geography is the forbidden data-absence-as-value class) ⇒ coerce to '' ⇒ RED",
+      place.geoid === null && place.name === null, JSON.stringify(place));
+  });
+
+  // ── (disclosure) census.ts builds NO whitespace-split disclosure note (C110 stays green). ──
+  {
+    const src = censusReadFile("src/census.ts", "utf8");
+    const { violations } = censusDisclosureLint(src, "src/census.ts");
+    ok("55disclosure census.ts has ZERO whitespace-only disclosure-split violations (tokenizeForDisclosure is genuinely N/A — a structured geocoder, not a multi-token keyword search) ⇒ the lint-invariants disclosure check stays green",
+      violations.length === 0, JSON.stringify(violations));
+  }
+
+  // ── num null-never-0 + parity (one shared audited impl — NO local num/str in census.ts). ──
+  eq("55-parity census.num(null) ⇒ null", censusNum(null), null);
+  eq("55-parity census.num(0) ⇒ 0 (genuine zero preserved)", censusNum(0), 0);
+  eq("55-parity census.num('') ⇒ null (Number('') is 0 — must be caught)", censusNum(""), null);
+  eq("55-parity census.num('-86.3') ⇒ -86.3 (numeric string parses — coordinates)", censusNum("-86.3"), -86.3);
+  ok("55-parity census.num === coerce.num (one shared audited impl — a num regression fails §40e/§51i/§55 together; NO local num/str in census.ts)", censusNum === coerceNum, "census.num diverged from coerce.num");
+}
+
 // §54: shared disclosure tokenizer (src/disclosure.ts, ADR-0022) — the byte-identical
 // extraction of NSF's OR-note + ClinicalTrials' AND-note tokenizer into ONE audited
 // home, PLUS the lint guardrail against the whitespace-only recurrence adversarial
@@ -10539,6 +10842,7 @@ async function main() {
   await testNihHonesty();
   await testNsfHonesty();
   await testClinicaltrialsHonesty();
+  await testCensusHonesty();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
 

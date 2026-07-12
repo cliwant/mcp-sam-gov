@@ -52,6 +52,7 @@ import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
 import * as nsf from "./nsf.js";
 import * as clinicaltrials from "./clinicaltrials.js";
+import * as census from "./census.js";
 import * as fema from "./fema.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
@@ -1965,6 +1966,81 @@ const ClinicaltrialsGetStudyInput = z.object({
     ),
 });
 
+// ─── US Census Geocoder (keyless source #22) — input schemas ──────
+// ADR-0023. KEYLESS, single fixed host (geocoding.geo.census.gov) + two fixed
+// endpoint paths (the SSRF core — no free host/path; NO id in the path). benchmark /
+// vintage are frozen enums (the Zod source of truth = census.CENSUS_BENCHMARKS /
+// census.CENSUS_VINTAGES). [M2] CENSUS_VINTAGES is the UNION of live-valid vintages
+// across the four benchmarks (25 distinct) so a VALID non-default pair is not Zod-
+// rejected; an INVALID (benchmark,vintage) pair fails-closed at HTTP 400. GEOIDs are
+// strings (leading zeros survive). Coordinate finiteness is re-guarded in the handler.
+const CensusBenchmarkEnum = z
+  .enum(census.CENSUS_BENCHMARKS)
+  .optional()
+  .describe(
+    "Address-range benchmark (default Public_AR_Current — a MOVING benchmark). One of Public_AR_Current / Public_AR_ACS2025 / Public_AR_LUCA / Public_AR_Census2020. vintage MUST be compatible with this benchmark (a matrix); an incompatible pair fails-closed with an HTTP 400.",
+  );
+const CensusVintageEnum = z
+  .enum(census.CENSUS_VINTAGES)
+  .optional()
+  .describe(
+    "Geography vintage (default Current_Current — a MOVING vintage; the same address may return a different tract/CD across cycles). The valid vintage set DEPENDS on the benchmark (a matrix — this enum is the UNION across all four benchmarks); an incompatible (benchmark, vintage) pair fails-closed with an HTTP 400 (invalid_input), never a silent mis-resolution. e.g. Census2020_Census2020 (with Public_AR_Census2020), Census2010_Current.",
+  );
+
+const CensusGeocodeAddressInput = z.object({
+  address: z
+    .string()
+    .min(1)
+    .max(500)
+    .describe(
+      "A one-line US address, e.g. '600 Dexter Ave, Montgomery, AL 36104'. An unmatched/under-specified address is NOT an error — it returns matches:[] / matchCount:0 (a genuine empty; add city, state, ZIP). An ambiguous address may return MULTIPLE matches, each with its own matchedAddress + geographies.",
+    ),
+  benchmark: CensusBenchmarkEnum,
+  vintage: CensusVintageEnum,
+});
+
+const CensusGeographiesByCoordinatesInput = z
+  .object({
+    longitude: z
+      .number()
+      .min(-180)
+      .max(180)
+      .optional()
+      .describe(
+        "Longitude (x), a finite number in [-180, 180]. Alias of `x`. e.g. -86.301883.",
+      ),
+    latitude: z
+      .number()
+      .min(-90)
+      .max(90)
+      .optional()
+      .describe(
+        "Latitude (y), a finite number in [-90, 90]. Alias of `y`. e.g. 32.377612.",
+      ),
+    x: z
+      .number()
+      .min(-180)
+      .max(180)
+      .optional()
+      .describe("Longitude — the Census API's own name for longitude (alias of `longitude`)."),
+    y: z
+      .number()
+      .min(-90)
+      .max(90)
+      .optional()
+      .describe("Latitude — the Census API's own name for latitude (alias of `latitude`)."),
+    benchmark: CensusBenchmarkEnum,
+    vintage: CensusVintageEnum,
+  })
+  .refine((v) => v.longitude !== undefined || v.x !== undefined, {
+    message: "longitude (or its alias x) is required.",
+    path: ["longitude"],
+  })
+  .refine((v) => v.latitude !== undefined || v.y !== undefined, {
+    message: "latitude (or its alias y) is required.",
+    path: ["latitude"],
+  });
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -3150,6 +3226,29 @@ const TOOLS: ToolDef[] = [
       "Fetch ONE GovInfo package's summary (metadata + download links txt/xml/pdf/mods/premis/zip + related links) by packageId (api.data.gov keyed). Input `packageId` (from govinfo_search_packages, e.g. 'BILLS-118hr1enr', 'PLAW-117publ58', 'CFR-2023-title1-vol1'). Returns { found:true, packageId, package:{…} } + single-record _meta (complete:true). A nonexistent packageId ⇒ found:false (HTTP 404, never a fabricated summary). Any api_key embedded in a download link is stripped key-free before the payload is surfaced.",
     inputSchema: GovinfoGetPackageInput,
     handler: (input) => govinfo.getPackage(input),
+  }),
+  // ━━━ US Census Geocoder — keyless territory/geospatial (2) ━━━ ADR-0023
+  // A NEW capability domain (territory/geospatial) serving the WEAK set-aside /
+  // place-of-performance layer. KEYLESS (keylessMode:true, byte-clean init), single
+  // fixed host + two fixed endpoint paths (the SSRF core — no id in the path). The
+  // layer mapper resolves each canonical geography by SUFFIX pattern (the key names
+  // ROLL: "119th Congressional Districts") and handles >1 KEY PER SUFFIX ([B1] — a
+  // historical vintage returns 111th+113th CDs with DISTINCT GEOIDs; both surfaced +
+  // a note, never silently dropped). Drift-guard scoped to 4 sentinels ([M1]); the
+  // vintage enum is the (benchmark,vintage) UNION ([M2]); GEOIDs stay strings.
+  defineTool({
+    name: "census_geocode_address",
+    description:
+      "Resolve a one-line US address → its matched address(es) + the Census GEOGRAPHIES that drive set-aside / place-of-performance analysis (US Census Geocoder, keyless; geocoding.geo.census.gov/geocoder/geographies/onelineaddress) — the NEW territory/geospatial domain. Input `address` (≤500 chars), optional `benchmark` (default Public_AR_Current) / `vintage` (default Current_Current). Returns { matches:[{ matchedAddress, coordinates:{x,y}, tigerLineId, addressComponents, geographies:{ state, county, congressionalDistrict, censusTract, censusBlock, place, cbsaOrCsa, stateLegislativeUpper, stateLegislativeLower } }], matchCount, vintageResolved } + honest _meta. Each geography = { layerKey (the RAW vintage-versioned key, e.g. '119th Congressional Districts'), geoid (a STRING — leading zeros survive: '0102'), name }. HONESTY: genuine-empty (addressMatches:[]) ⇒ matchCount:0/complete:true (NOT an error; verify spelling + add city/state/ZIP); MULTIPLE matches are ALL surfaced (each with its own geographies) + a note; a historical vintage can return >1 layer per type (e.g. 111th+113th Congressional Districts with DISTINCT GEOIDs for a redistricted place) ⇒ BOTH surfaced (chosen + alternates[]) + a mandatory note (NEVER silently dropped); the resolved benchmark/vintage is echoed + a 'Current is a MOVING vintage' note; an invalid/missing benchmark/vintage ⇒ HTTP 400 THROWS (never a fake empty); an outage/5xx ⇒ THROWS. MANDATORY CAVEAT every response: these are a NOMINAL input, NOT an authoritative HUBZone / Opportunity-Zone / set-aside determination (those require SBA's HUBZone map / Treasury's OZ-tract list). Feed censusTract.geoid / county.geoid onward to those authoritative sources.",
+    inputSchema: CensusGeocodeAddressInput,
+    handler: (input) => census.geocodeAddress(input),
+  }),
+  defineTool({
+    name: "census_geographies_by_coordinates",
+    description:
+      "Resolve a longitude/latitude point → the Census GEOGRAPHIES at that point, no address parsing (US Census Geocoder, keyless; geocoding.geo.census.gov/geocoder/geographies/coordinates). For a caller that already holds coordinates. Input `longitude`/`x` (required, -180..180) + `latitude`/`y` (required, -90..90) — x=longitude, y=latitude (the Census API's own names; `longitude`/`latitude` are the clearer aliases), optional `benchmark`/`vintage`. Returns { found, coordinates:{x,y}, geographies:{ state, county, congressionalDistrict, censusTract, censusBlock, place, cbsaOrCsa, stateLegislativeUpper, stateLegislativeLower }, vintageResolved } + honest _meta. HONESTY: a point outside any US Census geography (offshore / out-of-US) ⇒ geographies all null / found:false / complete:true (an honest empty geographies:{}, NOT an error); coordinate finiteness is re-guarded PRE-fetch (a non-finite x/y ⇒ invalid_input, 0 fetch); a historical vintage's >1-layer-per-type is surfaced with alternates[] + a note (same [B1] multi-key handling as the address tool); GEOIDs are STRINGS (leading zeros survive); the resolved benchmark/vintage is echoed + a moving-vintage note; a bad benchmark/vintage ⇒ HTTP 400 THROWS; an outage/5xx ⇒ THROWS. MANDATORY CAVEAT every response: these are a NOMINAL input, NOT an authoritative HUBZone / Opportunity-Zone / set-aside determination.",
+    inputSchema: CensusGeographiesByCoordinatesInput,
+    handler: (input) => census.geographiesByCoordinates(input),
   }),
 ];
 

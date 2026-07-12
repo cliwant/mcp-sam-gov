@@ -1,5 +1,69 @@
 [
   {
+    "name": "census_geocode_address",
+    "description": "Resolve a one-line US address → its matched address(es) + the Census GEOGRAPHIES that drive set-aside / place-of-performance analysis (US Census Geocoder, keyless; geocoding.geo.census.gov/geocoder/geographies/onelineaddress) — the NEW territory/geospatial domain. Input `address` (≤500 chars), optional `benchmark` (default Public_AR_Current) / `vintage` (default Current_Current). Returns { matches:[{ matchedAddress, coordinates:{x,y}, tigerLineId, addressComponents, geographies:{ state, county, congressionalDistrict, censusTract, censusBlock, place, cbsaOrCsa, stateLegislativeUpper, stateLegislativeLower } }], matchCount, vintageResolved } + honest _meta. Each geography = { layerKey (the RAW vintage-versioned key, e.g. '119th Congressional Districts'), geoid (a STRING — leading zeros survive: '0102'), name }. HONESTY: genuine-empty (addressMatches:[]) ⇒ matchCount:0/complete:true (NOT an error; verify spelling + add city/state/ZIP); MULTIPLE matches are ALL surfaced (each with its own geographies) + a note; a historical vintage can return >1 layer per type (e.g. 111th+113th Congressional Districts with DISTINCT GEOIDs for a redistricted place) ⇒ BOTH surfaced (chosen + alternates[]) + a mandatory note (NEVER silently dropped); the resolved benchmark/vintage is echoed + a 'Current is a MOVING vintage' note; an invalid/missing benchmark/vintage ⇒ HTTP 400 THROWS (never a fake empty); an outage/5xx ⇒ THROWS. MANDATORY CAVEAT every response: these are a NOMINAL input, NOT an authoritative HUBZone / Opportunity-Zone / set-aside determination (those require SBA's HUBZone map / Treasury's OZ-tract list). Feed censusTract.geoid / county.geoid onward to those authoritative sources.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "A one-line US address, e.g. '600 Dexter Ave, Montgomery, AL 36104'. An unmatched/under-specified address is NOT an error — it returns matches:[] / matchCount:0 (a genuine empty; add city, state, ZIP). An ambiguous address may return MULTIPLE matches, each with its own matchedAddress + geographies."
+        },
+        "benchmark": {
+          "type": "string",
+          "enum": [
+            "Public_AR_Current",
+            "Public_AR_ACS2025",
+            "Public_AR_LUCA",
+            "Public_AR_Census2020"
+          ],
+          "description": "Address-range benchmark (default Public_AR_Current — a MOVING benchmark). One of Public_AR_Current / Public_AR_ACS2025 / Public_AR_LUCA / Public_AR_Census2020. vintage MUST be compatible with this benchmark (a matrix); an incompatible pair fails-closed with an HTTP 400."
+        },
+        "vintage": {
+          "type": "string",
+          "enum": [
+            "Current_Current",
+            "Census2010_Current",
+            "ACS2017_Current",
+            "ACS2018_Current",
+            "ACS2019_Current",
+            "Census2020_Current",
+            "ACS2021_Current",
+            "ACS2022_Current",
+            "ACS2023_Current",
+            "ACS2024_Current",
+            "ACS2025_Current",
+            "LUCA_Current",
+            "Current_ACS2025",
+            "Census2010_ACS2025",
+            "ACS2017_ACS2025",
+            "ACS2018_ACS2025",
+            "ACS2019_ACS2025",
+            "Census2020_ACS2025",
+            "ACS2021_ACS2025",
+            "ACS2022_ACS2025",
+            "ACS2023_ACS2025",
+            "ACS2024_ACS2025",
+            "ACS2025_ACS2025",
+            "Census2020_Census2020",
+            "Census2010_Census2020"
+          ],
+          "description": "Geography vintage (default Current_Current — a MOVING vintage; the same address may return a different tract/CD across cycles). The valid vintage set DEPENDS on the benchmark (a matrix — this enum is the UNION across all four benchmarks); an incompatible (benchmark, vintage) pair fails-closed with an HTTP 400 (invalid_input), never a silent mis-resolution. e.g. Census2020_Census2020 (with Public_AR_Census2020), Census2010_Current."
+        }
+      },
+      "required": [
+        "address"
+      ]
+    }
+  },
+  {
+    "name": "census_geographies_by_coordinates",
+    "description": "Resolve a longitude/latitude point → the Census GEOGRAPHIES at that point, no address parsing (US Census Geocoder, keyless; geocoding.geo.census.gov/geocoder/geographies/coordinates). For a caller that already holds coordinates. Input `longitude`/`x` (required, -180..180) + `latitude`/`y` (required, -90..90) — x=longitude, y=latitude (the Census API's own names; `longitude`/`latitude` are the clearer aliases), optional `benchmark`/`vintage`. Returns { found, coordinates:{x,y}, geographies:{ state, county, congressionalDistrict, censusTract, censusBlock, place, cbsaOrCsa, stateLegislativeUpper, stateLegislativeLower }, vintageResolved } + honest _meta. HONESTY: a point outside any US Census geography (offshore / out-of-US) ⇒ geographies all null / found:false / complete:true (an honest empty geographies:{}, NOT an error); coordinate finiteness is re-guarded PRE-fetch (a non-finite x/y ⇒ invalid_input, 0 fetch); a historical vintage's >1-layer-per-type is surfaced with alternates[] + a note (same [B1] multi-key handling as the address tool); GEOIDs are STRINGS (leading zeros survive); the resolved benchmark/vintage is echoed + a moving-vintage note; a bad benchmark/vintage ⇒ HTTP 400 THROWS; an outage/5xx ⇒ THROWS. MANDATORY CAVEAT every response: these are a NOMINAL input, NOT an authoritative HUBZone / Opportunity-Zone / set-aside determination.",
+    "inputSchema": {
+      "type": "string"
+    }
+  },
+  {
     "name": "ckan_discover_datasets",
     "description": "Find CKAN datastore resource ids by keyword via package_search (keyless). Input `host` (allowlisted enum), `q` (e.g. 'procurement', 'checkbook'), `limit` (≤100, def 20). Returns per-resource rows [{ resourceId, name, datasetTitle, format, datastoreActive }] + totalAvailable = the matching DATASET count. Feed a datastoreActive:true result's `resourceId` to ckan_query (a datastoreActive:false resource is a raw file blob NOT in the datastore, not queryable).",
     "inputSchema": {
