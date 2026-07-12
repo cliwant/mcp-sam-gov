@@ -1254,6 +1254,62 @@ const FdicBankFailuresInput = z.object({
         .default("DESC")
         .describe("Sort direction, default DESC (most-recent failures first)."),
 });
+// ADR-0030 — the 4th FDIC tool (source 23 unchanged; snapshot 90→91) reading
+// /banks/history, the institution-level STRUCTURAL-CHANGE event log (mergers,
+// absorptions, failures, name/location/charter/regulator changes, branch open/close,
+// etc.) — completing the FDIC entity cluster. Live review: the state field is PSTALP
+// (NOT STALP — a false-empty landmine), and /history's `search` param returns 0 for
+// INSTNAME (a false-empty) → NO name/city filter; name lookup is the 2-step CERT
+// linkage via fdic_search_institutions. All inputs optional, AND-combined; `cert` is
+// the primary path.
+const FdicInstitutionHistoryInput = z.object({
+    cert: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Filter by FDIC certificate number (the STABLE entity key; → CERT filter — the PRIMARY lookup). Resolve a bank's CERT via fdic_search_institutions. e.g. 3510 → Bank of America's 13,794-row structural-change history."),
+    changeCode: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Filter by FDIC structural-change code (→ CHANGECODE filter). e.g. 223 = Merger (Without Assistance), 211 = Failure (Whole Institution), 721 = Branch Closing, 520 = Change in Physical Location, 110 = New Institution. Each row also carries FDIC's own changeDescription (CHANGECODE_DESC)."),
+    effYear: z
+        .number()
+        .int()
+        .min(1782)
+        .max(new Date().getUTCFullYear())
+        .optional()
+        .describe("Filter by the year the structural change took effect (→ EFFYEAR filter). 1782..current UTC year (1782 = the oldest observed EFFYEAR)."),
+    state: z
+        .string()
+        .regex(/^[A-Z]{2}$/)
+        .optional()
+        .describe("Filter by 2-letter US state code (uppercase; → PSTALP filter — the /history state field is PSTALP, NOT STALP). e.g. 'CA'."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page, 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(100000)
+        .default(0)
+        .describe("0-based row offset for pagination, 0..100000, default 0."),
+    sortBy: z
+        .enum(["EFFDATE", "PROCDATE", "CHANGECODE", "TRANSNUM"])
+        .default("EFFDATE")
+        .describe("Sort field (allowlisted enum; default EFFDATE = effective date). An unknown field is rejected before fetch."),
+    sortOrder: z
+        .enum(["ASC", "DESC"])
+        .default("DESC")
+        .describe("Sort direction, default DESC (newest structural change first)."),
+});
 // ─── OpenFEMA (keyless disaster declarations + emergency-assistance spend) ──────
 // ADR-0016. KEYLESS, fixed host www.fema.gov + a PINNED dataset registry
 // {entityName, version} (the SSRF core — no free host/path/version). Filters are
@@ -2776,6 +2832,12 @@ const TOOLS = [
         description: "Historical FDIC-insured bank failures & assistance transactions (keyless FDIC BankFind, api.fdic.gov/banks/failures) — B2G counterparty / entity due-diligence: a failed or FDIC-assisted institution is a red flag, and CERT links a failure back to fdic_search_institutions / fdic_institution_financials. Exact-key filters: `state` (2-letter → PSTALP — NOTE the /failures state field is PSTALP, NOT STALP), `failYear` (→ FAILYR; e.g. 2023 → the 5 real 2023 failures incl. Silicon Valley Bank & First Republic Bank), `cert` (→ CERT, the STABLE entity key). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum FAILDATE/COST/QBFASSET/QBFDEP/NAME/FAILYR, def FAILDATE), `sortOrder` (def DESC → most-recent first). Returns { failures:[{ name, cert, failDate, failYear, city, state, resolutionType, resolutionFund, estimatedLossUSD, depositsUSD, assetsUSD, id }] }. NO name/city filter — FDIC's /failures `search` param is IGNORED (it returns the whole dataset), so name/city are SHOWN in each row but NOT searchable; to find a specific bank's failure, resolve its CERT via fdic_search_institutions then filter here by `cert`. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); failDate is normalized from FDIC's M/D/YYYY to ISO YYYY-MM-DD (an unrecognized value is surfaced raw + disclosed, never nulled/fabricated); COST/QBFDEP/QBFASSET are $thousands normalized to whole USD ×1000 (null-never-0 — a genuine 0 = a fully-assisted no-loss stays 0, a NEGATIVE COST = a net DIF recovery/gain not a loss, absent → null); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
         inputSchema: FdicBankFailuresInput,
         handler: (input) => fdic.bankFailures(input),
+    }),
+    defineTool({
+        name: "fdic_institution_history",
+        description: "Institution-level STRUCTURAL-CHANGE event log for FDIC-insured banks (keyless FDIC BankFind, api.fdic.gov/banks/history) — the full lineage of mergers, absorptions, consolidations, failures, name/location/charter/regulator changes, branch open/close, trust-power grants & FRS-membership changes. Completes the FDIC entity cluster (directory + financials + failures + history). Killer feature: CERT-linked MERGER LINEAGE — a merger/failure row carries the acquiring / outgoing / surviving institution's CERT + name, each linking back to fdic_search_institutions / fdic_institution_financials / fdic_bank_failures. Exact-key filters (all optional, AND-combined): `cert` (→ CERT, the STABLE entity key & PRIMARY lookup; e.g. 3510 → Bank of America's 13,794 rows), `changeCode` (→ CHANGECODE; e.g. 223 = merger, 211 = failure, 721 = branch closing, 520 = location change), `effYear` (→ EFFYEAR), `state` (2-letter → PSTALP — NOTE the /history state field is PSTALP, NOT STALP). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum EFFDATE/PROCDATE/CHANGECODE/TRANSNUM, def EFFDATE), `sortOrder` (def DESC → newest change first). Returns { history:[{ cert, instName, state, changeCode, changeDescription, effectiveDate, processDate, effYear, transNum, acquirerCert, acquirerName, outgoingCert, outgoingName, survivingCert, survivingName, id }] }. NO name/city filter — FDIC's /history `search` param returns 0 for INSTNAME (a false-empty), so names are SHOWN in each row but NOT searchable; to find a specific bank's history, resolve its CERT via fdic_search_institutions then filter here by `cert`. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); changeDescription is FDIC's OWN co-served CHANGECODE_DESC passed through verbatim (the numeric changeCode is authoritative — never a hand-map); effectiveDate/processDate are normalized from FDIC's YYYY-MM-DDT00:00:00 to ISO YYYY-MM-DD (an unrecognized value is surfaced raw + disclosed, never nulled/fabricated); the acquirer/outgoing/surviving CERTs are null on a non-merger event (null-never-0 — a real absence, never a fabricated 0; *_UNINUM's 0 sentinel is NOT surfaced); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
+        inputSchema: FdicInstitutionHistoryInput,
+        handler: (input) => fdic.institutionHistory(input),
     }),
     // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (2) ━━━ ADR-0016
     defineTool({

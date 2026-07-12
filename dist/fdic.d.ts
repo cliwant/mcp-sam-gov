@@ -292,4 +292,89 @@ export declare function bankFailures(args: {
     sortBy?: string;
     sortOrder?: string;
 }): Promise<MetaBundle>;
+declare const FDIC_HISTORY_FILTER_FIELDS: ReadonlySet<string>;
+export { FDIC_HISTORY_FILTER_FIELDS };
+/**
+ * Build the history `filters` string — EXACT-KEY terms only: `cert`→`CERT:<int>`
+ * (the PRIMARY lookup), `changeCode`→`CHANGECODE:<int>`, `effYear`→`EFFYEAR:<year>`
+ * (emit the integer's digits — EFFYEAR is a string field but the digits filter
+ * cleanly, live-verified), `state`→`PSTALP:<state>` (★F1-analog — PSTALP, NEVER
+ * STALP). There is NO name/city term (★F2-analog — /history's `search` param
+ * returns 0 for INSTNAME; this tool never emits `search=`). Terms joined with
+ * ` AND `. Returns "" when there is no structured filter clause. Exported for the
+ * fault fixtures.
+ */
+export declare function buildHistFilters(inp: {
+    cert?: number;
+    changeCode?: number;
+    effYear?: number;
+    state?: string;
+}): string;
+/**
+ * ★Q2 — normalize FDIC's `EFFDATE`/`PROCDATE` (`YYYY-MM-DDT00:00:00`, e.g.
+ * `2002-07-01T00:00:00`) to ISO `YYYY-MM-DD`. Match
+ * `^(\d{4})-(\d{2})-(\d{2})T00:00:00$`, extract y/m/d, then validate the calendar
+ * day with the EXACT 3-component Date.UTC round-trip (`getUTCFullYear/Month+1/Date`
+ * all match — rejects JS's silent roll-overs). On success → the ISO date
+ * (`normalized:true`; the month/day are already zero-padded by the `\d{2}` capture).
+ * If the value does NOT match the pattern or fails the round-trip → surface the RAW
+ * upstream value UNCHANGED (`normalized:false`; NEVER null or fabricate a present
+ * date — the handler discloses the raw passthrough); a genuinely-absent value
+ * (null/undefined/"") → str-coerced (null for absent, "" preserved). Live-confirmed
+ * 0/2000 nulls and 0 non-`T00:00:00` and old rows (1782 → `1782-01-01T00:00:00`)
+ * conform, so the raw-passthrough branch is defensive-only. The `9999-12-31T00:00:00`
+ * sentinel round-trips fine to `9999-12-31` (disclosed by the handler's sentinel
+ * note). Exported for the fault fixtures.
+ */
+export declare function normHistDate(raw: unknown): {
+    value: string | null;
+    normalized: boolean;
+};
+export type FdicHistory = {
+    cert: number | null;
+    instName: string | null;
+    state: string | null;
+    changeCode: number | null;
+    changeDescription: string | null;
+    effectiveDate: string | null;
+    processDate: string | null;
+    effYear: string | null;
+    transNum: number | null;
+    acquirerCert: number | null;
+    acquirerName: string | null;
+    outgoingCert: number | null;
+    outgoingName: string | null;
+    survivingCert: number | null;
+    survivingName: string | null;
+    id: string | null;
+};
+/**
+ * Institution-level structural-change event log (`/banks/history`). Exact-key
+ * structured inputs: `cert` (→ CERT filter, the PRIMARY lookup), `changeCode` (→
+ * CHANGECODE), `effYear` (→ EFFYEAR), `state` (→ PSTALP filter, ★F1-analog) → the
+ * `filters` param; plus `limit`/`offset`/`sortBy`/`sortOrder` (default EFFDATE DESC
+ * → newest structural change first). Fixed field projection. NO name/city filter and
+ * NEVER a `search=` param (★F2-analog). Consumes the IDENTICAL fetch → 3-envelope
+ * guard → pagination machinery as tools 1–3.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1; live: CERT 3510
+ * → total 13794, stable across offset); the 3-envelope drift-guard makes the ONLY
+ * honest empty `200 + total:0 + data:[]`, everything else THROWS (P2); changeDescription
+ * is FDIC's co-served CHANGECODE_DESC passed through verbatim (Q1, never hand-mapped);
+ * effectiveDate/processDate normalized YYYY-MM-DDT00:00:00→ISO (unrecognized → raw +
+ * disclosed, never nulled/fabricated; 9999-* sentinel disclosed) (Q2); the ACQ_/OUT_/
+ * SUR_ counterparty CERT-triad is null-never-0 and uses *_CERT not *_UNINUM's 0
+ * sentinel (Q3); a projected always-present field absent from all records →
+ * fieldsUnavailable (B); the snapshot build time is disclosed.
+ */
+export declare function institutionHistory(args: {
+    cert?: number;
+    changeCode?: number;
+    effYear?: number;
+    state?: string;
+    limit?: number;
+    offset?: number;
+    sortBy?: string;
+    sortOrder?: string;
+}): Promise<MetaBundle>;
 //# sourceMappingURL=fdic.d.ts.map
