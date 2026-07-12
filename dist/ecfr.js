@@ -13,6 +13,7 @@
  * Both keyless. Documented at https://www.ecfr.gov/developers/.
  */
 import { fetchWithRetry } from "./errors.js";
+import { driftError } from "./datasource.js";
 import { memoize } from "./cache.js";
 import { withMeta } from "./meta.js";
 const ECFR = "https://www.ecfr.gov/api";
@@ -56,6 +57,19 @@ export async function search(args) {
         url.searchParams.set("hierarchy[chapter]", String(args.chapter));
     }
     const json = await fetchJson(url.toString());
+    // F6 (P2 empty-vs-outage): a 200 whose `results` is PRESENT-but-non-array — or
+    // a body carrying NEITHER a `results` array NOR a `meta` object — is drift / an
+    // unexpected shape, NOT a genuine no-match. Throw (schema_drift) rather than
+    // letting `(json.results ?? []).map` coalesce it into a fake AUTHORITATIVE empty.
+    // A GENUINE empty (results:[] with meta.total_count:0) flows through honestly
+    // below. (eCFR normally signals errors via HTTP status caught by fetchWithRetry;
+    // this closes the previously-unhandled + untested 200-body drift path.)
+    if (json.results !== undefined && !Array.isArray(json.results)) {
+        throw driftError("ecfr.gov", "eCFR search returned HTTP 200 but `results` is not an array — treating it as schema drift, NOT an empty result set.");
+    }
+    if (json.results === undefined && json.meta === undefined) {
+        throw driftError("ecfr.gov", "eCFR search returned HTTP 200 with neither a `results` array nor a `meta` object — an unexpected shape; treating it as schema drift, NOT an empty result set.");
+    }
     const data = {
         results: (json.results ?? []).map((r) => ({
             type: r.type ?? "",

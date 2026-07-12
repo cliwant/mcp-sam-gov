@@ -47,7 +47,7 @@ import { runTool } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier, fetchWithRetry } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards, searchRecipients, glossary } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -10996,6 +10996,168 @@ async function testFetchWithRetryTimeout() {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// §57 — Cross-source honesty-audit remediation (ADR-0025, v6 cycle 29). Six
+// genuine honesty defects (F1–F6) across 5 source modules, each with a
+// RED-on-mutation assertion: reverting the fix in source turns the assertion RED
+// (its non-vacuity note says exactly which revert breaks it), the correct code
+// keeps it GREEN. No fix may over-correct: the drift guards (F4/F6) must NOT
+// throw on a GENUINE empty, and the null coercions (F2/F3) must keep a REAL 0.
+// ═══════════════════════════════════════════════════════════════════════════
+async function testHonestyAuditRemediation() {
+  section("57. cross-source honesty-audit remediation (ADR-0025 F1–F6) — RED-on-mutation");
+
+  // A CALC-shaped mock (ceilingrates): N rows ascending by current_price, page
+  // size honored. Used by F1.
+  const calcMock = (relation, N) => (u) => {
+    if (!/\/calc\/v3\/api\/ceilingrates\//.test(u)) return failClosed()();
+    const q = new URL(u).searchParams;
+    const page = Number(q.get("page") ?? 1);
+    const size = Number(q.get("page_size") ?? 100);
+    const start = (page - 1) * size;
+    const hits = [];
+    for (let i = 0; i < size; i++) {
+      const rank = start + i;
+      if (rank >= N) break;
+      hits.push({ _source: { labor_category: "Widget Analyst", current_price: 100 + rank, next_year_price: 105 + rank, second_year_price: 110 + rank, education_level: "BA", min_years_experience: 5, business_size: "s" } });
+    }
+    return mockResponse({ status: 200, json: { hits: { total: { value: N, relation }, hits } } });
+  };
+
+  // ── F1 [pricing.ts, P4 money] gsa_benchmark_labor_rates priceRange: CALC v3
+  // IGNORES price_range (LIVE-RE-CONFIRMED 2026-07-12). It must be reported in
+  // filtersDropped (NEVER filtersApplied), with a disclosure note, and NO note
+  // may advise using priceRange to narrow. NON-VACUITY: reverting F1 (push
+  // priceRange to filtersApplied + keep it in the "Narrow with filters (…)"
+  // advice) turns the filtersDropped/filtersApplied and advice assertions RED.
+  await withFetch(calcMock("gte", 10000), async () => {
+    const res = await benchmarkLaborRates({ laborCategory: "Widget Analyst", priceRange: "50,150" });
+    const m = res.meta;
+    ok("F1 priceRange ⇒ in _meta.filtersDropped (CALC ignores it — a no-op filter, never 'applied')",
+      m.filtersDropped.includes("priceRange"), JSON.stringify(m.filtersDropped));
+    ok("F1 priceRange ⇒ NOT in _meta.filtersApplied (the money-domain lie is closed — mutate to filtersApplied ⇒ RED)",
+      !m.filtersApplied.includes("priceRange"), JSON.stringify(m.filtersApplied));
+    ok("F1 a disclosure note says priceRange was NOT applied (CALC does not narrow by it)",
+      m.notes.some((n) => /priceRange was NOT applied/i.test(n) && /IGNORES the price_range/i.test(n)), JSON.stringify(m.notes));
+    ok("F1 NO note advises priceRange as a narrowing filter (the false 'Narrow with filters (…, priceRange)' advice is deleted ⇒ mutate back ⇒ RED)",
+      !m.notes.some((n) => /Narrow with filters \([^)]*priceRange[^)]*\)/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── F2 [usaspending.ts, P3] money `?? 0` → `?? null`: an ABSENT Award Amount
+  // must map to null (not a fabricated $0); a GENUINE 0 must survive as 0.
+  // NON-VACUITY: reverting to `?? 0` makes the null-row assertion read 0 ⇒ RED.
+  const awardRows = [
+    { "Award ID": "A-ABSENT", "Recipient Name": "R1", generated_internal_id: "GID1" }, // NO Award Amount
+    { "Award ID": "A-ZERO", "Recipient Name": "R2", "Award Amount": 0, generated_internal_id: "GID2" }, // genuine 0
+  ];
+  const usasAwardMock = (rows) => (u) => {
+    if (isSpendingByAwardCount(u)) return mockResponse({ status: 200, json: { results: { contracts: rows.length } } });
+    if (isSpendingByAward(u)) return mockResponse({ status: 200, json: { results: rows, page_metadata: { hasNext: false } } });
+    return failClosed()();
+  };
+  await withFetch(usasAwardMock(awardRows), async () => {
+    const res = await searchIndividualAwards({ agency: "Department of Defense" });
+    ok("F2 usas_search_awards (searchIndividualAwards): ABSENT Award Amount ⇒ amount null (NOT a fabricated $0 — mutate `?? null`→`?? 0` ⇒ RED)",
+      res.data.awards[0].amount === null, JSON.stringify(res.data.awards[0]));
+    ok("F2 usas_search_awards: GENUINE 0 Award Amount ⇒ amount 0 (a real zero survives; no over-correction)",
+      res.data.awards[1].amount === 0, JSON.stringify(res.data.awards[1]));
+  });
+  await withFetch(usasAwardMock(awardRows), async () => {
+    const res = await searchAwardsByRecipient({ recipientName: "R1" });
+    ok("F2 usas_search_awards_by_recipient: ABSENT Award Amount ⇒ amount null; genuine 0 stays 0",
+      res.data.awards[0].amount === null && res.data.awards[1].amount === 0, JSON.stringify(res.data.awards.map((a) => a.amount)));
+  });
+  const subRows = [
+    { "Sub-Award ID": "S-ABSENT", "Sub-Award Recipient": "SR1" }, // NO Sub-Award Amount
+    { "Sub-Award ID": "S-ZERO", "Sub-Award Recipient": "SR2", "Sub-Award Amount": 0 }, // genuine 0
+  ];
+  await withFetch((u) => {
+    if (isSpendingByAwardCount(u)) return mockResponse({ status: 200, json: { results: { subcontracts: subRows.length } } });
+    if (isSpendingByAward(u)) return mockResponse({ status: 200, json: { results: subRows, page_metadata: { hasNext: false } } });
+    return failClosed()();
+  }, async () => {
+    const res = await searchSubawards({ primeRecipientName: "P1" });
+    ok("F2 usas_search_subawards: ABSENT Sub-Award Amount ⇒ amount null; genuine 0 stays 0",
+      res.data.subawards[0].amount === null && res.data.subawards[1].amount === 0, JSON.stringify(res.data.subawards.map((s) => s.amount)));
+  });
+
+  // ── F3 [usaspending.ts, P1] totalRecords DATA field `?? 0` → null: a 200 with
+  // rows but an OMITTED total must emit totalRecords:null (consistent with the
+  // null _meta.totalAvailable), NOT a contradictory 0. NON-VACUITY: reverting to
+  // `?? 0` makes totalRecords read 0 while _meta is null ⇒ RED.
+  await withFetch((u) => {
+    if (/\/api\/v2\/recipient\/?($|\?)/.test(u)) return mockResponse({ status: 200, json: { results: [{ id: "R1", name: "BOOZ ALLEN", recipient_level: "R", amount: 100 }], page_metadata: {} } });
+    return failClosed()();
+  }, async () => {
+    const res = await searchRecipients({ keyword: "booz" });
+    ok("F3 usas_search_recipients: rows + OMITTED total ⇒ data.totalRecords null (mirrors _meta.totalAvailable null — mutate `?? 0` ⇒ RED)",
+      res.data.totalRecords === null && res.meta.totalAvailable === null, JSON.stringify({ tr: res.data.totalRecords, ta: res.meta.totalAvailable, rows: res.data.recipients.length }));
+  });
+  _clearCache();
+  await withFetch((u) => {
+    if (/references\/glossary\//.test(u)) return mockResponse({ status: 200, json: { results: [{ term: "Obligation", slug: "obligation", plain: "…" }] } });
+    return failClosed()();
+  }, async () => {
+    const res = await glossary({ search: "auditonly-uniqkey" });
+    ok("F3 usas_glossary: rows + OMITTED count ⇒ data.totalRecords null (consistent with the null meta — mutate `?? 0` ⇒ RED)",
+      res.data.totalRecords === null && res.meta.totalAvailable === null, JSON.stringify({ tr: res.data.totalRecords, ta: res.meta.totalAvailable, rows: res.data.terms.length }));
+  });
+
+  // ── F4 [grants.ts, P2] drift-as-empty: a malformed 200 (no errorcode AND no
+  // numeric data.hitCount) must throw driftError (schema_drift), NEVER ship a
+  // fake authoritative empty; a GENUINE empty (hitCount:0) stays honest.
+  // NON-VACUITY: mutating the guard off lets the malformed body coalesce to
+  // totalRecords:0/grants:[] ⇒ the throw assertion RED.
+  const isGrantsSearch = (u) => /api\.grants\.gov\/.*search2/.test(u);
+  await withFetch((u) => (isGrantsSearch(u) ? mockResponse({ status: 200, json: { unexpected: "interstitial", note: "no errorcode, no data.hitCount" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => searchGrants({ keyword: "flood" }));
+    ok("F4 grants_search malformed 200 (no errorcode, no data.hitCount) ⇒ driftError schema_drift (NOT a fake empty — mutate guard off ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch((u) => (isGrantsSearch(u) ? mockResponse({ status: 200, json: { errorcode: 0, data: { hitCount: 0, oppHits: [] } } }) : failClosed()()), async () => {
+    const res = await searchGrants({ keyword: "zzznotarealprogram" });
+    ok("F4 grants_search GENUINE empty (hitCount:0) ⇒ honest empty (totalAvailable 0, truncated false) — no over-correction (§14 stays GREEN)",
+      res.data.grants.length === 0 && res.meta.totalAvailable === 0 && res.meta.truncated === false, JSON.stringify(res.meta));
+  });
+
+  // ── F5 [fpds.ts, P4] orphaned lone date bound: signedDateFrom ONLY (with the
+  // request satisfied by naics) must be disclosed in filtersDropped + a note,
+  // never silently dropped. NON-VACUITY: reverting F5 (emit the date token only
+  // when both ends present, filtersDropped hard-coded []) ⇒ the lone bound
+  // vanishes from both filter lists ⇒ RED.
+  {
+    const sam = new SamGovClient({});
+    const EMPTY_FEED = '<?xml version="1.0" encoding="UTF-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><title>FPDS-NG search results</title></feed>';
+    await withFetch((u) => (/fpds\.gov/.test(u) ? mockResponse({ status: 200, json: EMPTY_FEED }) : failClosed()()), async () => {
+      const r = await runTool("fpds_search_awards", { naics: "541511", signedDateFrom: "2024-01-01" }, sam);
+      const m = buildMeta(r.meta);
+      ok("F5 fpds_search_awards lone signedDateFrom (+naics) ⇒ _meta.filtersDropped discloses it (NOT silently dropped — mutate off ⇒ RED)",
+        m.filtersDropped.some((x) => /signedDateFrom/.test(x)), JSON.stringify(m.filtersDropped));
+      ok("F5 lone date bound NOT claimed applied (filtersApplied has naics, NOT signedDate)",
+        m.filtersApplied.includes("naics") && !m.filtersApplied.includes("signedDate"), JSON.stringify(m.filtersApplied));
+      ok("F5 a disclosure note explains FPDS date ranges require BOTH ends",
+        m.notes.some((n) => /both/i.test(n) && /date/i.test(n) && /signedDateFrom/i.test(n)), JSON.stringify(m.notes));
+    });
+  }
+
+  // ── F6 [ecfr.ts, P2] no array/drift guard: a 200 with a PRESENT-but-non-array
+  // results must throw driftError (schema_drift), never a fake empty; a GENUINE
+  // empty (results:[] + meta.total_count:0) stays an honest empty. NON-VACUITY:
+  // mutating the guard off lets `(json.results ?? []).map` run — a non-array
+  // results throws a raw TypeError (kind undefined), not schema_drift ⇒ RED.
+  const isEcfrSearch = (u) => /\/search\/v1\/results/.test(u);
+  await withFetch((u) => (isEcfrSearch(u) ? mockResponse({ status: 200, json: { results: { not: "an array" }, meta: { total_count: 3 } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => ecfrSearch({ query: "commercial items" }));
+    ok("F6 ecfr_search non-array results ⇒ driftError schema_drift (NOT a fake empty — mutate guard off ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch((u) => (isEcfrSearch(u) ? mockResponse({ status: 200, json: { results: [], meta: { total_count: 0 } } }) : failClosed()()), async () => {
+    const res = await ecfrSearch({ query: "zzznomatch" });
+    ok("F6 ecfr_search GENUINE empty (results:[], total_count:0) ⇒ honest empty (returned 0, totalAvailable 0), NOT thrown — no over-correction",
+      res.data.results.length === 0 && res.meta.totalAvailable === 0, JSON.stringify(res.meta));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -11068,6 +11230,7 @@ async function main() {
   await testCensusHonesty();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
+  await testHonestyAuditRemediation();
 
   // Prove the harness bites.
   await selfCheck();
