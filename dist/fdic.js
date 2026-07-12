@@ -1022,4 +1022,263 @@ export async function institutionHistory(args) {
         notes,
     });
 }
+// ═══════════════════════════════════════════════════════════════════
+// Tool 5: fdic_industry_summary (ADR-0031) — the FDIC's OWN aggregate/statistical
+// roll-ups (`/banks/summary`): industry-wide and per-state ANNUAL aggregate financials
+// (total assets, deposits, net income, equity, net interest income) + structural
+// counts (institutions, offices, branches, employees), grouped by CHARTER CLASS
+// (commercial banks vs savings institutions). ★NEW CAPABILITY TYPE for the source —
+// the FIRST AGGREGATE / statistical tool (the 4 existing tools are all per-ENTITY,
+// keyed on CERT). Answers "how big is the US (or a state's) banking industry this
+// year, and how many institutions?" — a question NONE of the 4 entity tools can
+// express without manually summing thousands of institution rows. Reuses the
+// C116/C118-hardened adapter VERBATIM (getFdic / parseEnvelope 3-envelope guard /
+// filterTerm allowlist-by-construction + Set.has / sortParams enum+Set.has / EXACT
+// meta.total pagination / snapshot-freshness / $thousands→USD ×1000 null-never-0 /
+// the C118-quoted filterTerm). It does NOT use searchTerm/escapeSearch (no name
+// search — /summary's `search` param is a no-op that returns the whole year). The NEW
+// surface is exactly four things, all live-verified 2026-07-13:
+//   ★S1 — TWO cross-cut dimensions (NOT one): (1) charter class CB_SI (CB=commercial
+//     banks, SI=savings institutions — every row is scoped to EXACTLY ONE; there is NO
+//     pre-combined "all institutions" row), and (2) geography STALP (a MIX of
+//     per-jurisdiction leaf rows AND geographic ROLL-UP rows).
+//   ★S2 (the honesty crux) — the roll-up-vs-jurisdiction split. STALP ∈ {USA,US,OT,PI}
+//     are GEOGRAPHIC AGGREGATES (scope national_total / national_states_dc /
+//     territories_total / pacific_islands, isRollup:true); every other STALP is a
+//     single jurisdiction (isRollup:false). Surfaced as derived scope+isRollup on
+//     EVERY row + a MANDATORY disclosure: NEVER sum a roll-up row with jurisdiction
+//     rows or across scopes (live-proven: Σ jurisdictions = USA; USA − US = OT). A
+//     roll-up row must NEVER masquerade as a state.
+//   ★S3 — the aggregate FIELD NAMES: number-of-institutions is BANKS (NOT NUMINST);
+//     /summary serves NO ratio fields at all (ROA/ROE/NIMY/ERNAST absent) — only
+//     $-aggregates + integer COUNTS.
+//   ★S4 (the NIM foot-gun) — on /summary NIM is net interest INCOME in $thousands
+//     (Alabama CB 2023 → 7,457,074 = $7.5B; USA CB → 660,219,591 = $660B), NOT the
+//     net-interest-margin percentage. It MUST be ×1000-scaled like every money field
+//     AND relabeled net interest income (netInterestIncomeUSD). Money
+//     (ASSET/DEP/NETINC/EQ/NIM) ×1000 with the null-guard BEFORE the multiply; counts
+//     (BANKS/OFFICES/BRANCHES/NUMEMP) pass through un-scaled (a count ×1000 is a
+//     fabrication). A genuine 0 (American Samoa CB BANKS:0/ASSET:0/NIM:0) stays 0; an
+//     absent value (American Samoa SI has NO BANKS key) stays null (never 0).
+//   The state filter field is STALP (NOT PSTALP — a per-endpoint difference from
+//   /failures & /history), C118-quoted so Oregon `STALP:"OR"` is operator-safe. NO
+//   name/city filter, NEVER a `search=` param. The unknown-filter-field false-empty
+//   (200/total:0) is neutralized by the allowlist-by-construction; the malformed-year
+//   false-empty (YEAR:notanum → total:0) is guarded by Zod .int() at the boundary.
+// ═══════════════════════════════════════════════════════════════════
+// Fixed endpoint constant — the TOOL chooses it; NO caller value on the path (SSRF core).
+const ENDPOINT_SUMMARY = "summary";
+// Fixed field projection on the wire (every field live-verified present + non-null on
+// both a leaf row (CA CB) and a roll-up row (USA CB); genuine 0/absent handled by the
+// map). NO ratio fields (they do not exist on /summary).
+const SUMMARY_FIELDS = "YEAR,CB_SI,STNAME,STALP,STNUM,BANKS,OFFICES,BRANCHES,NUMEMP,ASSET,DEP,NETINC,EQ,NIM,ID";
+const SUMMARY_PROJECTION = [
+    "YEAR",
+    "CB_SI",
+    "STNAME",
+    "STALP",
+    "STNUM",
+    "BANKS",
+    "OFFICES",
+    "BRANCHES",
+    "NUMEMP",
+    "ASSET",
+    "DEP",
+    "NETINC",
+    "EQ",
+    "NIM",
+    "ID",
+];
+// ★S3 — the summary filter-FIELD allowlist (P4 belt-and-suspenders). ONLY these three
+// (a caller never supplies a field name — they are compile-time constants behind named
+// inputs). YEAR is numeric (emitted bare by filterTerm); STALP/CB_SI are non-numeric
+// (C118-double-quoted). An un-allowlisted field → invalid_input pre-fetch (guards the
+// live HTTP-200 total:0 unknown-field false-empty).
+const FDIC_SUMMARY_FILTER_FIELDS = new Set(["YEAR", "STALP", "CB_SI"]);
+// sortBy allowlist (mirrors the server's Zod enum; a Set.has recheck in sortParams →
+// an unknown sort field is invalid_input BEFORE fetch; live `sort_by=NOTAFIELD` → 400,
+// so the pre-fetch guard is load-bearing).
+const SUMMARY_SORT_FIELDS = new Set(["YEAR", "ASSET", "DEP", "NETINC", "BANKS"]);
+// Exported so the fault suite can drive the belt-and-suspenders field-guard directly.
+export { FDIC_SUMMARY_FILTER_FIELDS };
+// ★S2 — the explicit roll-up STALP set (the honesty discriminator; live-verified
+// exhaustive over all 121 rows of 2023, and structurally by FIPS STNUM ∈ {0,99,98,97}).
+const ROLLUP_STALP = new Set(["USA", "US", "OT", "PI"]);
+/**
+ * ★CRUX-1 (S2) — derive the geographic SCOPE from the raw STALP, using the explicit
+ * roll-up set (a fixed 4-element discriminator, NOT a fragile numeric threshold).
+ * A non-roll-up value (incl. null / any future/unknown STALP) falls through to
+ * "jurisdiction" and is surfaced by the ALWAYS-projected raw STNAME/STALP/STNUM — a
+ * caller can always see the literal label, never a silently-mislabeled aggregate.
+ * Exported for the fault fixtures.
+ */
+export function scopeOf(stalp) {
+    switch (stalp) {
+        case "USA":
+            return "national_total"; // STNUM 0  — 50 states + DC + all territories (grand total)
+        case "US":
+            return "national_states_dc"; // STNUM 99 — 50 states + DC, EXCL territories
+        case "OT":
+            return "territories_total"; // STNUM 98 — all US territories
+        case "PI":
+            return "pacific_islands"; // STNUM 97 — Pacific-island territories (⊂ OT)
+        default:
+            return "jurisdiction"; // a single state / DC / individual territory (or an absent/unknown STALP)
+    }
+}
+/**
+ * ★CRUX-1b (S1) — map the raw CB_SI charter code to a readable class. An UNMAPPED
+ * value returns the raw code (never fabricated); a genuinely-absent (null) value stays
+ * null. Exported for the fault fixtures.
+ */
+export function charterClassOf(code) {
+    if (code === "CB")
+        return "commercial_banks";
+    if (code === "SI")
+        return "savings_institutions";
+    return code; // unmapped → the raw code (never invented); null → null
+}
+/**
+ * Build the summary `filters` string — EXACT-KEY terms only: `year`→`YEAR:<int>`
+ * (numeric → emitted BARE by filterTerm; a non-int is guarded pre-fetch by Zod .int()),
+ * `state`→`STALP:"<code>"` (★S2 — STALP is the /summary state field, NOT PSTALP;
+ * C118-double-quoted so Oregon `STALP:"OR"` is Lucene-operator-safe), `charterClass`
+ * →`CB_SI:"<v>"` (quoted). There is NO name/city term (★/summary's `search` is a no-op
+ * that returns the whole year — this tool never emits `search=`). Terms joined with
+ * ` AND `. Returns "" when there is no structured filter clause. Exported for the fault
+ * fixtures.
+ */
+export function buildSummaryFilters(inp) {
+    const terms = [];
+    if (inp.year !== undefined)
+        terms.push(filterTerm("YEAR", String(inp.year), FDIC_SUMMARY_FILTER_FIELDS));
+    if (inp.state !== undefined)
+        terms.push(filterTerm("STALP", inp.state, FDIC_SUMMARY_FILTER_FIELDS));
+    if (inp.charterClass !== undefined)
+        terms.push(filterTerm("CB_SI", inp.charterClass, FDIC_SUMMARY_FILTER_FIELDS));
+    return terms.join(" AND ");
+}
+function mapSummary(rec) {
+    const stateCode = str(rec.STALP);
+    const charterClassCode = str(rec.CB_SI);
+    const scope = scopeOf(stateCode); // ★S2 — derived from the explicit roll-up set
+    return {
+        year: num(rec.YEAR), // YEAR is a string field ("2023") → num parses the digits
+        charterClass: charterClassOf(charterClassCode), // ★S1 — CB→commercial_banks, SI→savings_institutions (unmapped→raw)
+        charterClassCode,
+        geography: str(rec.STNAME),
+        stateCode,
+        stateFips: str(rec.STNUM),
+        scope,
+        isRollup: scope !== "jurisdiction", // ★S2 — a roll-up must NEVER masquerade as a state
+        // ★S4 / P3 — COUNT fields pass through via num (NEVER ×1000; a count ×1000 is a
+        // fabrication). A genuine 0 (American Samoa CB BANKS:0) stays 0; an absent value
+        // (American Samoa SI has no BANKS key) stays null (never 0).
+        institutionCount: num(rec.BANKS),
+        officeCount: num(rec.OFFICES),
+        branchCount: num(rec.BRANCHES),
+        employeeCount: num(rec.NUMEMP),
+        // ★S4 / P3 — MONEY fields ($thousands → whole USD ×1000, null-guard BEFORE the
+        // multiply; a genuine 0 stays 0, absent → null).
+        totalAssetsUSD: thousandsToUsd(rec.ASSET),
+        totalDepositsUSD: thousandsToUsd(rec.DEP),
+        netIncomeUSD: thousandsToUsd(rec.NETINC),
+        totalEquityUSD: thousandsToUsd(rec.EQ),
+        // ★S4 — NIM is net interest INCOME ($thousands), NOT the margin ratio: scaled ×1000
+        // and relabeled income (never surfaced as a "margin").
+        netInterestIncomeUSD: thousandsToUsd(rec.NIM),
+        id: str(rec.ID),
+    };
+}
+// ─── summary disclosure notes ──────────────────────────────────────
+// ★S2 — the load-bearing roll-up double-count-prevention disclosure (P4/P1 frontier).
+const SUMMARY_ROLLUP_NOTE = "Rows cross charter class (CB_SI) × geography (STALP); STALP ∈ {USA,US,OT,PI} are ROLL-UP totals (isRollup:true, scope national_total/national_states_dc/territories_total/pacific_islands) — NEVER sum a roll-up row with jurisdiction rows, and NEVER sum across scopes: national_total (USA) = national_states_dc (US) + territories_total (OT), and pacific_islands (PI) is a SUBSET of territories (live-proven: Σ jurisdictions = USA; USA − US = OT). A geography's total = its CB row + its SI row (there is NO pre-combined charter row). Filter by state/charterClass or by isRollup to avoid double-counting; to get one national figure read the national_total (USA) row directly rather than summing states — a roll-up row is NOT a state.";
+// ★S1 — the charter-class split (no combined row).
+const SUMMARY_CHARTER_NOTE = "Each row covers ONE charter class: CB = commercial_banks, SI = savings_institutions. There is NO pre-combined 'all institutions' row — a geography's all-FDIC-insured total for a year = its CB row + its SI row (omit charterClass to fetch both).";
+// ★S4 / P3 — money vs count units + the NIM foot-gun + the no-ratios fact.
+const SUMMARY_UNITS_NOTE = "ASSET/DEP/NETINC/EQ/NIM are $thousands, normalized here to whole USD (×1,000); NIM is net interest INCOME (a dollar sum, surfaced as netInterestIncomeUSD), NOT the net-interest-margin ratio. BANKS/OFFICES/BRANCHES/EMPLOYEES are COUNTS (not scaled). This endpoint provides NO ratio fields (ROA/ROE); derive them from netIncomeUSD / totalAssetsUSD / totalEquityUSD if needed. A real 0 stays 0; an absent value is null (never 0).";
+// ★ name-search scope (no institution-name search on /summary).
+const SUMMARY_SCOPE_NOTE = "This is FDIC's aggregate roll-up endpoint; it has no institution-name search (FDIC's /summary `search` param is ignored and returns the whole year). To drill from an industry aggregate to individual institutions, use fdic_search_institutions (filter by state) or fdic_institution_financials (by CERT).";
+/**
+ * FDIC industry & state banking-sector ANNUAL aggregates (`/banks/summary`) — the
+ * FIRST aggregate/statistical FDIC tool. Exact-key structured inputs (all optional,
+ * AND-combined): `year` (→ YEAR filter), `state` (→ STALP filter, ★S2 — STALP NOT
+ * PSTALP; accepts a jurisdiction code OR a roll-up code USA/US/OT/PI), `charterClass`
+ * (→ CB_SI filter; CB/SI) → the `filters` param; plus `limit`/`offset`/`sortBy`/
+ * `sortOrder` (default YEAR DESC → newest aggregate year first). Fixed field
+ * projection. NO name/city filter and NEVER a `search=` param. Consumes the IDENTICAL
+ * fetch → 3-envelope guard → pagination machinery as tools 1–4.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1; live YEAR:2023 →
+ * 121, stable across offset); the 3-envelope drift-guard makes the ONLY honest empty
+ * `200 + total:0 + data:[]`, everything else THROWS (P2); money (ASSET/DEP/NETINC/EQ/
+ * NIM) is $thousands → whole USD ×1000 null-never-0, counts (BANKS/OFFICES/BRANCHES/
+ * NUMEMP) pass through un-scaled (P3; a genuine 0 stays 0, absent → null); ★NIM is net
+ * interest INCOME (scaled + relabeled netInterestIncomeUSD), NOT the margin ratio (S4);
+ * ★scope/isRollup are derived per row from the explicit roll-up STALP set so a roll-up
+ * never masquerades as a state (S2); charterClass is derived from CB_SI (S1); a
+ * projected field absent from all records → fieldsUnavailable (B); the snapshot build
+ * time is disclosed.
+ */
+export async function industrySummary(args) {
+    const limit = args.limit ?? 100;
+    const offset = args.offset ?? 0;
+    // Default YEAR DESC (newest aggregate year first) when the server's Zod default did
+    // not supply one (defensive — the server always defaults sortBy=YEAR/DESC).
+    const sort = sortParams(args.sortBy ?? "YEAR", args.sortOrder ?? "DESC", SUMMARY_SORT_FIELDS, "summary");
+    const filters = buildSummaryFilters({
+        year: args.year,
+        state: args.state,
+        charterClass: args.charterClass,
+    });
+    const params = new URLSearchParams();
+    if (filters)
+        params.set("filters", filters);
+    params.set("fields", SUMMARY_FIELDS);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    if (sort.sort_by) {
+        params.set("sort_by", sort.sort_by);
+        params.set("sort_order", sort.sort_order);
+    }
+    params.set("format", "json");
+    const body = await getFdic(ENDPOINT_SUMMARY, params);
+    const env = parseEnvelope(body);
+    const records = env.records.map(mapSummary);
+    const returned = records.length;
+    const totalAvailable = env.totalAvailable;
+    const hasMore = offset + returned < totalAvailable;
+    const nextOffset = hasMore ? offset + returned : null;
+    const filtersApplied = [];
+    if (args.year !== undefined)
+        filtersApplied.push("year");
+    if (args.state !== undefined)
+        filtersApplied.push("state");
+    if (args.charterClass !== undefined)
+        filtersApplied.push("charterClass");
+    if (sort.sort_by)
+        filtersApplied.push("sort");
+    const notes = [
+        freshnessNote(env.indexName, env.indexCreated),
+        SUMMARY_ROLLUP_NOTE,
+        SUMMARY_CHARTER_NOTE,
+        SUMMARY_UNITS_NOTE,
+        SUMMARY_SCOPE_NOTE,
+    ];
+    const fu = fieldsUnavailable(env.records, SUMMARY_PROJECTION);
+    if (fu.length > 0) {
+        notes.push(`Requested field(s) ${fu.join(", ")} were not returned by FDIC for any record — possible schema drift / rename.`);
+    }
+    return withMeta({ summary: records }, {
+        source: "api.fdic.gov/banks/summary (BankFind, keyless)",
+        keylessMode: true,
+        returned,
+        totalAvailable,
+        filtersApplied,
+        filtersDropped: [],
+        fieldsUnavailable: fu,
+        pagination: { offset, limit, hasMore, nextOffset },
+        notes,
+    });
+}
 //# sourceMappingURL=fdic.js.map

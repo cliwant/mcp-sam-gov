@@ -1310,6 +1310,57 @@ const FdicInstitutionHistoryInput = z.object({
         .default("DESC")
         .describe("Sort direction, default DESC (newest structural change first)."),
 });
+// ADR-0031 — the 5th FDIC tool (source 23 unchanged; snapshot 91→92) reading
+// /banks/summary, the FDIC's OWN aggregate/statistical roll-ups (the FIRST
+// AGGREGATE tool on this source; the 4 existing are per-ENTITY on CERT). Live
+// review: the state field is STALP (NOT PSTALP — a per-endpoint difference), the
+// number-of-institutions field is BANKS (NOT NUMINST), /summary serves NO ratio
+// fields, and NIM is net interest INCOME in $thousands (NOT the margin ratio). Each
+// row crosses charter (CB_SI) × geography (STALP), where STALP ∈ {USA,US,OT,PI} are
+// geographic ROLL-UPS surfaced via a derived scope/isRollup so a roll-up never
+// masquerades as a state. NO name/city filter (the `search` param is a no-op). A
+// non-int year is rejected pre-fetch (a malformed year is a live HTTP-200 total:0
+// false-empty). All inputs optional, AND-combined.
+const FdicIndustrySummaryInput = z.object({
+    year: z
+        .number()
+        .int()
+        .min(1934)
+        .max(new Date().getUTCFullYear())
+        .optional()
+        .describe("Filter by aggregate YEAR (→ YEAR filter). 1934..current UTC year. e.g. 2023 → the 121 (charter × geography) aggregate rows for 2023. A non-int is rejected pre-fetch (a malformed year is a live HTTP-200 total:0 false-empty)."),
+    state: z
+        .string()
+        .regex(/^[A-Z]{2,3}$/)
+        .optional()
+        .describe("Filter by geography via the STALP code (uppercase 2-or-3 letters; → STALP filter — the /summary state field is STALP, NOT PSTALP). Accepts a jurisdiction USPS code (TX, CA, DC, GU, PR…) OR a ROLL-UP code: USA (all states+territories), US (states+DC), OT (all territories), PI (Pacific Islands). The output scope/isRollup disambiguates every returned row."),
+    charterClass: z
+        .enum(["CB", "SI"])
+        .optional()
+        .describe("Filter by charter class (→ CB_SI filter): CB = commercial banks, SI = savings institutions. Omit to return BOTH charter rows for the geography — there is NO pre-combined 'all institutions' row (a geography's total = its CB row + its SI row)."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page, 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(100000)
+        .default(0)
+        .describe("0-based row offset for pagination, 0..100000, default 0."),
+    sortBy: z
+        .enum(["YEAR", "ASSET", "DEP", "NETINC", "BANKS"])
+        .default("YEAR")
+        .describe("Sort field (allowlisted enum; default YEAR = aggregate year). An unknown field is rejected before fetch."),
+    sortOrder: z
+        .enum(["ASC", "DESC"])
+        .default("DESC")
+        .describe("Sort direction, default DESC (newest year / largest first)."),
+});
 // ─── OpenFEMA (keyless disaster declarations + emergency-assistance spend) ──────
 // ADR-0016. KEYLESS, fixed host www.fema.gov + a PINNED dataset registry
 // {entityName, version} (the SSRF core — no free host/path/version). Filters are
@@ -2814,7 +2865,7 @@ const TOOLS = [
         inputSchema: CkanDiscoverDatasetsInput,
         handler: (input) => ckan.discoverDatasets(input),
     }),
-    // ━━━ FDIC BankFind Suite — keyless institution directory + financials (2) ━━━ ADR-0028
+    // ━━━ FDIC BankFind Suite — keyless institution directory + financials + failures + history + industry aggregates (5) ━━━ ADR-0028 / ADR-0029 / ADR-0030 / ADR-0031
     defineTool({
         name: "fdic_search_institutions",
         description: "Search the FDIC-insured-institution directory (keyless FDIC BankFind, api.fdic.gov/banks/institutions) — a regulated-entity directory for B2G counterparty / bank due-diligence. Structured filters: `state` (2-letter, → STALP), `activeOnly` (→ ACTIVE 1/0), `cert` (→ CERT, the STABLE entity key), plus `name`/`city` matched via FDIC's case-insensitive full-text `search` param (NOT `filters` — `filters=NAME:\"chase\"` is case-sensitive exact-keyword and returns a false-empty; `search=NAME:chase` finds JPMorgan Chase etc.). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum NAME/CERT/ASSET/ESTYMD/STALP/CITY/ACTIVE), `sortOrder` (ASC/DESC). Returns { institutions:[{ name, city, state, cert, assetUSD, active, establishedDate, id }] }. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); ASSET is published in $thousands and normalized to whole USD ×1000 (null-never-0 — a real 0 stays 0, absent → null); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); a multi-word name/city is matched per-token (disclosed); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
@@ -2838,6 +2889,12 @@ const TOOLS = [
         description: "Institution-level STRUCTURAL-CHANGE event log for FDIC-insured banks (keyless FDIC BankFind, api.fdic.gov/banks/history) — the full lineage of mergers, absorptions, consolidations, failures, name/location/charter/regulator changes, branch open/close, trust-power grants & FRS-membership changes. Completes the FDIC entity cluster (directory + financials + failures + history). Killer feature: CERT-linked MERGER LINEAGE — a merger/failure row carries the acquiring / outgoing / surviving institution's CERT + name, each linking back to fdic_search_institutions / fdic_institution_financials / fdic_bank_failures. Exact-key filters (all optional, AND-combined): `cert` (→ CERT, the STABLE entity key & PRIMARY lookup; e.g. 3510 → Bank of America's 13,794 rows), `changeCode` (→ CHANGECODE; e.g. 223 = merger, 211 = failure, 721 = branch closing, 520 = location change), `effYear` (→ EFFYEAR), `state` (2-letter → PSTALP — NOTE the /history state field is PSTALP, NOT STALP). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum EFFDATE/PROCDATE/CHANGECODE/TRANSNUM, def EFFDATE), `sortOrder` (def DESC → newest change first). Returns { history:[{ cert, instName, state, changeCode, changeDescription, effectiveDate, processDate, effYear, transNum, acquirerCert, acquirerName, outgoingCert, outgoingName, survivingCert, survivingName, id }] }. NO name/city filter — FDIC's /history `search` param returns 0 for INSTNAME (a false-empty), so names are SHOWN in each row but NOT searchable; to find a specific bank's history, resolve its CERT via fdic_search_institutions then filter here by `cert`. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); changeDescription is FDIC's OWN co-served CHANGECODE_DESC passed through verbatim (the numeric changeCode is authoritative — never a hand-map); effectiveDate/processDate are normalized from FDIC's YYYY-MM-DDT00:00:00 to ISO YYYY-MM-DD (an unrecognized value is surfaced raw + disclosed, never nulled/fabricated); the acquirer/outgoing/surviving CERTs are null on a non-merger event (null-never-0 — a real absence, never a fabricated 0; *_UNINUM's 0 sentinel is NOT surfaced); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
         inputSchema: FdicInstitutionHistoryInput,
         handler: (input) => fdic.institutionHistory(input),
+    }),
+    defineTool({
+        name: "fdic_industry_summary",
+        description: "FDIC industry & state banking-sector ANNUAL AGGREGATES — the FDIC's own roll-ups (keyless FDIC BankFind, api.fdic.gov/banks/summary). The FIRST aggregate/statistical FDIC tool (the other 4 are per-ENTITY, keyed on CERT): total assets, deposits, net income, equity & net interest income + structural counts (institutions, offices, branches, employees) for the whole US banking industry OR one state/territory in one year, split by charter class. Answers 'how big is the US (or a state's) banking industry this year, and how many institutions?' — a question the entity tools cannot express without summing thousands of rows. Exact-key filters (all optional, AND-combined): `year` (→ YEAR; e.g. 2023 → 121 rows), `state` (2-or-3-letter → STALP — NOTE the /summary state field is STALP, NOT PSTALP; accepts a jurisdiction code TX/CA/DC/GU/PR… OR a ROLL-UP code USA/US/OT/PI), `charterClass` (CB = commercial banks, SI = savings institutions; omit for both — there is NO combined row). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum YEAR/ASSET/DEP/NETINC/BANKS, def YEAR), `sortOrder` (def DESC → newest year / largest first). Returns { summary:[{ year, charterClass, charterClassCode, geography, stateCode, stateFips, scope, isRollup, institutionCount, officeCount, branchCount, employeeCount, totalAssetsUSD, totalDepositsUSD, netIncomeUSD, totalEquityUSD, netInterestIncomeUSD, id }] }. ★ROLL-UP HONESTY: each row crosses charter × geography; STALP ∈ {USA,US,OT,PI} are GEOGRAPHIC AGGREGATES (scope national_total/national_states_dc/territories_total/pacific_islands, isRollup:true), every other STALP is a jurisdiction (isRollup:false) — NEVER sum a roll-up row with jurisdiction rows or across scopes (national_total = national_states_dc + territories_total; a geography's total = its CB row + its SI row), read the national_total (USA) row directly for one national figure; a roll-up is NOT a state. ★NIM is net interest INCOME (a $ sum surfaced as netInterestIncomeUSD), NOT the margin ratio; this endpoint has NO ratio fields (ROA/ROE — derive from netIncomeUSD/totalAssetsUSD/totalEquityUSD). NO name/city filter — FDIC's /summary `search` param is ignored (returns the whole year); drill to institutions via fdic_search_institutions. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); money (ASSET/DEP/NETINC/EQ/NIM) is $thousands → whole USD ×1000 (null-never-0 — a genuine 0 like American Samoa's zero commercial banks stays 0, absent → null), counts (BANKS/OFFICES/BRANCHES/employees) pass through un-scaled (a count ×1000 is a fabrication); a non-int year is rejected pre-fetch (a malformed year is a live HTTP-200 total:0 false-empty); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
+        inputSchema: FdicIndustrySummaryInput,
+        handler: (input) => fdic.industrySummary(input),
     }),
     // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (2) ━━━ ADR-0016
     defineTool({

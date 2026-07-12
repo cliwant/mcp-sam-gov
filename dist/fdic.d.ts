@@ -391,4 +391,86 @@ export declare function institutionHistory(args: {
     sortBy?: string;
     sortOrder?: string;
 }): Promise<MetaBundle>;
+declare const FDIC_SUMMARY_FILTER_FIELDS: ReadonlySet<string>;
+export { FDIC_SUMMARY_FILTER_FIELDS };
+/**
+ * ★CRUX-1 (S2) — derive the geographic SCOPE from the raw STALP, using the explicit
+ * roll-up set (a fixed 4-element discriminator, NOT a fragile numeric threshold).
+ * A non-roll-up value (incl. null / any future/unknown STALP) falls through to
+ * "jurisdiction" and is surfaced by the ALWAYS-projected raw STNAME/STALP/STNUM — a
+ * caller can always see the literal label, never a silently-mislabeled aggregate.
+ * Exported for the fault fixtures.
+ */
+export declare function scopeOf(stalp: string | null): string;
+/**
+ * ★CRUX-1b (S1) — map the raw CB_SI charter code to a readable class. An UNMAPPED
+ * value returns the raw code (never fabricated); a genuinely-absent (null) value stays
+ * null. Exported for the fault fixtures.
+ */
+export declare function charterClassOf(code: string | null): string | null;
+/**
+ * Build the summary `filters` string — EXACT-KEY terms only: `year`→`YEAR:<int>`
+ * (numeric → emitted BARE by filterTerm; a non-int is guarded pre-fetch by Zod .int()),
+ * `state`→`STALP:"<code>"` (★S2 — STALP is the /summary state field, NOT PSTALP;
+ * C118-double-quoted so Oregon `STALP:"OR"` is Lucene-operator-safe), `charterClass`
+ * →`CB_SI:"<v>"` (quoted). There is NO name/city term (★/summary's `search` is a no-op
+ * that returns the whole year — this tool never emits `search=`). Terms joined with
+ * ` AND `. Returns "" when there is no structured filter clause. Exported for the fault
+ * fixtures.
+ */
+export declare function buildSummaryFilters(inp: {
+    year?: number;
+    state?: string;
+    charterClass?: string;
+}): string;
+export type FdicIndustrySummary = {
+    year: number | null;
+    charterClass: string | null;
+    charterClassCode: string | null;
+    geography: string | null;
+    stateCode: string | null;
+    stateFips: string | null;
+    scope: string;
+    isRollup: boolean;
+    institutionCount: number | null;
+    officeCount: number | null;
+    branchCount: number | null;
+    employeeCount: number | null;
+    totalAssetsUSD: number | null;
+    totalDepositsUSD: number | null;
+    netIncomeUSD: number | null;
+    totalEquityUSD: number | null;
+    netInterestIncomeUSD: number | null;
+    id: string | null;
+};
+/**
+ * FDIC industry & state banking-sector ANNUAL aggregates (`/banks/summary`) — the
+ * FIRST aggregate/statistical FDIC tool. Exact-key structured inputs (all optional,
+ * AND-combined): `year` (→ YEAR filter), `state` (→ STALP filter, ★S2 — STALP NOT
+ * PSTALP; accepts a jurisdiction code OR a roll-up code USA/US/OT/PI), `charterClass`
+ * (→ CB_SI filter; CB/SI) → the `filters` param; plus `limit`/`offset`/`sortBy`/
+ * `sortOrder` (default YEAR DESC → newest aggregate year first). Fixed field
+ * projection. NO name/city filter and NEVER a `search=` param. Consumes the IDENTICAL
+ * fetch → 3-envelope guard → pagination machinery as tools 1–4.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1; live YEAR:2023 →
+ * 121, stable across offset); the 3-envelope drift-guard makes the ONLY honest empty
+ * `200 + total:0 + data:[]`, everything else THROWS (P2); money (ASSET/DEP/NETINC/EQ/
+ * NIM) is $thousands → whole USD ×1000 null-never-0, counts (BANKS/OFFICES/BRANCHES/
+ * NUMEMP) pass through un-scaled (P3; a genuine 0 stays 0, absent → null); ★NIM is net
+ * interest INCOME (scaled + relabeled netInterestIncomeUSD), NOT the margin ratio (S4);
+ * ★scope/isRollup are derived per row from the explicit roll-up STALP set so a roll-up
+ * never masquerades as a state (S2); charterClass is derived from CB_SI (S1); a
+ * projected field absent from all records → fieldsUnavailable (B); the snapshot build
+ * time is disclosed.
+ */
+export declare function industrySummary(args: {
+    year?: number;
+    state?: string;
+    charterClass?: string;
+    limit?: number;
+    offset?: number;
+    sortBy?: string;
+    sortOrder?: string;
+}): Promise<MetaBundle>;
 //# sourceMappingURL=fdic.d.ts.map
