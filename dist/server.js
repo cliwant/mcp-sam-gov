@@ -1207,6 +1207,53 @@ const FdicInstitutionFinancialsInput = z.object({
         .default("DESC")
         .describe("Sort direction, default DESC (newest quarter first)."),
 });
+// ADR-0029 — the 3rd FDIC tool (source 23 unchanged; snapshot 89→90) reading
+// /banks/failures. v2 (cycle-33) live review: the state field is PSTALP (NOT
+// STALP — a false-empty landmine), and /failures IGNORES the `search` param (a
+// name/city query floods the whole dataset) → NO name/city filter here; name
+// lookup is the 2-step CERT linkage via fdic_search_institutions.
+const FdicBankFailuresInput = z.object({
+    state: z
+        .string()
+        .regex(/^[A-Z]{2}$/)
+        .optional()
+        .describe("Filter by 2-letter US state code (uppercase; → PSTALP filter — the /failures state field is PSTALP, NOT STALP). e.g. 'CA'."),
+    failYear: z
+        .number()
+        .int()
+        .min(1934)
+        .max(new Date().getUTCFullYear())
+        .optional()
+        .describe("Filter by year of failure (→ FAILYR filter). 1934..current UTC year. e.g. 2023 → the 5 real 2023 failures (Silicon Valley Bank, Signature Bank, First Republic Bank, Heartland Tri-State Bank, Citizens Bank)."),
+    cert: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Filter by FDIC certificate number (the STABLE entity key; → CERT filter). Resolve a bank's CERT via fdic_search_institutions."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page, 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(100000)
+        .default(0)
+        .describe("0-based row offset for pagination, 0..100000, default 0."),
+    sortBy: z
+        .enum(["FAILDATE", "COST", "QBFASSET", "QBFDEP", "NAME", "FAILYR"])
+        .default("FAILDATE")
+        .describe("Sort field (allowlisted enum; default FAILDATE = failure date). An unknown field is rejected before fetch."),
+    sortOrder: z
+        .enum(["ASC", "DESC"])
+        .default("DESC")
+        .describe("Sort direction, default DESC (most-recent failures first)."),
+});
 // ─── OpenFEMA (keyless disaster declarations + emergency-assistance spend) ──────
 // ADR-0016. KEYLESS, fixed host www.fema.gov + a PINNED dataset registry
 // {entityName, version} (the SSRF core — no free host/path/version). Filters are
@@ -2723,6 +2770,12 @@ const TOOLS = [
         description: "Quarterly financial time-series for ONE FDIC-insured institution by certificate number (keyless FDIC BankFind, api.fdic.gov/banks/financials). Input `cert` (REQUIRED FDIC certificate number, from fdic_search_institutions), `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum REPDTE/ASSET/DEP/NETINC, def REPDTE), `sortOrder` (def DESC → newest quarter first). Returns { cert, financials:[{ cert, reportDate, assetUSD, depositsUSD, netIncomeUSD, id }] } (e.g. CERT 10363 → 169 quarterly rows). HONESTY: totalAvailable is the EXACT meta.total (stable across offset — page via offset for the full history); ASSET/DEP/NETINC are published in $thousands and normalized to whole USD ×1000 (null-never-0); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope THROWS (never a fake empty); the snapshot build time is disclosed.",
         inputSchema: FdicInstitutionFinancialsInput,
         handler: (input) => fdic.institutionFinancials(input),
+    }),
+    defineTool({
+        name: "fdic_bank_failures",
+        description: "Historical FDIC-insured bank failures & assistance transactions (keyless FDIC BankFind, api.fdic.gov/banks/failures) — B2G counterparty / entity due-diligence: a failed or FDIC-assisted institution is a red flag, and CERT links a failure back to fdic_search_institutions / fdic_institution_financials. Exact-key filters: `state` (2-letter → PSTALP — NOTE the /failures state field is PSTALP, NOT STALP), `failYear` (→ FAILYR; e.g. 2023 → the 5 real 2023 failures incl. Silicon Valley Bank & First Republic Bank), `cert` (→ CERT, the STABLE entity key). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum FAILDATE/COST/QBFASSET/QBFDEP/NAME/FAILYR, def FAILDATE), `sortOrder` (def DESC → most-recent first). Returns { failures:[{ name, cert, failDate, failYear, city, state, resolutionType, resolutionFund, estimatedLossUSD, depositsUSD, assetsUSD, id }] }. NO name/city filter — FDIC's /failures `search` param is IGNORED (it returns the whole dataset), so name/city are SHOWN in each row but NOT searchable; to find a specific bank's failure, resolve its CERT via fdic_search_institutions then filter here by `cert`. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); failDate is normalized from FDIC's M/D/YYYY to ISO YYYY-MM-DD (an unrecognized value is surfaced raw + disclosed, never nulled/fabricated); COST/QBFDEP/QBFASSET are $thousands normalized to whole USD ×1000 (null-never-0 — a genuine 0 = a fully-assisted no-loss stays 0, a NEGATIVE COST = a net DIF recovery/gain not a loss, absent → null); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
+        inputSchema: FdicBankFailuresInput,
+        handler: (input) => fdic.bankFailures(input),
     }),
     // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (2) ━━━ ADR-0016
     defineTool({
