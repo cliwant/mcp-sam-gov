@@ -66,6 +66,7 @@ import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments
 import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
+import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward } from "./dist/nsf.js";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
 import { getJson, getText, isRedirectError, driftError, throughGate } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
@@ -9550,6 +9551,312 @@ async function testNihHonesty() {
   ok("51i nih.num === coerce.num (one shared audited impl — a num regression fails §40e/§49p/§51i together)", nihNum === coerceNum, "nih.num diverged from coerce.num");
 }
 
+// §52-nsf: NSF Awards API (api.nsf.gov/services/v1/awards.json, ADR-0020) — the
+// grant-SIBLING of NIH on the R2 getJson port (a plain keyless GET). NON-VACUOUS,
+// OFFLINE, deterministic. Each assertion pins a value + names the mutation that
+// turns it RED (the ADR §MAKER-CHECKLIST load-bearing mutations a–g + n + parity):
+//   (a) totalAvailable = metadata.totalCount EXACT (mutate→award.length ⇒ RED).
+//   (b) totalCount===10000 ⇒ totalIsLowerBound:true + note (drop it ⇒ RED); <10000 exact.
+//   (c) serviceNotification + metadata-absent ⇒ invalid_input/upstream_unavailable
+//       THROWS, never read award:[] as empty (swallow→[] ⇒ RED).
+//   (d) genuine-empty(total:0) ⇒ found:false/returned:0/complete (thrown ⇒ RED).
+//   (e) amounts: coerce.num null-never-0 ("" / absent ⇒ null, "0" ⇒ 0) (→0 ⇒ RED).
+//   (f) outgoing rpp clamp = min(limit, 10000−offset) (drop it ⇒ FATAL/dead-end ⇒ RED).
+//   (g) grant≠contract caveat in EVERY response (drop ⇒ RED).
+//   (n) [M1] multi-word keyword ⇒ OR-semantics note (drop ⇒ RED); single-word ⇒ none.
+//   (h) piMiddeInitial VERBATIM misspelled (→piMiddleInitial reads undefined ⇒ RED).
+//   filtersApplied honesty (a no-op filter never listed); state-enum + date-format +
+//   window guards ⇒ invalid_input, 0 fetch; uppercase-normalize UEIs; SSRF host;
+//   shape/outage honesty; parity nsf.num===coerce.num.
+const NSF_URL_RE = /api\.nsf\.gov\/services\/v1\/awards\.json/;
+const isNsf = (u) => NSF_URL_RE.test(u);
+// A real-structured NSF award row (verbatim shape from a live id=2545697 probe).
+const NSF_ROW = {
+  id: "2545697",
+  title: "REU Site: AI in Sensing, Robotics, and Healthcare",
+  agency: "NSF",
+  awardAgencyCode: "4900",
+  fundAgencyCode: "4900",
+  cfdaNumber: "47.041",
+  transType: "Standard Grant",
+  awardee: "Johns Hopkins University",
+  awardeeName: "Johns Hopkins University",
+  awardeeCity: "BALTIMORE",
+  awardeeStateCode: "MD",
+  awardeeCountryCode: "US",
+  awardeeZipCode: "212182608",
+  awardeeDistrictCode: "MD07",
+  ueiNumber: "FTMTDMBR29C7",
+  parentUeiNumber: "GS4PNKTRNKL3",
+  perfLocation: "Baltimore, MD",
+  perfCity: "Baltimore",
+  perfStateCode: "MD",
+  perfCountryCode: "US",
+  perfZipCode: "212182608",
+  pdPIName: "Muyinatu A Bell",
+  piFirstName: "Muyinatu",
+  piLastName: "Bell",
+  piMiddeInitial: "A", // VERBATIM misspelled source key (missing the second 'l')
+  piEmail: "mledijubell@jhu.edu",
+  piId: "269999537",
+  coPDPI: ["Jeremy D Brown jbrow262@jhu.edu"],
+  poName: "Jane Officer",
+  poEmail: "officer@nsf.gov",
+  fundsObligatedAmt: "505423",
+  estimatedTotalAmt: "505423",
+  fundsObligated: ["FY 2026 = $505,423.00"],
+  startDate: "10/15/2026",
+  expDate: "09/30/2029",
+  date: "06/30/2026",
+  initAmendmentDate: "06/30/2026",
+  latestAmendmentDate: "06/30/2026",
+  fundProgramName: "REU SITE",
+  program: "Robotics",
+  dirAbbr: "ENG",
+  divAbbr: "EEC",
+  orgLongName: "Div Of Engineering Education and Centers",
+  orgLongName2: "",
+  activeAwd: "true",
+  histAwd: "false",
+  abstractText: "During a ten-week summer session, undergraduate participants ...",
+};
+const nsfRows = (n, row = NSF_ROW) => Array.from({ length: n }, () => row);
+const nsfBody = (totalCount, rows) => ({ response: { metadata: { offset: 0, rpp: rows.length, totalCount }, award: rows } });
+// A body-level loud-fail: serviceNotification present + metadata ABSENT + award:[].
+const nsfNotif = (notif) => ({ response: { serviceNotification: notif, award: [] } });
+const nsfMock = (body, status = 200) => (u) => (isNsf(u) ? mockResponse({ status, json: body }) : failClosed()());
+// Parse the module-built query off a captured NSF fetch url.
+const nsfQuery = (calls) => new URL(calls.find((x) => isNsf(x.url)).url).searchParams;
+
+async function testNsfHonesty() {
+  section("52. NSF Awards API (ADR-0020, source #20 — the grant-SIBLING of NIH on the getJson GET port) — exact-vs-saturate totalCount + 10k retrieval-window rpp-clamp + multi-word OR disclosure (M1) + serviceNotification loud-fail + grant caveat + state/date/UEI guards + SSRF + shape/outage honesty (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (a) totalAvailable = metadata.totalCount EXACT (NEVER award.length). ──
+  await withFetch(nsfMock(nsfBody(9038, nsfRows(25))), async (calls) => {
+    const r = await runTool("nsf_search_awards", { keyword: "robotics" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52a totalAvailable = metadata.totalCount EXACT = 9038 (NOT the 25 returned rows) + returned:25 — mutate the module to use award.length for the total ⇒ RED (the forbidden total===page-size class)",
+      m.totalAvailable === 9038 && m.returned === 25, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    ok("52a below-10k count is EXACT ⇒ NO totalIsLowerBound flag (only the ===10000 saturation sets it)", m.totalIsLowerBound === undefined, JSON.stringify(m.totalIsLowerBound));
+    // The mapped enrichment payload is non-vacuous (recipient/UEI/PI/amounts).
+    const a = r.data.awards[0];
+    ok("52a record map (recipient enrichment): id/title, awardee JHU/MD, ueiNumber+parentUeiNumber (the SAM/USAspending join), PI, amounts as number — abstract OMITTED in search rows",
+      a.id === "2545697" && a.awardee.name === "Johns Hopkins University" && a.awardee.stateCode === "MD" && a.awardee.ueiNumber === "FTMTDMBR29C7" && a.awardee.parentUeiNumber === "GS4PNKTRNKL3" && a.principalInvestigator.fullName === "Muyinatu A Bell" && a.amounts.fundsObligatedAmt === 505423 && a.abstractText === undefined,
+      JSON.stringify({ id: a.id, uei: a.awardee.ueiNumber, puei: a.awardee.parentUeiNumber, amt: a.amounts.fundsObligatedAmt, hasAbstract: a.abstractText !== undefined }));
+    ok("52h piMiddeInitial read VERBATIM (misspelled source key) ⇒ middleInitial 'A' — mutate the mapper to read piMiddleInitial ⇒ reads undefined→null ⇒ RED (silently drops real PI data)",
+      a.principalInvestigator.middleInitial === "A", JSON.stringify(a.principalInvestigator.middleInitial));
+  });
+
+  // ── (b) totalCount===10000 ⇒ totalIsLowerBound:true + the ES-saturation note. ──
+  await withFetch(nsfMock(nsfBody(10000, nsfRows(25))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "university" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52b totalCount===10000 ⇒ totalIsLowerBound:true + a note (the true total is ≥10,000, unknown; only the first 10,000 are retrievable) — drop the lower-bound flag/note (report 10000 as exact) ⇒ RED",
+      m.totalIsLowerBound === true && m.totalAvailable === 10000 && m.notes.some((n) => /AT LEAST 10,000/.test(n) && /exact match count only below 10,000/.test(n)), JSON.stringify({ lb: m.totalIsLowerBound, ta: m.totalAvailable }));
+    ok("52b saturated total ⇒ complete:false (a saturated set is never complete — buildMeta derives it from returned<totalAvailable)", m.complete === false, JSON.stringify(m.complete));
+  });
+
+  // ── (c) serviceNotification loud-fail (metadata absent) ⇒ THROWS, never []. ──
+  await withFetch(nsfMock(nsfNotif([{ notificationType: "ERROR", notificationCode: "AwardAPI-002", notificationMessage: "Invalid parameter(s) sent in the request. Invalid Parameter(s) {bogusParam}" }])), async () => {
+    const { threw, error } = await expectThrow(() => nsfSearchAwards({ keyword: "robotics" }));
+    ok("52c serviceNotification ERROR AwardAPI-002 + metadata ABSENT (HTTP 200 body-level loud-fail) ⇒ invalid_input THROWS (surfacing the code+message) — swallow it and read award:[] as an empty result ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && /AwardAPI-002/.test(toToolError(error).message), JSON.stringify(threw ? toToolError(error) : "no-throw"));
+  });
+  await withFetch(nsfMock(nsfNotif([{ notificationType: "FATAL", notificationCode: "AwardAPI-004", notificationMessage: "There was an error processing your request." }])), async () => {
+    const { threw, error } = await expectThrow(() => nsfSearchAwards({ keyword: "robotics" }));
+    ok("52c serviceNotification FATAL AwardAPI-004 (deep-offset overflow — guarded pre-fetch) ⇒ upstream_unavailable retryable THROWS (never a fake empty)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (d) genuine-empty (totalCount:0, no notification) ⇒ complete:true/0. ──
+  await withFetch(nsfMock(nsfBody(0, [])), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "zzqxwvnonsense12345" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52d genuine-empty (totalCount:0, award:[], NO serviceNotification) ⇒ returned:0, totalAvailable:0, complete:true, truncated:false (an honest exact zero, DISTINCT from the loud-fail — NOT thrown, NOT a fake count)",
+      r.data.awards.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false, JSON.stringify(m));
+    ok("52d genuine-empty STILL carries the grant caveat (every response discloses it)", m.notes.some((n) => /RESEARCH GRANTS/.test(n) && /NOT federal procurement contracts/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── (e) amounts: coerce.num null-never-0 ("" / absent ⇒ null; "0" ⇒ 0). ──
+  await withFetch(nsfMock(nsfBody(3, [
+    { ...NSF_ROW, fundsObligatedAmt: "", estimatedTotalAmt: "0" },
+    { ...NSF_ROW, fundsObligatedAmt: "0", estimatedTotalAmt: null },
+    (() => { const c = { ...NSF_ROW }; delete c.fundsObligatedAmt; return c; })(),
+  ])), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "robotics" }, sam);
+    const a = r.data.awards;
+    ok("52e string amounts → coerce.num null-never-0: '' ⇒ null, '0' ⇒ 0 (a genuine $0 is REAL), null ⇒ null, absent-key ⇒ null — a parseInt/Number() that turns ''/absent into 0 ⇒ RED",
+      a[0].amounts.fundsObligatedAmt === null && a[0].amounts.estimatedTotalAmt === 0 && a[1].amounts.fundsObligatedAmt === 0 && a[1].amounts.estimatedTotalAmt === null && a[2].amounts.fundsObligatedAmt === null,
+      JSON.stringify(a.map((x) => [x.amounts.fundsObligatedAmt, x.amounts.estimatedTotalAmt])));
+  });
+
+  // ── (f) outgoing rpp clamp = min(limit, 10000−offset) (LOAD-BEARING). ──
+  await withFetch(nsfMock(nsfBody(10000, nsfRows(1))), async (calls) => {
+    await runTool("nsf_search_awards", { offset: 9999, limit: 100 }, sam);
+    const q = nsfQuery(calls);
+    ok("52f offset=9999,limit=100 ⇒ OUTGOING rpp = min(100, 10000−9999) = 1 (a page that would cross 10,000 → FATAL AwardAPI-004) — drop the clamp (send rpp=100) ⇒ offset+rpp=10099 ⇒ FATAL ⇒ RED",
+      q.get("rpp") === "1" && q.get("offset") === "9999", JSON.stringify({ rpp: q.get("rpp"), offset: q.get("offset") }));
+  });
+  await withFetch(nsfMock(nsfBody(10000, nsfRows(10)), 200), async (calls) => {
+    const r = await runTool("nsf_search_awards", { offset: 9990, limit: 25 }, sam);
+    const q = nsfQuery(calls);
+    const m = buildMeta(r.meta);
+    ok("52f offset=9990,limit=25 ⇒ outgoing rpp=10 (min(25, 10)) + a clamp-disclosure note (records beyond 10,000 unreachable)",
+      q.get("rpp") === "10" && m.notes.some((n) => /reduced to 10/.test(n) && /10000-record retrieval window|10000/.test(n)), JSON.stringify({ rpp: q.get("rpp") }));
+    ok("52f candidateNext = 9990+10 = 10000 ≥ window ⇒ nextOffset:null, hasMore:false (NEVER a dead-end offset that would FATAL)", m.pagination.nextOffset === null && m.pagination.hasMore === false, JSON.stringify(m.pagination));
+  });
+  // Within-window exact pagination.
+  await withFetch(nsfMock(nsfBody(200, nsfRows(25))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "robotics", limit: 25 }, sam);
+    const m = buildMeta(r.meta);
+    ok("52f within-window: offset 0, returned 25, total 200 ⇒ hasMore:true, nextOffset:25, truncated:true (exact total drives it)",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 25 && m.truncated === true, JSON.stringify(m.pagination));
+  });
+  // Whole exact set fits ⇒ nextOffset null, complete.
+  await withFetch(nsfMock(nsfBody(20, nsfRows(20))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "robotics", limit: 25 }, sam);
+    const m = buildMeta(r.meta);
+    ok("52f candidateNext = 0+20 ≥ exact total 20 ⇒ nextOffset:null, hasMore:false, complete:true (the whole set, within window)",
+      m.pagination.nextOffset === null && m.pagination.hasMore === false && m.complete === true, JSON.stringify({ pg: m.pagination, c: m.complete }));
+  });
+
+  // ── Window pre-fetch guard: offset≥10000 ⇒ invalid_input, 0 fetch. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("nsf_search_awards", { offset: 10000 }, sam));
+    ok("52f offset:10000 (≥10000) ⇒ invalid_input, 0 fetch (the retrieval-window pre-fetch guard) [Zod .max(9999)]",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => nsfSearchAwards({ offset: 10000 }));
+    ok("52f module pre-fetch guard: nsfSearchAwards({offset:10000}) directly ⇒ invalid_input, 0 fetch (belt-and-suspenders behind Zod)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── (g) grant≠contract caveat + labeling notes on a normal success. ──
+  await withFetch(nsfMock(nsfBody(200, nsfRows(25))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "robotics" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52g M2 grant≠contract caveat present in _meta.notes on a normal success (an agent must never conflate an NSF grantee with a contractor) — mutate the caveat off ⇒ RED",
+      m.notes.some((n) => /RESEARCH GRANTS/.test(n) && /NOT federal procurement contracts/.test(n) && /ueiNumber/.test(n)), JSON.stringify(m.notes));
+    ok("52g UEI-join + distinct-amount-labeling + data-currency notes also present",
+      m.notes.some((n) => /EXACT join key/.test(n)) && m.notes.some((n) => /fundsObligatedAmt = funds obligated to date/.test(n)) && m.notes.some((n) => /rolling basis/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── (n) [M1] multi-word keyword ⇒ OR-semantics note; single-word ⇒ none. ──
+  await withFetch(nsfMock(nsfBody(10000, nsfRows(25))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "machine learning" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52n [M1] multi-word keyword 'machine learning' ⇒ a MANDATORY OR-semantics note (matches ANY word, not the phrase; the total may be far broader) listing [machine, learning] — drop it ⇒ RED (the VQ-1 filter-honesty class)",
+      m.notes.some((n) => /treats a multi-word term as a UNION/.test(n) && /machine, learning/.test(n) && /NOT the exact phrase/.test(n)), JSON.stringify(m.notes));
+  });
+  await withFetch(nsfMock(nsfBody(9038, nsfRows(25))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "robotics" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52n single-word keyword 'robotics' ⇒ NO OR-semantics note (the disclosure fires ONLY on inter-word whitespace, no false-positive noise)",
+      !m.notes.some((n) => /treats a multi-word term as a UNION/.test(n)), JSON.stringify(m.notes.filter((n) => /UNION/.test(n))));
+  });
+
+  // ── filtersApplied honesty + SSRF query building + uppercase-normalize UEIs. ──
+  await withFetch(nsfMock(nsfBody(3396, nsfRows(25))), async (calls) => {
+    // Pass a lowercase UEI + a spurious agency/printFields (Zod strips unknowns).
+    const r = await runTool("nsf_search_awards", { keyword: "robotics", awardeeStateCode: "MD", ueiNumber: "ftmtdmbr29c7", parentUeiNumber: "gs4pnktrnkl3", pdPIName: "Bell", agency: "NASA", printFields: "id" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52-filters filtersApplied lists EXACTLY the shipped, live-confirmed-narrowing filters actually sent (keyword, awardeeStateCode, awardeeName?, ueiNumber, parentUeiNumber, pdPIName) — a no-op filter (agency/printFields) NEVER appears (fault (m))",
+      JSON.stringify([...m.filtersApplied].sort()) === JSON.stringify(["awardeeStateCode", "keyword", "parentUeiNumber", "pdPIName", "ueiNumber"]), JSON.stringify(m.filtersApplied));
+    const q = nsfQuery(calls);
+    ok("52-ssrf the query is MODULE-BUILT via URLSearchParams to api.nsf.gov ONLY, whitelisted keys — agency/printFields NEVER built into the query (agency = NSF-only-corpus zeros-out foot-gun; printFields = proven no-op)",
+      q.get("agency") === null && q.get("printFields") === null && calls.every((c) => !isNsf(c.url) || new URL(c.url).hostname === "api.nsf.gov"), JSON.stringify([...q.keys()]));
+    ok("52-ssrf ueiNumber + parentUeiNumber UPPERCASE-NORMALIZED before sending (a stable exact match — UEIs are uppercase alnum) ⇒ query carries FTMTDMBR29C7 / GS4PNKTRNKL3",
+      q.get("ueiNumber") === "FTMTDMBR29C7" && q.get("parentUeiNumber") === "GS4PNKTRNKL3", JSON.stringify({ uei: q.get("ueiNumber"), puei: q.get("parentUeiNumber") }));
+    ok("52-ssrf redirect:'error' on the getJson call (fail-closed on any off-host 3xx; body never read)", calls.find((x) => isNsf(x.url)).init.redirect === "error", JSON.stringify(calls.find((x) => isNsf(x.url))?.init?.redirect));
+  });
+
+  // ── state-enum + date-format guards ⇒ invalid_input, 0 fetch (silent foot-guns). ──
+  for (const bad of ["ZZ", "ca", "texas"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("nsf_search_awards", { awardeeStateCode: bad }, sam));
+      ok(`52-state awardeeStateCode:${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (the UPPERCASE 2-letter enum — a non-state value silently returns totalCount:0 on NSF, read as 'no funding')`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  for (const bad of ["2024-01-01", "1/1/2024", "13/01/2024", "01/32/2024"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("nsf_search_awards", { dateStart: bad }, sam));
+      ok(`52-date dateStart:${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (STRICT mm/dd/yyyy — a wrong format is silently mis-parsed by NSF, not an error)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // A well-formed date ⇒ passes + emits the date-semantics disclosure.
+  await withFetch(nsfMock(nsfBody(369, nsfRows(25))), async (calls) => {
+    const r = await runTool("nsf_search_awards", { keyword: "robotics", dateStart: "01/01/2024", dateEnd: "12/31/2024" }, sam);
+    const m = buildMeta(r.meta);
+    const q = nsfQuery(calls);
+    ok("52-date well-formed mm/dd/yyyy dates pass ⇒ sent verbatim + a note LABELING the filter as the award ACTION date (not startDate/expDate — live-verified, Open-Q6)",
+      q.get("dateStart") === "01/01/2024" && q.get("dateEnd") === "12/31/2024" && m.notes.some((n) => /award ACTION date/.test(n) && /NOT the project startDate/.test(n)), JSON.stringify({ ds: q.get("dateStart"), de: q.get("dateEnd") }));
+  });
+
+  // ── disclose-not-refuse: an unscoped query is NOT refused. ──
+  await withFetch(nsfMock(nsfBody(10000, nsfRows(25))), async () => {
+    const r = await runTool("nsf_search_awards", {}, sam);
+    const m = buildMeta(r.meta);
+    ok("52-scope disclose-not-refuse: an UNSCOPED query returns the first page (25) + the saturated lower-bound total + empty filtersApplied + a narrow-your-criteria note (invalid_input is reserved for the window/enum guards, not for scope)",
+      r.data.awards.length === 25 && m.totalAvailable === 10000 && m.totalIsLowerBound === true && m.filtersApplied.length === 0 && m.notes.some((n) => /unscoped query/.test(n)), JSON.stringify({ n: r.data.awards.length, ta: m.totalAvailable, fa: m.filtersApplied }));
+  });
+
+  // ── shape guards + outage. ──
+  await withFetch(nsfMock([NSF_ROW]), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nsf_search_awards", { keyword: "robotics" }, sam));
+    ok("52-shape 200 body is an ARRAY (not {response:{…}}) ⇒ schema_drift (never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nsfMock({ response: { award: [NSF_ROW] } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nsf_search_awards", { keyword: "robotics" }, sam));
+    ok("52-shape 200 {response:{award:[…]}} with NO metadata + no serviceNotification ⇒ schema_drift (never fabricate a total)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nsfMock({ response: { metadata: { totalCount: "9038" }, award: [] } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nsf_search_awards", { keyword: "robotics" }, sam));
+    ok("52-shape non-number metadata.totalCount ('9038' string) ⇒ schema_drift BEFORE num() (typeof-check first — num() can't tell a non-number from absent; mutate to num() it ⇒ a string total would silently parse ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift" && /totalCount absent\/non-numeric/.test(toToolError(error).message), JSON.stringify(threw ? toToolError(error) : "no-throw"));
+  });
+  await withFetch(nsfMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nsf_search_awards", { keyword: "robotics" }, sam));
+    ok("52-outage 503 ⇒ throws upstream_unavailable (a DOWN NSF is NEVER a returned:0 — getJson/fetchWithRetry throws)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── nsf_get_award: full record (incl. abstract) + honest not-found. ──
+  await withFetch(nsfMock(nsfBody(1, nsfRows(1))), async (calls) => {
+    const r = await runTool("nsf_get_award", { awardId: "2545697" }, sam);
+    const m = buildMeta(r.meta);
+    const q = nsfQuery(calls);
+    ok("52-get valid id ⇒ found:true, returned:1, the FULL record INCLUDING abstractText (search rows omit it; get owns it) + the id sent as the `id` param",
+      r.data.found === true && r.data.award.id === "2545697" && typeof r.data.award.abstractText === "string" && q.get("id") === "2545697" && m.returned === 1, JSON.stringify({ found: r.data.found, hasAbstract: typeof r.data.award.abstractText }));
+    ok("52-get the get response ALSO carries the grant≠contract caveat", m.notes.some((n) => /RESEARCH GRANTS/.test(n) && /NOT federal procurement contracts/.test(n)), JSON.stringify(m.notes));
+  });
+  await withFetch(nsfMock(nsfBody(0, [])), async () => {
+    const r = await runTool("nsf_get_award", { awardId: "999999999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52-get nonexistent id ⇒ genuine-empty (totalCount:0) ⇒ found:false / award:null, complete:true (an honest not-found, NEVER a fabricated record)",
+      r.data.found === false && r.data.award === null && m.returned === 0 && m.complete === true, JSON.stringify({ found: r.data.found, award: r.data.award }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("nsf_get_award", { awardId: "12ab" }, sam));
+    ok("52-get non-numeric awardId '12ab' ⇒ invalid_input, 0 fetch (numeric-only Zod ^\\d{5,9}$ — injection-safe)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── num null-never-0 + parity. ──
+  eq("52-parity num(null) ⇒ null", nsfNum(null), null);
+  eq("52-parity num(0) ⇒ 0 (genuine zero preserved)", nsfNum(0), 0);
+  eq("52-parity num('') ⇒ null (Number('') is 0 — must be caught)", nsfNum(""), null);
+  eq("52-parity num('505423') ⇒ 505423 (numeric string parses)", nsfNum("505423"), 505423);
+  ok("52-parity nsf.num === coerce.num (one shared audited impl — a num regression fails §40e/§51i/§52 together; NO local num in nsf.ts)", nsfNum === coerceNum, "nsf.num diverged from coerce.num");
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // §: fetchWithRetry timeout/abort ⇒ fail-fast NON-retryable (ADR-0015)
 // ──────────────────────────────────────────────────────────────────────────
@@ -9771,6 +10078,7 @@ async function main() {
   await testFpdsHonesty();
   await testGetTextPort();
   await testNihHonesty();
+  await testNsfHonesty();
   await testFetchWithRetryTimeout();
 
   // Prove the harness bites.

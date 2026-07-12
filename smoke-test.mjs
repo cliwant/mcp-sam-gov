@@ -848,6 +848,47 @@ const tests = [
           typeof p.organization === "object",
       ),
   },
+  // ━━━ NSF Awards API — keyless federal research-GRANT awards (ADR-0020, source #20)
+  // Live-hits api.nsf.gov (keyless). ueiNumber=FTMTDMBR29C7 (Johns Hopkins) is an
+  // EXACT recipient-graph filter (a stable sub-10k count); every row carries the
+  // awardee/UEI recipient-enrichment payload (the SAM/USAspending join) + a 7-digit
+  // numeric id. A live transient (5xx/timeout/429) is TOLERATED as a pass-with-note.
+  {
+    name: "nsf_search_awards",
+    args: { ueiNumber: "FTMTDMBR29C7", limit: 3 },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      Array.isArray(r.awards) &&
+      r.awards.length >= 1 &&
+      r.awards.length <= 3 &&
+      r.awards.every(
+        (a) =>
+          a !== null &&
+          typeof a === "object" &&
+          a.awardee !== null &&
+          typeof a.awardee === "object" &&
+          /^\d{5,9}$/.test(String(a.id)),
+      ),
+  },
+  {
+    // Full-record deep-dive (incl. abstractText) for the first award id from the
+    // search above (chained — no hardcoded id). A nonexistent id ⇒ found:false; a
+    // live transient is tolerated.
+    name: "nsf_get_award",
+    args: { awardId: "FETCH_FROM_PRIOR" },
+    chain: { from: "nsf_search_awards", path: "awards[0].id" },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      r.found === true &&
+      r.award !== null &&
+      typeof r.award === "object" &&
+      /^\d{5,9}$/.test(String(r.award.id)) &&
+      typeof r.award.abstractText === "string",
+  },
   // ━━━ EPA ECHO REST — keyless facility compliance/enforcement (ADR-0009)
   // Live-hits echodata.epa.gov (keyless). A live transient (5xx/timeout/429) is
   // acceptable and TOLERATED as a pass-with-note (the honest taxonomy, not a code
