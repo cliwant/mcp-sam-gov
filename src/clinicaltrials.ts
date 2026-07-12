@@ -57,9 +57,10 @@
  *   2026-07-12: `query.spons=sanofi<delim>aventis` == the whitespace count (3) for
  *   space + `- , / ; + & | @ # =`; `. : _ '` do NOT split. So a single-token-LOOKING
  *   compound like "Sanofi-Aventis" is really 'Sanofi' AND 'Aventis' (→3 vs Sanofi
- *   →3416 — a ~1000× silent false-negative). A multi-TOKEN value (split on
- *   CT_TOKEN_SPLIT_RE, not just whitespace) fires a MANDATORY `_meta` AND-note (the
- *   mirror of NSF's OR-note, but AND); a multi-token sponsor SUPPRESSES the
+ *   →3416 — a ~1000× silent false-negative). A multi-TOKEN value (tokenized via the
+ *   shared tokenizeForDisclosure / DISCLOSURE_SPLIT_RE, not just whitespace) fires a
+ *   MANDATORY `_meta` AND-note (the mirror of NSF's OR-note, but AND); a multi-token
+ *   sponsor SUPPRESSES the
  *   contradictory "matches more variants" broadening note (CT NARROWED, not broadened).
  *
  * ★ funderType facets OVERLAP (non-exclusive: nih+fed+industry+other sum >
@@ -72,6 +73,7 @@
 import { ToolErrorCarrier } from "./errors.js";
 import { getJson, driftError } from "./datasource.js";
 import { num, str } from "./coerce.js";
+import { tokenizeForDisclosure } from "./disclosure.js";
 import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
 
 // Re-export the shared honesty coercion (single audited copy in ./coerce.js —
@@ -79,6 +81,12 @@ import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
 // `num` (clinicaltrials.num === coerce.num — a num regression fails together;
 // NO local num/str in this module).
 export { num };
+
+// Re-export the shared disclosure tokenizer (single audited copy in
+// ./disclosure.js — ADR-0022) so the fault suite's parity guard resolves the SAME
+// function (clinicaltrials.tokenizeForDisclosure === nsf.tokenizeForDisclosure ===
+// disclosure.tokenizeForDisclosure — a class regression fails both suites at once).
+export { tokenizeForDisclosure } from "./disclosure.js";
 
 // ─── Fixed endpoint (SSRF core — compile-time CONSTANTS) ──────────
 const CT_HOST = "clinicaltrials.gov";
@@ -163,18 +171,13 @@ const CT_DATA_CURRENCY_NOTE =
   "ClinicalTrials.gov updates registrations on a rolling basis; per-record refresh lag is not API-verifiable.";
 
 // CT's Essie analyzer AND-tokenizes free-text query.spons/query.cond/query.term on
-// whitespace AND a specific PUNCTUATION set, NOT whitespace alone. LIVE-verified
-// 2026-07-12 (`query.spons=sanofi<delim>aventis` == the whitespace count 3, ≠ the
-// single-token "sanofi.aventis"→0): space + `- , / ; + & | @ # =` ALL SPLIT into
-// the AND co-occurrence; `. : _ '` do NOT split (kept as one literal token). So a
+// whitespace AND the confirmed PUNCTUATION set (space + `- , / ; + & | @ # =` split
+// into the AND co-occurrence; `. : _ '` do NOT — live-verified 2026-07-12), so a
 // single-token-LOOKING compound like "Sanofi-Aventis" is really 'Sanofi' AND
-// 'Aventis' (→3 vs Sanofi→3416 — a ~1000× silent false-negative), and a
-// whitespace-only detector would MISS it and skip the mandatory AND-note. The
-// class is the PRECISE confirmed-splitter set (NOT a non-alnum superset — that
-// would over-disclose a split CT did not make on `.`/`_`/`'`). This is the CT
-// analogue of NSF's NSF_KEYWORD_SPLIT_RE (there OR, here AND); `-` is placed last
-// (literal); `/` is escaped for the regex-literal delimiter.
-const CT_TOKEN_SPLIT_RE = /[\s,;+&|@#=\/-]+/;
+// 'Aventis' (→3 vs Sanofi→3416 — a ~1000× silent false-negative). That precise
+// class is the SHARED tokenizeForDisclosure / DISCLOSURE_SPLIT_RE (src/disclosure.js,
+// ADR-0022) — byte-identical to NSF's former CT_TOKEN_SPLIT_RE / NSF_KEYWORD_SPLIT_RE
+// (there OR, here AND) — so a whitespace-only detector can never miss the AND-note.
 
 /** The AND-tokenization disclosure for a multi-TOKEN term/sponsor/condition value. */
 function andTokenNote(field: string, tokens: string[]): string {
@@ -376,12 +379,12 @@ export async function searchStudies(args: CtSearchArgs): Promise<MetaBundle> {
   const andNotes: string[] = [];
 
   // A helper: push a filter + detect MULTI-TOKEN AND-tokenization on CT's REAL
-  // delimiter set (whitespace AND the confirmed punctuation splitters —
-  // CT_TOKEN_SPLIT_RE), so a compound like "Sanofi-Aventis" (= Sanofi AND Aventis)
-  // fires the mandatory AND-note instead of leaking as one token through a
-  // hyphen/comma/slash. Returns true iff the value split into 2+ tokens (so the
-  // caller can suppress the contradictory sponsor-broadening note). andField=null
-  // for fields with no AND-note obligation (location).
+  // delimiter set via the shared tokenizeForDisclosure (whitespace AND the confirmed
+  // punctuation splitters — DISCLOSURE_SPLIT_RE), so a compound like "Sanofi-Aventis"
+  // (= Sanofi AND Aventis) fires the mandatory AND-note instead of leaking as one
+  // token through a hyphen/comma/slash. Returns true iff the value split into 2+
+  // tokens (so the caller can suppress the contradictory sponsor-broadening note).
+  // andField=null for fields with no AND-note obligation (location).
   const pushText = (
     value: string | undefined,
     upstreamKey: string,
@@ -392,7 +395,7 @@ export async function searchStudies(args: CtSearchArgs): Promise<MetaBundle> {
     params.set(upstreamKey, value);
     filtersApplied.push(filterLabel);
     if (andField === null) return false;
-    const tokens = value.trim().split(CT_TOKEN_SPLIT_RE).filter((t) => t.length > 0);
+    const tokens = tokenizeForDisclosure(value);
     if (tokens.length > 1) {
       andNotes.push(andTokenNote(andField, tokens));
       return true;

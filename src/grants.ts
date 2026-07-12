@@ -141,6 +141,7 @@ export async function searchGrants(args: {
     .trim()
     .replace(/^["']+|["']+$/g, "")
     .trim()
+    // disclosure-split-ok: grants.gov OR-splits ONLY whitespace (and '+'), NOT punctuation — live-verified 2026-07; the shared DISCLOSURE_SPLIT_RE punctuation class must NOT be applied here (it would over-disclose). See ADR-0022.
     .split(/\s+/)
     .filter(Boolean);
   if (kwWords.length > 1) {
