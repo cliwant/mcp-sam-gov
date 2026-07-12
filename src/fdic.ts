@@ -1542,8 +1542,13 @@ export async function industrySummary(args: {
   ];
   const fu = fieldsUnavailable(env.records, SUMMARY_PROJECTION);
   if (fu.length > 0) {
+    // /banks/summary is a 2-D roll-up: some count fields (e.g. BANKS/OFFICES/
+    // BRANCHES) are STRUCTURALLY absent for certain roll-up/territory rows
+    // (e.g. the Pacific-Islands roll-up carries no bank/branch count) — that is
+    // a legitimate structural absence, NOT necessarily a schema change. Disclose
+    // the absence honestly without falsely diagnosing "schema drift".
     notes.push(
-      `Requested field(s) ${fu.join(", ")} were not returned by FDIC for any record — possible schema drift / rename.`,
+      `Requested field(s) ${fu.join(", ")} were not returned by FDIC for any record in this result set — for /banks/summary this is usually a structural absence (some count fields are not reported for certain roll-up or territory rows), though it can also indicate a schema change; the affected values are surfaced as null, never fabricated.`,
     );
   }
 
