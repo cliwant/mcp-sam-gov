@@ -1962,3 +1962,580 @@ export async function filingIndex(args: {
     edgarMeta(meta),
   );
 }
+
+// ─── Tool 7: edgar_daily_filing_index (ADR-0027) ──────────────────
+// The per-DAY sibling of edgar_filing_index: read the SEC EDGAR DAILY-index
+// (www.sec.gov/Archives/edgar/daily-index/<year>/QTR<n>/master.YYYYMMDD.idx — a
+// COMPLETE cross-filer index of EVERY filer's EVERY filing on ONE calendar day,
+// pipe-delimited, ~0.5–1.2MB / ~8K rows — ~30× smaller than the quarterly file),
+// FULL-SCAN it, apply CLIENT-SIDE filters, and return offset-paginated filings
+// with an EXACT total. It answers the monitoring/alerting question the quarterly
+// tool cannot without a whole-quarter download ("every 8-K filed on 2024-01-03").
+// Reuses getEdgar VERBATIM (UA + gzip + the ≤10 req/s throughGate — UNTOUCHED, so
+// the other 6 edgar tools stay byte-identical), `.text()`, padCik, the module-local
+// `str`, `driftError`, `buildMeta`/`withMeta`, `edgarMeta`, `splitOnFirstPipes`,
+// `MAX_INDEX_ROWS`, `currentUtcYear`, `FILING_ARCHIVE_BASE`, `FULLINDEX_HOST`. A
+// DEDICATED daily parser (do NOT reuse parseFullIndex — the daily header is
+// `…|Date Filed|File Name` WITH A SPACE, not the full-index `Filename`).
+//
+// LIVE-VERIFIED 2026-07-12 (SEC UA `cliwant-mcp-sam-gov research (…)`):
+//  - master.20240103.idx (Wed) → 200; header VERBATIM `CIK|Company Name|Form Type|
+//    Date Filed|File Name` (File Name WITH a space), then `----`; Date Filed column
+//    compact `20240103`; 8426 data rows; 8-K = 220, 8-K/A = 5 (distinct/exact).
+//  - master.20240106.idx (Sat) → 403 AccessDenied XML; index.json 2024/QTR1 does
+//    NOT list it and its newest master is 20240329 ⇒ TRUE genuine-absent (found:false,
+//    complete:true) — a real gap INSIDE the covered range.
+//  - ★M1 recency (live Sun 2026-07-12): 2026/QTR3 index.json lists master ONLY through
+//    master.20260709 (Thu); Fri 20260710 (a normal trading day) is UNLISTED and its
+//    .idx 403s ⇒ requestedYyyymmdd > maxListedMasterDate ⇒ NOT-YET-DISSEMINATED
+//    (found:false, complete:FALSE), NEVER a confident genuine-absent complete:true.
+//
+// ★HONESTY: the 403-disambiguation is DESIGN (b) — fetch the .idx FIRST (the happy
+// path pays ZERO oracle cost); consult the index.json existence oracle ONLY on a 403,
+// RECENCY-AWARE per M1 (maxListedMasterDate: newer-than-listed ⇒ not-yet-disseminated
+// complete:FALSE; listed-range gap ⇒ true genuine-absent complete:true; listed-but-403
+// ⇒ honest rate_limited; oracle-inconclusive ⇒ ambiguous both-causes upstream_unavailable).
+// The 403-reclassify is TOOL-LOCAL (getEdgar UNTOUCHED). M2: an EXACT date round-trip
+// PRE-fetch rejects Feb-30 / day-40 / non-leap-Feb-29 / a future date (invalid_input, 0 GET).
+
+const DAILYINDEX_BASE = "https://www.sec.gov/Archives/edgar/daily-index";
+const DAILYINDEX_FILE = (yyyymmdd: string): string => `master.${yyyymmdd}.idx`; // the single backing file (pipe-delimited)
+const DAILYINDEX_LABEL = "edgar:daily-index"; // host+path only; keyless ⇒ no token can appear
+const DAILYINDEX_ORACLE_LABEL = "edgar:daily-index:index.json";
+// ★ File Name WITH A SPACE (the daily header) — the full-index uses `Filename` (no
+// space); a parser keying drift on `Filename` would FALSE-DRIFT on every valid daily index.
+const DAILYINDEX_HEADER = "CIK|Company Name|Form Type|Date Filed|File Name";
+const EDGAR_DAILY_START_YEAR = 1994; // EDGAR daily-index begins 1994 Q1 (conservative lower bound)
+
+// A daily-specific bounded LRU of the RAW TEXT keyed by yyyymmdd (mirrors the shipped
+// fullIndexCache; NOT the shared unbounded `memoize`, which a many-day sweep would OOM).
+// Days are tiny (~0.5–1.2MB) → a larger cap than full-index's 3 is cheap. TTL splits:
+// TODAY may still be posting until ~22:00 ET → short TTL; a PAST day is immutable →
+// long TTL. The index.json oracle is fetched ONLY on the rare 403 path and is NOT cached.
+const DAILYINDEX_CACHE_MAX = 8;
+const DAILYINDEX_TTL_TODAY_MS = 5 * 60 * 1000; // today may still be posting → short TTL
+const DAILYINDEX_TTL_CLOSED_MS = 24 * 60 * 60 * 1000; // a past day is immutable → long TTL
+const dailyIndexCache = new Map<string, { text: string; expiresAt: number }>();
+
+/** Throw the pre-fetch bounds/injection guard error (invalid_input, 0 fetch). */
+function dailyIndexInvalid(message: string): never {
+  throw new ToolErrorCarrier({
+    kind: "invalid_input",
+    message,
+    retryable: false,
+    upstreamEndpoint: DAILYINDEX_LABEL,
+  });
+}
+
+/** Today's date as compact `YYYYMMDD` in UTC (call-time fresh — survives a day rollover). */
+function todayUtcYyyymmdd(): string {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth() + 1;
+  const d = now.getUTCDate();
+  return `${y}${String(m).padStart(2, "0")}${String(d).padStart(2, "0")}`;
+}
+
+/** True iff the compact `yyyymmdd` is TODAY (UTC) — the freshness/cache-TTL signal. */
+function isTodayUtc(yyyymmdd: string): boolean {
+  return yyyymmdd === todayUtcYyyymmdd();
+}
+
+/**
+ * Normalize the row's compact `Date Filed` (`YYYYMMDD`, fact #3) to ISO `YYYY-MM-DD`
+ * for the `dateFiled` output (so it matches edgar_filing_index / edgar_company_filings
+ * and is human-readable). A non-8-digit value is kept as-is (defensive; via `str`).
+ */
+function normDailyDate(raw: unknown): string | null {
+  const s = str(raw);
+  if (s === null) return null;
+  if (/^\d{8}$/.test(s)) return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+  return s;
+}
+
+/**
+ * Build the daily-index URL from the caller-influenced segments (year, quarter,
+ * yyyymmdd — all DERIVED from one validated ISO date). BELT-AND-SUSPENDERS behind Zod
+ * (a direct handler call could bypass it): re-run the integer/range guards + the
+ * 8-digit-tied-to-year regex, then assert the built URL is https on the fixed
+ * www.sec.gov host. The 8-digit regex admits NO `%`/`/`/`.`/`\`/`..`/`%2F` (JS `\d`
+ * is ASCII-only). This does NOT reject a well-formed-but-NONEXISTENT day (Feb-30) —
+ * the pre-fetch date round-trip (M2, in the handler) is the SOLE defense for that.
+ */
+function buildDailyIndexUrl(year: number, quarter: number, yyyymmdd: string): string {
+  const maxYear = currentUtcYear();
+  if (!Number.isInteger(year) || year < EDGAR_DAILY_START_YEAR || year > maxYear) {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: year ${JSON.stringify(year)} must be an integer in [${EDGAR_DAILY_START_YEAR}, ${maxYear}] (EDGAR daily-index begins 1994 Q1; a future year has no published daily index) — refused before any fetch (path-segment bounds guard).`,
+    );
+  }
+  if (!Number.isInteger(quarter) || quarter < 1 || quarter > 4) {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: quarter ${JSON.stringify(quarter)} must be an integer in {1,2,3,4} — refused before any fetch (path-segment bounds guard).`,
+    );
+  }
+  if (!/^\d{8}$/.test(yyyymmdd) || yyyymmdd.slice(0, 4) !== String(year)) {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: yyyymmdd ${JSON.stringify(yyyymmdd)} must be 8 digits whose year prefix === ${year} — refused before any fetch (path-segment injection guard; ties the compact day to the validated year, admits no slash/dot/percent/'..').`,
+    );
+  }
+  const built = `${DAILYINDEX_BASE}/${year}/QTR${quarter}/${DAILYINDEX_FILE(yyyymmdd)}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(built);
+  } catch {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: could not construct a valid URL from year=${year} quarter=${quarter} yyyymmdd=${yyyymmdd} — refused before any fetch.`,
+    );
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname !== FULLINDEX_HOST) {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: constructed URL host/scheme is not https://${FULLINDEX_HOST} (${parsed.protocol}//${parsed.hostname}) — refused before any fetch (fixed-host assertion).`,
+    );
+  }
+  return built;
+}
+
+/** Build the quarter's index.json existence-oracle URL (same year/quarter guard). */
+function buildDailyOracleUrl(year: number, quarter: number): string {
+  const maxYear = currentUtcYear();
+  if (!Number.isInteger(year) || year < EDGAR_DAILY_START_YEAR || year > maxYear) {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: oracle year ${JSON.stringify(year)} must be an integer in [${EDGAR_DAILY_START_YEAR}, ${maxYear}] — refused before any fetch (path-segment bounds guard).`,
+    );
+  }
+  if (!Number.isInteger(quarter) || quarter < 1 || quarter > 4) {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: oracle quarter ${JSON.stringify(quarter)} must be an integer in {1,2,3,4} — refused before any fetch (path-segment bounds guard).`,
+    );
+  }
+  const built = `${DAILYINDEX_BASE}/${year}/QTR${quarter}/index.json`;
+  let parsed: URL;
+  try {
+    parsed = new URL(built);
+  } catch {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: could not construct a valid oracle URL from year=${year} quarter=${quarter} — refused before any fetch.`,
+    );
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname !== FULLINDEX_HOST) {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: constructed oracle URL host/scheme is not https://${FULLINDEX_HOST} (${parsed.protocol}//${parsed.hostname}) — refused before any fetch (fixed-host assertion).`,
+    );
+  }
+  return built;
+}
+
+/**
+ * Parse the raw daily master.YYYYMMDD.idx body into `FilingIndexRow[]` (DEDICATED —
+ * NOT parseFullIndex). DRIFT keys on the ABSENCE of the daily `CIK|Company Name|Form
+ * Type|Date Filed|File Name` header (★ File Name WITH A SPACE) + the `----` dashes
+ * boundary ONLY (M1/fact #2) — a non-index / error / format-changed body served with
+ * HTTP 200 → THROW `driftError`. A body WITH the header+dashes but ZERO data rows is a
+ * GENUINE-EMPTY day → returned (NOT thrown; near-unreachable for a real trading day but
+ * honest). A body WITH the header+dashes whose EVERY data row fails the 5-field split →
+ * THROW `driftError` (all-malformed = format drift). Date Filed is normalized to ISO.
+ */
+export function parseDailyIndex(
+  body: string,
+  maxRows: number = MAX_INDEX_ROWS,
+): ParsedFullIndex {
+  const lines = body.split("\n");
+  // Locate the DAILY header line immediately followed by the `----` dashes boundary.
+  let dashesIdx = -1;
+  for (let i = 0; i < lines.length - 1; i++) {
+    if ((lines[i] ?? "").replace(/\r$/, "").trim() === DAILYINDEX_HEADER) {
+      const next = (lines[i + 1] ?? "").replace(/\r$/, "");
+      if (/^-{5,}\s*$/.test(next.trim())) {
+        dashesIdx = i + 1;
+        break;
+      }
+    }
+  }
+  if (dashesIdx === -1) {
+    throw driftError(
+      DAILYINDEX_LABEL,
+      `edgar:daily-index body is missing the '${DAILYINDEX_HEADER}' header / '----' dashes boundary (a non-index / error / format-changed body served with HTTP 200 — note the daily header is 'File Name' WITH a space, NOT the full-index 'Filename') — refusing to report an empty result (schema drift, NOT a genuine-absent day).`,
+    );
+  }
+  const rows: FilingIndexRow[] = [];
+  let malformedRows = 0;
+  let totalIsLowerBound = false;
+  for (let i = dashesIdx + 1; i < lines.length; i++) {
+    const line = (lines[i] ?? "").replace(/\r$/, "");
+    if (line.trim() === "") continue; // blank line (e.g. the trailing newline) — skip
+    if (rows.length + malformedRows >= maxRows) {
+      totalIsLowerBound = true; // safety ceiling — never a SILENT truncation
+      break;
+    }
+    const parts = splitOnFirstPipes(line, 4); // bounded → a `|`-in-company row stays 5 fields
+    if (parts.length < 5) {
+      malformedRows++;
+      continue;
+    }
+    const cik = str(parts[0]);
+    const filename = str(parts[4]);
+    rows.push({
+      cik,
+      cikPadded: cik === null ? null : padCik(cik),
+      companyName: str(parts[1]),
+      formType: str(parts[2]),
+      dateFiled: normDailyDate(parts[3]), // compact YYYYMMDD → ISO YYYY-MM-DD
+      filename,
+      filingUrl: filename === null ? null : FILING_ARCHIVE_BASE + filename,
+    });
+  }
+  if (rows.length === 0 && malformedRows > 0) {
+    throw driftError(
+      DAILYINDEX_LABEL,
+      `edgar:daily-index has the header/dashes boundary but ALL ${malformedRows} data row(s) failed the 5-field pipe split (format drift) — refusing to report an empty result.`,
+    );
+  }
+  return { rows, malformedRows, totalIsLowerBound };
+}
+
+/**
+ * Fetch the whole day's master.YYYYMMDD.idx text (getEdgar VERBATIM + `.text()`),
+ * through the bounded LRU. getEdgar sets the mandatory UA + gzip + the ≤10 req/s gate
+ * + the 15s timeout; a 403 throws (rate_limited/403 — caught tool-locally by the
+ * handler for the oracle disambiguation), so ONLY a 200 body is ever cached. A slow
+ * body-read → abort → getEdgar's honest upstream_unavailable throw (never a fake-empty).
+ */
+async function fetchDailyIndexText(built: string, yyyymmdd: string): Promise<string> {
+  const key = yyyymmdd;
+  const now = Date.now();
+  const hit = dailyIndexCache.get(key);
+  if (hit && hit.expiresAt > now) {
+    dailyIndexCache.delete(key); // LRU touch → re-insert as the newest
+    dailyIndexCache.set(key, hit);
+    return hit.text;
+  }
+  if (hit) dailyIndexCache.delete(key); // expired
+  const r = await getEdgar(built, DAILYINDEX_LABEL);
+  const text = await r.text();
+  const ttl = isTodayUtc(yyyymmdd) ? DAILYINDEX_TTL_TODAY_MS : DAILYINDEX_TTL_CLOSED_MS;
+  dailyIndexCache.set(key, { text, expiresAt: now + ttl });
+  while (dailyIndexCache.size > DAILYINDEX_CACHE_MAX) {
+    const oldest = dailyIndexCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    dailyIndexCache.delete(oldest);
+  }
+  return text;
+}
+
+/** For tests: evict the daily-index bounded LRU (mirrors `_resetFullIndexCache`). */
+export function _resetDailyIndexCache(): void {
+  dailyIndexCache.clear();
+}
+
+/**
+ * Consult the quarter's index.json existence oracle (getEdgar; ONLY on the 403 path).
+ * Returns whether `master.<yyyymmdd>.idx` is listed AND `maxListed` = the newest
+ * `YYYYMMDD` among items matching `/^master\.(\d{8})\.idx$/` (M1). Throws on a 403 /
+ * unexpected shape — the caller converts that to the ambiguous both-causes
+ * upstream_unavailable (the oracle itself is inconclusive).
+ */
+async function fetchDailyOracle(
+  url: string,
+  yyyymmdd: string,
+): Promise<{ listed: boolean; maxListed: string | null }> {
+  const r = await getEdgar(url, DAILYINDEX_ORACLE_LABEL);
+  const d = (await r.json()) as { directory?: { item?: Array<{ name?: unknown }> } };
+  const items = d?.directory?.item;
+  if (!Array.isArray(items)) {
+    throw new ToolErrorCarrier({
+      kind: "schema_drift",
+      message: `edgar:daily-index index.json returned an unexpected shape (directory.item[] array missing) — the existence oracle is inconclusive.`,
+      retryable: false,
+      upstreamEndpoint: DAILYINDEX_ORACLE_LABEL,
+    });
+  }
+  const wanted = DAILYINDEX_FILE(yyyymmdd);
+  let listed = false;
+  let maxListed: string | null = null;
+  for (const it of items) {
+    const name = typeof it?.name === "string" ? it.name : "";
+    const mm = /^master\.(\d{8})\.idx$/.exec(name);
+    if (!mm) continue;
+    if (name === wanted) listed = true;
+    const day = mm[1] as string;
+    if (maxListed === null || day > maxListed) maxListed = day;
+  }
+  return { listed, maxListed };
+}
+
+/** Honest found:false bundle for the daily-index absent/not-yet-disseminated states. */
+function dailyAbsentBundle(
+  found: false,
+  date: string,
+  year: number,
+  quarter: number,
+  yyyymmdd: string,
+  complete: boolean,
+  note: string,
+): MetaBundle {
+  return withMeta(
+    {
+      found,
+      date,
+      year,
+      quarter,
+      indexFile: DAILYINDEX_FILE(yyyymmdd),
+      returned: 0,
+      totalAvailable: 0,
+      filings: [] as FilingIndexRow[],
+    },
+    edgarMeta({
+      returned: 0,
+      totalAvailable: 0,
+      complete,
+      notes: [note, DAILY_SNAPSHOT_NOTE],
+    }),
+  );
+}
+
+const DAILY_SNAPSHOT_NOTE =
+  "The daily-index is a point-in-time snapshot of ONE dissemination DAY. For the LATEST or complete-history filings of a KNOWN filer use edgar_company_filings; for a whole quarter use edgar_filing_index; for a text query across 2001-present use edgar_full_text_search.";
+
+/**
+ * Read the SEC EDGAR daily-index for one calendar `date` and return the filings
+ * matching the given CLIENT-SIDE filters (form / CIK / company substring),
+ * offset-paginated, with the EXACT total match count for the day.
+ *
+ * HONESTY (ADR-0027 v1 + M1 + M2):
+ *  - ★M2 — an EXACT date round-trip (Date.UTC component re-extraction) rejects
+ *    Feb-30 / day-40 / non-leap-Feb-29 / a malformed / a FUTURE date PRE-fetch
+ *    (invalid_input, 0 GET). NOT the `!isNaN(Date.UTC(...))` shortcut (it rolls overflow).
+ *  - Fetch the .idx FIRST (happy path pays zero oracle cost). 200 + parseable ⇒
+ *    found:true; FULL-SCAN → EXACT totalAvailable (byte-cap forbidden).
+ *  - ★M1 — on a 403 (getEdgar mislabels the daily AccessDenied XML rate_limited/403;
+ *    caught TOOL-LOCAL), consult index.json; maxListedMasterDate makes it recency-aware:
+ *      requestedYyyymmdd > maxListed  ⇒ NOT-YET-DISSEMINATED (found:false, complete:FALSE)
+ *      requestedYyyymmdd ≤ maxListed & unlisted ⇒ TRUE genuine-absent (found:false, complete:true)
+ *      listed but .idx 403'd          ⇒ honest rate_limited (retryable ~600s)
+ *      oracle itself 403/bad-shape     ⇒ ambiguous both-causes upstream_unavailable
+ *  - A REAL 429 (status 429, not 403) is NOT caught → stays honest rate_limited.
+ *  - CIK stays a STRING; every column via `str`; companyContains is a LITERAL
+ *    case-insensitive substring (C110 N/A — no token split).
+ */
+export async function dailyFilingIndex(args: {
+  date: string;
+  formType?: string;
+  cik?: string | number;
+  companyContains?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<MetaBundle> {
+  // ★M2 — EXACT date round-trip PRE-fetch (before the URL builder), 0 GET on failure.
+  const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(args.date);
+  if (!dm) {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: date ${JSON.stringify(args.date)} must be an ISO calendar day YYYY-MM-DD — refused before any fetch.`,
+    );
+  }
+  const y = Number(dm[1]);
+  const mo = Number(dm[2]);
+  const d = Number(dm[3]);
+  // Component re-extraction (NOT !isNaN(Date.UTC(...)) — JS silently rolls Feb-30 →
+  // Mar-01, day-40, non-leap Feb-29, so the naive shortcut would FETCH a nonexistent day).
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (
+    dt.getUTCFullYear() !== y ||
+    dt.getUTCMonth() + 1 !== mo ||
+    dt.getUTCDate() !== d
+  ) {
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: date ${JSON.stringify(args.date)} is not a real calendar day (it does not round-trip through Date.UTC — e.g. 2024-02-30, 2024-01-40, or a non-leap 2023-02-29) — refused before any fetch.`,
+    );
+  }
+  const yyyymmdd = `${dm[1]}${dm[2]}${dm[3]}`;
+  const todayYyyymmdd = todayUtcYyyymmdd();
+  if (yyyymmdd > todayYyyymmdd) {
+    // A future day has not happened — you cannot ask for its filings. TODAY is allowed
+    // (reachable; the oracle handles the not-yet-posted case as not-yet-disseminated).
+    dailyIndexInvalid(
+      `edgar_daily_filing_index: date ${args.date} is in the FUTURE (> today ${todayYyyymmdd.slice(0, 4)}-${todayYyyymmdd.slice(4, 6)}-${todayYyyymmdd.slice(6, 8)} UTC) — no filings can exist for a day that has not happened. Refused before any fetch.`,
+    );
+  }
+  const quarter = Math.floor((mo - 1) / 3) + 1;
+
+  // S1 — build + re-validate the path BEFORE any fetch (0 fetch on a bad year/quarter/day).
+  const built = buildDailyIndexUrl(y, quarter, yyyymmdd);
+
+  // Fetch the whole day (getEdgar VERBATIM + `.text()`, bounded-LRU cached). A 403 is
+  // caught TOOL-LOCAL and disambiguated via the index.json oracle (M1) — getEdgar is
+  // UNTOUCHED (the other 6 edgar tools stay byte-identical).
+  let body: string;
+  try {
+    body = await fetchDailyIndexText(built, yyyymmdd);
+  } catch (e) {
+    if (
+      e instanceof ToolErrorCarrier &&
+      e.toolError.kind === "rate_limited" &&
+      e.toolError.upstreamStatus === 403
+    ) {
+      // ── ★M1 403-DISAMBIGUATION via the index.json existence oracle (recency-aware) ──
+      const oracleUrl = buildDailyOracleUrl(y, quarter);
+      let oracle: { listed: boolean; maxListed: string | null };
+      try {
+        oracle = await fetchDailyOracle(oracleUrl, yyyymmdd);
+      } catch {
+        // The oracle ITSELF 403'd / returned an unexpected shape ⇒ INCONCLUSIVE.
+        throw new ToolErrorCarrier({
+          kind: "upstream_unavailable",
+          message: `SEC returned HTTP 403 for the daily-index ${DAILYINDEX_BASE}/${y}/QTR${quarter}/${DAILYINDEX_FILE(yyyymmdd)}, and the index.json existence oracle could not be consulted (it too 403'd / returned an unexpected shape). This is AMBIGUOUS: EITHER ${args.date} has no published daily index OR SEC is rate-limiting this IP at the 10 req/s ceiling (~10-minute block). NOT fabricated as empty — retry after ~10 minutes.`,
+          retryable: true,
+          retryAfterSeconds: 600,
+          upstreamStatus: 403,
+          upstreamEndpoint: DAILYINDEX_LABEL,
+        });
+      }
+      if (oracle.maxListed === null || yyyymmdd > oracle.maxListed) {
+        // ★M1 branch (a) — NEWER than anything the oracle has published yet (covers today
+        // AND unlisted recent trading day(s) across weekends/holidays) ⇒ NOT-YET-DISSEMINATED.
+        // NEVER complete:true — a day full of 8-Ks must not read as a confident empty.
+        return dailyAbsentBundle(
+          false,
+          args.date,
+          y,
+          quarter,
+          yyyymmdd,
+          false, // complete:FALSE
+          `${args.date} is NEWER than the newest daily index EDGAR has published for this quarter (${oracle.maxListed ? `${oracle.maxListed.slice(0, 4)}-${oracle.maxListed.slice(4, 6)}-${oracle.maxListed.slice(6, 8)}` : "none listed yet"}). EDGAR's daily index and its index.json listing LAG real filing activity and may not be posted for the most recent trading day(s), especially across weekends/holidays — this day may simply not be disseminated yet; retry later (EDGAR posts each day's index around 22:00 US-Eastern). This is NOT a confirmed empty day (complete:false).`,
+        );
+      }
+      if (!oracle.listed) {
+        // ★M1 branch (b) — requestedYyyymmdd ≤ maxListed AND still not listed ⇒ a TRUE
+        // gap INSIDE the covered range (weekend / holiday / genuinely no-dissemination day).
+        return dailyAbsentBundle(
+          false,
+          args.date,
+          y,
+          quarter,
+          yyyymmdd,
+          true, // complete:true — an HONEST genuine-absent, NOT an error/drift/fake-empty
+          `master.${yyyymmdd}.idx is NOT published for ${args.date}: it is not listed in the quarter's index.json existence oracle, yet the oracle DOES list newer day(s) (newest ${oracle.maxListed.slice(0, 4)}-${oracle.maxListed.slice(4, 6)}-${oracle.maxListed.slice(6, 8)}) — so this is a genuine gap INSIDE the covered range (a weekend / holiday / no-dissemination day). This is an HONEST genuine-absent answer (found:false, complete:true), NOT an error, NOT a rate-block, NOT a fabricated empty.`,
+        );
+      }
+      // listed === true but the .idx 403'd ⇒ the index EXISTS, SEC rate-blocked this IP.
+      throw new ToolErrorCarrier({
+        kind: "rate_limited",
+        message: `The daily index master.${yyyymmdd}.idx for ${args.date} EXISTS (it IS listed in the quarter's index.json oracle) but the .idx fetch returned HTTP 403 — SEC is rate-limiting this IP at the 10 req/s ceiling (or a transient edge block). Slow down and retry after ~10 minutes. NOT a fake-empty, NOT a genuine-absent day.`,
+        retryable: true,
+        retryAfterSeconds: 600,
+        upstreamStatus: 403,
+        upstreamEndpoint: DAILYINDEX_LABEL,
+      });
+    }
+    throw e; // schema_drift / invalid_input(UA) / upstream_unavailable / real 429 — loud
+  }
+
+  // 200 path — FULL-SCAN → parse ALL rows past the preamble. Drift (header-absent /
+  // all-malformed) THROWS; header+0-rows ⇒ genuine-empty (found:true, totalAvailable:0).
+  const parsed = parseDailyIndex(body);
+  const all = parsed.rows;
+
+  // CLIENT-SIDE filters — ZERO query string (none reach the URL). cik via padCik
+  // both-sides; formType case-insensitive EXACT on col3 ('8-K' ≠ '8-K/A');
+  // companyContains a LITERAL case-insensitive substring (no token split, C110 N/A).
+  const formNeedle = args.formType?.trim() ? args.formType.trim().toLowerCase() : null;
+  const cikFilter =
+    args.cik != null && String(args.cik).trim() !== "" ? padCik(args.cik) : null;
+  const companyNeedle = args.companyContains?.trim()
+    ? args.companyContains.trim().toLowerCase()
+    : null;
+
+  const matches = all.filter((row) => {
+    if (formNeedle !== null) {
+      if (row.formType === null || row.formType.toLowerCase() !== formNeedle) return false;
+    }
+    if (cikFilter !== null) {
+      if (row.cikPadded !== cikFilter) return false;
+    }
+    if (companyNeedle !== null) {
+      if (
+        row.companyName === null ||
+        !row.companyName.toLowerCase().includes(companyNeedle)
+      )
+        return false;
+    }
+    return true;
+  });
+
+  const limit = args.limit ?? 100;
+  const offset = args.offset ?? 0;
+  const totalAvailable = matches.length; // EXACT (full-scan) — never a page length
+  const page = matches.slice(offset, offset + limit);
+  const returned = page.length;
+  const hasMore = offset + returned < totalAvailable;
+  const nextOffset = hasMore ? offset + returned : null;
+
+  const filtersApplied: string[] = [];
+  if (formNeedle !== null) filtersApplied.push("formType");
+  if (cikFilter !== null) filtersApplied.push("cik");
+  if (companyNeedle !== null) filtersApplied.push("companyContains");
+
+  const notes: string[] = [];
+  notes.push(DAILY_SNAPSHOT_NOTE);
+  notes.push(
+    `The whole ${args.date} daily index was downloaded and FULL-SCANNED; totalAvailable (${totalAvailable}) is the EXACT count of filings matching the filters across the ENTIRE day (not a page length, not a byte-capped subset — SEC ignores HTTP Range). This page contains ${returned} of ${totalAvailable}; page via _meta.pagination.nextOffset for the rest.`,
+  );
+  notes.push(
+    `dateFiled is normalized to ISO YYYY-MM-DD from the index's compact YYYYMMDD column; every row in this file shares the requested day (${args.date}).`,
+  );
+  if (isTodayUtc(yyyymmdd)) {
+    notes.push(
+      `${args.date} is TODAY (UTC) — EDGAR posts each day's index around 22:00 US-Eastern and it GROWS as filings disseminate, so totalAvailable is EXACT AS-OF this (short-cached) snapshot, not exact-forever. A closed past day is immutable.`,
+    );
+  }
+  if (companyNeedle !== null) {
+    notes.push(
+      `companyContains is a case-insensitive LITERAL substring match on the Company Name column — a multi-word value matches as ONE contiguous string, NOT AND/OR-tokenized.`,
+    );
+  }
+  if (formNeedle !== null) {
+    notes.push(
+      `formType is a case-insensitive EXACT match on the Form Type column ("${args.formType?.trim()}" matches that form only — e.g. "8-K" does NOT match "8-K/A"). Pass each amendment variant separately.`,
+    );
+  }
+  if (parsed.malformedRows > 0) {
+    notes.push(
+      `${parsed.malformedRows} row(s) did not split into 5 pipe fields and were skipped (tolerated as stray malformed rows; a body with ZERO valid rows would instead be refused as schema drift).`,
+    );
+  }
+  if (parsed.totalIsLowerBound) {
+    notes.push(
+      `The scan hit the MAX_INDEX_ROWS safety ceiling (${MAX_INDEX_ROWS}); totals are a LOWER BOUND — the daily index is larger than expected (possible format drift). See totalIsLowerBound.`,
+    );
+  }
+  if (totalAvailable === 0) {
+    notes.push(
+      filtersApplied.length
+        ? `0 filings on ${args.date} matched the filters (${filtersApplied.join(", ")}). This is an EXACT ZERO over the full day index (found:true — the day IS published) — NOT a truncation, NOT an outage, NOT a genuine-absent day.`
+        : `0 data rows in the ${args.date} daily index (found:true — the day IS published, but its index has no filing rows). This is an EXACT ZERO over the full day index — NOT a truncation, NOT an outage.`,
+    );
+  }
+
+  const meta: Partial<ResponseMeta> = {
+    returned,
+    totalAvailable,
+    filtersApplied,
+    pagination: { offset, limit, hasMore, nextOffset },
+    notes,
+  };
+  if (parsed.totalIsLowerBound) meta.totalIsLowerBound = true;
+
+  return withMeta(
+    {
+      found: true,
+      date: args.date,
+      year: y,
+      quarter,
+      indexFile: DAILYINDEX_FILE(yyyymmdd),
+      returned,
+      totalAvailable,
+      filings: page,
+    },
+    edgarMeta(meta),
+  );
+}
