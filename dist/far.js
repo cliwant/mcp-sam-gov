@@ -27,10 +27,11 @@
  *   - `farOverhaulRisk` carries NO fabricated FAR-case numbers/dates — only the
  *     fixed structural caveat + the real authoritative-list / deviation URLs.
  *
- * Self-contained: imports only fetchWithRetry (+ ToolErrorCarrier) from
- * ./errors.js, memoize from ./cache.js, listTitles from ./ecfr.js, and withMeta
- * from ./meta.js — the versioner XML parse lives here (ecfr.ts's stripHtml is
- * private and stays private).
+ * Self-contained: imports `getText` from ./datasource.js (the shared XML/text
+ * fetch port, ADR-0013) + ToolErrorCarrier from ./errors.js, memoize from
+ * ./cache.js, listTitles from ./ecfr.js, and withMeta from ./meta.js — the
+ * versioner XML parse lives here (ecfr.ts's stripHtml is private and stays
+ * private).
  */
 import { ToolErrorCarrier } from "./errors.js";
 import { getText } from "./datasource.js";

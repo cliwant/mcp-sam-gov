@@ -48,6 +48,13 @@ export async function getJson(url, opts) {
         init.headers = opts.headers;
     if (opts.redirect)
         init.redirect = opts.redirect;
+    // POST/body passthrough (ADR-0014) — set ONLY when defined, matching the
+    // `headers` idiom, so a GET caller's init stays byte-identical (no `method`/
+    // `body` key). `method`/`body` are RequestInit fields forwarded without logic.
+    if (opts.method !== undefined)
+        init.method = opts.method;
+    if (opts.body !== undefined)
+        init.body = opts.body;
     const r = await fetchWithRetry(url, init, opts.label);
     return (await r.json());
 }

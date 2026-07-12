@@ -47,6 +47,22 @@ export type GetJsonOptions = {
   redirect?: "error";
   /** Request timeout; default 15_000 (all sources today). */
   timeoutMs?: number;
+  /**
+   * HTTP method — the SINGLE literal `"POST"` (ADR-0014, the first non-GET
+   * consumer: NIH RePORTER is a POST-with-JSON-body API). Set on init ONLY when
+   * defined, so every existing GET caller (which omits it) keeps a byte-identical
+   * init with NO `method` key. Typed as the literal (not `string`) so a stray
+   * `method:"GET"` cannot silently alter a consumer. A retry of a read-only POST
+   * search with a re-readable string body is safe.
+   */
+  method?: "POST";
+  /**
+   * Request body (a pre-serialized string, e.g. `JSON.stringify(payload)`).
+   * A `RequestInit` field, exactly like `headers`/`redirect` — getJson forwards
+   * it verbatim, adding no logic. Set on init ONLY when defined (the `!== undefined`
+   * idiom), so a GET caller's init stays byte-identical.
+   */
+  body?: string;
 };
 
 /**
@@ -66,6 +82,11 @@ export async function getJson<T = unknown>(
   };
   if (opts.headers !== undefined) init.headers = opts.headers;
   if (opts.redirect) init.redirect = opts.redirect;
+  // POST/body passthrough (ADR-0014) — set ONLY when defined, matching the
+  // `headers` idiom, so a GET caller's init stays byte-identical (no `method`/
+  // `body` key). `method`/`body` are RequestInit fields forwarded without logic.
+  if (opts.method !== undefined) init.method = opts.method;
+  if (opts.body !== undefined) init.body = opts.body;
   const r = await fetchWithRetry(url, init, opts.label);
   return (await r.json()) as T;
 }
