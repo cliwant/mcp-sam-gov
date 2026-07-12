@@ -80,6 +80,11 @@ import {
   normHistDate as fdicNormHistDate,
   institutionHistory as fdicInstitutionHistory,
   FDIC_HISTORY_FILTER_FIELDS,
+  buildSummaryFilters as fdicBuildSummaryFilters,
+  scopeOf as fdicScopeOf,
+  charterClassOf as fdicCharterClassOf,
+  industrySummary as fdicIndustrySummary,
+  FDIC_SUMMARY_FILTER_FIELDS,
 } from "./dist/fdic.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
@@ -9140,6 +9145,242 @@ async function testFdicHistoryHonesty() {
   });
 }
 
+// §61: FDIC BankFind /banks/summary (ADR-0031) — the 5th FDIC tool
+// `fdic_industry_summary` (source 23 unchanged; snapshot 91→92). The FIRST AGGREGATE/
+// statistical tool on the source (the 4 existing are per-ENTITY on CERT): industry &
+// per-state annual aggregate financials + structural counts, grouped by charter class.
+// Reuses the C116/C118 adapter VERBATIM (getFdic / parseEnvelope 3-envelope guard /
+// filterTerm allowlist + Set.has / sortParams enum+Set.has / EXACT meta.total
+// pagination / freshness / $thousands→USD ×1000), so this section pins ONLY the NEW
+// surface + a P1/P2/SSRF smoke through the new tool. All OFFLINE (mock fetch),
+// deterministic, NON-VACUOUS: every assertion pins a value and names the mutation that
+// turns it RED.
+//   (★S2 scope/isRollup) roll-up STALP {USA,US,OT,PI} → national_total/national_states_dc/
+//        territories_total/pacific_islands + isRollup:true; every other STALP →
+//        jurisdiction + isRollup:false. A roll-up mis-flagged as a jurisdiction (or a
+//        state flagged a roll-up) = double-count risk ⇒ RED.
+//   (★S2 state field) state → the STALP filter, NOT PSTALP (per-endpoint difference);
+//        PSTALP is NOT on the summary allowlist. C118-quoted (Oregon STALP:"OR" safe).
+//   (★S3 no name search) NO name/city input + NEVER a `search=` param; allowlist is
+//        {YEAR,STALP,CB_SI}.
+//   (★S4 NIM foot-gun) netInterestIncomeUSD = NIM×1000 (net interest INCOME, NOT a
+//        ratio); a COUNT (BANKS/OFFICES/BRANCHES/NUMEMP) is NEVER ×1000.
+//   (★S4/P3 money vs count) money ×1000 with the null-guard BEFORE the multiply; a
+//        genuine 0 (American Samoa) stays 0, an absent value stays null (never 0).
+//   (★S1 charter) charterClass ← CB_SI map (CB→commercial_banks, SI→savings_institutions;
+//        unknown→raw code).
+//   (P1) totalAvailable === meta.total 121 (not page length). (P2) 400/404/non-JSON/drift
+//        THROW; genuine total:0 ⇒ complete:true; non-int year ⇒ invalid_input 0-fetch.
+//        (SSRF) fixed host/path/https + redirect:'error' + keyless + bounded l/o.
+const isFdicSummary = (u) => /api\.fdic\.gov\/banks\/summary\?/.test(u);
+const FDIC_SUMMARY_INDEX = { name: "risview_aggregate_1781008283694", createTimestamp: "2026-06-09T12:31:23Z" };
+const fdicSummaryMock = (spec) => (u) => (isFdicSummary(u) ? mockResponse({ status: 200, json: fdicBody({ ...spec, index: spec.index ?? FDIC_SUMMARY_INDEX }) }) : failClosed()());
+const fdicSummaryUrl = (calls) => { const c = calls.find((x) => isFdicSummary(x.url)); return c ? new URL(c.url) : null; };
+// A USA roll-up row (national grand total) + US/OT/PI roll-ups + a CA jurisdiction row
+// (all 14 fields present — the units-matrix row) + an American-Samoa GENUINE-0 row
+// (BANKS/ASSET/NIM all a real 0) + a Guam ABSENT row (no BANKS/OFFICES key + ASSET:null
+// → null, never 0). Live-anchored values (USA/CA/Alabama spot-checked 2026-07-13).
+const SUM_USA_CB = { YEAR: "2023", CB_SI: "CB", STNAME: "All States and Territories", STALP: "USA", STNUM: "0", BANKS: 4036, OFFICES: 82000, BRANCHES: 77964, NUMEMP: 1600000, ASSET: 22453583377, DEP: 18000000000, NETINC: 250000000, EQ: 2200000000, NIM: 660219591, ID: "CB_2023_USA" };
+const SUM_US_CB = { YEAR: "2023", CB_SI: "CB", STNAME: "U.S. States and DC", STALP: "US", STNUM: "99", BANKS: 3977, OFFICES: 81000, BRANCHES: 77000, NUMEMP: 1590000, ASSET: 22362971981, DEP: 17900000000, NETINC: 249000000, EQ: 2190000000, NIM: 658000000, ID: "CB_2023_US" };
+const SUM_OT_CB = { YEAR: "2023", CB_SI: "CB", STNAME: "U.S. Territories", STALP: "OT", STNUM: "98", BANKS: 59, OFFICES: 1000, BRANCHES: 964, NUMEMP: 10000, ASSET: 90611396, DEP: 80000000, NETINC: 1000000, EQ: 10000000, NIM: 2000000, ID: "CB_2023_OT" };
+const SUM_PI_CB = { YEAR: "2023", CB_SI: "CB", STNAME: "Pacific Islands", STALP: "PI", STNUM: "97", BANKS: 10, OFFICES: 100, BRANCHES: 90, NUMEMP: 1000, ASSET: 5000000, DEP: 4000000, NETINC: 100000, EQ: 500000, NIM: 200000, ID: "CB_2023_PI" };
+const SUM_CA_CB = { YEAR: "2023", CB_SI: "CB", STNAME: "California", STALP: "CA", STNUM: "6", BANKS: 119, OFFICES: 5707, BRANCHES: 5588, NUMEMP: 37692, ASSET: 515536280, DEP: 414471118, NETINC: 413928, EQ: 59022119, NIM: 15588542, ID: "CB_2023_CA" };
+const SUM_AS_CB = { YEAR: "2023", CB_SI: "CB", STNAME: "American Samoa", STALP: "AS", STNUM: "60", BANKS: 0, OFFICES: 0, BRANCHES: 0, NUMEMP: 0, ASSET: 0, DEP: 0, NETINC: 0, EQ: 0, NIM: 0, ID: "CB_2023_AS" };
+const SUM_GU_NULL = { YEAR: "2023", CB_SI: "SI", STNAME: "Guam", STALP: "GU", STNUM: "66", ASSET: null, DEP: null, NETINC: null, EQ: null, NIM: null, ID: "SI_2023_GU" };
+
+async function testFdicSummaryHonesty() {
+  section("61. FDIC BankFind /banks/summary (ADR-0031) — the 5th FDIC tool, the FIRST AGGREGATE: ★S2 scope/isRollup roll-up-vs-jurisdiction (double-count prevention) + state→STALP (NOT PSTALP) C118-quoted + ★S3 NO name/city, NEVER `search=` + ★S4 NIM=income ×1000 (NOT a ratio) + counts NEVER ×1000 + money ×1000 null-never-0 (genuine 0 stays 0) + ★S1 charterClass←CB_SI map + P1 exact-total + P2 3-envelope + non-int year guard + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  // (★S2-unit) scopeOf — the explicit roll-up discriminator; a non-roll-up (incl. null) → jurisdiction.
+  eq("61 ★S2 scopeOf('USA') → 'national_total' (roll-up; mis-map ⇒ RED = a national total masquerading as a state)", fdicScopeOf("USA"), "national_total");
+  eq("61 ★S2 scopeOf('US') → 'national_states_dc'", fdicScopeOf("US"), "national_states_dc");
+  eq("61 ★S2 scopeOf('OT') → 'territories_total'", fdicScopeOf("OT"), "territories_total");
+  eq("61 ★S2 scopeOf('PI') → 'pacific_islands'", fdicScopeOf("PI"), "pacific_islands");
+  eq("61 ★S2 scopeOf('CA') → 'jurisdiction' (a real state; flag it a roll-up ⇒ RED)", fdicScopeOf("CA"), "jurisdiction");
+  eq("61 ★S2 scopeOf('AS') → 'jurisdiction' (an individual territory)", fdicScopeOf("AS"), "jurisdiction");
+  eq("61 ★S2 scopeOf(null) → 'jurisdiction' (absent/unknown STALP falls through — never a fabricated roll-up)", fdicScopeOf(null), "jurisdiction");
+
+  // (★S1-unit) charterClassOf — CB/SI map; unknown → raw; null → null (never fabricated).
+  eq("61 ★S1 charterClassOf('CB') → 'commercial_banks' (mismap ⇒ RED)", fdicCharterClassOf("CB"), "commercial_banks");
+  eq("61 ★S1 charterClassOf('SI') → 'savings_institutions'", fdicCharterClassOf("SI"), "savings_institutions");
+  eq("61 ★S1 charterClassOf('ZZ') → 'ZZ' (unmapped → the RAW code, never invented)", fdicCharterClassOf("ZZ"), "ZZ");
+  ok("61 ★S1 charterClassOf(null) → null (genuinely absent; never String()-fabricated)", fdicCharterClassOf(null) === null, JSON.stringify(fdicCharterClassOf(null)));
+
+  // (buildSummaryFilters) year→YEAR bare, state→STALP:"…" quoted (NOT PSTALP), charterClass→CB_SI:"…" quoted.
+  eq("61 ★S2 buildSummaryFilters state:'CA' → 'STALP:\"CA\"' (STALP, NOT PSTALP — map to PSTALP ⇒ RED; ★C118: QUOTED)", fdicBuildSummaryFilters({ state: "CA" }), 'STALP:"CA"');
+  eq("61 buildSummaryFilters year:2023 → 'YEAR:2023' (numeric → BARE, never quoted)", fdicBuildSummaryFilters({ year: 2023 }), "YEAR:2023");
+  eq("61 ★S1 buildSummaryFilters charterClass:'CB' → 'CB_SI:\"CB\"' (QUOTED)", fdicBuildSummaryFilters({ charterClass: "CB" }), 'CB_SI:"CB"');
+  eq("61 buildSummaryFilters compound: YEAR:2023 AND STALP:\"CA\" AND CB_SI:\"CB\" (numeric bare, non-numeric quoted)", fdicBuildSummaryFilters({ year: 2023, state: "CA", charterClass: "CB" }), 'YEAR:2023 AND STALP:"CA" AND CB_SI:"CB"');
+  eq("61 buildSummaryFilters no clauses → '' (⇒ no filters param)", fdicBuildSummaryFilters({}), "");
+
+  // (allowlist) the summary allowlist is {YEAR,STALP,CB_SI}; PSTALP/NAME/NOTAFIELD are rejected.
+  {
+    const badP = await expectThrow(async () => fdicFilterTerm("PSTALP", "CA", FDIC_SUMMARY_FILTER_FIELDS));
+    ok("61 ★S2 filterTerm('PSTALP',…,summaryAllowlist) ⇒ invalid_input (PSTALP is the /failures & /history field, NOT /summary's — add it ⇒ RED = the wrong state field)", badP.threw && toToolError(badP.error).kind === "invalid_input", JSON.stringify({ threw: badP.threw }));
+    const badN = await expectThrow(async () => fdicFilterTerm("NAME", "x", FDIC_SUMMARY_FILTER_FIELDS));
+    ok("61 ★S3 filterTerm('NAME',…,summaryAllowlist) ⇒ invalid_input (NO name search on /summary)", badN.threw && toToolError(badN.error).kind === "invalid_input", JSON.stringify({ threw: badN.threw }));
+    eq("61 filterTerm positive: STALP IS allowlisted ⇒ 'STALP:\"CA\"'", fdicFilterTerm("STALP", "CA", FDIC_SUMMARY_FILTER_FIELDS), 'STALP:"CA"');
+    eq("61 filterTerm positive: YEAR IS allowlisted ⇒ 'YEAR:2023' (bare)", fdicFilterTerm("YEAR", "2023", FDIC_SUMMARY_FILTER_FIELDS), "YEAR:2023");
+  }
+
+  // (wire) end-to-end: year:2023, state:'CA', charterClass:'CB' → filters=YEAR:2023 AND
+  // STALP:"CA" AND CB_SI:"CB", NO `search=` EVER, fixed host/path/https, projection,
+  // sort_by=YEAR&sort_order=DESC (default).
+  await withFetch(fdicSummaryMock({ records: [SUM_CA_CB], total: 1 }), async (calls) => {
+    await runTool("fdic_industry_summary", { year: 2023, state: "CA", charterClass: "CB" }, sam);
+    const url = fdicSummaryUrl(calls);
+    const c = calls.find((x) => isFdicSummary(x.url));
+    ok("61 ★S2 wire: filters === 'YEAR:2023 AND STALP:\"CA\" AND CB_SI:\"CB\"' (STALP not PSTALP; ★C118 state/charter QUOTED, YEAR bare)", !!url && url.searchParams.get("filters") === 'YEAR:2023 AND STALP:"CA" AND CB_SI:"CB"', JSON.stringify(url?.searchParams.get("filters")));
+    ok("61 ★S3 wire: NO `search=` param is EVER emitted on /summary (the `search` param is a no-op that floods the whole year ⇒ RED)", !!url && url.searchParams.get("search") === null, JSON.stringify({ search: url?.searchParams.get("search") }));
+    ok("61 SSRF fixed host/path/https: https://api.fdic.gov/banks/summary; filters is a query param (NOT the path)", !!url && url.hostname === "api.fdic.gov" && url.protocol === "https:" && url.pathname === "/banks/summary", JSON.stringify(c?.url));
+    ok("61 SSRF redirect:'error' + keyless (NO headers — byte-clean init) on the summary fetch (drop redirect ⇒ RED)", !!c && c.init && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
+    ok("61 fixed field projection: fields=YEAR,CB_SI,STNAME,STALP,STNUM,BANKS,OFFICES,BRANCHES,NUMEMP,ASSET,DEP,NETINC,EQ,NIM,ID + format=json + sort_by=YEAR&sort_order=DESC (default)",
+      url.searchParams.get("fields") === "YEAR,CB_SI,STNAME,STALP,STNUM,BANKS,OFFICES,BRANCHES,NUMEMP,ASSET,DEP,NETINC,EQ,NIM,ID" && url.searchParams.get("format") === "json" && url.searchParams.get("sort_by") === "YEAR" && url.searchParams.get("sort_order") === "DESC", JSON.stringify(url?.search));
+  });
+
+  // (★C118 OR-fix) state:'OR' (Oregon) — the only 2-letter code that collides with a
+  // Lucene operator. Unquoted `STALP:OR` → live HTTP 400; the quoted `STALP:"OR"` is safe.
+  await withFetch(fdicSummaryMock({ records: [{ ...SUM_CA_CB, STNAME: "Oregon", STALP: "OR", STNUM: "41", ID: "CB_2023_OR" }], total: 2 }), async (calls) => {
+    const r = await runTool("fdic_industry_summary", { year: 2023, state: "OR" }, sam);
+    const url = fdicSummaryUrl(calls);
+    const c = calls.find((x) => isFdicSummary(x.url));
+    ok("61 ★C118 wire: state:'OR' ⇒ decoded filters === 'YEAR:2023 AND STALP:\"OR\"' (QUOTED; revert to bare `STALP:OR` ⇒ RED = live HTTP 400 hard-fail)", !!url && url.searchParams.get("filters") === 'YEAR:2023 AND STALP:"OR"', JSON.stringify(url?.searchParams.get("filters")));
+    ok("61 ★C118 raw URL carries STALP%3A%22OR%22 and NEVER the bare STALP%3AOR", !!c && /STALP%3A%22OR%22/.test(c.url) && !/STALP%3AOR(?!%22)/.test(c.url), JSON.stringify(c?.url));
+    ok("61 ★C118 Oregon returns rows (isRollup:false, scope jurisdiction) — NOT a thrown 400", r.data.summary.length === 1 && r.data.summary[0].stateCode === "OR" && r.data.summary[0].isRollup === false && r.data.summary[0].scope === "jurisdiction", JSON.stringify({ n: r.data.summary.length }));
+  });
+
+  // (★S2 scope/isRollup output) a mixed page: 4 roll-ups + CA jurisdiction + AS territory.
+  await withFetch(fdicSummaryMock({ records: [SUM_USA_CB, SUM_US_CB, SUM_OT_CB, SUM_PI_CB, SUM_CA_CB, SUM_AS_CB], total: 121 }), async () => {
+    const r = await runTool("fdic_industry_summary", { year: 2023, charterClass: "CB" }, sam);
+    const by = Object.fromEntries(r.data.summary.map((row) => [row.stateCode, row]));
+    ok("61 ★S2 USA ⇒ scope 'national_total' + isRollup:true (a roll-up flagged jurisdiction/false ⇒ RED = double-count risk)", by.USA.scope === "national_total" && by.USA.isRollup === true, JSON.stringify({ s: by.USA.scope, r: by.USA.isRollup }));
+    ok("61 ★S2 US ⇒ 'national_states_dc' + isRollup:true", by.US.scope === "national_states_dc" && by.US.isRollup === true, JSON.stringify({ s: by.US.scope }));
+    ok("61 ★S2 OT ⇒ 'territories_total' + isRollup:true", by.OT.scope === "territories_total" && by.OT.isRollup === true, JSON.stringify({ s: by.OT.scope }));
+    ok("61 ★S2 PI ⇒ 'pacific_islands' + isRollup:true", by.PI.scope === "pacific_islands" && by.PI.isRollup === true, JSON.stringify({ s: by.PI.scope }));
+    ok("61 ★S2 CA ⇒ 'jurisdiction' + isRollup:false (a real state flagged a roll-up ⇒ RED)", by.CA.scope === "jurisdiction" && by.CA.isRollup === false, JSON.stringify({ s: by.CA.scope, r: by.CA.isRollup }));
+    ok("61 ★S2 AS (territory) ⇒ 'jurisdiction' + isRollup:false (an individual territory is NOT a roll-up)", by.AS.scope === "jurisdiction" && by.AS.isRollup === false, JSON.stringify({ s: by.AS.scope }));
+    // raw geography label always projected (a fall-through STALP is never silently mislabeled)
+    ok("61 output: stateCode←STALP, geography←STNAME, stateFips←STNUM always projected (USA: 'USA'/'All States and Territories'/'0')", by.USA.stateCode === "USA" && by.USA.geography === "All States and Territories" && by.USA.stateFips === "0", JSON.stringify({ sc: by.USA.stateCode, g: by.USA.geography, f: by.USA.stateFips }));
+  });
+
+  // (★S4 NIM + counts + ★S1 charter + money ×1000) the CA units-matrix row (all fields present).
+  await withFetch(fdicSummaryMock({ records: [SUM_CA_CB], total: 1 }), async () => {
+    const row = (await runTool("fdic_industry_summary", { year: 2023, state: "CA", charterClass: "CB" }, sam)).data.summary[0];
+    ok("61 ★S4 netInterestIncomeUSD === NIM×1000 = 15,588,542,000 (NIM is INCOME in $thousands, NOT a ratio; surface raw / as a margin ⇒ RED)", row.netInterestIncomeUSD === 15588542 * 1000, JSON.stringify(row.netInterestIncomeUSD));
+    ok("61 ★S4 institutionCount === BANKS 119 UN-scaled (a count ×1000 = 119000 ⇒ RED = a gross fabrication)", row.institutionCount === 119, JSON.stringify(row.institutionCount));
+    ok("61 ★S4 officeCount/branchCount/employeeCount are counts un-scaled (5707/5588/37692 — ×1000 ⇒ RED)", row.officeCount === 5707 && row.branchCount === 5588 && row.employeeCount === 37692, JSON.stringify({ o: row.officeCount, b: row.branchCount, e: row.employeeCount }));
+    ok("61 ★money totalAssetsUSD/totalDepositsUSD/netIncomeUSD/totalEquityUSD === field×1000 (drop ×1000 ⇒ RED)", row.totalAssetsUSD === 515536280 * 1000 && row.totalDepositsUSD === 414471118 * 1000 && row.netIncomeUSD === 413928 * 1000 && row.totalEquityUSD === 59022119 * 1000, JSON.stringify({ a: row.totalAssetsUSD, d: row.totalDepositsUSD }));
+    ok("61 ★S1 charterClass === 'commercial_banks' + charterClassCode 'CB' (mismap/fabricate ⇒ RED)", row.charterClass === "commercial_banks" && row.charterClassCode === "CB", JSON.stringify({ cc: row.charterClass, code: row.charterClassCode }));
+    eq("61 output: year←num(YEAR) 2023 (string field → int)", row.year, 2023);
+  });
+
+  // (★S4/P3 genuine-0 vs absent) American Samoa (genuine 0 stays 0) + Guam (absent → null, never 0).
+  await withFetch(fdicSummaryMock({ records: [SUM_AS_CB, SUM_GU_NULL], total: 2 }), async () => {
+    const r = await runTool("fdic_industry_summary", { year: 2023, state: "AS" }, sam);
+    const as = r.data.summary.find((x) => x.stateCode === "AS");
+    const gu = r.data.summary.find((x) => x.stateCode === "GU");
+    ok("61 ★P3 American Samoa GENUINE-0: institutionCount 0, totalAssetsUSD 0, netInterestIncomeUSD 0 (a territory with no commercial banks — turn a genuine 0 to null ⇒ RED)", as.institutionCount === 0 && as.totalAssetsUSD === 0 && as.netInterestIncomeUSD === 0, JSON.stringify({ ic: as.institutionCount, ta: as.totalAssetsUSD, nim: as.netInterestIncomeUSD }));
+    ok("61 ★P3 Guam ABSENT: institutionCount null (no BANKS key → null, NEVER 0), totalAssetsUSD null (ASSET:null → null; ×1000-before-null-guard would make it 0 ⇒ RED)", gu.institutionCount === null && gu.totalAssetsUSD === null && gu.netInterestIncomeUSD === null, JSON.stringify({ ic: gu.institutionCount, ta: gu.totalAssetsUSD }));
+    ok("61 ★S1 Guam charterClass 'savings_institutions' (SI map)", gu.charterClass === "savings_institutions", JSON.stringify(gu.charterClass));
+  });
+
+  // (disclosure notes) the load-bearing roll-up double-count-prevention note + charter +
+  // units (NIM=income) + scope + freshness + source-inline, all present & non-vacuous.
+  await withFetch(fdicSummaryMock({ records: [SUM_USA_CB, SUM_CA_CB], total: 121 }), async () => {
+    const m = buildMeta((await runTool("fdic_industry_summary", { year: 2023, charterClass: "CB" }, sam)).meta);
+    ok("61 ★S2 the ROLL-UP double-count-prevention note is present (isRollup:true = roll-up totals; NEVER sum a roll-up with jurisdiction rows / across scopes; a geography = CB + SI) — drop it ⇒ RED",
+      m.notes.some((n) => /ROLL-UP totals/.test(n) && /NEVER sum/.test(n) && /isRollup/.test(n) && /CB row \+ its SI row/.test(n)), JSON.stringify(m.notes));
+    ok("61 ★S1 the charter-split note (CB=commercial_banks, SI=savings_institutions; NO pre-combined row) is present", m.notes.some((n) => /ONE charter class/.test(n) && /NO pre-combined/.test(n)), JSON.stringify(m.notes));
+    ok("61 ★S4 the units note discloses NIM is net interest INCOME (NOT the margin ratio) + $thousands→USD ×1000 + counts not scaled + NO ratio fields",
+      m.notes.some((n) => /net interest INCOME/.test(n) && /NOT the net-interest-margin ratio/.test(n) && /COUNTS \(not scaled\)/.test(n) && /NO ratio fields/.test(n)), JSON.stringify(m.notes));
+    ok("61 ★S3 the name-search scope note (no institution-name search; `search` ignored → whole year; drill via fdic_search_institutions) is present", m.notes.some((n) => /no institution-name search/.test(n) && /fdic_search_institutions/.test(n)), JSON.stringify(m.notes));
+    ok("61 ★freshness: the summary snapshot name risview_aggregate_1781008283694 + createTimestamp 2026-06-09T12:31:23Z are disclosed (drop ⇒ RED)", m.notes.some((n) => /risview_aggregate_1781008283694/.test(n) && /2026-06-09T12:31:23Z/.test(n) && /snapshot/i.test(n)), JSON.stringify(m.notes));
+    ok("61 source set INLINE (A1) to the summary endpoint provenance (no synthesizeDefaultMeta branch)", m.source === "api.fdic.gov/banks/summary (BankFind, keyless)", JSON.stringify(m.source));
+  });
+
+  // (P1) totalAvailable === meta.total 121 (NOT page length) — pagination is load-bearing.
+  await withFetch(fdicSummaryMock({ records: [SUM_USA_CB, SUM_CA_CB], total: 121 }), async () => {
+    const m = buildMeta((await runTool("fdic_industry_summary", { year: 2023, limit: 2 }, sam)).meta);
+    ok("61 ★P1 totalAvailable === meta.total 121 (NOT records.length 2 — mutate→page length ⇒ RED); returned 2 ⇒ hasMore:true, nextOffset:2, complete:false",
+      m.totalAvailable === 121 && m.returned === 2 && m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.complete === false, JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
+  });
+  // offset stability: total 121 stable across offset 120; the last page has hasMore:false
+  // (no further page to fetch) yet returned 1 < 121 ⇒ this single-row page is still a
+  // PARTIAL view of the 121-row set ⇒ truncated:true / complete:false (honest).
+  await withFetch(fdicSummaryMock({ records: [SUM_CA_CB], total: 121 }), async () => {
+    const m = buildMeta((await runTool("fdic_industry_summary", { year: 2023, limit: 1, offset: 120 }, sam)).meta);
+    ok("61 ★P1 offset 120 + returned 1 ⇒ 120+1===121 ⇒ hasMore:false, nextOffset:null (last page, no more to fetch); total 121 stable across offset; returned 1<121 ⇒ truncated:true/complete:false (a 1-row page is not the whole set)",
+      m.totalAvailable === 121 && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.truncated === true && m.complete === false, JSON.stringify(m.pagination));
+  });
+
+  // (P2) 3-envelope guard — 400 errors[] ⇒ invalid_input (detail not leaked); 404 ⇒
+  // not_found; non-JSON ⇒ schema_drift; 200-missing-meta/data ⇒ drift.
+  const SUM_SECRET = "search_phase_execution_exception SUM_LEAK_9z";
+  await withFetch((u) => (isFdicSummary(u) ? mockResponse({ status: 400, json: { errors: [{ status: 400, detail: SUM_SECRET }] } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_industry_summary", { year: 2023 }, sam));
+    const te = toToolError(r.error);
+    ok("61 ★P2 400 errors[] ⇒ invalid_input AND the raw ES `detail` is NOT leaked", r.threw && te.kind === "invalid_input" && !JSON.stringify(te).includes(SUM_SECRET), JSON.stringify({ kind: te.kind }));
+  });
+  await withFetch((u) => (isFdicSummary(u) ? mockResponse({ status: 404, json: { message: "Cannot GET /banks/summarz", statusCode: 404 } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_industry_summary", { year: 2023 }, sam));
+    ok("61 ★P2 404 {message,statusCode} ⇒ not_found THROW (never a fake empty)", r.threw && toToolError(r.error).kind === "not_found", JSON.stringify(toToolError(r.error).kind));
+  });
+  const sumHtmlResp = () => ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON"); }, text: async () => "<html>down</html>" });
+  await withFetch((u) => (isFdicSummary(u) ? sumHtmlResp() : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_industry_summary", { year: 2023 }, sam));
+    ok("61 ★P2 200 non-JSON body ⇒ schema_drift (never a fake-empty)", r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(toToolError(r.error).kind));
+  });
+  for (const [json, why] of [
+    [{ errors: [{ status: 400 }] }, "meta+data missing (errors[] shape at 200)"],
+    [{ meta: { total: 5 }, data: "not-an-array" }, "data is a string"],
+    [{ meta: {}, data: [] }, "meta.total absent"],
+    [{ meta: { total: "5" }, data: [] }, "meta.total a string (typeof-check before num)"],
+  ]) {
+    await withFetch((u) => (isFdicSummary(u) ? mockResponse({ status: 200, json }) : failClosed()()), async () => {
+      const r = await expectThrow(() => runTool("fdic_industry_summary", { year: 2023 }, sam));
+      ok(`61 ★P2 3-envelope: 200 with ${why} ⇒ schema_drift throw (never [] + complete:true)`, r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(toToolError(r.error).kind));
+    });
+  }
+
+  // (genuine-empty) — the ONLY honest empty: total:0 + data:[] ⇒ complete:true.
+  await withFetch(fdicSummaryMock({ records: [], total: 0 }), async () => {
+    const r = await runTool("fdic_industry_summary", { year: 1934 }, sam);
+    const m = buildMeta(r.meta);
+    ok("61 genuine-empty (meta.total:0 + data:[]) ⇒ returned:0, totalAvailable:0, complete:true, truncated:false (a real no-match — the ONLY honest empty)",
+      r.data.summary.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.returned === 0, JSON.stringify(m));
+  });
+
+  // (sortBy allowlist) — unknown sortBy ⇒ invalid_input BEFORE fetch (0 fetch), both the
+  // module (Set.has) and the runTool (Zod enum) paths.
+  await withFetch(failClosed(), async (calls) => {
+    const r = await expectThrow(() => fdicIndustrySummary({ sortBy: "NOTAFIELD" }));
+    ok("61 ★sortBy Set.has (module): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch (widen the Set ⇒ RED = sort_by=NOTAFIELD reaches the wire, live 400)", r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: r.threw ? toToolError(r.error).kind : null, fetches: calls.length }));
+    const rz = await expectThrow(() => runTool("fdic_industry_summary", { sortBy: "NOTAFIELD" }, sam));
+    ok("61 ★sortBy Zod enum (runTool): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch (widen the enum ⇒ RED)", rz.threw && toToolError(rz.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: rz.threw ? toToolError(rz.error).kind : null, fetches: calls.length }));
+  });
+
+  // (SSRF bounds + non-int year) — Zod bound/format guards ⇒ invalid_input, 0 fetch. The
+  // non-int year guard is LOAD-BEARING (it prevents the live HTTP-200 total:0 false-empty).
+  await withFetch(failClosed(), async (calls) => {
+    for (const [args, why] of [
+      [{ limit: 5000 }, "limit>1000"],
+      [{ offset: -1 }, "offset<0"],
+      [{ offset: 200000 }, "offset>100000"],
+      [{ state: "california" }, "state not 2-3-upper"],
+      [{ year: 2023.5 }, "year non-int (guards the live HTTP-200 total:0 false-empty on YEAR:notanum)"],
+      [{ year: 1900 }, "year<1934"],
+      [{ year: 3000 }, "year>currentUtcYear"],
+      [{ charterClass: "XX" }, "charterClass not CB/SI"],
+    ]) {
+      const before = calls.length;
+      const r = await expectThrow(() => runTool("fdic_industry_summary", args, sam));
+      ok(`61 SSRF Zod bound/format guard (${why}) ⇒ invalid_input, 0 fetch`, r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: r.threw ? toToolError(r.error).kind : null, added: calls.length - before }));
+    }
+  });
+}
+
 // §45: api.data.gov KEYED trio (ADR-0007) — Regulations.gov + Congress.gov. The
 // project's FIRST keyed source. The load-bearing guarantee is the KEY-NEVER-LEAKS
 // discipline (§2): the secret rides ONLY in the X-Api-Key header, never the URL /
@@ -12556,6 +12797,7 @@ async function main() {
   await testFdicHonesty();
   await testFdicFailuresHonesty();
   await testFdicHistoryHonesty();
+  await testFdicSummaryHonesty();
   await testDatagovHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
