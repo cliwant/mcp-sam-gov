@@ -889,6 +889,46 @@ const tests = [
       /^\d{5,9}$/.test(String(r.award.id)) &&
       typeof r.award.abstractText === "string",
   },
+  // ━━━ ClinicalTrials.gov API v2 — keyless clinical-study registrations (ADR-0021, source #21)
+  // Live-hits clinicaltrials.gov (keyless). sponsor='Pfizer' is a stable multi-thousand
+  // scoped total; every row carries the sponsor/org/funding entity-enrichment payload
+  // (leadSponsor.{name,class} + an NCT id). countTotal=true ⇒ an exact filtered total.
+  // A live transient (5xx/timeout/429) is TOLERATED as a pass-with-note.
+  {
+    name: "clinicaltrials_search_studies",
+    args: { sponsor: "Pfizer", pageSize: 3 },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      Array.isArray(r.studies) &&
+      r.studies.length >= 1 &&
+      r.studies.length <= 3 &&
+      r.studies.every(
+        (s) =>
+          s !== null &&
+          typeof s === "object" &&
+          /^NCT\d{8}$/.test(String(s.nctId)) &&
+          s.leadSponsor !== null &&
+          typeof s.leadSponsor === "object",
+      ),
+  },
+  {
+    // Full-record deep-dive (incl. briefSummary) for the first nctId from the search
+    // above (chained — no hardcoded id). A nonexistent id ⇒ found:false; a live
+    // transient is tolerated.
+    name: "clinicaltrials_get_study",
+    args: { nctId: "FETCH_FROM_PRIOR" },
+    chain: { from: "clinicaltrials_search_studies", path: "studies[0].nctId" },
+    tolerateError: (env) =>
+      env?.error?.kind === "upstream_unavailable" ||
+      env?.error?.kind === "rate_limited",
+    verify: (r) =>
+      r.found === true &&
+      r.study !== null &&
+      typeof r.study === "object" &&
+      /^NCT\d{8}$/.test(String(r.study.nctId)),
+  },
   // ━━━ EPA ECHO REST — keyless facility compliance/enforcement (ADR-0009)
   // Live-hits echodata.epa.gov (keyless). A live transient (5xx/timeout/429) is
   // acceptable and TOLERATED as a pass-with-note (the honest taxonomy, not a code
