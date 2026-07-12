@@ -587,6 +587,117 @@
     }
   },
   {
+    "name": "fema_disaster_declarations",
+    "description": "Look up FEMA disaster / emergency declarations by state, type, incident, year, or date (keyless OpenFEMA, dataset DisasterDeclarationsSummaries v2, ~70k rows). Structured filters (module-built into an OData $filter; each LIVE-VERIFIED to narrow): `state` (→ state), `incidentType` (e.g. 'Flood'), `declarationType` (DR/EM/FM), `fyDeclared`, `disasterNumber`, `declaredDateFrom`/`declaredDateTo` (declarationDate ge/le), `paProgramDeclared`/`iaProgramDeclared` (booleans). `limit` (≤1000, def 100 → $top), `offset` (→ $skip). HONESTY: the module ALWAYS sends $inlinecount=allpages so totalAvailable is the EXACT filtered total (metadata.count), never the page length; genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). NOTE: per-dataset OData field names differ — 'state' here is the real field, whereas the public-assistance tool maps 'state' to 'stateAbbreviation'.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "Filter by state (→ state eq 'XX'). 2-letter code."
+        },
+        "incidentType": {
+          "type": "string",
+          "description": "Filter by incident type (→ incidentType eq '...'). e.g. 'Flood', 'Hurricane', 'Winter Storm'."
+        },
+        "declarationType": {
+          "type": "string",
+          "enum": [
+            "DR",
+            "EM",
+            "FM"
+          ],
+          "description": "Filter by declaration type (→ declarationType eq 'XX'): DR (major disaster), EM (emergency), FM (fire management)."
+        },
+        "fyDeclared": {
+          "type": "number",
+          "description": "Filter by fiscal year declared (→ fyDeclared eq N). e.g. 2024."
+        },
+        "disasterNumber": {
+          "type": "number",
+          "description": "Filter by FEMA disaster number (→ disasterNumber eq N)."
+        },
+        "declaredDateFrom": {
+          "type": "string",
+          "description": "Earliest declaration date, inclusive (→ declarationDate ge 'ISO')."
+        },
+        "declaredDateTo": {
+          "type": "string",
+          "description": "Latest declaration date, inclusive (→ declarationDate le 'ISO')."
+        },
+        "paProgramDeclared": {
+          "type": "boolean",
+          "description": "Filter to declarations where the Public Assistance program was declared (→ paProgramDeclared eq true/false)."
+        },
+        "iaProgramDeclared": {
+          "type": "boolean",
+          "description": "Filter to declarations where the Individual Assistance program was declared (→ iaProgramDeclared eq true/false)."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page ($top), 1..1000, default 100."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset ($skip) for pagination, default 0."
+        }
+      }
+    }
+  },
+  {
+    "name": "fema_search_public_assistance",
+    "description": "Search FEMA Public Assistance funded projects — federal emergency-assistance spend to state/local/tribal applicants (keyless OpenFEMA, dataset PublicAssistanceFundedProjectsDetails v2, ~800k rows). Structured filters (module-built into an OData $filter; each LIVE-VERIFIED to narrow): `state` (→ stateAbbreviation), `disasterNumber`, `applicantId`, `damageCategoryCode` (e.g. 'B' = Emergency Protective Measures), `incidentType`, `minProjectAmount`/`maxProjectAmount` (projectAmount ge/le), `declaredDateFrom`/`declaredDateTo` (declarationDate ge/le). `limit` (≤1000, def 100 → $top), `offset` (→ $skip). HONESTY: the module ALWAYS sends $inlinecount=allpages so totalAvailable is the EXACT filtered total (metadata.count), never the page length; amount fields are number|null (a real 0 stays 0, absent → null); genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "Filter by applicant state (→ stateAbbreviation eq 'XX'). 2-letter code."
+        },
+        "disasterNumber": {
+          "type": "number",
+          "description": "Filter by FEMA disaster number (→ disasterNumber eq N)."
+        },
+        "applicantId": {
+          "type": "string",
+          "description": "Filter by applicant id (→ applicantId eq '...'). e.g. '015-UF5E0-00'."
+        },
+        "damageCategoryCode": {
+          "type": "string",
+          "description": "Filter by PA damage category code (→ damageCategoryCode eq 'X'). e.g. 'B' = Emergency Protective Measures, 'C'–'G' = permanent work."
+        },
+        "incidentType": {
+          "type": "string",
+          "description": "Filter by incident type (→ incidentType eq '...'). e.g. 'Flood', 'Hurricane', 'Severe Storm'."
+        },
+        "minProjectAmount": {
+          "type": "number",
+          "description": "Minimum project amount (→ projectAmount ge N)."
+        },
+        "maxProjectAmount": {
+          "type": "number",
+          "description": "Maximum project amount (→ projectAmount le N)."
+        },
+        "declaredDateFrom": {
+          "type": "string",
+          "description": "Earliest declaration date, inclusive (→ declarationDate ge 'ISO')."
+        },
+        "declaredDateTo": {
+          "type": "string",
+          "description": "Latest declaration date, inclusive (→ declarationDate le 'ISO')."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page ($top), 1..1000, default 100."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset ($skip) for pagination, default 0."
+        }
+      }
+    }
+  },
+  {
     "name": "fpds_search_awards",
     "description": "Search FPDS-NG federal contract AWARD ACTIONS (keyless ATOM) — the AUTHORITATIVE system-of-record for contract actions (each modification is its own transaction), the source USAspending.gov derives from (and lags 1-2 days). Structured filters ONLY, AND-combined (NO raw query — a typo'd FPDS field name is a SILENT ZERO, so the tool builds the fielded q): naics (PRINCIPAL_NAICS_CODE), vendorName, piid, departmentId, contractingAgencyName, signedDate range (from/to ISO), lastModified range, keyword. At least one filter is REQUIRED. Returns award/IDV rows { piid, modNumber, parentIdvPiid, actionType, signedDate, vendorName, vendorUei, ultimateParentUei, obligatedAmount, totalObligatedAmount, naics, psc, placeOfPerformanceState, extentCompeted, setAside, businessSize, socioeconomic, … } (content root is award OR IDV — both parse). HONESTY: page size is FIXED at 10; for >10 results totalAvailable is a LOWER BOUND (totalIsLowerBound:true; true count ∈ [total, total+9]) and you MUST paginate by pagination.hasMore (page-fullness), NEVER by totalAvailable (keyless deep-paging is capped ~200K far below the advertised total). Genuine-empty (offset 0) ⇒ complete:true/total:0 + a silent-zero disclosure; an empty page at offset>0 ⇒ totalAvailable:null/complete:false (deep-paging ceiling, ambiguous); an HTML/non-feed body or an all-null-piid page ⇒ schema_drift (never a fake empty); an outage/5xx/timeout THROWS. Amounts are number|null (a 0.00 obligation and negative de-obligations are REAL, absent ⇒ null). Prefer usas_* tools for spending rollups / sub-award graphs.",
     "inputSchema": {

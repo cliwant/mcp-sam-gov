@@ -40,6 +40,7 @@ import * as datagov from "./datagov.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
+import * as fema from "./fema.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
@@ -949,6 +950,122 @@ const CkanDiscoverDatasetsInput = z.object({
         .max(100)
         .default(20)
         .describe("Max datasets (packages) to return, 1..100, default 20."),
+});
+// ─── OpenFEMA (keyless disaster declarations + emergency-assistance spend) ──────
+// ADR-0016. KEYLESS, fixed host www.fema.gov + a PINNED dataset registry
+// {entityName, version} (the SSRF core — no free host/path/version). Filters are
+// MODULE-BUILT from a per-tool, LIVE-VERIFIED field whitelist into an OData
+// `$filter` (NO raw `$filter` arg exists — no injection surface); the module
+// ALWAYS sends `$inlinecount=allpages` so metadata.count is the EXACT filtered
+// total. Per-dataset field names DIFFER (M1): the PA tool's `state` maps to
+// `stateAbbreviation`, the declarations tool's `state` maps to `state` — a shared
+// user-facing arg over two different real OData fields. limit → $top (≤1000),
+// offset → $skip.
+// A 2-letter US state/territory code (uppercase; e.g. CA, LA, PR, DC). A bad value
+// is NOT an SSRF vector (the fixed host + dataset registry are) — it just returns
+// an honest genuine-empty (metadata.count:0), never a silent unfiltered set.
+const FemaStateSchema = z
+    .string()
+    .regex(/^[A-Za-z]{2}$/)
+    .describe("2-letter US state / territory code (e.g. 'CA', 'LA', 'PR', 'DC'). Uppercase per FEMA; a bad code returns an honest empty (count 0).");
+// ISO date 'YYYY-MM-DD' or a full ISO datetime. A bare date = midnight-UTC start.
+const FemaDateSchema = z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z?)?$/)
+    .describe("ISO date 'YYYY-MM-DD' or full ISO datetime; a bare date is midnight-UTC start of that day.");
+const FemaSearchPublicAssistanceInput = z.object({
+    state: FemaStateSchema.optional().describe("Filter by applicant state (→ stateAbbreviation eq 'XX'). 2-letter code."),
+    disasterNumber: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Filter by FEMA disaster number (→ disasterNumber eq N)."),
+    applicantId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Filter by applicant id (→ applicantId eq '...'). e.g. '015-UF5E0-00'."),
+    damageCategoryCode: z
+        .string()
+        .min(1)
+        .max(2)
+        .optional()
+        .describe("Filter by PA damage category code (→ damageCategoryCode eq 'X'). e.g. 'B' = Emergency Protective Measures, 'C'–'G' = permanent work."),
+    incidentType: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Filter by incident type (→ incidentType eq '...'). e.g. 'Flood', 'Hurricane', 'Severe Storm'."),
+    minProjectAmount: z
+        .number()
+        .optional()
+        .describe("Minimum project amount (→ projectAmount ge N)."),
+    maxProjectAmount: z
+        .number()
+        .optional()
+        .describe("Maximum project amount (→ projectAmount le N)."),
+    declaredDateFrom: FemaDateSchema.optional().describe("Earliest declaration date, inclusive (→ declarationDate ge 'ISO')."),
+    declaredDateTo: FemaDateSchema.optional().describe("Latest declaration date, inclusive (→ declarationDate le 'ISO')."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page ($top), 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("0-based row offset ($skip) for pagination, default 0."),
+});
+const FemaDisasterDeclarationsInput = z.object({
+    state: FemaStateSchema.optional().describe("Filter by state (→ state eq 'XX'). 2-letter code."),
+    incidentType: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Filter by incident type (→ incidentType eq '...'). e.g. 'Flood', 'Hurricane', 'Winter Storm'."),
+    declarationType: z
+        .enum(["DR", "EM", "FM"])
+        .optional()
+        .describe("Filter by declaration type (→ declarationType eq 'XX'): DR (major disaster), EM (emergency), FM (fire management)."),
+    fyDeclared: z
+        .number()
+        .int()
+        .optional()
+        .describe("Filter by fiscal year declared (→ fyDeclared eq N). e.g. 2024."),
+    disasterNumber: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Filter by FEMA disaster number (→ disasterNumber eq N)."),
+    declaredDateFrom: FemaDateSchema.optional().describe("Earliest declaration date, inclusive (→ declarationDate ge 'ISO')."),
+    declaredDateTo: FemaDateSchema.optional().describe("Latest declaration date, inclusive (→ declarationDate le 'ISO')."),
+    paProgramDeclared: z
+        .boolean()
+        .optional()
+        .describe("Filter to declarations where the Public Assistance program was declared (→ paProgramDeclared eq true/false)."),
+    iaProgramDeclared: z
+        .boolean()
+        .optional()
+        .describe("Filter to declarations where the Individual Assistance program was declared (→ iaProgramDeclared eq true/false)."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page ($top), 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("0-based row offset ($skip) for pagination, default 0."),
 });
 // ─── EPA ECHO REST (keyless facility compliance/enforcement) — input schemas ──
 // ADR-0009. KEYLESS, single fixed host (echodata.epa.gov) + three fixed service
@@ -2113,6 +2230,19 @@ const TOOLS = [
         description: "Find CKAN datastore resource ids by keyword via package_search (keyless). Input `host` (allowlisted enum), `q` (e.g. 'procurement', 'checkbook'), `limit` (≤100, def 20). Returns per-resource rows [{ resourceId, name, datasetTitle, format, datastoreActive }] + totalAvailable = the matching DATASET count. Feed a datastoreActive:true result's `resourceId` to ckan_query (a datastoreActive:false resource is a raw file blob NOT in the datastore, not queryable).",
         inputSchema: CkanDiscoverDatasetsInput,
         handler: (input) => ckan.discoverDatasets(input),
+    }),
+    // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (2) ━━━ ADR-0016
+    defineTool({
+        name: "fema_search_public_assistance",
+        description: "Search FEMA Public Assistance funded projects — federal emergency-assistance spend to state/local/tribal applicants (keyless OpenFEMA, dataset PublicAssistanceFundedProjectsDetails v2, ~800k rows). Structured filters (module-built into an OData $filter; each LIVE-VERIFIED to narrow): `state` (→ stateAbbreviation), `disasterNumber`, `applicantId`, `damageCategoryCode` (e.g. 'B' = Emergency Protective Measures), `incidentType`, `minProjectAmount`/`maxProjectAmount` (projectAmount ge/le), `declaredDateFrom`/`declaredDateTo` (declarationDate ge/le). `limit` (≤1000, def 100 → $top), `offset` (→ $skip). HONESTY: the module ALWAYS sends $inlinecount=allpages so totalAvailable is the EXACT filtered total (metadata.count), never the page length; amount fields are number|null (a real 0 stays 0, absent → null); genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty).",
+        inputSchema: FemaSearchPublicAssistanceInput,
+        handler: (input) => fema.searchPublicAssistance(input),
+    }),
+    defineTool({
+        name: "fema_disaster_declarations",
+        description: "Look up FEMA disaster / emergency declarations by state, type, incident, year, or date (keyless OpenFEMA, dataset DisasterDeclarationsSummaries v2, ~70k rows). Structured filters (module-built into an OData $filter; each LIVE-VERIFIED to narrow): `state` (→ state), `incidentType` (e.g. 'Flood'), `declarationType` (DR/EM/FM), `fyDeclared`, `disasterNumber`, `declaredDateFrom`/`declaredDateTo` (declarationDate ge/le), `paProgramDeclared`/`iaProgramDeclared` (booleans). `limit` (≤1000, def 100 → $top), `offset` (→ $skip). HONESTY: the module ALWAYS sends $inlinecount=allpages so totalAvailable is the EXACT filtered total (metadata.count), never the page length; genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). NOTE: per-dataset OData field names differ — 'state' here is the real field, whereas the public-assistance tool maps 'state' to 'stateAbbreviation'.",
+        inputSchema: FemaDisasterDeclarationsInput,
+        handler: (input) => fema.disasterDeclarations(input),
     }),
     // ━━━ FPDS-NG — federal contract AWARD ACTIONS (keyless ATOM) (1) ━━━ ADR-0012
     // The FIRST XML/ATOM source (bounded, ReDoS-safe hand-parser — the far.ts/gao.ts
