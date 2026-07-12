@@ -57,9 +57,10 @@
  *   2026-07-12: `query.spons=sanofi<delim>aventis` == the whitespace count (3) for
  *   space + `- , / ; + & | @ # =`; `. : _ '` do NOT split. So a single-token-LOOKING
  *   compound like "Sanofi-Aventis" is really 'Sanofi' AND 'Aventis' (→3 vs Sanofi
- *   →3416 — a ~1000× silent false-negative). A multi-TOKEN value (split on
- *   CT_TOKEN_SPLIT_RE, not just whitespace) fires a MANDATORY `_meta` AND-note (the
- *   mirror of NSF's OR-note, but AND); a multi-token sponsor SUPPRESSES the
+ *   →3416 — a ~1000× silent false-negative). A multi-TOKEN value (tokenized via the
+ *   shared tokenizeForDisclosure / DISCLOSURE_SPLIT_RE, not just whitespace) fires a
+ *   MANDATORY `_meta` AND-note (the mirror of NSF's OR-note, but AND); a multi-token
+ *   sponsor SUPPRESSES the
  *   contradictory "matches more variants" broadening note (CT NARROWED, not broadened).
  *
  * ★ funderType facets OVERLAP (non-exclusive: nih+fed+industry+other sum >
@@ -71,6 +72,7 @@
 import { num } from "./coerce.js";
 import { type MetaBundle } from "./meta.js";
 export { num };
+export { tokenizeForDisclosure } from "./disclosure.js";
 export declare const CT_STATUSES: readonly ["COMPLETED", "UNKNOWN", "RECRUITING", "TERMINATED", "NOT_YET_RECRUITING", "ACTIVE_NOT_RECRUITING", "WITHDRAWN", "ENROLLING_BY_INVITATION", "SUSPENDED", "WITHHELD", "NO_LONGER_AVAILABLE", "AVAILABLE", "APPROVED_FOR_MARKETING", "TEMPORARILY_NOT_AVAILABLE"];
 export type CtStatus = (typeof CT_STATUSES)[number];
 export declare const CT_FUNDER_TYPES: readonly ["nih", "fed", "industry", "other"];

@@ -53,11 +53,12 @@
  *   =4253; and the hyphen/comma/slash/semicolon/plus/&/|/@/#/= forms all return the
  *   SAME OR union — while `.`/`:`/`_`/`'`/`\`/`*` do NOT split, and `~`/`(`/`)`
  *   loud-fail). The honest-looking (often saturated) totalCount + rows carry NO
- *   signal the tokens were unioned, so when `keyword` contains ANY confirmed
- *   splitter (NSF_KEYWORD_SPLIT_RE — whitespace + the confirmed punctuation set,
- *   NOT just whitespace) the module emits a MANDATORY `_meta.notes` line disclosing
- *   the OR-semantics. This closes the compound-token leak (e.g. "coral-reef" =
- *   coral OR reef, a far broader set than a caller intends).
+ *   signal the tokens were unioned, so when `keyword` splits into 2+ tokens on the
+ *   shared confirmed-splitter class (tokenizeForDisclosure / DISCLOSURE_SPLIT_RE —
+ *   whitespace + the confirmed punctuation set, NOT just whitespace) the module
+ *   emits a MANDATORY `_meta.notes` line disclosing the OR-semantics. This closes
+ *   the compound-token leak (e.g. "coral-reef" = coral OR reef, a far broader set
+ *   than a caller intends).
  *
  * ★ AMOUNTS are STRINGS → `coerce.num` (null-never-0): a real $0 → 0; absent/""/
  *   "null" → null (NEVER 0). `fundsObligatedAmt` (obligated to date) and
@@ -70,6 +71,7 @@
 import { num } from "./coerce.js";
 import { type MetaBundle } from "./meta.js";
 export { num };
+export { tokenizeForDisclosure } from "./disclosure.js";
 export declare const NSF_STATES: readonly ["AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "AS", "GU", "MP", "PR", "VI"];
 export type NsfState = (typeof NSF_STATES)[number];
 export type NsfAward = {

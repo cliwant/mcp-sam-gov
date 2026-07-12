@@ -66,8 +66,10 @@ import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments
 import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
-import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward } from "./dist/nsf.js";
-import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy } from "./dist/clinicaltrials.js";
+import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward, tokenizeForDisclosure as nsfTok } from "./dist/nsf.js";
+import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
+import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
+import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
 import { getJson, getText, isRedirectError, driftError, throughGate } from "./dist/datasource.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
@@ -10233,6 +10235,87 @@ async function testClinicaltrialsHonesty() {
   ok("53-parity clinicaltrials.num === coerce.num (one shared audited impl — NO local num/str in clinicaltrials.ts)", ctNum === coerceNum, "clinicaltrials.num diverged from coerce.num");
 }
 
+// §54: shared disclosure tokenizer (src/disclosure.ts, ADR-0022) — the byte-identical
+// extraction of NSF's OR-note + ClinicalTrials' AND-note tokenizer into ONE audited
+// home, PLUS the lint guardrail against the whitespace-only recurrence adversarial
+// verification caught on TWO sources (NSF C108 OR-note, ClinicalTrials C109 AND-note).
+// NON-VACUOUS, OFFLINE, deterministic. Each assertion names the mutation that turns
+// it RED. This is a BEHAVIOR-PRESERVING refactor: the load-bearing invariants are the
+// class correctness + the end-to-end proof-of-use (NOT the === parity alone, per M2)
+// + the lint firing on the literal AND the named-const alias form (per M1).
+async function testDisclosurePort() {
+  section("§54: shared disclosure tokenizer (tokenizeForDisclosure) + lint guardrail (ADR-0022)");
+  const sam = new SamGovClient({});
+
+  // ── (split) CLASS CORRECTNESS (property). Each confirmed splitter → 2 tokens; each
+  //    confirmed NON-splitter → 1. Mutate DISCLOSURE_SPLIT_RE to /\s+/ (whitespace-
+  //    only) ⇒ the punctuation cases collapse to 1 ⇒ RED (the recurrence). Mutate to
+  //    /[^A-Za-z0-9]+/ (superset) ⇒ a.b / a_b split ⇒ RED (over-disclosure). ──
+  for (const v of ["a-b", "a,b", "a/b", "a;b", "a+b", "a&b", "a|b", "a@b", "a#b", "a=b", "a b"]) {
+    ok(`54-split '${v}' ⇒ 2 tokens (a confirmed ES/Essie splitter — a /\\s+/ regression collapses it to 1 ⇒ RED)`,
+      disclosureTok(v).length === 2, JSON.stringify(disclosureTok(v)));
+  }
+  for (const v of ["a.b", "a:b", "a_b", "a'b"]) {
+    ok(`54-split '${v}' ⇒ 1 token (a confirmed NON-splitter — a [^A-Za-z0-9]+ superset would over-disclose a split the APIs did NOT make ⇒ RED)`,
+      disclosureTok(v).length === 1, JSON.stringify(disclosureTok(v)));
+  }
+  eq("54-split 'coral-reef' ⇒ [coral, reef]", disclosureTok("coral-reef"), ["coral", "reef"]);
+  eq("54-split 'web_service' ⇒ [web_service] (underscore does NOT split — one token)", disclosureTok("web_service"), ["web_service"]);
+  eq("54-split 'robotics' ⇒ [robotics]", disclosureTok("robotics"), ["robotics"]);
+  eq("54-split '   ' (whitespace only) ⇒ [] (trim + empty-drop)", disclosureTok("   "), []);
+  ok("54-split DISCLOSURE_SPLIT_RE is the PRECISE confirmed-splitter class /[\\s,;+&|@#=\\/-]+/ (byte-identical to NSF's + CT's dropped local classes; no flags, stateless)",
+    DISCLOSURE_SPLIT_RE.source === "[\\s,;+&|@#=\\/-]+" && DISCLOSURE_SPLIT_RE.flags === "", JSON.stringify({ src: DISCLOSURE_SPLIT_RE.source, flags: DISCLOSURE_SPLIT_RE.flags }));
+
+  // ── (parity) the delegation is REAL, not a fork: both sources re-export the SAME
+  //    function object. Pins the re-export; NOT the sole proof-of-use (per M2). ──
+  ok("54-parity nsf.tokenizeForDisclosure === disclosure.tokenizeForDisclosure (re-export identity — a local re-implementation in nsf.ts ⇒ RED)", nsfTok === disclosureTok, "nsf.tokenizeForDisclosure diverged");
+  ok("54-parity clinicaltrials.tokenizeForDisclosure === disclosure.tokenizeForDisclosure (re-export identity — a local re-implementation in clinicaltrials.ts ⇒ RED)", ctTok === disclosureTok, "ct.tokenizeForDisclosure diverged");
+  ok("54-parity nsf.tokenizeForDisclosure === clinicaltrials.tokenizeForDisclosure (one shared audited impl feeds BOTH honesty suites)", nsfTok === ctTok, "nsf/ct tokenizer diverged");
+
+  // ── (proof-of-use NSF) [M2] the === parity proves re-export identity, NOT that NSF
+  //    TOKENIZES via the shared class. Drive the REAL tool with a PUNCTUATION keyword
+  //    'a-b': the OR-note must fire listing [a, b] end-to-end (RED under a whitespace-
+  //    only split — the recurrence). The byte-identity proof alongside 52n. ──
+  await withFetch(nsfMock(nsfBody(4289, nsfRows(25))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "a-b" }, sam);
+    const m = buildMeta(r.meta);
+    ok("54-use NSF hyphen keyword 'a-b' ⇒ the OR-note FIRES listing [a, b] via the shared tokenizeForDisclosure (proof-of-use: NSF tokenizes on the punctuation class, not whitespace) — a whitespace-only split ⇒ RED",
+      m.notes.some((n) => /UNION of its tokens/.test(n) && /\[a, b\]/.test(n)), JSON.stringify(m.notes.filter((n) => /UNION/.test(n))));
+  });
+
+  // ── (proof-of-use CT) [M2] sponsor:'Sanofi-Aventis' ⇒ the AND-note fires listing
+  //    [Sanofi, Aventis] AND the contradictory broadening note is SUPPRESSED (mirrors
+  //    53and; RED under a whitespace-only split). ──
+  await withFetch(ctMock(ctBody(3, ctRows(3), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { sponsor: "Sanofi-Aventis" }, sam);
+    const m = buildMeta(r.meta);
+    ok("54-use CT hyphen sponsor 'Sanofi-Aventis' ⇒ the AND-note FIRES listing [Sanofi, Aventis] via the shared tokenizeForDisclosure + the 'matches more variants' broadening note is SUPPRESSED (proof-of-use; whitespace-only split ⇒ RED)",
+      m.notes.some((n) => /must co-occur/.test(n) && /Sanofi, Aventis/.test(n)) && !m.notes.some((n) => /matches related name variants/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── (lint efficacy) [M1] the STRUCTURAL guardrail: a whitespace-only split feeding a
+  //    multi-token disclosure note makes the disclosure lint fire — BOTH the literal
+  //    .split(/\s+/) form AND the named-const alias (const X=/\s+/; …split(X)), the very
+  //    idiom NSF/CT used (a literal-only rule would MISS it). The marker suppresses; the
+  //    punctuation class + tokenizeForDisclosure + an out-of-window split are exempt
+  //    (0 false positives). Runs the REAL detector from lint-invariants.mjs on fixtures. ──
+  const disclosureGate = '  if (tokens.length > 1) notes.push("multi-word OR-disclosure note");';
+  const wsLiteral = ["const notes = [];", "const tokens = value.trim().split(/\\s+/).filter((t) => t.length > 0);", disclosureGate].join("\n");
+  const wsAlias = ["const WS = /\\s+/;", "const tokens = value.trim().split(WS).filter((t) => t.length > 0);", disclosureGate].join("\n");
+  const wsMarked = ["// disclosure-split-ok: verified whitespace-only analyzer", "const tokens = value.trim().split(/\\s+/).filter((t) => t.length > 0);", disclosureGate].join("\n");
+  const punctAlias = ["const DISCLOSURE_SPLIT_RE = /[\\s,;+&|@#=\\/-]+/;", "const tokens = value.trim().split(DISCLOSURE_SPLIT_RE).filter((t) => t.length > 0);", disclosureGate].join("\n");
+  const helperCall = ["const tokens = tokenizeForDisclosure(value);", disclosureGate].join("\n");
+  const outsideWindow = ["const lines = doc.split(/\\s+/);", "return lines.length;"].join("\n");
+  const V = (s) => findDisclosureSplitViolations(s, "fixture.ts").violations.length;
+  const O = (s) => findDisclosureSplitViolations(s, "fixture.ts").optOuts.length;
+  ok("54-lint [M1] a LITERAL whitespace-only .split(/\\s+/) feeding a multi-token disclosure note ⇒ the lint FIRES (1 violation; delete the rule ⇒ RED)", V(wsLiteral) === 1, `violations=${V(wsLiteral)}`);
+  ok("54-lint [M1] a NAMED-CONST ALIAS (const X=/\\s+/; …split(X)) — the EXACT idiom NSF/CT used — ALSO fires (the literal-only v1 rule would MISS this; the strengthened rule bites the alias ⇒ 1 violation)", V(wsAlias) === 1, `violations=${V(wsAlias)}`);
+  ok("54-lint the `// disclosure-split-ok:` marker SUPPRESSES the literal plant (0 violations, 1 active opt-out) — removing the marker turns it RED again (the marker is load-bearing, not decorative)", V(wsMarked) === 0 && O(wsMarked) === 1, `violations=${V(wsMarked)} optOuts=${O(wsMarked)}`);
+  ok("54-lint the punctuation DISCLOSURE_SPLIT_RE alias is EXEMPT (it carries non-whitespace members — NOT a whitespace-only split) ⇒ 0 violations (a false positive here would break the real nsf/ct delegation)", V(punctAlias) === 0, `violations=${V(punctAlias)}`);
+  ok("54-lint a tokenizeForDisclosure(...) call in a disclosure window is EXEMPT ⇒ 0 violations (the sanctioned tokenizer must never self-flag)", V(helperCall) === 0, `violations=${V(helperCall)}`);
+  ok("54-lint a whitespace split OUTSIDE a disclosure window (no `.length > 1` gate + no disclosure keyword) ⇒ 0 violations (the two-signal gate drives false positives to zero)", V(outsideWindow) === 0, `violations=${V(outsideWindow)}`);
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // §: fetchWithRetry timeout/abort ⇒ fail-fast NON-retryable (ADR-0015)
 // ──────────────────────────────────────────────────────────────────────────
@@ -10456,6 +10539,7 @@ async function main() {
   await testNihHonesty();
   await testNsfHonesty();
   await testClinicaltrialsHonesty();
+  await testDisclosurePort();
   await testFetchWithRetryTimeout();
 
   // Prove the harness bites.
