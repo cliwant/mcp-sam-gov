@@ -46,13 +46,18 @@
  *      genuine result. Genuine-empty is the DISTINCT `totalCount:0`-with-no-
  *      notification shape.
  *
- * ★ [M1] MULTI-WORD KEYWORD OR-TOKENIZATION (normative disclosure): NSF treats a
- *   multi-word `keyword` as a UNION, not a phrase (LIVE-verified: cryptography=
- *   2598 + volcano=1655 → "cryptography volcano"=4253 = the exact union;
- *   "quantum zzznonsense"=10000 — a garbage second word does NOT shrink ⇒ OR, not
- *   AND). The honest-looking (often saturated) totalCount + rows carry NO signal
- *   the terms were unioned, so when `keyword` has inter-word whitespace the module
- *   emits a MANDATORY `_meta.notes` line disclosing the OR-semantics.
+ * ★ [M1] MULTI-TOKEN KEYWORD OR-TOKENIZATION (normative disclosure): NSF's ES
+ *   analyzer OR-splits a `keyword` into tokens and matches ANY of them (a UNION),
+ *   not the phrase — and it splits on whitespace AND PUNCTUATION, not whitespace
+ *   alone (LIVE-verified: cryptography=2598 + volcano=1655 → "cryptography volcano"
+ *   =4253; and the hyphen/comma/slash/semicolon/plus/&/|/@/#/= forms all return the
+ *   SAME OR union — while `.`/`:`/`_`/`'`/`\`/`*` do NOT split, and `~`/`(`/`)`
+ *   loud-fail). The honest-looking (often saturated) totalCount + rows carry NO
+ *   signal the tokens were unioned, so when `keyword` contains ANY confirmed
+ *   splitter (NSF_KEYWORD_SPLIT_RE — whitespace + the confirmed punctuation set,
+ *   NOT just whitespace) the module emits a MANDATORY `_meta.notes` line disclosing
+ *   the OR-semantics. This closes the compound-token leak (e.g. "coral-reef" =
+ *   coral OR reef, a far broader set than a caller intends).
  *
  * ★ AMOUNTS are STRINGS → `coerce.num` (null-never-0): a real $0 → 0; absent/""/
  *   "null" → null (NEVER 0). `fundsObligatedAmt` (obligated to date) and
@@ -100,6 +105,18 @@ const MMDDYYYY_RE = /^(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])\/\d{4}$/;
 // to exactly 7 and risk rejecting an unsampled legitimate id); numeric-only is
 // the actual injection-safety property.
 const AWARD_ID_RE = /^\d{5,9}$/;
+// M1 — NSF's Elasticsearch analyzer OR-tokenizes a keyword on whitespace AND a
+// specific PUNCTUATION set, NOT whitespace alone. LIVE-verified 2026-07-12 (each
+// `wordA<delim>wordB` returned an OR union broader than either single term):
+// space + `- , / ; + & | @ # =` ALL SPLIT; `. : _ ' \ *` do NOT split (kept as one
+// token); `~ ( )` loud-fail as ES query-syntax special chars (already surfaced by
+// the loud-fail guard). So a single-token-LOOKING compound like "coral-reef" is
+// really coral OR reef (a far broader set) — detect multi-token on THIS class (not
+// just whitespace) so the mandatory OR-note is never skipped. The class is the
+// PRECISE confirmed-splitter set (no non-alnum superset — that would over-disclose
+// a union NSF did not make on `.`/`_`/`'`). `-` is placed last (literal); `/` is
+// escaped for the regex-literal delimiter.
+const NSF_KEYWORD_SPLIT_RE = /[\s,;+&|@#=\/-]+/;
 
 // ─── Frozen US state/territory 2-letter USPS enum (UPPERCASE-only) ─
 // Built FROM this array by the Zod enum in server.ts (single source of truth).
@@ -150,9 +167,9 @@ function clampNote(rpp: number): string {
   return `The requested page would cross NSF's ${RETRIEVAL_WINDOW}-record retrieval window; the outgoing page size was reduced to ${rpp} to keep offset+rpp ≤ ${RETRIEVAL_WINDOW} (crossing it triggers a FATAL AwardAPI-004). Records beyond ${RETRIEVAL_WINDOW} are unreachable via this keyless API.`;
 }
 
-/** M1 — the multi-word keyword OR-tokenization disclosure. */
-function orSemanticsNote(words: string[]): string {
-  return `NSF keyword search treats a multi-word term as a UNION — this result matches awards containing ANY of the words [${words.join(", ")}], NOT the exact phrase; the total may be far broader than intended. For a narrower set, use a single distinctive keyword or add a scoping filter (state, UEI, PI, date).`;
+/** M1 — the multi-token keyword OR-tokenization disclosure. */
+function orSemanticsNote(tokens: string[]): string {
+  return `NSF tokenizes a keyword on whitespace AND punctuation (hyphen, comma, slash, semicolon, etc.) and matches it as a UNION of its tokens — this result matches awards containing ANY of [${tokens.join(", ")}], NOT the exact phrase/compound; the total may be far broader than intended. For a narrower set, use a single distinctive keyword or add a scoping filter (state, UEI, PI, date).`;
 }
 
 const SOURCE = "api.nsf.gov /services/v1/awards.json (keyless)";
@@ -539,8 +556,15 @@ export async function searchAwards(args: NsfSearchArgs): Promise<MetaBundle> {
   if (args.keyword !== undefined) {
     params.set("keyword", args.keyword);
     filtersApplied.push("keyword");
-    const words = args.keyword.trim().split(/\s+/).filter((w) => w.length > 0);
-    if (words.length > 1) multiWordKeyword = words; // M1 OR-disclosure trigger
+    // M1: split on NSF's REAL tokenizer delimiters (whitespace AND the confirmed
+    // punctuation splitters — NSF_KEYWORD_SPLIT_RE), so a compound like
+    // "coral-reef" (= coral OR reef) fires the OR-note instead of leaking as one
+    // token through a non-whitespace delimiter.
+    const tokens = args.keyword
+      .trim()
+      .split(NSF_KEYWORD_SPLIT_RE)
+      .filter((t) => t.length > 0);
+    if (tokens.length > 1) multiWordKeyword = tokens; // M1 OR-disclosure trigger
   }
   if (args.awardeeStateCode !== undefined) {
     params.set("awardeeStateCode", args.awardeeStateCode.toUpperCase());

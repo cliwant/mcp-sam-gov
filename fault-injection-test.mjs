@@ -9745,18 +9745,52 @@ async function testNsfHonesty() {
       m.notes.some((n) => /EXACT join key/.test(n)) && m.notes.some((n) => /fundsObligatedAmt = funds obligated to date/.test(n)) && m.notes.some((n) => /rolling basis/.test(n)), JSON.stringify(m.notes));
   });
 
-  // ── (n) [M1] multi-word keyword ⇒ OR-semantics note; single-word ⇒ none. ──
+  // ── (n) [M1] multi-TOKEN keyword ⇒ OR-semantics note on whitespace AND
+  //    punctuation delimiters (NSF's ES analyzer OR-splits on BOTH — live-verified
+  //    2026-07-12: space + - , / ; + & | @ # = all SPLIT into the OR union;
+  //    . : _ ' \ * do NOT split). A whitespace-ONLY detector split(/\s+/) leaks a
+  //    hyphen/comma compound as a single token → the mandatory note is SKIPPED
+  //    (the refuted honesty gap). A genuine single token ⇒ NO note (no over-fire). ──
+  // (n1) whitespace-separated (the original space case — stays GREEN).
   await withFetch(nsfMock(nsfBody(10000, nsfRows(25))), async () => {
     const r = await runTool("nsf_search_awards", { keyword: "machine learning" }, sam);
     const m = buildMeta(r.meta);
-    ok("52n [M1] multi-word keyword 'machine learning' ⇒ a MANDATORY OR-semantics note (matches ANY word, not the phrase; the total may be far broader) listing [machine, learning] — drop it ⇒ RED (the VQ-1 filter-honesty class)",
-      m.notes.some((n) => /treats a multi-word term as a UNION/.test(n) && /machine, learning/.test(n) && /NOT the exact phrase/.test(n)), JSON.stringify(m.notes));
+    ok("52n [M1] whitespace multi-token 'machine learning' ⇒ a MANDATORY OR-semantics note (UNION of its tokens, NOT the phrase) listing [machine, learning] — drop it ⇒ RED (the VQ-1 filter-honesty class)",
+      m.notes.some((n) => /UNION of its tokens/.test(n) && /machine, learning/.test(n) && /NOT the exact phrase/.test(n)), JSON.stringify(m.notes));
   });
+  // (n2) HYPHEN compound (THE refuted gap): 'coral-reef' LOOKS like one word but NSF
+  //      OR-splits the hyphen → coral OR reef (live-verified coral-reef = the OR
+  //      union, broader than either term). RED under the old split(/\s+/): it sees
+  //      ONE token and SKIPS the note.
+  await withFetch(nsfMock(nsfBody(4289, nsfRows(25))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "coral-reef" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52n [M1] HYPHEN compound 'coral-reef' ⇒ the OR-note FIRES listing [coral, reef] (NSF OR-splits on the hyphen → a broad union) — the whitespace-only detector split(/\\s+/) sees one token and SKIPS it ⇒ RED (the refuted honesty gap this fix closes)",
+      m.notes.some((n) => /UNION of its tokens/.test(n) && /coral, reef/.test(n) && /whitespace AND punctuation/.test(n)), JSON.stringify(m.notes));
+  });
+  // (n3) COMMA compound — same OR-split (live-verified cryptography,volcano = union).
+  await withFetch(nsfMock(nsfBody(4253, nsfRows(25))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "cryptography,volcano" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52n [M1] COMMA compound 'cryptography,volcano' ⇒ the OR-note FIRES listing [cryptography, volcano] (NSF OR-splits on the comma) — whitespace-only ⇒ RED",
+      m.notes.some((n) => /UNION of its tokens/.test(n) && /cryptography, volcano/.test(n)), JSON.stringify(m.notes));
+  });
+  // (n4) genuine single token (no splitting delimiter) ⇒ NO note (stays GREEN).
   await withFetch(nsfMock(nsfBody(9038, nsfRows(25))), async () => {
     const r = await runTool("nsf_search_awards", { keyword: "robotics" }, sam);
     const m = buildMeta(r.meta);
-    ok("52n single-word keyword 'robotics' ⇒ NO OR-semantics note (the disclosure fires ONLY on inter-word whitespace, no false-positive noise)",
-      !m.notes.some((n) => /treats a multi-word term as a UNION/.test(n)), JSON.stringify(m.notes.filter((n) => /UNION/.test(n))));
+    ok("52n single token 'robotics' ⇒ NO OR-semantics note (fires ONLY on a real splitter — no false-positive noise)",
+      !m.notes.some((n) => /UNION of its tokens/.test(n)), JSON.stringify(m.notes.filter((n) => /UNION/.test(n))));
+  });
+  // (n5) NON-splitting punctuation ('web_service' underscore) ⇒ NO note — NSF keeps
+  //      it ONE token (live-verified _ / . / : / ' do NOT split), so firing here
+  //      would be OVER-disclosure (a union NSF did not make). Guards the PRECISE
+  //      splitter class (not a non-alnum superset).
+  await withFetch(nsfMock(nsfBody(3, nsfRows(3))), async () => {
+    const r = await runTool("nsf_search_awards", { keyword: "web_service" }, sam);
+    const m = buildMeta(r.meta);
+    ok("52n underscore 'web_service' (a NON-splitting delimiter on NSF) ⇒ NO OR-note — the detector uses the PRECISE confirmed-splitter class, NOT a non-alnum superset, so it never over-discloses a union NSF did not make",
+      !m.notes.some((n) => /UNION of its tokens/.test(n)), JSON.stringify(m.notes.filter((n) => /UNION/.test(n))));
   });
 
   // ── filtersApplied honesty + SSRF query building + uppercase-normalize UEIs. ──

@@ -46,13 +46,18 @@
  *      genuine result. Genuine-empty is the DISTINCT `totalCount:0`-with-no-
  *      notification shape.
  *
- * ★ [M1] MULTI-WORD KEYWORD OR-TOKENIZATION (normative disclosure): NSF treats a
- *   multi-word `keyword` as a UNION, not a phrase (LIVE-verified: cryptography=
- *   2598 + volcano=1655 → "cryptography volcano"=4253 = the exact union;
- *   "quantum zzznonsense"=10000 — a garbage second word does NOT shrink ⇒ OR, not
- *   AND). The honest-looking (often saturated) totalCount + rows carry NO signal
- *   the terms were unioned, so when `keyword` has inter-word whitespace the module
- *   emits a MANDATORY `_meta.notes` line disclosing the OR-semantics.
+ * ★ [M1] MULTI-TOKEN KEYWORD OR-TOKENIZATION (normative disclosure): NSF's ES
+ *   analyzer OR-splits a `keyword` into tokens and matches ANY of them (a UNION),
+ *   not the phrase — and it splits on whitespace AND PUNCTUATION, not whitespace
+ *   alone (LIVE-verified: cryptography=2598 + volcano=1655 → "cryptography volcano"
+ *   =4253; and the hyphen/comma/slash/semicolon/plus/&/|/@/#/= forms all return the
+ *   SAME OR union — while `.`/`:`/`_`/`'`/`\`/`*` do NOT split, and `~`/`(`/`)`
+ *   loud-fail). The honest-looking (often saturated) totalCount + rows carry NO
+ *   signal the tokens were unioned, so when `keyword` contains ANY confirmed
+ *   splitter (NSF_KEYWORD_SPLIT_RE — whitespace + the confirmed punctuation set,
+ *   NOT just whitespace) the module emits a MANDATORY `_meta.notes` line disclosing
+ *   the OR-semantics. This closes the compound-token leak (e.g. "coral-reef" =
+ *   coral OR reef, a far broader set than a caller intends).
  *
  * ★ AMOUNTS are STRINGS → `coerce.num` (null-never-0): a real $0 → 0; absent/""/
  *   "null" → null (NEVER 0). `fundsObligatedAmt` (obligated to date) and
