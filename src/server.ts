@@ -1007,6 +1007,71 @@ const EdgarCompanyFactsInput = z.object({
     .describe("true ⇒ reduce each concept to its single most-recent data point (by period end). false (default) ⇒ the full reported time series."),
 });
 
+// ADR-0017. Keyless cross-filer XBRL cross-section over data.sec.gov/api/xbrl/
+// frames. taxonomy/tag/unit/period are RAW PATH SEGMENTS, so the enum + the three
+// regexes below ARE the SSRF guard (re-run belt-and-suspenders in the handler's
+// URL builder). `limit`/`offset` window the already-fully-fetched cross-section
+// CLIENT-SIDE (they do NOT reduce the fetch). taxonomy enum = live-confirmed only.
+const EdgarXbrlFramesInput = z.object({
+  tag: z
+    .string()
+    .regex(
+      /^[A-Za-z0-9]+$/,
+      "tag must be alphanumeric only — an EXACT XBRL concept tag (e.g. 'Assets', 'Revenues'). Slash/dot/space/percent/'..' are rejected (path-segment injection guard).",
+    )
+    .describe(
+      "XBRL concept tag — EXACT, alphanumeric only (e.g. 'Assets', 'Revenues', 'NetIncomeLoss', 'EarningsPerShareBasic'). A non-matching tag ⇒ upstream 404 ⇒ found:false (never a fabricated 0).",
+    ),
+  period: z
+    .string()
+    .regex(
+      /^CY\d{4}(Q[1-4]I?)?$/,
+      "period must be CY{yyyy} (annual flow, e.g. CY2023), CY{yyyy}Q{n} (quarterly flow, e.g. CY2023Q1), or CY{yyyy}Q{n}I (instant, trailing I, e.g. CY2023Q4I).",
+    )
+    .describe(
+      "Calendar period frame: CY2023 (annual flow) · CY2023Q1 (quarterly flow, no I) · CY2023Q4I (instant / balance-sheet, trailing I). Instant concepts (e.g. Assets) REQUIRE the trailing I; a mismatch ⇒ 404 ⇒ found:false.",
+    ),
+  taxonomy: z
+    .enum(edgar.FRAMES_TAXONOMIES)
+    .default("us-gaap")
+    .describe(
+      "XBRL taxonomy namespace (a fixed enum — the SSRF guard for this segment): 'us-gaap' (financial statements, default) or 'dei' (entity/document info, e.g. EntityCommonStockSharesOutstanding, EntityPublicFloat). Live-confirmed members only.",
+    ),
+  unit: z
+    .string()
+    .regex(
+      /^[A-Za-z0-9-]+$/,
+      "unit must match ^[A-Za-z0-9-]+$ — hyphen allowed (e.g. 'USD-per-shares'); slash/dot/percent forbidden (never the 'USD/shares' companyfacts key form).",
+    )
+    .default("USD")
+    .describe(
+      "XBRL unit of measure, as a path segment: 'USD' (default), 'shares', 'USD-per-shares' (EPS — HYPHEN, never 'USD/shares'), 'pure'. A valid-shaped but wrong unit ⇒ 404 ⇒ found:false.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(1000)
+    .default(100)
+    .describe(
+      "CLIENT-SIDE page size over the already-fully-fetched cross-section (1..1000, default 100). Does NOT reduce the upstream fetch — the whole frame is fetched in one call; this only windows the returned rows (page via _meta.pagination.nextOffset).",
+    ),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe(
+      "0-based client-side offset into the fetched cross-section (default 0). Page via _meta.pagination.nextOffset to reach every filer.",
+    ),
+  includeStats: z
+    .boolean()
+    .default(false)
+    .describe(
+      "When true, compute a summary distribution { count, min, max, sum, mean, median, p25, p75, nonFiniteExcluded } over the FULL cross-section (ALL rows, BEFORE the client-side slice), using linear-interpolated percentiles over the FINITE vals only. count===0 (no finite vals) ⇒ every stat is null (never 0/NaN/Infinity).",
+    ),
+});
+
 const EdgarFullTextSearchInput = z.object({
   q: z
     .string()
@@ -2669,6 +2734,13 @@ const TOOLS: ToolDef[] = [
       "Full-text search across EDGAR filings, 2001-present (keyless, efts.sec.gov). Input `q` (phrase in double-quotes for exact), optional `forms`, `startdt`/`enddt` (ISO), `from` (offset; page size FIXED at 100 — no size param). Returns { accession, form, filingDate, entityNames, ciks, filingIndexUrl }. HONESTY: totalAvailable = the true match count, or a LOWER BOUND (totalIsLowerBound:true) when SEC reports ≥10000; from ≥ 9900 is rejected (10000-result window).",
     inputSchema: EdgarFullTextSearchInput,
     handler: (input) => edgar.fullTextSearch(input),
+  }),
+  defineTool({
+    name: "edgar_xbrl_frames",
+    description:
+      "Keyless cross-filer XBRL cross-section (SEC EDGAR frames, data.sec.gov). In ONE call, return EVERY filer's reported value for a single us-gaap/dei concept in a single calendar period — the complete cross-section — for peer benchmarking + distribution stats. Input `tag` (EXACT alnum concept, e.g. 'Assets'), `period` (CY2023 annual · CY2023Q1 quarterly · CY2023Q4I instant/trailing-I), optional `taxonomy` (us-gaap|dei), `unit` (default USD; EPS uses 'USD-per-shares'), `limit`/`offset` (CLIENT-SIDE window over the fully-fetched set), `includeStats`. Rows: { accn, cik, entityName, loc, end, val, start? } (start only for duration concepts). HONESTY: totalAvailable = SEC's own pts (asserted === data.length, else schema_drift THROW — no fake completeness); the whole frame is fetched upstream in one call and limit/offset is a disclosed client-side page (never a subset labeled complete); a tag/unit/period mismatch ⇒ 404 ⇒ found:false (NEVER a fabricated val:0); val is null-never-0; includeStats covers the FULL set with linear-interpolated percentiles (count===0 ⇒ all-null, never 0/NaN). taxonomy/tag/unit/period are validated path segments (enum+regex, re-checked pre-fetch) — no injection surface. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS.",
+    inputSchema: EdgarXbrlFramesInput,
+    handler: (input) => edgar.xbrlFrames(input),
   }),
   // ━━━ Socrata / SODA — keyless SLED + E-rate open data (2) ━━━ ADR-0004
   defineTool({

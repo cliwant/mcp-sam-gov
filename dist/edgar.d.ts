@@ -142,4 +142,71 @@ export declare function fullTextSearch(args: {
     enddt?: string;
     from?: number;
 }): Promise<MetaBundle>;
+/**
+ * The `taxonomy` path-segment enum — the SSRF guard for that segment (no free
+ * value reaches the host). Only members LIVE-CONFIRMED to resolve a real frame
+ * (per-segment live-verify discipline, ADR-0017 Open-Q5) are shipped. Maker
+ * probes 2026-07-12: us-gaap (Assets/Revenues/NetIncomeLoss/EPS) + dei
+ * (EntityCommonStockSharesOutstanding/EntityPublicFloat) → 200; the guessed
+ * srt/invest/us-ins tags → 404, so they are DROPPED (conservative floor).
+ */
+export declare const FRAMES_TAXONOMIES: readonly ["us-gaap", "dei"];
+/** One filer's row in a frame. `start` is present ONLY for duration concepts. */
+export type FrameRow = {
+    accn: string | null;
+    cik: string | null;
+    entityName: string | null;
+    loc: string | null;
+    end: string | null;
+    val: number | null;
+    start?: string | null;
+};
+/**
+ * Summary distribution over the FULL cross-section (M2/M3). Computed over the
+ * FINITE `val`s only (num() → null for absent/blank/"null"/non-finite, which are
+ * excluded and counted in `nonFiniteExcluded`; a real 0 survives). Percentiles use
+ * LINEAR INTERPOLATION on the ascending-sorted finite vals. `count===0` (no finite
+ * vals) ⇒ EVERY stat field null (never 0/NaN/Infinity — the null-never-0 row rule
+ * lifted onto the aggregate).
+ */
+export type FrameStats = {
+    count: number;
+    min: number | null;
+    max: number | null;
+    sum: number | null;
+    mean: number | null;
+    median: number | null;
+    p25: number | null;
+    p75: number | null;
+    nonFiniteExcluded: number;
+};
+/**
+ * Keyless cross-filer XBRL cross-section. In ONE call, return every filer's
+ * reported value for a single us-gaap/dei concept in a single calendar period —
+ * the complete cross-section — for peer benchmarking + distribution stats.
+ *
+ * HONESTY (ADR-0017 v2):
+ *  - `totalAvailable` = SEC's own `pts` (NEVER a page length). Drift guards THROW
+ *    schema_drift on a non-frames shape (data not array / pts non-numeric) or a
+ *    `pts !== data.length` mismatch (a truncation frames has no way to page past,
+ *    so refusing is the honest move — Open-Q2 resolved: THROW is the DEFAULT).
+ *  - The upstream frame is fetched in FULL; `limit`/`offset` is a CLIENT-SIDE
+ *    window disclosed as such (M1 — the completeness note never calls a subset
+ *    page "complete"; buildMeta derives complete/truncated from returned/total/
+ *    hasMore, mirroring edgar_company_filings — NO forced complete:true).
+ *  - A 404 (tag/unit/period/taxonomy quadruple did not match) ⇒ honest found:false
+ *    with the semantic note (absence ≠ 0). NEVER a fabricated val:0.
+ *  - Row `val` is num()-coerced (null-never-0). `start` appears only on duration
+ *    rows. `uom` echoes SEC's OWN unit (e.g. requested 'USD-per-shares' ⇒ 'USD/shares').
+ *  - `includeStats` computes over the FULL data[] (all rows, before the slice).
+ */
+export declare function xbrlFrames(args: {
+    tag: string;
+    period: string;
+    taxonomy?: string;
+    unit?: string;
+    limit?: number;
+    offset?: number;
+    includeStats?: boolean;
+}): Promise<MetaBundle>;
 //# sourceMappingURL=edgar.d.ts.map
