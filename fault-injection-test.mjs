@@ -72,6 +72,10 @@ import {
   searchInstitutions as fdicSearchInstitutions,
   institutionFinancials as fdicInstitutionFinancials,
   INST_FILTER_FIELDS as FDIC_INST_FILTER_FIELDS,
+  buildFailFilters as fdicBuildFailFilters,
+  normFailDate as fdicNormFailDate,
+  bankFailures as fdicBankFailures,
+  FDIC_FAILURES_FILTER_FIELDS,
 } from "./dist/fdic.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
@@ -8661,6 +8665,205 @@ async function testFdicHonesty() {
   });
 }
 
+// §59: FDIC BankFind /banks/failures (ADR-0029) — the 3rd FDIC tool
+// `fdic_bank_failures` (source 23 unchanged; snapshot 89→90). Reuses the C116
+// adapter VERBATIM (getFdic / parseEnvelope 3-envelope guard / filterTerm
+// allowlist / sortParams enum+Set.has / EXACT meta.total pagination / thousands→
+// USD ×1000 / freshness), so this section pins ONLY the NEW surface (the v2
+// cycle-33 review fixes F1/F2/F3) + a P1/P2/P3/SSRF smoke through the new tool.
+// All OFFLINE (mock fetch), deterministic, NON-VACUOUS: every assertion pins a
+// value and names the mutation that turns it RED.
+//   (F1) state → the PSTALP filter, NOT STALP (STALP:CA is a live total-0 false-
+//        empty). Assert the spied filter is exactly `PSTALP:CA` + output state←PSTALP.
+//   (F2) NO name/city input + NEVER a `search=` param (routing name/city through
+//        `search` on /failures is a false-FLOOD of the whole 4115-row dataset);
+//        the allowlist is {PSTALP,FAILYR,CERT} (NAME/CITY rejected).
+//   (F3) normFailDate M/D/YYYY→ISO (exact round-trip; 2/30 rejected → raw; an
+//        unparseable "2023"/"" → raw + disclosed, NOT null); COST/QBFDEP/QBFASSET
+//        $thousands→USD ×1000 (genuine 0 stays 0, NEGATIVE stays negative, absent
+//        → null, ×1000 AFTER the null-guard).
+//   (P1) totalAvailable === meta.total (not page length). (P2) 400/404/non-JSON/
+//        drift THROW; genuine total:0 ⇒ complete:true. (SSRF) fixed host/path/https
+//        + redirect:'error' + keyless + bounded l/o.
+const isFdicFail = (u) => /api\.fdic\.gov\/banks\/failures\?/.test(u);
+const FDIC_FAIL_INDEX = { name: "failures_1779890467665", createTimestamp: "2026-05-27T14:01:07Z" };
+const fdicFailMock = (spec) => (u) => (isFdicFail(u) ? mockResponse({ status: 200, json: fdicBody({ ...spec, index: spec.index ?? FDIC_FAIL_INDEX }) }) : failClosed()());
+const fdicFailUrl = (calls) => { const c = calls.find((x) => isFdicFail(x.url)); return c ? new URL(c.url) : null; };
+// A SIGNATURE-BANK-shape (genuine COST:0) + an SVB-shape (FAILDATE 3/10/2023) row.
+const FAIL_SIG = { NAME: "SIGNATURE BANK", CERT: 57053, FAILDATE: "3/12/2023", FAILYR: "2023", CITY: "New York", PSTALP: "NY", COST: 0, RESTYPE: "FAILURE", SAVR: "DIF", QBFDEP: 88413339, QBFASSET: 110363650, ID: "1" };
+const FAIL_SVB = { NAME: "SILICON VALLEY BANK", CERT: 24735, FAILDATE: "3/10/2023", FAILYR: "2023", CITY: "Santa Clara", PSTALP: "CA", COST: 18894401, RESTYPE: "FAILURE", SAVR: "DIF", QBFDEP: 175408000, QBFASSET: 209026000, ID: "2" };
+
+async function testFdicFailuresHonesty() {
+  section("59. FDIC BankFind /banks/failures (ADR-0029) — the 3rd FDIC tool: ★F1 state→PSTALP (NOT STALP false-empty) + ★F2 NO name/city, NEVER `search=` + ★F3 normFailDate M/D/YYYY→ISO (exact round-trip; unparseable→raw+disclose) + COST genuine-0/negative/absent-null + P1 exact-total + P2 3-envelope + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  // (F3-unit) normFailDate — the exact Date.UTC round-trip, raw-passthrough, never null-a-present-date.
+  eq("59 ★F3 normFailDate('3/10/2023') → '2023-03-10' (M/D/YYYY→ISO, zero-padded; surface raw ⇒ RED)", fdicNormFailDate("3/10/2023").value, "2023-03-10");
+  ok("59 ★F3 normFailDate('3/10/2023').normalized === true", fdicNormFailDate("3/10/2023").normalized === true, JSON.stringify(fdicNormFailDate("3/10/2023")));
+  eq("59 ★F3 normFailDate('12/5/1988') → '1988-12-05' (single-digit day padded)", fdicNormFailDate("12/5/1988").value, "1988-12-05");
+  ok("59 ★F3 normFailDate('2/30/2023') FAILS the round-trip → surfaced RAW '2/30/2023' NOT a rolled '2023-03-02' and NOT null (naive !isNaN(Date.UTC) ⇒ RED = fabricated Mar-02)",
+    fdicNormFailDate("2/30/2023").value === "2/30/2023" && fdicNormFailDate("2/30/2023").normalized === false, JSON.stringify(fdicNormFailDate("2/30/2023")));
+  ok("59 ★F3 normFailDate('2023') (no slashes) → raw '2023', normalized:false, NOT null (null-a-present-value ⇒ RED)",
+    fdicNormFailDate("2023").value === "2023" && fdicNormFailDate("2023").normalized === false, JSON.stringify(fdicNormFailDate("2023")));
+  ok("59 ★F3 normFailDate('') → raw '' (present-but-empty surfaced, NOT null), normalized:false", fdicNormFailDate("").value === "" && fdicNormFailDate("").normalized === false, JSON.stringify(fdicNormFailDate("")));
+  ok("59 ★F3 normFailDate(null/undefined) → null (genuinely absent; never String()-fabricated 'null')", fdicNormFailDate(null).value === null && fdicNormFailDate(undefined).value === null, JSON.stringify([fdicNormFailDate(null), fdicNormFailDate(undefined)]));
+
+  // (F1) buildFailFilters — state→PSTALP (NOT STALP), failYear→FAILYR, cert→CERT.
+  eq("59 ★F1 buildFailFilters state:'CA' → 'PSTALP:CA' (NOT 'STALP:CA' — STALP:CA is a live total-0 false-empty ⇒ map to STALP ⇒ RED)", fdicBuildFailFilters({ state: "CA" }), "PSTALP:CA");
+  eq("59 ★F1 buildFailFilters compound: PSTALP:CA AND FAILYR:2023 AND CERT:24735 (structured — no free field)", fdicBuildFailFilters({ state: "CA", failYear: 2023, cert: 24735 }), "PSTALP:CA AND FAILYR:2023 AND CERT:24735");
+  eq("59 ★F1 buildFailFilters failYear:2023 → 'FAILYR:2023' (the year's digits filter the string FAILYR field)", fdicBuildFailFilters({ failYear: 2023 }), "FAILYR:2023");
+  eq("59 buildFailFilters no clauses → '' (⇒ no filters param)", fdicBuildFailFilters({}), "");
+
+  // (F2) the allowlist is {PSTALP,FAILYR,CERT}; NAME/CITY/STALP are rejected.
+  {
+    const bad = await expectThrow(async () => fdicFilterTerm("NAME", "x", FDIC_FAILURES_FILTER_FIELDS));
+    ok("59 ★F2 filterTerm('NAME',…,failuresAllowlist) ⇒ invalid_input (NAME is NOT filterable on /failures — add NAME to the allowlist ⇒ RED = the false-flood)", bad.threw && toToolError(bad.error).kind === "invalid_input", JSON.stringify({ threw: bad.threw }));
+    const badStalp = await expectThrow(async () => fdicFilterTerm("STALP", "CA", FDIC_FAILURES_FILTER_FIELDS));
+    ok("59 ★F1 filterTerm('STALP',…,failuresAllowlist) ⇒ invalid_input (STALP is NOT on the failures allowlist — only PSTALP is)", badStalp.threw && toToolError(badStalp.error).kind === "invalid_input", JSON.stringify({ threw: badStalp.threw }));
+    eq("59 ★F1 filterTerm positive: PSTALP IS allowlisted ⇒ 'PSTALP:CA'", fdicFilterTerm("PSTALP", "CA", FDIC_FAILURES_FILTER_FIELDS), "PSTALP:CA");
+  }
+
+  // (F1+F2 wire) end-to-end: state:'CA', failYear:2023 → filters=PSTALP:CA AND
+  // FAILYR:2023, NO `search=` param EVER, fixed host/path/https, projection.
+  await withFetch(fdicFailMock({ records: [FAIL_SVB], total: 2 }), async (calls) => {
+    const r = await runTool("fdic_bank_failures", { state: "CA", failYear: 2023 }, sam);
+    const url = fdicFailUrl(calls);
+    const c = calls.find((x) => isFdicFail(x.url));
+    ok("59 ★F1 wire: filters === 'PSTALP:CA AND FAILYR:2023' (PSTALP, NOT STALP; state→STALP ⇒ RED)", !!url && url.searchParams.get("filters") === "PSTALP:CA AND FAILYR:2023", JSON.stringify(url?.searchParams.get("filters")));
+    ok("59 ★F2 wire: NO `search=` param is EVER emitted on /failures (route name/city → search ⇒ RED = the 4115-row false-flood)", !!url && url.searchParams.get("search") === null, JSON.stringify({ search: url?.searchParams.get("search") }));
+    ok("59 SSRF fixed host/path/https: https://api.fdic.gov/banks/failures; filters is a query param (NOT the path)", !!url && url.hostname === "api.fdic.gov" && url.protocol === "https:" && url.pathname === "/banks/failures", JSON.stringify(c?.url));
+    ok("59 SSRF redirect:'error' + keyless (NO headers — byte-clean init) on the failures fetch (drop redirect ⇒ RED)", !!c && c.init && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
+    ok("59 fixed field projection on the wire: fields=NAME,CERT,FAILDATE,FAILYR,CITY,PSTALP,COST,RESTYPE,SAVR,QBFDEP,QBFASSET,ID + format=json + sort_by=FAILDATE&sort_order=DESC (default)",
+      url.searchParams.get("fields") === "NAME,CERT,FAILDATE,FAILYR,CITY,PSTALP,COST,RESTYPE,SAVR,QBFDEP,QBFASSET,ID" && url.searchParams.get("format") === "json" && url.searchParams.get("sort_by") === "FAILDATE" && url.searchParams.get("sort_order") === "DESC", JSON.stringify(url?.search));
+  });
+
+  // (F1 output + F3 date + F3 cost) end-to-end map: state←PSTALP, failDate ISO,
+  // estimatedLossUSD ×1000, a genuine COST:0 stays 0.
+  await withFetch(fdicFailMock({ records: [FAIL_SVB, FAIL_SIG], total: 2 }), async () => {
+    const r = await runTool("fdic_bank_failures", { failYear: 2023 }, sam);
+    const rows = r.data.failures;
+    const svb = rows.find((x) => x.cert === 24735);
+    const sig = rows.find((x) => x.cert === 57053);
+    ok("59 ★F1 output state ← PSTALP: SVB.state === 'CA' (map from STALP ⇒ null ⇒ RED)", svb.state === "CA", JSON.stringify(svb.state));
+    eq("59 ★F3 failDate ISO: SVB '3/10/2023' → '2023-03-10' (surface raw ⇒ RED)", svb.failDate, "2023-03-10");
+    ok("59 ★F3 estimatedLossUSD ×1000: SVB COST 18894401 → 18894401000 (drop ×1000 ⇒ RED)", svb.estimatedLossUSD === 18894401000, JSON.stringify(svb.estimatedLossUSD));
+    ok("59 ★F3 assetsUSD ×1000: SVB QBFASSET 209026000 → 209026000000 (~$209B ✓); depositsUSD 175408000→175408000000", svb.assetsUSD === 209026000000 && svb.depositsUSD === 175408000000, JSON.stringify({ a: svb.assetsUSD, d: svb.depositsUSD }));
+    ok("59 ★F3 a genuine COST:0 (SIGNATURE BANK, fully-assisted no-loss) stays 0 — NOT null (turn 0→null ⇒ RED)", sig.estimatedLossUSD === 0, JSON.stringify(sig.estimatedLossUSD));
+    ok("59 failYear via str: '2023'; resolutionType/resolutionFund via str: 'FAILURE'/'DIF'; cert via num", svb.failYear === "2023" && svb.resolutionType === "FAILURE" && svb.resolutionFund === "DIF" && svb.cert === 24735, JSON.stringify({ fy: svb.failYear, rt: svb.resolutionType, rf: svb.resolutionFund }));
+  });
+
+  // (F3 cost negative + absent) — a NEGATIVE COST (net DIF recovery) stays
+  // negative; an ABSENT COST ⇒ null (never 0); ×1000 AFTER the null-guard.
+  await withFetch(fdicFailMock({ records: [
+    { NAME: "MERABANK TEXAS", CERT: 100, FAILDATE: "1/31/1990", FAILYR: "1990", CITY: "X", PSTALP: "TX", COST: -4386, RESTYPE: "FAILURE", SAVR: "FSLIC", QBFDEP: 1, QBFASSET: 1, ID: "3" },
+    { NAME: "No-Cost Bank", CERT: 101, FAILDATE: "2/2/1991", FAILYR: "1991", CITY: "Y", PSTALP: "TX", RESTYPE: "FAILURE", SAVR: "DIF", QBFDEP: 1, QBFASSET: 1, ID: "4" },
+  ], total: 2 }), async () => {
+    const r = await runTool("fdic_bank_failures", { state: "TX" }, sam);
+    const neg = r.data.failures.find((x) => x.cert === 100);
+    const absent = r.data.failures.find((x) => x.cert === 101);
+    ok("59 ★F3 a NEGATIVE COST -4386 (net DIF recovery) stays negative → -4386000 (clamp negatives to 0 ⇒ RED)", neg.estimatedLossUSD === -4386000, JSON.stringify(neg.estimatedLossUSD));
+    ok("59 ★F3 an ABSENT COST ⇒ estimatedLossUSD:null (the null-guard PRECEDES the ×1000 — apply ×1000 first ⇒ RED = null*1000; absent→0 ⇒ RED)", absent.estimatedLossUSD === null, JSON.stringify(absent.estimatedLossUSD));
+  });
+
+  // (F3 date disclosure) — an unrecognized FAILDATE is surfaced RAW + a note fires;
+  // a fully-normalized page does NOT fire the raw-passthrough note (non-vacuity).
+  await withFetch(fdicFailMock({ records: [{ ...FAIL_SVB, FAILDATE: "2023" }], total: 1 }), async () => {
+    const r = await runTool("fdic_bank_failures", { failYear: 2023 }, sam);
+    const m = buildMeta(r.meta);
+    ok("59 ★F3 an unparseable FAILDATE '2023' ⇒ failDate surfaced RAW '2023' (NOT null) + a raw-passthrough disclosure note fires",
+      r.data.failures[0].failDate === "2023" && m.notes.some((n) => /surfaced RAW|did not match FDIC's M\/D\/YYYY/i.test(n)), JSON.stringify({ fd: r.data.failures[0].failDate, notes: m.notes }));
+  });
+  await withFetch(fdicFailMock({ records: [FAIL_SVB], total: 1 }), async () => {
+    const m = buildMeta((await runTool("fdic_bank_failures", { failYear: 2023 }, sam)).meta);
+    ok("59 ★F3 a fully-normalized page ⇒ NO raw-passthrough note (non-vacuity) but the standing M/D/YYYY→ISO + COST notes ARE present",
+      !m.notes.some((n) => /surfaced RAW/i.test(n)) && m.notes.some((n) => /M\/D\/YYYY to ISO/.test(n)) && m.notes.some((n) => /Deposit Insurance Fund/.test(n)), JSON.stringify(m.notes));
+    ok("59 the CERT-linkage note (F2) + scope note are present (name/city shown-not-searchable; absent = no recorded failure)",
+      m.notes.some((n) => /resolve its CERT via fdic_search_institutions/.test(n)) && m.notes.some((n) => /no recorded FDIC failure/.test(n)), JSON.stringify(m.notes));
+    ok("59 source set INLINE (A1) to the failures endpoint provenance (no synthesizeDefaultMeta branch)", m.source === "api.fdic.gov/banks/failures (BankFind, keyless)", JSON.stringify(m.source));
+    ok("59 freshness: the failures snapshot createTimestamp 2026-05-27T14:01:07Z is disclosed", m.notes.some((n) => /2026-05-27T14:01:07Z/.test(n) && /snapshot/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // (sortBy allowlist) — unknown sortBy ⇒ invalid_input BEFORE fetch (0 fetch),
+  // both the module (Set.has) and the runTool (Zod enum) paths.
+  await withFetch(failClosed(), async (calls) => {
+    const r = await expectThrow(() => fdicBankFailures({ sortBy: "NOTAFIELD" }));
+    ok("59 ★sortBy Set.has (module): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch (widen the Set ⇒ RED)", r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: r.threw ? toToolError(r.error).kind : null, fetches: calls.length }));
+    const rz = await expectThrow(() => runTool("fdic_bank_failures", { sortBy: "NOTAFIELD" }, sam));
+    ok("59 ★sortBy Zod enum (runTool): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch (widen the enum ⇒ RED)", rz.threw && toToolError(rz.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: rz.threw ? toToolError(rz.error).kind : null, fetches: calls.length }));
+  });
+
+  // (SSRF bounds) — Zod bound/format guards ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    for (const [args, why] of [
+      [{ limit: 5000 }, "limit>1000"],
+      [{ offset: -1 }, "offset<0"],
+      [{ offset: 200000 }, "offset>100000"],
+      [{ state: "california" }, "state not 2-upper"],
+      [{ failYear: 1900 }, "failYear<1934"],
+      [{ failYear: 3000 }, "failYear>currentUtcYear"],
+      [{ cert: 0 }, "cert<1"],
+    ]) {
+      const before = calls.length;
+      const r = await expectThrow(() => runTool("fdic_bank_failures", args, sam));
+      ok(`59 SSRF Zod bound/format guard (${why}) ⇒ invalid_input, 0 fetch`, r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: r.threw ? toToolError(r.error).kind : null, added: calls.length - before }));
+    }
+  });
+
+  // (P1) totalAvailable === meta.total (NOT page length).
+  await withFetch(fdicFailMock({ records: [FAIL_SVB], total: 265 }), async () => {
+    const m = buildMeta((await runTool("fdic_bank_failures", { state: "CA", limit: 100 }, sam)).meta);
+    ok("59 ★P1 totalAvailable === meta.total 265 (NOT records.length 1 — mutate→page length ⇒ RED); returned 1 ⇒ hasMore:true, nextOffset:1, complete:false",
+      m.totalAvailable === 265 && m.returned === 1 && m.pagination.hasMore === true && m.pagination.nextOffset === 1 && m.complete === false, JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
+  });
+
+  // (P2) 3-envelope guard — 400 errors[] ⇒ invalid_input (detail not leaked);
+  // 404 ⇒ not_found; non-JSON ⇒ schema_drift; 200-missing-meta/data ⇒ drift.
+  const FAIL_SECRET = "search_phase_execution_exception FAIL_LEAK_7z";
+  await withFetch((u) => (isFdicFail(u) ? mockResponse({ status: 400, json: { errors: [{ status: 400, detail: FAIL_SECRET }] } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_bank_failures", { state: "CA" }, sam));
+    const te = toToolError(r.error);
+    ok("59 ★P2 400 errors[] ⇒ invalid_input AND the raw ES `detail` is NOT leaked", r.threw && te.kind === "invalid_input" && !JSON.stringify(te).includes(FAIL_SECRET), JSON.stringify({ kind: te.kind }));
+  });
+  await withFetch((u) => (isFdicFail(u) ? mockResponse({ status: 404, json: { message: "Cannot GET /banks/failurez", statusCode: 404 } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_bank_failures", { state: "CA" }, sam));
+    ok("59 ★P2 404 {message,statusCode} ⇒ not_found THROW (never a fake empty)", r.threw && toToolError(r.error).kind === "not_found", JSON.stringify(toToolError(r.error).kind));
+  });
+  const failHtmlResp = () => ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON"); }, text: async () => "<html>down</html>" });
+  await withFetch((u) => (isFdicFail(u) ? failHtmlResp() : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_bank_failures", { state: "CA" }, sam));
+    ok("59 ★P2 200 non-JSON body ⇒ schema_drift (never a fake-empty)", r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(toToolError(r.error).kind));
+  });
+  for (const [json, why] of [
+    [{ errors: [{ status: 400 }] }, "meta+data missing (errors[] shape at 200)"],
+    [{ meta: { total: 5 }, data: "not-an-array" }, "data is a string"],
+    [{ meta: {}, data: [] }, "meta.total absent"],
+    [{ meta: { total: "5" }, data: [] }, "meta.total a string (typeof-check before num)"],
+  ]) {
+    await withFetch((u) => (isFdicFail(u) ? mockResponse({ status: 200, json }) : failClosed()()), async () => {
+      const r = await expectThrow(() => runTool("fdic_bank_failures", { state: "CA" }, sam));
+      ok(`59 ★P2 3-envelope: 200 with ${why} ⇒ schema_drift throw (never [] + complete:true)`, r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(toToolError(r.error).kind));
+    });
+  }
+
+  // (genuine-empty) — the ONLY honest empty: total:0 + data:[] ⇒ complete:true.
+  await withFetch(fdicFailMock({ records: [], total: 0 }), async () => {
+    const r = await runTool("fdic_bank_failures", { state: "CA", failYear: 1935 }, sam);
+    const m = buildMeta(r.meta);
+    ok("59 genuine-empty (meta.total:0 + data:[]) ⇒ returned:0, totalAvailable:0, complete:true, truncated:false (a real no-match — the ONLY honest empty)",
+      r.data.failures.length === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false && m.returned === 0, JSON.stringify(m));
+  });
+
+  // (B) a projected field absent from ALL records ⇒ fieldsUnavailable + note.
+  await withFetch(fdicFailMock({ records: [
+    { NAME: "A", CERT: 1, FAILDATE: "1/1/1990", FAILYR: "1990", CITY: "X", PSTALP: "TX", RESTYPE: "FAILURE", SAVR: "DIF", QBFDEP: 1, QBFASSET: 1, ID: "1" },
+  ], total: 1 }), async () => {
+    const m = buildMeta((await runTool("fdic_bank_failures", { state: "TX" }, sam)).meta);
+    ok("59 B: COST absent from ALL records ⇒ COST ∈ fieldsUnavailable + a drift note (drop the returned-fields disclosure ⇒ RED)",
+      m.fieldsUnavailable.includes("COST") && m.notes.some((n) => /COST/.test(n) && /not.*returned|schema drift/i.test(n)), JSON.stringify({ fu: m.fieldsUnavailable }));
+  });
+}
+
 // §45: api.data.gov KEYED trio (ADR-0007) — Regulations.gov + Congress.gov. The
 // project's FIRST keyed source. The load-bearing guarantee is the KEY-NEVER-LEAKS
 // discipline (§2): the secret rides ONLY in the X-Api-Key header, never the URL /
@@ -12075,6 +12278,7 @@ async function main() {
   await testCkanHonesty();
   await testFemaHonesty();
   await testFdicHonesty();
+  await testFdicFailuresHonesty();
   await testDatagovHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
