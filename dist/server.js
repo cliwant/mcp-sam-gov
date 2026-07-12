@@ -855,12 +855,23 @@ const EdgarFullTextSearchInput = z.object({
         .string()
         .optional()
         .describe("Optional ISO YYYY-MM-DD filing-date upper bound (sets dateRange=custom)."),
+    ciks: z
+        .array(z.string())
+        .max(50)
+        .optional()
+        .describe("Optional: pin filings BY one or more entities, by NUMERIC SEC CIK (each is zero-padded to 10 digits — an EXACT-entity match). Multiple CIKs are AND-of-OR (any of the listed entities). A ticker/company name / CIK-0 entry is rejected as invalid_input — use `entityName` or resolve the CIK first with edgar_lookup_cik."),
+    entityName: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Optional FUZZY filer-name narrowing (matches the filer's display name; NOT CIK-exact — can match related entities, e.g. multiple 'Apple*' filers). Combine with `ciks` for an exact-entity result."),
     from: z
         .number()
         .int()
         .min(0)
         .default(0)
-        .describe("0-based result offset for pagination; page size is FIXED at 100 (there is no size param). Must be < 9900 (from+100 ≤ 10000 upstream window); a larger from is rejected as invalid_input."),
+        .describe("0-based result offset for pagination; page size is FIXED at 100 (there is no size param). Must be <= 9900 (from+100 ≤ 10000 upstream window); a larger from is rejected as invalid_input."),
 });
 // ─── Socrata / SODA (keyless SLED + E-rate) — input schemas ──────
 // ADR-0004. First SLED source. `domain` is a curated allowlist ENUM (the SSRF
@@ -2242,7 +2253,7 @@ const TOOLS = [
     }),
     defineTool({
         name: "edgar_full_text_search",
-        description: "Full-text search across EDGAR filings, 2001-present (keyless, efts.sec.gov). Input `q` (phrase in double-quotes for exact), optional `forms`, `startdt`/`enddt` (ISO), `from` (offset; page size FIXED at 100 — no size param). Returns { accession, form, filingDate, entityNames, ciks, filingIndexUrl }. HONESTY: totalAvailable = the true match count, or a LOWER BOUND (totalIsLowerBound:true) when SEC reports ≥10000; from ≥ 9900 is rejected (10000-result window).",
+        description: "Full-text search across EDGAR filings, 2001-present (keyless, efts.sec.gov). Input `q` (phrase in double-quotes for exact), optional `forms`, `startdt`/`enddt` (ISO), `ciks` (pin filings BY entities — numeric 10-digit SEC CIKs, zero-padded, exact-entity match), `entityName` (FUZZY filer-name narrowing — can match related filers, e.g. multiple 'Apple*'), `from` (offset; page size FIXED at 100 — no size param). Returns { accession, form, filingDate, entityNames, ciks, filingIndexUrl }. HONESTY: totalAvailable = the true match count, or a LOWER BOUND (totalIsLowerBound:true) when SEC reports ≥10000; a 0-result set with ciks/entityName applied is NOT proof of absence (verify the CIK via edgar_lookup_cik by name/ticker); from > 9900 is rejected (10000-result window). NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS.",
         inputSchema: EdgarFullTextSearchInput,
         handler: (input) => edgar.fullTextSearch(input),
     }),

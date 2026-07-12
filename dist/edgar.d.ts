@@ -24,7 +24,7 @@
  *        personal email. Override via EDGAR_USER_AGENT.
  *   F2 — `edgar_full_text_search` has NO `size` param: efts ignores it (5/20/100/
  *        200 all return 100), so page size is a fixed 100. Pagination is by `from`.
- *   F3 — FTS window overflow: `from >= 9900` (from+100 > 10000) is rejected as
+ *   F3 — FTS window overflow: `from > 9900` (from+100 > 10000) is rejected as
  *        invalid_input BEFORE the fetch; and after r.json(), a missing `hits.hits`
  *        (SEC returns HTTP 200 + `{message:"Internal server error"}` past the
  *        window) is thrown as schema_drift, never crashed on.
@@ -128,18 +128,22 @@ export type FtsResult = {
 };
 /**
  * Full-text search across EDGAR filings (2001-present). F2 — NO `size` param
- * (efts always returns 100/page); pagination is by `from`. F3 — `from >= 9900`
+ * (efts always returns 100/page); pagination is by `from`. F3 — `from > 9900`
  * is rejected as invalid_input BEFORE the fetch (from+100 would exceed the 10000
- * window, which efts answers with HTTP 200 + an error body), and a response
- * missing `hits.hits` is thrown as schema_drift (never crashed on). F5 —
- * `hits.total.relation === "gte"` (true total unknown, ≥10000) surfaces as
- * `totalIsLowerBound:true`.
+ * window, which efts answers with HTTP 200 + an error body; from=9900 itself is a
+ * VALID final page), and a response missing `hits.hits` is thrown as schema_drift
+ * (never crashed on). F5 — `hits.total.relation === "gte"` (true total unknown,
+ * ≥10000) surfaces as `totalIsLowerBound:true`. ADR-0018 — optional `ciks` (pin
+ * filings BY entities, exact 10-digit CIK) + `entityName` (fuzzy filer-name)
+ * narrowing filters; a no-digit/CIK-0 `ciks` entry is rejected pre-fetch (M1).
  */
 export declare function fullTextSearch(args: {
     q: string;
     forms?: string[];
     startdt?: string;
     enddt?: string;
+    ciks?: string[];
+    entityName?: string;
     from?: number;
 }): Promise<MetaBundle>;
 /**
