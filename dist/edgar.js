@@ -643,4 +643,266 @@ export async function fullTextSearch(args) {
         meta.totalIsLowerBound = true;
     return withMeta({ query: args.q, results }, edgarMeta(meta));
 }
+// ─── Tool 5: edgar_xbrl_frames ────────────────────────────────────
+// ADR-0017 (v1 + v2 AUTHORITATIVE). A COMPLETE keyless cross-filer cross-section:
+// every XBRL filer's reported value for ONE concept in ONE calendar period, in a
+// single call — the peer-benchmarking / distribution primitive. Reuses getEdgar
+// VERBATIM (no new host/gate/UA); the frames path puts caller-supplied segments
+// (taxonomy/tag/unit/period) as RAW PATH SEGMENTS, so the load-bearing control is
+// the pre-fetch enum/regex validation + fixed-host assertion (§SSRF, S1/S2).
+/** The whitelisted frames host + base (same data.sec.gov the other edgar tools use). */
+const FRAMES_BASE = "https://data.sec.gov/api/xbrl/frames";
+/**
+ * The `taxonomy` path-segment enum — the SSRF guard for that segment (no free
+ * value reaches the host). Only members LIVE-CONFIRMED to resolve a real frame
+ * (per-segment live-verify discipline, ADR-0017 Open-Q5) are shipped. Maker
+ * probes 2026-07-12: us-gaap (Assets/Revenues/NetIncomeLoss/EPS) + dei
+ * (EntityCommonStockSharesOutstanding/EntityPublicFloat) → 200; the guessed
+ * srt/invest/us-ins tags → 404, so they are DROPPED (conservative floor).
+ */
+export const FRAMES_TAXONOMIES = ["us-gaap", "dei"];
+// Segment grammars (belt-and-suspenders re-check in the builder — S1). These are
+// the SAME regexes/enum the server Zod schema applies; re-running them here does
+// NOT rely on Zod (a direct call could bypass it) nor on the hostname assertion
+// alone (a same-host `../` traversal normalizes to host=data.sec.gov and PASSES a
+// hostname check). They are allowlists: `%`, `/`, `.`, `\`, `..`, `%2F`, `%2E`,
+// `%00` all fail (S2 — those characters are simply not in the allowed classes).
+const FRAMES_TAG_RE = /^[A-Za-z0-9]+$/;
+const FRAMES_UNIT_RE = /^[A-Za-z0-9-]+$/;
+const FRAMES_PERIOD_RE = /^CY\d{4}(Q[1-4]I?)?$/;
+/** Throw the pre-fetch injection-guard error (invalid_input, 0 fetch). */
+function framesInvalid(message) {
+    throw new ToolErrorCarrier({
+        kind: "invalid_input",
+        message,
+        retryable: false,
+        upstreamEndpoint: "edgar:frames",
+    });
+}
+/**
+ * Build the frames URL from validated path segments (S1/S2). BELT-AND-SUSPENDERS:
+ * re-run the enum + the three regexes on each segment and hard-throw invalid_input
+ * (0 fetch) on any mismatch — do NOT trust that Zod already ran, and do NOT rely on
+ * the hostname assertion alone (it passes same-host traversal). THEN assert the
+ * built URL is https on the fixed data.sec.gov host (guards host-escape/downgrade).
+ */
+function buildFramesUrl(taxonomy, tag, unit, period) {
+    if (!FRAMES_TAXONOMIES.includes(taxonomy)) {
+        framesInvalid(`edgar_xbrl_frames: taxonomy ${JSON.stringify(taxonomy)} is not one of {${FRAMES_TAXONOMIES.join(", ")}} — refused before any fetch (path-segment injection guard).`);
+    }
+    if (!FRAMES_TAG_RE.test(tag)) {
+        framesInvalid(`edgar_xbrl_frames: tag ${JSON.stringify(tag)} must match ^[A-Za-z0-9]+$ (XBRL tags are alphanumeric; slash/dot/percent/backslash/'..' are rejected) — refused before any fetch (path-segment injection guard).`);
+    }
+    if (!FRAMES_UNIT_RE.test(unit)) {
+        framesInvalid(`edgar_xbrl_frames: unit ${JSON.stringify(unit)} must match ^[A-Za-z0-9-]+$ (hyphen allowed, e.g. USD-per-shares; slash/dot/percent forbidden — never the 'USD/shares' companyfacts key form) — refused before any fetch (path-segment injection guard).`);
+    }
+    if (!FRAMES_PERIOD_RE.test(period)) {
+        framesInvalid(`edgar_xbrl_frames: period ${JSON.stringify(period)} must match ^CY\\d{4}(Q[1-4]I?)?$ (e.g. CY2023, CY2023Q1, CY2023Q4I) — refused before any fetch (path-segment injection guard).`);
+    }
+    const built = `${FRAMES_BASE}/${taxonomy}/${tag}/${unit}/${period}.json`;
+    let parsed;
+    try {
+        parsed = new URL(built);
+    }
+    catch {
+        framesInvalid(`edgar_xbrl_frames: could not construct a valid URL from the segments — refused before any fetch.`);
+    }
+    if (parsed.protocol !== "https:" || parsed.hostname !== "data.sec.gov") {
+        framesInvalid(`edgar_xbrl_frames: constructed URL host/scheme is not https://data.sec.gov (${parsed.protocol}//${parsed.hostname}) — refused before any fetch (fixed-host assertion).`);
+    }
+    return built;
+}
+/** Compute FrameStats over the full data[] (all rows, before any client slice). */
+function framesStats(data) {
+    const finite = [];
+    let nonFiniteExcluded = 0;
+    for (const d of data) {
+        const v = num(d.val); // null for absent/""/"null"/non-finite; real 0 survives.
+        if (v === null)
+            nonFiniteExcluded++;
+        else
+            finite.push(v);
+    }
+    const count = finite.length;
+    // M3 — no finite values ⇒ no distribution computable ⇒ every field null.
+    if (count === 0) {
+        return {
+            count: 0,
+            min: null,
+            max: null,
+            sum: null,
+            mean: null,
+            median: null,
+            p25: null,
+            p75: null,
+            nonFiniteExcluded,
+        };
+    }
+    finite.sort((a, b) => a - b);
+    const sum = finite.reduce((s, v) => s + v, 0);
+    // M2 — linear interpolation: pos=q*(n-1), interpolate between the bracketing
+    // sorted values. median = q=0.5 (mean of the two middle values for even n).
+    const quantile = (q) => {
+        const pos = q * (count - 1);
+        const lo = Math.floor(pos);
+        const hi = Math.ceil(pos);
+        const vLo = finite[lo];
+        const vHi = finite[hi];
+        return pos === lo ? vLo : vLo + (pos - lo) * (vHi - vLo);
+    };
+    return {
+        count,
+        min: finite[0],
+        max: finite[count - 1],
+        sum,
+        mean: sum / count,
+        median: quantile(0.5),
+        p25: quantile(0.25),
+        p75: quantile(0.75),
+        nonFiniteExcluded,
+    };
+}
+/**
+ * Keyless cross-filer XBRL cross-section. In ONE call, return every filer's
+ * reported value for a single us-gaap/dei concept in a single calendar period —
+ * the complete cross-section — for peer benchmarking + distribution stats.
+ *
+ * HONESTY (ADR-0017 v2):
+ *  - `totalAvailable` = SEC's own `pts` (NEVER a page length). Drift guards THROW
+ *    schema_drift on a non-frames shape (data not array / pts non-numeric) or a
+ *    `pts !== data.length` mismatch (a truncation frames has no way to page past,
+ *    so refusing is the honest move — Open-Q2 resolved: THROW is the DEFAULT).
+ *  - The upstream frame is fetched in FULL; `limit`/`offset` is a CLIENT-SIDE
+ *    window disclosed as such (M1 — the completeness note never calls a subset
+ *    page "complete"; buildMeta derives complete/truncated from returned/total/
+ *    hasMore, mirroring edgar_company_filings — NO forced complete:true).
+ *  - A 404 (tag/unit/period/taxonomy quadruple did not match) ⇒ honest found:false
+ *    with the semantic note (absence ≠ 0). NEVER a fabricated val:0.
+ *  - Row `val` is num()-coerced (null-never-0). `start` appears only on duration
+ *    rows. `uom` echoes SEC's OWN unit (e.g. requested 'USD-per-shares' ⇒ 'USD/shares').
+ *  - `includeStats` computes over the FULL data[] (all rows, before the slice).
+ */
+export async function xbrlFrames(args) {
+    const taxonomy = args.taxonomy ?? "us-gaap";
+    const unit = args.unit ?? "USD";
+    const limit = args.limit ?? 100;
+    const offset = args.offset ?? 0;
+    const includeStats = args.includeStats ?? false;
+    // S1/S2 — build (and re-validate) the path BEFORE any fetch. Throws
+    // invalid_input with 0 fetches on any bad segment or a non-fixed-host URL.
+    const url = buildFramesUrl(taxonomy, args.tag, unit, args.period);
+    let body;
+    try {
+        const r = await getEdgar(url, "edgar:frames");
+        body = (await r.json());
+    }
+    catch (e) {
+        // 404 ⇒ the quadruple did not match a frame ⇒ honest found:false (NEVER 0).
+        if (e instanceof ToolErrorCarrier && e.toolError.kind === "not_found") {
+            return notFoundBundle(`${taxonomy}/${args.tag}/${unit}/${args.period}`, `No XBRL frame matched taxonomy=${taxonomy} tag=${args.tag} unit=${unit} period=${args.period} (HTTP 404). The concept was NOT reported under that exact tag/unit/calendar-frame — this is NOT a value of 0. Check: instant (balance-sheet) concepts need the trailing 'I' (e.g. CY2023Q4I); EPS uses unit 'USD-per-shares' (hyphen), never 'USD/shares'.`);
+        }
+        throw e;
+    }
+    // Drift guards (schema_drift THROW — never a fabricated empty). Order matters:
+    // (1) data[] must be an array, (2) pts must be a finite number, (3) the
+    // load-bearing invariant pts === data.length (a mismatch ⇒ truncation/shape
+    // change; frames has NO page param to recover the rest, so we refuse).
+    const data = body.data;
+    if (!Array.isArray(data)) {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `edgar:frames returned HTTP 200 without a data[] array (taxonomy=${taxonomy} tag=${args.tag} unit=${unit} period=${args.period}) — the frames envelope changed.`,
+            retryable: false,
+            upstreamEndpoint: "edgar:frames",
+        });
+    }
+    if (typeof body.pts !== "number" || !Number.isFinite(body.pts)) {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `edgar:frames returned a non-numeric 'pts' (${JSON.stringify(body.pts)}) — SEC's own data-point count is missing; the envelope changed.`,
+            retryable: false,
+            upstreamEndpoint: "edgar:frames",
+        });
+    }
+    if (body.pts !== data.length) {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `SEC frames pts (${body.pts}) ≠ data.length (${data.length}) — the cross-section may be truncated or the envelope changed. Frames has no pagination to recover the rest, so refusing rather than presenting a partial set as complete.`,
+            retryable: false,
+            upstreamEndpoint: "edgar:frames",
+        });
+    }
+    // SEC's own count; validated === data.length. NEVER a page length (mutation a).
+    const totalAvailable = body.pts;
+    // Stats over the FULL data[] (ALL rows, BEFORE the client-side slice) — M2/M3.
+    const stats = includeStats
+        ? framesStats(data)
+        : undefined;
+    // Map every row: null-never-0 via num() on val; start only on duration rows.
+    const allRows = data.map((d) => {
+        const row = {
+            accn: str(d.accn),
+            cik: d.cik == null ? null : padCik(d.cik),
+            entityName: str(d.entityName),
+            loc: str(d.loc),
+            end: str(d.end),
+            val: num(d.val),
+        };
+        if ("start" in d)
+            row.start = str(d.start);
+        return row;
+    });
+    // Client-side window over the already-fully-fetched cross-section (M1).
+    const page = allRows.slice(offset, offset + limit);
+    const returned = page.length;
+    const hasMore = offset + returned < totalAvailable;
+    const uom = str(body.uom);
+    const found = data.length > 0;
+    const notes = [];
+    // SEMANTIC (the CIK-caveat analogue) — absence ≠ 0.
+    notes.push("A frame contains ONLY filers who reported this EXACT tag for this EXACT calendar period, with SEC selecting one best-fit fact per entity. Absence from the frame ≠ 0 and ≠ 'the company has none' — it means the filer did not report under that tag/calendar-frame.");
+    // COMPLETENESS — M1 two-clause split (the word "complete" never describes a
+    // subset page): the upstream-frame-fetched-in-full sense and the this-page-is-a-
+    // subset sense are stated distinctly.
+    notes.push(`The upstream frame was fetched in FULL server-side (pts=${totalAvailable} = the entire cross-section for this taxonomy/tag/unit/period, uncapped and unpaginated by SEC). THIS response page contains ${returned} of ${totalAvailable} rows; when hasMore is true, page via nextOffset to retrieve the remaining filers.`);
+    // DISCOVERABILITY — period grammar + hyphen unit + 404-not-zero.
+    notes.push("Period grammar: CY2023 (annual flow) · CY2023Q1 (quarterly flow, no I) · CY2023Q4I (instant, trailing I). EPS uses unit 'USD-per-shares' (hyphen), never 'USD/shares'. A tag/unit/period mismatch returns found:false (a 404), NOT an empty zero.");
+    // val null-never-0.
+    notes.push("Each row 'val' is coerced to number-or-null: a real reported 0 survives as 0, but an absent/blank/non-finite value is null — never a fabricated 0.");
+    // uom echo (minor) — path-form vs response-form.
+    if (uom && uom !== unit) {
+        notes.push(`SEC's response uom is '${uom}', which differs from the requested unit path-segment '${unit}' (path-form vs response-form — e.g. 'USD-per-shares' is reported as 'USD/shares'). The 'uom' field echoes SEC's own value.`);
+    }
+    // Stats disclosure — M2 method / M3 no-finite.
+    if (stats) {
+        notes.push(stats.count === 0
+            ? `stats: no finite values across the full cross-section (nonFiniteExcluded=${stats.nonFiniteExcluded}) — no distribution computable, so every stat field (min/max/sum/mean/median/p25/p75) is null, never 0/NaN/Infinity.`
+            : `stats: min/max/sum/mean and linear-interpolated p25/median/p75 computed over the ${stats.count} FINITE vals (nulls/non-finite excluded; nonFiniteExcluded=${stats.nonFiniteExcluded}) across the FULL cross-section of ${totalAvailable} rows, sorted ascending — not a robust estimator for small frames.`);
+    }
+    const outData = {
+        found,
+        taxonomy,
+        tag: str(body.tag) ?? args.tag,
+        unit,
+        uom,
+        period: args.period,
+        label: str(body.label),
+        description: str(body.description),
+        rows: page,
+    };
+    if (stats)
+        outData.stats = stats;
+    return withMeta(outData, edgarMeta({
+        returned,
+        totalAvailable,
+        filtersApplied: ["taxonomy", "tag", "unit", "period"],
+        pagination: {
+            offset,
+            limit,
+            hasMore,
+            nextOffset: hasMore ? offset + returned : null,
+        },
+        notes,
+    }));
+}
 //# sourceMappingURL=edgar.js.map

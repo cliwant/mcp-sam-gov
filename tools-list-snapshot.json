@@ -420,6 +420,51 @@
     }
   },
   {
+    "name": "edgar_xbrl_frames",
+    "description": "Keyless cross-filer XBRL cross-section (SEC EDGAR frames, data.sec.gov). In ONE call, return EVERY filer's reported value for a single us-gaap/dei concept in a single calendar period — the complete cross-section — for peer benchmarking + distribution stats. Input `tag` (EXACT alnum concept, e.g. 'Assets'), `period` (CY2023 annual · CY2023Q1 quarterly · CY2023Q4I instant/trailing-I), optional `taxonomy` (us-gaap|dei), `unit` (default USD; EPS uses 'USD-per-shares'), `limit`/`offset` (CLIENT-SIDE window over the fully-fetched set), `includeStats`. Rows: { accn, cik, entityName, loc, end, val, start? } (start only for duration concepts). HONESTY: totalAvailable = SEC's own pts (asserted === data.length, else schema_drift THROW — no fake completeness); the whole frame is fetched upstream in one call and limit/offset is a disclosed client-side page (never a subset labeled complete); a tag/unit/period mismatch ⇒ 404 ⇒ found:false (NEVER a fabricated val:0); val is null-never-0; includeStats covers the FULL set with linear-interpolated percentiles (count===0 ⇒ all-null, never 0/NaN). taxonomy/tag/unit/period are validated path segments (enum+regex, re-checked pre-fetch) — no injection surface. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tag": {
+          "type": "string",
+          "description": "XBRL concept tag — EXACT, alphanumeric only (e.g. 'Assets', 'Revenues', 'NetIncomeLoss', 'EarningsPerShareBasic'). A non-matching tag ⇒ upstream 404 ⇒ found:false (never a fabricated 0)."
+        },
+        "period": {
+          "type": "string",
+          "description": "Calendar period frame: CY2023 (annual flow) · CY2023Q1 (quarterly flow, no I) · CY2023Q4I (instant / balance-sheet, trailing I). Instant concepts (e.g. Assets) REQUIRE the trailing I; a mismatch ⇒ 404 ⇒ found:false."
+        },
+        "taxonomy": {
+          "type": "string",
+          "enum": [
+            "us-gaap",
+            "dei"
+          ],
+          "description": "XBRL taxonomy namespace (a fixed enum — the SSRF guard for this segment): 'us-gaap' (financial statements, default) or 'dei' (entity/document info, e.g. EntityCommonStockSharesOutstanding, EntityPublicFloat). Live-confirmed members only."
+        },
+        "unit": {
+          "type": "string",
+          "description": "XBRL unit of measure, as a path segment: 'USD' (default), 'shares', 'USD-per-shares' (EPS — HYPHEN, never 'USD/shares'), 'pure'. A valid-shaped but wrong unit ⇒ 404 ⇒ found:false."
+        },
+        "limit": {
+          "type": "number",
+          "description": "CLIENT-SIDE page size over the already-fully-fetched cross-section (1..1000, default 100). Does NOT reduce the upstream fetch — the whole frame is fetched in one call; this only windows the returned rows (page via _meta.pagination.nextOffset)."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based client-side offset into the fetched cross-section (default 0). Page via _meta.pagination.nextOffset to reach every filer."
+        },
+        "includeStats": {
+          "type": "boolean",
+          "description": "When true, compute a summary distribution { count, min, max, sum, mean, median, p25, p75, nonFiniteExcluded } over the FULL cross-section (ALL rows, BEFORE the client-side slice), using linear-interpolated percentiles over the FINITE vals only. count===0 (no finite vals) ⇒ every stat is null (never 0/NaN/Infinity)."
+        }
+      },
+      "required": [
+        "tag",
+        "period"
+      ]
+    }
+  },
+  {
     "name": "far_clause_lookup",
     "description": "Authoritative FAR/DFARS clause text + its PRESCRIPTION (the 'As prescribed in …' rule for when the clause applies), from the eCFR versioner-full endpoint (Title 48). Use this — NOT ecfr_search — for an EXACT clause number: full-text search mis-ranks '52.212-4' (returns GSAM 552.212-4 above the real FAR clause). Returns heading, revision date, clause/provision kind, regulation (FAR/DFARS/GSAM), full text, the prescribing section, and ecfrUrl. Every response carries farOverhaulRisk — a structural currency caveat that eCFR reflects only the CODIFIED FAR, so a clause may be superseded by a Revolutionary-FAR-Overhaul agency class deviation not shown here. A genuinely-absent clause returns a not_found error (never a fake empty clause). Keyless.",
     "inputSchema": {
