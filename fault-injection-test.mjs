@@ -44,7 +44,7 @@ import zlib from "node:zlib";
 // smoke's spawn), never on an import like this one. §9/§12/§13 call this real
 // runTool over a mocked fetch so a regression in the real wrapper turns RED.
 import { runTool } from "./dist/server.js";
-import { toToolError, ToolErrorCarrier } from "./dist/errors.js";
+import { toToolError, ToolErrorCarrier, fetchWithRetry } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards } from "./dist/usaspending.js";
@@ -8747,6 +8747,161 @@ async function testNihHonesty() {
   ok("51i nih.num === coerce.num (one shared audited impl — a num regression fails §40e/§49p/§51i together)", nihNum === coerceNum, "nih.num diverged from coerce.num");
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// §: fetchWithRetry timeout/abort ⇒ fail-fast NON-retryable (ADR-0015)
+// ──────────────────────────────────────────────────────────────────────────
+// The most-shared piece of infra. A caller creates AbortSignal.timeout(15_000)
+// ONCE and reuses the same `init` (thus the same signal) across all 3 attempts;
+// once it fires, attempts 2/3 reject IMMEDIATELY without reaching the endpoint,
+// so classifying a timeout `retryable:true` is a lie (the retries are guaranteed
+// no-ops) AND burns two pointless backoff sleeps. The fix intercepts an
+// abort/timeout in fetchWithRetry's catch(e), keyed on the DOMException NAME
+// only ("TimeoutError" from AbortSignal.timeout | "AbortError" from a manual
+// abort — LIVE-VERIFIED disjoint from a genuine network fault's TypeError), and
+// throws upstream_unavailable retryable:FALSE IMMEDIATELY: 1 attempt, no sleep.
+//
+// This section imports fetchWithRetry DIRECTLY and drives it with a mock fetch
+// + a COUNTING setTimeout (delegates to the real one at 0ms — offline,
+// deterministic, no real wait), so it asserts the EXACT fetch-call count AND
+// that no inter-attempt backoff sleep ran. Non-vacuity is proven out-of-band by
+// deleting the isAbort throw (→ case 1 flips to 3 calls / retryable:true → RED).
+// ══════════════════════════════════════════════════════════════════════════
+async function testFetchWithRetryTimeout() {
+  section("§: fetchWithRetry timeout/abort ⇒ fail-fast non-retryable (ADR-0015)");
+
+  const LABEL = "example-endpoint";
+
+  // Drive fetchWithRetry against `handler`, counting fetch calls AND every
+  // setTimeout invocation (the backoff sleeps). setTimeout delegates to the real
+  // one at 0ms so the harness never actually waits — assertions key on the
+  // call/sleep COUNTS, never on wall-clock. Always restores globals in a finally.
+  async function drive(handler) {
+    const savedFetch = globalThis.fetch;
+    const savedSetTimeout = globalThis.setTimeout;
+    const calls = [];
+    let sleeps = 0;
+    globalThis.fetch = async (url, init) => {
+      calls.push(String(url));
+      return handler(url, init, calls);
+    };
+    globalThis.setTimeout = (cb, _ms, ...rest) => {
+      sleeps++;
+      return savedSetTimeout(cb, 0, ...rest);
+    };
+    let threw = false;
+    let error;
+    try {
+      await fetchWithRetry("https://example.test/api", {}, LABEL);
+    } catch (e) {
+      threw = true;
+      error = e;
+    } finally {
+      globalThis.fetch = savedFetch;
+      globalThis.setTimeout = savedSetTimeout;
+    }
+    return { calls, sleeps, threw, error };
+  }
+
+  // (1) TIMEOUT (DOMException name "TimeoutError") ⇒ fail fast: exactly 1
+  // attempt, upstream_unavailable, retryable:FALSE, NO backoff sleep.
+  {
+    const r = await drive(() => {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    });
+    ok("timeout ⇒ throws a ToolErrorCarrier",
+      r.threw && r.error instanceof ToolErrorCarrier,
+      `threw=${r.threw} error=${r.error && r.error.constructor.name}`);
+    ok("timeout ⇒ EXACTLY 1 fetch call (no no-op attempts 2/3)",
+      r.calls.length === 1, `calls=${r.calls.length}`);
+    ok("timeout ⇒ kind:upstream_unavailable, retryable:FALSE",
+      r.error?.toolError?.kind === "upstream_unavailable" &&
+        r.error?.toolError?.retryable === false,
+      JSON.stringify(r.error?.toolError));
+    ok("timeout ⇒ upstreamEndpoint echoed",
+      r.error?.toolError?.upstreamEndpoint === LABEL,
+      JSON.stringify(r.error?.toolError));
+    ok("timeout ⇒ NO backoff sleep ran (0 setTimeout calls)",
+      r.sleeps === 0, `sleeps=${r.sleeps}`);
+  }
+
+  // (1b) A manual/already-aborted signal (DOMException name "AbortError") ⇒ same
+  // fail-fast contract.
+  {
+    const r = await drive(() => {
+      throw new DOMException("The operation was aborted", "AbortError");
+    });
+    ok("abort ⇒ EXACTLY 1 fetch call", r.calls.length === 1, `calls=${r.calls.length}`);
+    ok("abort ⇒ upstream_unavailable, retryable:FALSE, no backoff sleep",
+      r.error?.toolError?.kind === "upstream_unavailable" &&
+        r.error?.toolError?.retryable === false && r.sleeps === 0,
+      JSON.stringify({ te: r.error?.toolError, sleeps: r.sleeps }));
+  }
+
+  // (1c) The guard keys on `.name`, not on the DOMException type — a plain
+  // Error{name:"TimeoutError"} is intercepted identically.
+  {
+    const r = await drive(() => {
+      throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    });
+    ok("name-only guard: Error{name:'TimeoutError'} ⇒ 1 call, retryable:false, no sleep",
+      r.calls.length === 1 && r.error?.toolError?.retryable === false && r.sleeps === 0,
+      JSON.stringify({ calls: r.calls.length, te: r.error?.toolError, sleeps: r.sleeps }));
+  }
+
+  // (2) NO-REGRESSION — 503 (returns fast; signal live) STILL retries 3×, still
+  // retryable, with 2 inter-attempt backoff sleeps. Byte-identical to today.
+  {
+    const r = await drive(() => mockResponse({ status: 503 }));
+    ok("503 ⇒ STILL 3 attempts (unchanged)", r.calls.length === 3, `calls=${r.calls.length}`);
+    ok("503 ⇒ upstream_unavailable, retryable:TRUE",
+      r.error?.toolError?.kind === "upstream_unavailable" &&
+        r.error?.toolError?.retryable === true,
+      JSON.stringify(r.error?.toolError));
+    ok("503 ⇒ 2 backoff sleeps ran (between the 3 attempts)",
+      r.sleeps === 2, `sleeps=${r.sleeps}`);
+  }
+
+  // (3) NO-REGRESSION — 429 STILL retries; rate_limited + Retry-After honored.
+  {
+    const r = await drive(() => mockResponse({ status: 429, headers: { "Retry-After": "1" } }));
+    ok("429 ⇒ STILL 3 attempts", r.calls.length === 3, `calls=${r.calls.length}`);
+    ok("429 ⇒ rate_limited, retryable:TRUE, retryAfterSeconds honored",
+      r.error?.toolError?.kind === "rate_limited" &&
+        r.error?.toolError?.retryable === true &&
+        r.error?.toolError?.retryAfterSeconds === 1,
+      JSON.stringify(r.error?.toolError));
+  }
+
+  // (4) NO-REGRESSION / ANTI-OVER-CATCH (LOAD-BEARING) — a GENUINE network
+  // TypeError (name "TypeError", NOT an abort) must STILL retry 3× and stay
+  // retryable. Cases (1) and (4) share the SAME catch block and differ ONLY by
+  // e.name; this proves the discriminator keys on the abort-NAME, not "any
+  // throw" (i.e. the guard does not over-catch real transient network faults).
+  {
+    const r = await drive(() => {
+      throw new TypeError("fetch failed");
+    });
+    ok("genuine TypeError('fetch failed') ⇒ STILL 3 attempts (NOT swallowed by abort guard)",
+      r.calls.length === 3, `calls=${r.calls.length}`);
+    ok("genuine TypeError ⇒ upstream_unavailable, retryable:TRUE (unchanged)",
+      r.error?.toolError?.kind === "upstream_unavailable" &&
+        r.error?.toolError?.retryable === true,
+      JSON.stringify(r.error?.toolError));
+    ok("genuine TypeError ⇒ 2 backoff sleeps ran (real retries)",
+      r.sleeps === 2, `sleeps=${r.sleeps}`);
+  }
+
+  // (5) NO-REGRESSION — a 404 ⇒ not_found, retryable:false, 1 attempt (already a
+  // non-retryable throw; unaffected by the fix).
+  {
+    const r = await drive(() => mockResponse({ status: 404 }));
+    ok("404 ⇒ not_found, retryable:false, 1 attempt (unchanged)",
+      r.calls.length === 1 && r.error?.toolError?.kind === "not_found" &&
+        r.error?.toolError?.retryable === false,
+      JSON.stringify({ calls: r.calls.length, te: r.error?.toolError }));
+  }
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -8809,6 +8964,7 @@ async function main() {
   await testFpdsHonesty();
   await testGetTextPort();
   await testNihHonesty();
+  await testFetchWithRetryTimeout();
 
   // Prove the harness bites.
   await selfCheck();
