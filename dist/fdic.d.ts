@@ -48,25 +48,26 @@
  *   ★M1 (BLOCKER) — `name`/`city` route through FDIC's full-text `search` param,
  *     NOT `filters=NAME/CITY:"…"`. The `filters` DSL treats NAME/CITY as
  *     case-sensitive EXACT-keyword (live: `filters=NAME:"chase"` → total 0 — a
- *     confident false-empty), whereas `search=NAME:"chase"` is a case-insensitive
- *     full-text match that combines cleanly with `filters` (live: `search=NAME:
- *     first` + `filters=STALP:VA AND ACTIVE:1` → 9). We emit BOTH `filters=`
- *     (STALP/ACTIVE/CERT) and `search=` (NAME/CITY) when present. Disclosed in
- *     `_meta.notes`.
- *   ★M2 (MAJOR) — every quoted `search` value is escaped BACKSLASH-FIRST then
- *     quote (`v.replace(/\\/g,'\\\\').replace(/"/g,'\\"')`), NEVER quote-first
- *     (quote-first doubles the backslash the quote pass introduced → an embedded
- *     `"` becomes a literal backslash + a REAL closing quote → the phrase
- *     re-closes and trailing text executes as live query logic; live-proven on
- *     the `filters` DSL: `zzz" OR STALP:VA OR NAME:"zzz` quote-first → total 595).
- *     The value is then phrase-quoted (`NAME:"<escaped>"`). This holds even on the
- *     Zod-bypass path (the escape is the injection defense; the char-class is only
- *     a sanity boundary — S2).
+ *     confident false-empty), whereas `search=NAME:chase` is a case-insensitive
+ *     full-text token match (live: 43) that combines cleanly with `filters` (live:
+ *     `search=NAME:first` + `filters=STALP:VA AND ACTIVE:1` → 9). We emit BOTH
+ *     `filters=` (STALP/ACTIVE/CERT) and `search=` (NAME/CITY) when present.
+ *     Disclosed in `_meta.notes`.
+ *   ★M2 (v2 fix — the search value is UNQUOTED) — the `search` term is built
+ *     `NAME:<escaped>` (NO surrounding quotes). Quoting a single token makes FDIC
+ *     run a `match_phrase` that COLLAPSES recall to zero for real brand-name banks
+ *     (live: `NAME:"Axos"`→0 but `NAME:Axos`→1 — Axos Bank CERT 35546 exists), the
+ *     exact M1 false-empty class. The value is instead backslash-escaped for the
+ *     UNQUOTED Lucene reserved chars the char-class allows (`( ) & / -` + `\`; see
+ *     escapeSearch) — belt-and-suspenders on the Zod-bypass path. The `search`
+ *     param is provably non-injectable for WIDENING (default-AND token semantics —
+ *     `OR`/`&&` never form a union; live: `NAME:zzz OR STALP:VA`→0), so no quotes
+ *     are needed for security either.
  *   ★S1 — a multi-word name/city `search` value is matched PER-TOKEN by FDIC's
- *     full-text index (phrase-quoting does NOT phrase-scope it — live-verified:
- *     `search=NAME:"First Community"` returns 224 incl. names matching only one
- *     token, e.g. "First State Bank"). We disclose this in `_meta.notes` whenever
- *     a name/city value contains a space.
+ *     full-text index (may be BROADER than a literal substring — a record sharing
+ *     only ONE token can match; live: `search=NAME:First Community`→225 incl.
+ *     "First State Bank"). We disclose this in `_meta.notes` whenever a name/city
+ *     value contains a space.
  *   (P1) EXACT total → honest pagination: `totalAvailable = num(meta.total)`
  *     (stable across offset); `records = data.map(d => d.data)`; `hasMore =
  *     offset + returned < totalAvailable`; `nextOffset`. Via withMeta/buildMeta.
@@ -101,14 +102,24 @@ declare const INST_FILTER_FIELDS: ReadonlySet<string>;
 declare const FIN_FILTER_FIELDS: ReadonlySet<string>;
 declare const INST_SEARCH_FIELDS: ReadonlySet<string>;
 /**
- * ★M2 — escape a quoted-phrase value BACKSLASH-FIRST then quote (NEVER the
- * reverse). Quote-first doubles the backslash the quote pass just introduced, so
- * an embedded `"` becomes a literal backslash + a REAL closing quote → the phrase
- * re-closes early and trailing text executes as live query logic. Backslash-first
- * keeps the value fully phrase-literal. Exported for the direct-builder fault
- * fixture (which bypasses the Zod char-class).
+ * ★M2 (v2 fix) — escape an UNQUOTED `search` value: backslash FIRST (so a
+ * pre-existing `\` becomes a literal `\\` and we never double-process the escapes
+ * we add), then backslash-escape the Lucene reserved chars the char-class ALLOWS
+ * and that are meaningful UNQUOTED — grouping `(` `)`, the boolean-forming `&`
+ * (`&&`), the regex delimiter `/`, and the prefix/NOT operator `-`. There are NO
+ * surrounding quotes: FDIC's `search` treats a quoted single token as a
+ * `match_phrase` that COLLAPSES recall to ZERO for real brand-name banks (live:
+ * `NAME:"Axos"`→0 but `NAME:Axos`→1) — the exact M1 false-empty class this design
+ * exists to prevent. Quotes are also gratuitous for security: the SSRF review
+ * proved the `search` param is non-injectable for WIDENING (default-AND token
+ * semantics — `OR`/`&&` never form a union; live: `NAME:zzz OR STALP:VA`→0 vs
+ * STALP:VA→5998), and a field-pivot needs `:`, which the Zod char-class rejects.
+ * So this escape is belt-and-suspenders for the Zod-bypass path (`:` and `"` are
+ * char-class-rejected on the validated path). Live-verified 2026-07-13 that the
+ * escape preserves recall (`Farmers & Merchants`→181, `First-Citizens`→85,
+ * `Mizuho Bank \(USA\)`→1). Exported for the direct-builder fault fixture.
  */
-export declare function escapePhrase(v: string): string;
+export declare function escapeSearch(v: string): string;
 /** The filter-field allowlists, exported so the fault suite can drive the
  *  belt-and-suspenders field-guard directly (the tool functions only ever pass
  *  hardcoded fields, so this defense-in-depth check is otherwise unreachable). */
@@ -117,8 +128,9 @@ export { INST_FILTER_FIELDS, FIN_FILTER_FIELDS, INST_SEARCH_FIELDS };
  *  value is a constrained non-string (STALP/ACTIVE/CERT) → no quoting needed.
  *  Exported for the allowlist-bypass fault fixture (§7(b)). */
 export declare function filterTerm(field: string, value: string, allowed: ReadonlySet<string>): string;
-/** A `search` term `FIELD:"<escaped>"` (M1 route for NAME/CITY) — asserts the
- *  field ∈ the search allowlist, M2-escapes the value, and phrase-quotes it.
+/** A `search` term `FIELD:<escaped>` (M1 route for NAME/CITY) — asserts the field
+ *  ∈ the search allowlist and M2-escapes the value UNQUOTED (see escapeSearch: NO
+ *  surrounding quotes — quotes collapse match_phrase recall → false-empties).
  *  Exported for the allowlist-bypass fault fixture (§7(b)). */
 export declare function searchTerm(field: string, value: string): string;
 /**
@@ -134,9 +146,10 @@ export declare function buildInstFilters(inp: {
 /**
  * ★M1 + ★M2 — build the institutions `search` string (FDIC full-text; NAME/CITY
  * only). Each value is char-class-validated at the server boundary, then here
- * M2-escaped (backslash-first) + phrase-quoted. Terms joined with ` AND ` (live-
- * verified: `search=NAME:"first" AND CITY:"richmond"` → 9, both must match).
- * Returns "" when neither is present. Exported for the M1/M2 fault fixtures.
+ * M2-escaped UNQUOTED (backslash-first; NO surrounding quotes — see escapeSearch).
+ * Terms joined with ` AND ` (live-verified: `search=NAME:first AND CITY:richmond`
+ * → both must match). Returns "" when neither is present. Exported for the M1/M2
+ * fault fixtures.
  */
 export declare function buildInstSearch(inp: {
     name?: string;
@@ -169,7 +182,7 @@ export type FdicFinancials = {
  * Search the FDIC-insured-institution directory (`/banks/institutions`).
  * Structured inputs: `state` (STALP filter), `activeOnly` (ACTIVE filter), `cert`
  * (CERT filter) → the `filters` param; `name`/`city` → the full-text `search`
- * param (M1; case-insensitive token match, phrase-quoted + M2-escaped). Plus
+ * param (M1; case-insensitive token match, UNQUOTED + M2-escaped). Plus
  * `limit`/`offset`/`sortBy`/`sortOrder`. Fixed field projection.
  *
  * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1); the 3-

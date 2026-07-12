@@ -63,7 +63,7 @@ import { num as socrataNum } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
 import {
   num as fdicNum,
-  escapePhrase as fdicEscape,
+  escapeSearch as fdicEscape,
   buildInstFilters as fdicBuildFilters,
   buildInstSearch as fdicBuildSearch,
   buildFinFilters as fdicBuildFinFilters,
@@ -8385,43 +8385,64 @@ async function testFdicHonesty() {
     fdicNum(4016571) === 4016571 && fdicNum(0) === 0 && fdicNum("") === null && fdicNum("null") === null && fdicNum(undefined) === null,
     JSON.stringify([fdicNum(4016571), fdicNum(0), fdicNum(""), fdicNum("null"), fdicNum(undefined)]));
 
-  // (b) ★M2 — the escape ORDER is BACKSLASH-FIRST then quote. Quote-first doubles
-  // the backslash the quote pass introduced → the phrase re-closes early and the
-  // injected `OR STALP:VA` executes as live logic (live-proven: total 595). The
-  // direct-builder fixture BYPASSES the Zod char-class.
-  const INJ = 'zzz" OR STALP:VA OR NAME:"zzz';
-  eq("58b ★M2 escapePhrase backslash-first: `zzz\" OR STALP:VA OR NAME:\"zzz` stays fully phrase-literal (quote-first ⇒ RED = doubled backslash re-closes the phrase)",
-    fdicEscape(INJ), 'zzz\\" OR STALP:VA OR NAME:\\"zzz');
-  eq("58b ★M2 buildInstSearch phrase-quotes the M2-escaped injection: NAME:\"zzz\\\" OR STALP:VA OR NAME:\\\"zzz\" (the injected OR STALP:VA is literal phrase content, never query logic)",
-    fdicBuildSearch({ name: INJ }), 'NAME:"zzz\\" OR STALP:VA OR NAME:\\"zzz"');
-  eq("58b ★M2 backslash-first handles a pre-existing backslash: `a\\b\"c` → `a\\\\b\\\"c` (double the backslash FIRST, then escape the quote — quote-first ⇒ RED)",
-    fdicEscape('a\\b"c'), 'a\\\\b\\"c');
+  // (b) ★M2 (v2 fix) — the `search` value is UNQUOTED and backslash-escaped for
+  // the Lucene reserved chars the char-class allows (`( ) & / -` + `\`). NO
+  // surrounding quotes (quotes ⇒ match_phrase ⇒ recall collapse = the M1
+  // false-empty). The direct-builder fixture BYPASSES the Zod char-class. A
+  // paren-breakout value's grouping metachars are neutralized (escaped), so the
+  // `search` cannot form a Lucene group/boolean — RED if quotes ship OR if the
+  // parens are left unescaped.
+  eq("58b ★M2 escapeSearch escapes grouping parens (belt-and-suspenders, UNQUOTED): 'Mizuho Bank (USA)' → 'Mizuho Bank \\(USA\\)' (no quotes)",
+    fdicEscape("Mizuho Bank (USA)"), "Mizuho Bank \\(USA\\)");
+  eq("58b ★M2 escapeSearch backslash-FIRST then operators: `a\\b(c` → `a\\\\b\\(c` (a pre-existing backslash is doubled BEFORE the paren escape is added)",
+    fdicEscape("a\\b(c"), "a\\\\b\\(c");
+  eq("58b ★M2 escapeSearch escapes & / - too (Farmers & Merchants → 'Farmers \\& Merchants'; recall-preserving, live-verified 181)",
+    fdicEscape("Farmers & Merchants"), "Farmers \\& Merchants");
+  eq("58b ★M2 buildInstSearch is UNQUOTED: buildInstSearch({name:'Axos'}) === 'NAME:Axos' (NO quotes — a quoted 'NAME:\"Axos\"' collapses FDIC recall to 0 ⇒ RED = the M1 false-empty)",
+    fdicBuildSearch({ name: "Axos" }), "NAME:Axos");
+  eq("58b ★M2 injection (Zod-bypass) paren-breakout stays literal: buildInstSearch({name:'zzz) OR (NAME:chase'}) === 'NAME:zzz\\) OR \\(NAME:chase' (grouping metachars escaped → no Lucene group forms; unescape/quote ⇒ RED)",
+    fdicBuildSearch({ name: "zzz) OR (NAME:chase" }), "NAME:zzz\\) OR \\(NAME:chase");
 
   // (c) builders — filters (STALP/ACTIVE/CERT) + search (NAME/CITY phrase-quoted).
   eq("58c buildInstFilters compound: STALP:VA AND ACTIVE:1 AND CERT:628 (structured — no free field)",
     fdicBuildFilters({ state: "VA", activeOnly: true, cert: 628 }), "STALP:VA AND ACTIVE:1 AND CERT:628");
   eq("58c buildInstFilters activeOnly:false → ACTIVE:0 (not omitted)", fdicBuildFilters({ activeOnly: false }), "ACTIVE:0");
   eq("58c buildInstFilters no clauses → '' (⇒ no filters param)", fdicBuildFilters({}), "");
-  eq("58c buildInstSearch single: NAME:\"chase\" (phrase-quoted)", fdicBuildSearch({ name: "chase" }), 'NAME:"chase"');
-  eq("58c buildInstSearch NAME+CITY joined with AND (live: →9): NAME:\"first\" AND CITY:\"richmond\"",
-    fdicBuildSearch({ name: "first", city: "richmond" }), 'NAME:"first" AND CITY:"richmond"');
+  eq("58c buildInstSearch single UNQUOTED: NAME:chase (no quotes — live full token-match set = 43)", fdicBuildSearch({ name: "chase" }), "NAME:chase");
+  eq("58c buildInstSearch NAME+CITY joined with AND (UNQUOTED): NAME:first AND CITY:richmond",
+    fdicBuildSearch({ name: "first", city: "richmond" }), "NAME:first AND CITY:richmond");
   eq("58c buildFinFilters: CERT:10363 (the sole, numeric filter — zero string injection surface)", fdicBuildFinFilters({ cert: 10363 }), "CERT:10363");
 
   // (d) ★M1 — name/city ride the `search` param, NEVER `filters` (which is
   // case-sensitive exact-keyword → confident false-empties). Spy the wire.
-  await withFetch(fdicInstMock({ records: [{ NAME: "JPMorgan Chase Bank, National Association", CERT: 628 }], total: 11 }), async (calls) => {
+  await withFetch(fdicInstMock({ records: [{ NAME: "JPMorgan Chase Bank, National Association", CERT: 628 }], total: 43 }), async (calls) => {
     await runTool("fdic_search_institutions", { name: "chase" }, sam);
     const url = fdicInstUrl(calls);
-    ok("58d ★M1: name → the `search` param carrying NAME: (NOT `filters`); filters is ABSENT (route name via filters ⇒ RED = the case-sensitive false-empty class)",
-      !!url && url.searchParams.get("search") === 'NAME:"chase"' && url.searchParams.get("filters") === null,
+    ok("58d ★M1: name → the `search` param carrying NAME: (UNQUOTED, no %22) NOT `filters` (filters ABSENT; route name via filters ⇒ RED = the case-sensitive false-empty class)",
+      !!url && url.searchParams.get("search") === "NAME:chase" && url.searchParams.get("filters") === null,
       JSON.stringify({ search: url?.searchParams.get("search"), filters: url?.searchParams.get("filters") }));
   });
-  await withFetch(fdicInstMock({ records: [{ NAME: "First Bank", CERT: 1 }], total: 8 }), async (calls) => {
+  await withFetch(fdicInstMock({ records: [{ NAME: "First Bank", CERT: 1 }], total: 9 }), async (calls) => {
     await runTool("fdic_search_institutions", { name: "first", state: "VA", activeOnly: true }, sam);
     const url = fdicInstUrl(calls);
-    ok("58d ★M1: name→search AND state/activeOnly→filters, cleanly SPLIT (filters=STALP:VA AND ACTIVE:1, search=NAME:\"first\"); filters NEVER carries NAME",
-      !!url && url.searchParams.get("filters") === "STALP:VA AND ACTIVE:1" && url.searchParams.get("search") === 'NAME:"first"' && !/NAME/.test(url.searchParams.get("filters") ?? ""),
+    ok("58d ★M1: name→search AND state/activeOnly→filters, cleanly SPLIT (filters=STALP:VA AND ACTIVE:1, search=NAME:first UNQUOTED); filters NEVER carries NAME",
+      !!url && url.searchParams.get("filters") === "STALP:VA AND ACTIVE:1" && url.searchParams.get("search") === "NAME:first" && !/NAME/.test(url.searchParams.get("filters") ?? ""),
       JSON.stringify({ filters: url?.searchParams.get("filters"), search: url?.searchParams.get("search") }));
+  });
+  // ★M2-fix regression: a real brand-name bank (Axos, live: NAME:Axos→1, but the
+  // OLD quoted NAME:"Axos"→0) must NOT become a false-empty. Assert the emitted
+  // `search` is UNQUOTED (NAME:Axos, no `"`/%22) and the tool returns the record —
+  // shipping the quoted path (search=NAME:"Axos") ⇒ this assertion goes RED.
+  await withFetch(fdicInstMock({ records: [{ NAME: "Axos Bank", CERT: 35546, ASSET: 28200000, STALP: "CA", CITY: "San Diego", ACTIVE: 1, ESTYMD: "01/01/2000", ID: "35546" }], total: 1 }), async (calls) => {
+    const r = await runTool("fdic_search_institutions", { name: "Axos" }, sam);
+    const url = fdicInstUrl(calls);
+    const m = buildMeta(r.meta);
+    ok("58d ★M2-fix Axos NOT a false-empty: emitted search === 'NAME:Axos' (UNQUOTED — no double-quote/%22); tool returns the record (returned:1, total:1) — the quoted match_phrase path ⇒ RED",
+      !!url && url.searchParams.get("search") === "NAME:Axos" && !url.search.includes("%22") && r.data.institutions.length === 1 && m.totalAvailable === 1,
+      JSON.stringify({ search: url?.searchParams.get("search"), hasQuote: url?.search.includes("%22"), returned: r.data.institutions.length, ta: m.totalAvailable }));
+    ok("58d ★M2-fix the note does NOT vouch a 0-total as a confirmed genuine miss (it discloses a token match that may be BROADER than a literal substring); no 'treat 0 as a genuine miss' wording",
+      m.notes.some((n) => /full-text .*search/i.test(n) && /BROADER|broader/.test(n)) && !m.notes.some((n) => /actual full-text miss|genuine miss/i.test(n)),
+      JSON.stringify(m.notes));
   });
 
   // (e) allowlist — filterTerm/searchTerm reject an un-allowlisted field (P4
@@ -8620,7 +8641,7 @@ async function testFdicHonesty() {
     const r = await expectThrow(() => runTool("fdic_search_institutions", { name: "Mizuho Bank (USA)" }, sam));
     ok("58n ★S2 'Mizuho Bank (USA)' is ACCEPTED (parens/# in the char-class — NOT false-rejected as invalid_input; narrow the char-class ⇒ RED)", r.threw === false, JSON.stringify({ threw: r.threw, kind: r.threw ? toToolError(r.error).kind : null }));
     const url = fdicInstUrl(calls);
-    ok("58n ★S2 the parens are LITERAL inside the phrase-quoted search value: search=NAME:\"Mizuho Bank (USA)\"", url && url.searchParams.get("search") === 'NAME:"Mizuho Bank (USA)"', JSON.stringify(url?.searchParams.get("search")));
+    ok("58n ★S2 the parens are backslash-ESCAPED (UNQUOTED) so they match literally, live-verified →1: search=NAME:Mizuho Bank \\(USA\\) (NOT quoted, NOT rejected)", url && url.searchParams.get("search") === "NAME:Mizuho Bank \\(USA\\)", JSON.stringify(url?.searchParams.get("search")));
   });
 
   // (o) financials — CERT-only filter + REPDTE DESC default + per-CERT pagination.
