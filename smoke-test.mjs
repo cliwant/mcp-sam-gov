@@ -689,6 +689,31 @@ const tests = [
               h.filingIndexUrl.endsWith("/"))),
       ),
   },
+  {
+    // Bulk quarterly full-index (ADR-0026). 2024 QTR1 is a CLOSED, immutable quarter;
+    // the master.idx is FULL-SCANNED and the 8-K filter is client-side, so
+    // totalAvailable is the EXACT quarter total (16,997 live-verified 2026-07-12 —
+    // asserted > 10000 to stay robust). Each returned row is a real 8-K with a
+    // 10-digit cikPadded STRING and a resolvable archive filingUrl.
+    name: "edgar_filing_index",
+    args: { year: 2024, quarter: 1, formType: "8-K", limit: 3 },
+    verify: (r) =>
+      r.year === 2024 &&
+      r.quarter === 1 &&
+      r.indexFile === "master.idx" &&
+      typeof r.totalAvailable === "number" &&
+      r.totalAvailable > 10000 &&
+      Array.isArray(r.filings) &&
+      r.filings.length === 3 &&
+      r.filings.every(
+        (f) =>
+          f.formType === "8-K" &&
+          typeof f.cikPadded === "string" &&
+          f.cikPadded.length === 10 &&
+          typeof f.filingUrl === "string" &&
+          f.filingUrl.startsWith("https://www.sec.gov/Archives/edgar/data/"),
+      ),
+  },
 
   // ━━━ Socrata / SODA — keyless SLED + E-rate open data (ADR-0004)
   {
