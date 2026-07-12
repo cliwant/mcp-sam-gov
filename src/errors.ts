@@ -149,6 +149,27 @@ export async function fetchWithRetry(
       await new Promise((res) => setTimeout(res, wait * 1000));
     } catch (e) {
       if (e instanceof ToolErrorCarrier) throw e;
+      // A timeout/abort. The caller's AbortSignal.timeout fired (or an
+      // already-aborted signal is being reused across attempts). Retrying is
+      // futile within this call's budget: the same signal stays aborted, so
+      // attempts 2/3 reject immediately without ever reaching the endpoint,
+      // and a re-driven tool call just re-hits the same wall. Fail fast,
+      // honestly non-retryable. Keyed on the DOMException NAME only —
+      // AbortSignal.timeout → "TimeoutError", AbortController.abort() →
+      // "AbortError" — which is disjoint from a genuine network fault
+      // (TypeError, name "TypeError"), so a real "fetch failed" falls through
+      // to the generic retryable branch below UNCHANGED.
+      if (
+        e instanceof Error &&
+        (e.name === "TimeoutError" || e.name === "AbortError")
+      ) {
+        throw new ToolErrorCarrier({
+          kind: "upstream_unavailable",
+          message: `Request to ${endpointLabel} timed out.`,
+          retryable: false,
+          upstreamEndpoint: endpointLabel,
+        });
+      }
       // Network-level error
       lastErr = {
         kind: "upstream_unavailable",
