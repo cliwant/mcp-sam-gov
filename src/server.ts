@@ -50,6 +50,7 @@ import * as datagov from "./datagov.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
+import * as nsf from "./nsf.js";
 import * as fema from "./fema.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
@@ -1790,6 +1791,106 @@ const NihSearchProjectsInput = z.object({
     ),
 });
 
+// ─── NSF Awards API (api.nsf.gov — keyless GET) ─── ADR-0020 (source #20)
+// The grant-SIBLING of NIH RePORTER on a DIFFERENT agency: federal research-GRANT
+// award records with recipient / PI / UEI enrichment, strengthening the WEAK
+// entity/recipient layer (ueiNumber/parentUeiNumber join to SAM/USAspending). The
+// SSRF surface is a compile-time-CONSTANT host+path; all filters ride in a
+// module-built URLSearchParams from a validated whitelist. Only LIVE-CONFIRMED-
+// narrowing filters ship (M1); agency + printFields are EXCLUDED (agency = the
+// NSF-only-corpus zeros-out foot-gun; printFields = a proven no-op). The 10,000-
+// record retrieval window (offset+rpp ≤ 10,000) is enforced by offset .max(9999)
+// + a module-side outgoing-rpp clamp. Dates are STRICT mm/dd/yyyy (a wrong format
+// is silently mis-parsed by NSF); a multi-word keyword is OR-tokenized (disclosed).
+const NSF_UEI_RE = /^[A-Za-z0-9]{12}$/;
+const NSF_MMDDYYYY_RE = /^(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])\/\d{4}$/;
+const NsfSearchAwardsInput = z.object({
+  keyword: z
+    .string()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe(
+      "Free-text search over title/abstract. NOTE: NSF OR-tokenizes a MULTI-WORD keyword (matches ANY word, not the phrase — 'machine learning' = machine OR learning, a far broader set; disclosed in _meta.notes). Use a single distinctive word or add a scoping filter for a precise set.",
+    ),
+  awardeeStateCode: z
+    .enum(nsf.NSF_STATES)
+    .optional()
+    .describe(
+      "Awardee-organization US state/territory 2-letter USPS code (UPPERCASE — the enum is the SSRF value guard + the silent-zero guard: a non-state typo silently returns 0 awards on NSF, indistinguishable from 'no NSF funding', so it is an invalid_input). LIVE-CONFIRMED to narrow. e.g. 'CA'.",
+    ),
+  awardeeName: z
+    .string()
+    .min(2)
+    .max(200)
+    .optional()
+    .describe(
+      "Awardee-organization name filter (2..200 chars). LIVE-CONFIRMED to narrow (a top recipient like 'Johns Hopkins University' may still saturate at the 10,000 count cap).",
+    ),
+  ueiNumber: z
+    .string()
+    .regex(NSF_UEI_RE)
+    .optional()
+    .describe(
+      "Awardee UEI — a 12-char alphanumeric SAM/USAspending Unique Entity ID (uppercase-normalized before sending). LIVE-CONFIRMED an EXACT recipient-graph filter (the clean SAM/USAspending join). e.g. 'FTMTDMBR29C7' (Johns Hopkins).",
+    ),
+  parentUeiNumber: z
+    .string()
+    .regex(NSF_UEI_RE)
+    .optional()
+    .describe(
+      "Parent-organization UEI — a 12-char alphanumeric UEI for the awardee's parent entity (uppercase-normalized). LIVE-CONFIRMED an EXACT narrow (the parent-org roll-up join). e.g. 'GS4PNKTRNKL3'.",
+    ),
+  pdPIName: z
+    .string()
+    .min(2)
+    .max(120)
+    .optional()
+    .describe(
+      "Principal-investigator name filter (2..120 chars). LIVE-CONFIRMED to narrow. e.g. 'Bell'.",
+    ),
+  dateStart: z
+    .string()
+    .regex(NSF_MMDDYYYY_RE)
+    .optional()
+    .describe(
+      "Award ACTION-date lower bound (the initial award/obligation date, NOT the project startDate — live-verified). STRICT mm/dd/yyyy; a wrong format (yyyy-mm-dd) is silently mis-parsed by NSF (not an error), so it is rejected. e.g. '01/01/2024'.",
+    ),
+  dateEnd: z
+    .string()
+    .regex(NSF_MMDDYYYY_RE)
+    .optional()
+    .describe(
+      "Award ACTION-date upper bound. STRICT mm/dd/yyyy (same semantics/foot-gun as dateStart). e.g. '12/31/2024'.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(25)
+    .describe(
+      "Awards per page (→ NSF rpp), 1..100, default 25. The OUTGOING page size is clamped so offset+rpp ≤ 10,000 (crossing NSF's retrieval window triggers a FATAL).",
+    ),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .max(9999)
+    .default(0)
+    .describe(
+      "0-based offset. HARD-CAPPED at 9,999: NSF caps keyless retrieval at the first 10,000 records (offset+rpp ≤ 10,000), so offset ≥ 10,000 is refused (invalid_input) — narrow criteria to bring the set under 10,000.",
+    ),
+});
+const NsfGetAwardInput = z.object({
+  awardId: z
+    .string()
+    .regex(/^\d{5,9}$/)
+    .describe(
+      "NSF award id — an all-digit id (5..9 digits; NSF ids are 7-digit numeric, live-verified). Returns the ONE full award record INCLUDING abstractText; a nonexistent id ⇒ found:false (never a fabricated record). e.g. '2545697'.",
+    ),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -2841,6 +2942,30 @@ const TOOLS: ToolDef[] = [
       "Search awarded NIH RePORTER research-GRANT projects (keyless; api.reporter.nih.gov v2, POST/JSON — the FIRST non-GET getJson-port consumer) — the NEW federal research-funding recipient-enrichment axis (who receives NIH research money, by organization / state, joinable to SAM/USAspending via primary_uei). Structured, LIVE-CONFIRMED-narrowing criteria ONLY, AND-combined in a module-built body (NO raw passthrough): orgStates (UPPERCASE 2-letter USPS enum — the SSRF + silent-zero guard; a lowercase/unknown code silently returns zeros), orgNames (≤512 each, ≤20), fiscalYears (int array 1985..currentYear+1, ≤20), limit (1..500, def 50), offset (0..14,999, def 0). Returns { projects:[{ projectNum, projectTitle, fiscalYear, awardAmount, organization:{ name, state, primaryUei, primaryDuns, ueis, duns }, principalInvestigators, contactPiName, fundingIc }] } + honest _meta. HONESTY: (M2) records are RESEARCH GRANTS, NOT procurement contracts — primary_uei joins to SAM/USAspending recipients but the award nature differs (disclosed in every _meta.notes); totalAvailable = the EXACT meta.total (NEVER the page size, NEVER a lower bound); NIH caps keyless retrieval at the first 15,000 records (offset 0..14,999) — offset ≥ 15,000 ⇒ invalid_input, and past the window the count stays exact while records are UNREACHABLE (disclosed in a note; nextOffset is never a dead-end). Disclose-not-refuse: an unscoped query still returns the first page + the exact total + a narrow-your-criteria note. agencyIcCodes is intentionally NOT a filter (NIH silently drops it — it would be a false 'applied'). Genuine-empty (total:0) ⇒ complete:true/total:0; an outage/5xx/timeout THROWS; a 400 (bad offset/limit/type) ⇒ invalid_input; a 200 body that isn't {meta,results} or a non-numeric meta.total ⇒ schema_drift (never a fake empty). awardAmount is number|null (a real $0 award is 0, an absent amount is null).",
     inputSchema: NihSearchProjectsInput,
     handler: (input) => nih.searchProjects(input),
+  }),
+  // ━━━ NSF Awards API — keyless federal research-GRANT awards (2) ━━━ ADR-0020
+  // Source #20. The grant-SIBLING of NIH RePORTER on a DIFFERENT agency: NSF
+  // research-grant awards with recipient / PI / UEI enrichment, strengthening the
+  // WEAK entity/recipient layer (ueiNumber/parentUeiNumber join to SAM/USAspending).
+  // SSRF surface = a compile-time-constant host+path; all filters ride in a
+  // module-built URLSearchParams from a validated whitelist. HONESTY: totalCount is
+  // EXACT below 10,000 and SATURATES at 10,000 (ES track_total_hits ⇒ totalIsLower-
+  // Bound + a note); the offset+rpp ≤ 10,000 retrieval window is clamped/disclosed;
+  // a multi-word keyword is OR-tokenized (disclosed, M1); a serviceNotification at
+  // HTTP 200 loud-fails (never a fake empty); grant≠contract in every response.
+  defineTool({
+    name: "nsf_search_awards",
+    description:
+      "Search awarded NSF research-GRANT awards (keyless; api.nsf.gov/services/v1/awards.json) — the NEW federal research-funding recipient-enrichment axis (who receives NSF research money, by organization / UEI / PI / state, joinable to SAM/USAspending via ueiNumber/parentUeiNumber). The grant-SIBLING of nih_reporter_search_projects on a different agency. LIVE-CONFIRMED-narrowing filters ONLY, module-built into a URLSearchParams query (NO raw passthrough): keyword (free text; MULTI-WORD is OR-tokenized — 'machine learning' = machine OR learning, disclosed in _meta.notes), awardeeStateCode (UPPERCASE 2-letter USPS enum — the SSRF + silent-zero guard; a non-state typo silently returns 0), awardeeName, ueiNumber (12-char UEI — an EXACT SAM/USAspending join), parentUeiNumber (parent-org roll-up), pdPIName, dateStart/dateEnd (STRICT mm/dd/yyyy on the award ACTION date — a wrong format is silently mis-parsed), limit (1..100, def 25 → rpp), offset (0..9999). Returns { awards:[{ id, title, agency, cfdaNumber, transType, awardee:{ name, city, stateCode, ueiNumber, parentUeiNumber }, performanceSite, principalInvestigator:{ fullName, firstName, lastName, middleInitial, email, id }, coPrincipalInvestigators, programOfficer, amounts:{ fundsObligatedAmt, estimatedTotalAmt, fundsObligatedByYear }, dates, program, activeAward, historicalAward }] } (abstract EXCLUDED — use nsf_get_award) + honest _meta. HONESTY: NSF Awards are RESEARCH GRANTS, NOT procurement contracts (ueiNumber joins to SAM/USAspending but the award nature differs — disclosed every response); totalAvailable = the EXACT metadata.totalCount below 10,000 and SATURATES at 10,000 (an ES track_total_hits cap ⇒ totalIsLowerBound:true + a note — the true total is ≥10,000 and only the first 10,000 are retrievable); NSF caps keyless retrieval at offset+rpp ≤ 10,000 (offset ≥ 10,000 ⇒ invalid_input; the outgoing rpp is clamped so a page never crosses the window). fundsObligatedAmt/estimatedTotalAmt arrive as STRINGS → number|null (a real $0 is 0, absent is null). Genuine-empty (totalCount:0) ⇒ complete:true/total:0; a serviceNotification at HTTP 200 (bad param / deep offset) ⇒ invalid_input/upstream_unavailable THROWS (never a fake empty); an outage/5xx/timeout THROWS; a 200 body that isn't {response:{award,metadata}} or a non-numeric totalCount ⇒ schema_drift. Feed a row's id to nsf_get_award for the full record + abstractText.",
+    inputSchema: NsfSearchAwardsInput,
+    handler: (input) => nsf.searchAwards(input),
+  }),
+  defineTool({
+    name: "nsf_get_award",
+    description:
+      "Fetch ONE NSF award by its numeric award id (keyless; api.nsf.gov/services/v1/awards.json). Input `awardId` (all-digit, 5..9 digits — NSF ids are 7-digit numeric, live-verified; numeric-only is injection-safe). Returns { found, award:{ …the FULL curated record INCLUDING abstractText… } } + honest _meta. A nonexistent id ⇒ a genuine empty (totalCount:0) ⇒ found:false / award:null (NEVER a fabricated record). HONESTY: NSF Awards are RESEARCH GRANTS, NOT procurement contracts (ueiNumber joins to SAM/USAspending but the award nature differs — disclosed every response); fundsObligatedAmt/estimatedTotalAmt arrive as STRINGS → number|null (a real $0 is 0, absent is null); a serviceNotification at HTTP 200 ⇒ invalid_input/upstream_unavailable THROWS; an outage/5xx ⇒ THROWS; a 200 body that isn't {response:{award,metadata}} ⇒ schema_drift (never a fabricated record).",
+    inputSchema: NsfGetAwardInput,
+    handler: (input) => nsf.getAward(input),
   }),
   // ━━━ EPA ECHO REST — keyless facility environmental compliance/enforcement (2) ━━━ ADR-0009
   // A NEW capability axis: facility & competitor environmental compliance-risk
