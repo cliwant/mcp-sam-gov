@@ -52,10 +52,15 @@
  *   even on a Zod-BYPASSING direct handler call (mirror govinfo's in-handler
  *   collection re-check).
  *
- * ★ TOKENIZATION is AND-conjunctive for query.term/query.spons/query.cond
- *   (live-verified: `query.spons="zzznotarealword Pfizer"` → 0 vs Pfizer → 6053).
- *   A multi-word value fires a MANDATORY `_meta` note disclosing the AND semantics
- *   (the mirror of NSF's OR-note, but AND).
+ * ★ TOKENIZATION is AND-conjunctive for query.term/query.spons/query.cond, and CT
+ *   splits on whitespace AND a PUNCTUATION set (NOT whitespace alone) — live-verified
+ *   2026-07-12: `query.spons=sanofi<delim>aventis` == the whitespace count (3) for
+ *   space + `- , / ; + & | @ # =`; `. : _ '` do NOT split. So a single-token-LOOKING
+ *   compound like "Sanofi-Aventis" is really 'Sanofi' AND 'Aventis' (→3 vs Sanofi
+ *   →3416 — a ~1000× silent false-negative). A multi-TOKEN value (split on
+ *   CT_TOKEN_SPLIT_RE, not just whitespace) fires a MANDATORY `_meta` AND-note (the
+ *   mirror of NSF's OR-note, but AND); a multi-token sponsor SUPPRESSES the
+ *   contradictory "matches more variants" broadening note (CT NARROWED, not broadened).
  *
  * ★ funderType facets OVERLAP (non-exclusive: nih+fed+industry+other sum >
  *   registry total) — a `_meta` note forbids summing them into a partition.
@@ -126,8 +131,11 @@ export const CT_NCT_RE = /^NCT\d{8}$/;
 // The opaque pageToken alphabet is a base64/URL-safe SUPERSET (the real injection
 // guard is URLSearchParams encoding; the regex bounds length + rejects obvious
 // garbage). Mirrors GovInfo's page-mark regex MINUS the `"*"` sentinel (CT has no
-// first-page sentinel — the first page is simply a call with no pageToken).
-export const CT_TOKEN_RE = new RegExp("^[A-Za-z0-9+/=_~.,:%-]{1,4096}$");
+// first-page sentinel — the first page is simply a call with no pageToken) AND
+// MINUS a literal `%` — URLSearchParams would double-encode a `%` (`%2e`→`%252e`)
+// and corrupt the cursor; CT's observed tokens are base64url (no `%`), so a stray
+// `%` is rejected as invalid_input rather than silently corrupting pagination.
+export const CT_TOKEN_RE = new RegExp("^[A-Za-z0-9+/=_~.,:-]{1,4096}$");
 
 // ─── Disclosure constants (honesty obligations) ──────────────────
 /** The mandatory trial≠federal-award caveat carried in EVERY response. */
@@ -142,17 +150,35 @@ const CT_CURSOR_NOTE =
 const CT_FUNDER_OVERLAP_NOTE =
   "funderType is an OVERLAPPING facet — a study can have multiple funders, so the per-funderType counts MUST NOT be summed across values to reconstruct a registry total.";
 
-/** query.spons is a fuzzy sponsor NAME search, not an exact-entity join. */
+/** query.spons is a fuzzy sponsor NAME search, not an exact-entity join. Emitted
+ *  ONLY for a SINGLE-token sponsor: for a MULTI-token sponsor CT AND-splits and
+ *  NARROWS (e.g. 'Sanofi-Aventis' → 'Sanofi' AND 'Aventis'), so the "matches more
+ *  variants" broadening framing here would be the OPPOSITE of what happened — the
+ *  AND-note (andTokenNote) takes precedence in that case (see searchStudies). */
 const CT_SPONSOR_NOTE =
-  "sponsor is a full-text sponsor-NAME search (query.spons), not an exact-entity equality — it also matches related name variants (e.g. 'Pfizer' matches 'Pfizer's Upjohn'), and the name is free text, NOT a UEI (nominal match only).";
+  "sponsor is a full-text sponsor-NAME search (query.spons), not an exact-entity equality — a single-token name also matches related name variants (e.g. 'Pfizer' matches 'Pfizer's Upjohn'), and the name is free text, NOT a UEI (nominal match only).";
 
 /** A conservative data-currency note (not API-verifiable). */
 const CT_DATA_CURRENCY_NOTE =
   "ClinicalTrials.gov updates registrations on a rolling basis; per-record refresh lag is not API-verifiable.";
 
-/** The AND-tokenization disclosure for a multi-word term/sponsor/condition value. */
+// CT's Essie analyzer AND-tokenizes free-text query.spons/query.cond/query.term on
+// whitespace AND a specific PUNCTUATION set, NOT whitespace alone. LIVE-verified
+// 2026-07-12 (`query.spons=sanofi<delim>aventis` == the whitespace count 3, ≠ the
+// single-token "sanofi.aventis"→0): space + `- , / ; + & | @ # =` ALL SPLIT into
+// the AND co-occurrence; `. : _ '` do NOT split (kept as one literal token). So a
+// single-token-LOOKING compound like "Sanofi-Aventis" is really 'Sanofi' AND
+// 'Aventis' (→3 vs Sanofi→3416 — a ~1000× silent false-negative), and a
+// whitespace-only detector would MISS it and skip the mandatory AND-note. The
+// class is the PRECISE confirmed-splitter set (NOT a non-alnum superset — that
+// would over-disclose a split CT did not make on `.`/`_`/`'`). This is the CT
+// analogue of NSF's NSF_KEYWORD_SPLIT_RE (there OR, here AND); `-` is placed last
+// (literal); `/` is escaped for the regex-literal delimiter.
+const CT_TOKEN_SPLIT_RE = /[\s,;+&|@#=\/-]+/;
+
+/** The AND-tokenization disclosure for a multi-TOKEN term/sponsor/condition value. */
 function andTokenNote(field: string, tokens: string[]): string {
-  return `ClinicalTrials.gov matches a multi-word ${field} as AND — ALL tokens must co-occur; a 0-result for [${tokens.join(", ")}] means no study matches EVERY token, NOT that the ${field} is absent. Try a single distinctive token.`;
+  return `ClinicalTrials.gov tokenizes a multi-word ${field} on whitespace AND punctuation (hyphen, comma, slash, semicolon, etc.) and matches it as AND — ALL tokens must co-occur; this value was split into [${tokens.join(", ")}], so a 0/small count means no study matches EVERY token, NOT that the ${field} is absent (e.g. 'Sanofi-Aventis' = 'Sanofi' AND 'Aventis' → far fewer than 'Sanofi' alone). Try a single distinctive token.`;
 }
 
 const CT_SOURCE = "clinicaltrials.gov /api/v2/studies (keyless)";
@@ -349,25 +375,33 @@ export async function searchStudies(args: CtSearchArgs): Promise<MetaBundle> {
   const filtersApplied: string[] = [];
   const andNotes: string[] = [];
 
-  // A helper: push a filter + detect multi-word AND-tokenization (term/sponsor/
-  // condition only — the free-text fields whose tokens are AND-conjunctive).
+  // A helper: push a filter + detect MULTI-TOKEN AND-tokenization on CT's REAL
+  // delimiter set (whitespace AND the confirmed punctuation splitters —
+  // CT_TOKEN_SPLIT_RE), so a compound like "Sanofi-Aventis" (= Sanofi AND Aventis)
+  // fires the mandatory AND-note instead of leaking as one token through a
+  // hyphen/comma/slash. Returns true iff the value split into 2+ tokens (so the
+  // caller can suppress the contradictory sponsor-broadening note). andField=null
+  // for fields with no AND-note obligation (location).
   const pushText = (
     value: string | undefined,
     upstreamKey: string,
     filterLabel: string,
     andField: string | null,
-  ): void => {
-    if (value === undefined) return;
+  ): boolean => {
+    if (value === undefined) return false;
     params.set(upstreamKey, value);
     filtersApplied.push(filterLabel);
-    if (andField !== null) {
-      const tokens = value.trim().split(/\s+/).filter((t) => t.length > 0);
-      if (tokens.length > 1) andNotes.push(andTokenNote(andField, tokens));
+    if (andField === null) return false;
+    const tokens = value.trim().split(CT_TOKEN_SPLIT_RE).filter((t) => t.length > 0);
+    if (tokens.length > 1) {
+      andNotes.push(andTokenNote(andField, tokens));
+      return true;
     }
+    return false;
   };
 
   pushText(args["query.term"], "query.term", "query.term", "term");
-  pushText(args.sponsor, "query.spons", "sponsor", "sponsor");
+  const sponsorMultiToken = pushText(args.sponsor, "query.spons", "sponsor", "sponsor");
   pushText(args.condition, "query.cond", "condition", "condition");
   pushText(args.location, "query.locn", "location", null);
 
@@ -435,7 +469,12 @@ export async function searchStudies(args: CtSearchArgs): Promise<MetaBundle> {
   //    conditional facet/tokenization disclosures; the unscoped recommendation. ──
   const notes: string[] = [CT_TRIAL_CAVEAT, CT_CURSOR_NOTE];
   notes.push(...andNotes);
-  if (args.sponsor !== undefined) notes.push(CT_SPONSOR_NOTE);
+  // Emit the sponsor-broadening note ONLY for a SINGLE-token sponsor. For a
+  // MULTI-token sponsor CT AND-split and NARROWED (the andNotes AND-note fired),
+  // so the "matches more variants" framing would AFFIRMATIVELY MISLEAD (the
+  // opposite of what happened) — the AND-note is what the caller must see.
+  if (args.sponsor !== undefined && !sponsorMultiToken)
+    notes.push(CT_SPONSOR_NOTE);
   if (args.funderType !== undefined) notes.push(CT_FUNDER_OVERLAP_NOTE);
   if (filtersApplied.length === 0) {
     notes.push(

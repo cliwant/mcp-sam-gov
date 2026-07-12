@@ -52,10 +52,15 @@
  *   even on a Zod-BYPASSING direct handler call (mirror govinfo's in-handler
  *   collection re-check).
  *
- * ★ TOKENIZATION is AND-conjunctive for query.term/query.spons/query.cond
- *   (live-verified: `query.spons="zzznotarealword Pfizer"` → 0 vs Pfizer → 6053).
- *   A multi-word value fires a MANDATORY `_meta` note disclosing the AND semantics
- *   (the mirror of NSF's OR-note, but AND).
+ * ★ TOKENIZATION is AND-conjunctive for query.term/query.spons/query.cond, and CT
+ *   splits on whitespace AND a PUNCTUATION set (NOT whitespace alone) — live-verified
+ *   2026-07-12: `query.spons=sanofi<delim>aventis` == the whitespace count (3) for
+ *   space + `- , / ; + & | @ # =`; `. : _ '` do NOT split. So a single-token-LOOKING
+ *   compound like "Sanofi-Aventis" is really 'Sanofi' AND 'Aventis' (→3 vs Sanofi
+ *   →3416 — a ~1000× silent false-negative). A multi-TOKEN value (split on
+ *   CT_TOKEN_SPLIT_RE, not just whitespace) fires a MANDATORY `_meta` AND-note (the
+ *   mirror of NSF's OR-note, but AND); a multi-token sponsor SUPPRESSES the
+ *   contradictory "matches more variants" broadening note (CT NARROWED, not broadened).
  *
  * ★ funderType facets OVERLAP (non-exclusive: nih+fed+industry+other sum >
  *   registry total) — a `_meta` note forbids summing them into a partition.

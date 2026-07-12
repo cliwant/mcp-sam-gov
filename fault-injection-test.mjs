@@ -10058,29 +10058,69 @@ async function testClinicaltrialsHonesty() {
       r.data.studies.length === 0 && m.pagination.hasMore === false && m.nextCursor === null, JSON.stringify({ n: r.data.studies.length, pg: m.pagination, nc: m.nextCursor }));
   });
 
-  // ── (and-note) multi-word term/sponsor/condition ⇒ mandatory AND-note; single ⇒ none. ──
+  // ── (and-note) multi-TOKEN term/sponsor/condition ⇒ mandatory AND-note on CT's
+  //    REAL tokenizer delimiters (whitespace AND punctuation — live-verified
+  //    2026-07-12: space + - , / ; + & | @ # = all SPLIT into the AND
+  //    co-occurrence; . : _ ' do NOT). A whitespace-ONLY detector split(/\s+/)
+  //    leaks a hyphen/comma compound as ONE token → the mandatory note is SKIPPED
+  //    (the refuted honesty gap this fix closes). A genuine single token ⇒ NO note. ──
+  // (and1) whitespace-separated (stays GREEN under the new logic too).
   await withFetch(ctMock(ctBody(50, ctRows(20), "T")), async () => {
     const r = await runTool("clinicaltrials_search_studies", { "query.term": "breast cancer" }, sam);
     const m = buildMeta(r.meta);
-    ok("53and multi-word query.term 'breast cancer' ⇒ a MANDATORY AND-note (ALL tokens must co-occur — mirror of NSF's OR-note, but AND) listing [breast, cancer] — drop it ⇒ RED (the tokenization-honesty class)",
-      m.notes.some((n) => /matches a multi-word term as AND/.test(n) && /breast, cancer/.test(n) && /must co-occur/.test(n)), JSON.stringify(m.notes));
+    ok("53and whitespace multi-token query.term 'breast cancer' ⇒ a MANDATORY AND-note (ALL tokens must co-occur) listing [breast, cancer] — drop it ⇒ RED (the tokenization-honesty class)",
+      m.notes.some((n) => /tokenizes a multi-word term on whitespace AND punctuation/.test(n) && /breast, cancer/.test(n) && /must co-occur/.test(n)), JSON.stringify(m.notes));
   });
-  await withFetch(ctMock(ctBody(50, ctRows(20), "T")), async () => {
-    const r = await runTool("clinicaltrials_search_studies", { sponsor: "National Cancer Institute" }, sam);
+  // (and2) HYPHEN compound (THE refuted killer): 'Sanofi-Aventis' LOOKS like one
+  //        token but CT AND-splits the hyphen → Sanofi AND Aventis (live-verified
+  //        →3 vs Sanofi→3416, a ~1000× silent false-negative). RED under the old
+  //        split(/\s+/): it sees ONE token and SKIPS the note.
+  await withFetch(ctMock(ctBody(3, ctRows(3), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { sponsor: "Sanofi-Aventis" }, sam);
     const m = buildMeta(r.meta);
-    ok("53and multi-word sponsor 'National Cancer Institute' ⇒ AND-note for 'sponsor' (AND-conjunctive: a 0 means no study matches EVERY token, NOT that the sponsor is absent)",
-      m.notes.some((n) => /matches a multi-word sponsor as AND/.test(n)), JSON.stringify(m.notes));
+    ok("53and HYPHEN compound sponsor 'Sanofi-Aventis' ⇒ the AND-note FIRES listing [Sanofi, Aventis] (CT AND-splits the hyphen → a ~1000× narrower set) — the whitespace-only detector split(/\\s+/) sees ONE token and SKIPS it ⇒ RED (the refuted honesty gap this fix closes)",
+      m.notes.some((n) => /tokenizes a multi-word sponsor on whitespace AND punctuation/.test(n) && /Sanofi, Aventis/.test(n) && /must co-occur/.test(n)), JSON.stringify(m.notes));
+    ok("53and HYPHEN sponsor is MULTI-token ⇒ the contradictory 'matches more variants' broadening note is SUPPRESSED (CT NARROWED, not broadened — the AND-note takes precedence) — keep emitting the broadening note here ⇒ RED (affirmatively misleading)",
+      !m.notes.some((n) => /matches related name variants/.test(n)), JSON.stringify(m.notes));
   });
+  // (and3) COMMA compound — same AND-split (live-verified sanofi,aventis == the ws count).
+  await withFetch(ctMock(ctBody(3, ctRows(3), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { condition: "covid,19" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and COMMA compound condition 'covid,19' ⇒ the AND-note FIRES listing [covid, 19] (CT AND-splits the comma) — whitespace-only ⇒ RED",
+      m.notes.some((n) => /tokenizes a multi-word condition on whitespace AND punctuation/.test(n) && /covid, 19/.test(n)), JSON.stringify(m.notes));
+  });
+  // (and4) SLASH compound — same AND-split (live-verified sanofi/aventis == the ws count).
+  await withFetch(ctMock(ctBody(3, ctRows(3), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { "query.term": "sanofi/aventis" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and SLASH compound query.term 'sanofi/aventis' ⇒ the AND-note FIRES listing [sanofi, aventis] (CT AND-splits the slash)",
+      m.notes.some((n) => /tokenizes a multi-word term on whitespace AND punctuation/.test(n) && /sanofi, aventis/.test(n)), JSON.stringify(m.notes));
+  });
+  // (and5) multi-word condition (whitespace) — unchanged GREEN.
   await withFetch(ctMock(ctBody(50, ctRows(20), "T")), async () => {
     const r = await runTool("clinicaltrials_search_studies", { condition: "type 2 diabetes" }, sam);
     const m = buildMeta(r.meta);
-    ok("53and multi-word condition 'type 2 diabetes' ⇒ AND-note for 'condition'",
-      m.notes.some((n) => /matches a multi-word condition as AND/.test(n)), JSON.stringify(m.notes));
+    ok("53and whitespace multi-token condition 'type 2 diabetes' ⇒ AND-note for 'condition'",
+      m.notes.some((n) => /tokenizes a multi-word condition on whitespace AND punctuation/.test(n)), JSON.stringify(m.notes));
   });
-  await withFetch(ctMock(ctBody(142304, ctRows(20), "T")), async () => {
-    const r = await runTool("clinicaltrials_search_studies", { "query.term": "cancer" }, sam);
+  // (and6) genuine SINGLE-token sponsor ⇒ NO AND-note + the sponsor-BROADENING note
+  //        IS present (single-token query.spons does match name variants — the
+  //        broadening framing is correct here, and must NOT over-fire the AND-note).
+  await withFetch(ctMock(ctBody(3416, ctRows(20), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { sponsor: "Pfizer" }, sam);
     const m = buildMeta(r.meta);
-    ok("53and single-token 'cancer' ⇒ NO AND-note (fires ONLY on 2+ whitespace tokens — no false-positive noise)",
+    ok("53and single-token sponsor 'Pfizer' ⇒ NO AND-note (fires ONLY on 2+ tokens) + the broadening sponsor-variants note IS present (correct for a single token — it genuinely matches 'Pfizer's Upjohn' etc.)",
+      !m.notes.some((n) => /must co-occur/.test(n)) && m.notes.some((n) => /matches related name variants/.test(n)), JSON.stringify(m.notes.filter((n) => /co-occur|variants/.test(n))));
+  });
+  // (and7) NON-splitting punctuation ('web_service' underscore / 'a.b' period) ⇒ NO
+  //        note — CT keeps these as ONE token (live-verified _ . : ' do NOT split on
+  //        query.spons/term), so firing here would OVER-disclose a split CT did not
+  //        make. Guards the PRECISE splitter class (not a non-alnum superset).
+  await withFetch(ctMock(ctBody(1, ctRows(1), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { sponsor: "sanofi.aventis" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and PERIOD 'sanofi.aventis' (a NON-splitting delimiter on query.spons — CT keeps it ONE token, live-verified →0 literal) ⇒ NO AND-note (the detector uses the PRECISE confirmed-splitter class, NOT a non-alnum superset, so it never over-discloses a split CT did not make)",
       !m.notes.some((n) => /must co-occur/.test(n)), JSON.stringify(m.notes.filter((n) => /co-occur/.test(n))));
   });
 
@@ -10144,6 +10184,12 @@ async function testClinicaltrialsHonesty() {
     const before = calls.length;
     const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { pageToken: "has space" }, sam));
     ok("53j a pageToken with a space ⇒ invalid_input, 0 fetch (the CT_TOKEN_RE bound — a bad token would otherwise loud-fail at HTTP 400)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { pageToken: "tok%2een" }, sam));
+    ok("53j a pageToken containing a literal '%' ⇒ invalid_input, 0 fetch (CT_TOKEN_RE now EXCLUDES '%' — URLSearchParams would double-encode it ('%2e'→'%252e') and corrupt the cursor; CT tokens are base64url so this only rejects a corrupting token, never a real one)",
       threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
   });
 
