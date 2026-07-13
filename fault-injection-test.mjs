@@ -106,6 +106,18 @@ import {
   OFAC_NOT_DETERMINATION_NOTE,
   _resetOfacCacheForTests,
 } from "./dist/ofac.js";
+import {
+  num as nvdNum,
+  cveLookup as nvdCveLookup,
+  cisaKevLookup as nvdCisaKevLookup,
+  extractCvssMetrics as nvdExtractCvss,
+  pickPrimaryCvss as nvdPickPrimary,
+  parseKevCatalog as nvdParseKev,
+  KEV_NOT_SAFE_NOTE,
+  CVE_ID_RE as NVD_CVE_ID_RE,
+  resolvedNvdKey,
+  _resetNvdCacheForTests,
+} from "./dist/nvd.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
@@ -13352,6 +13364,7 @@ async function main() {
   await testBlsHonesty();
   await testBlsOewsHonesty();
   await testOfacScreen();
+  await testNvdCveKev();
   await testClinicaltrialsHonesty();
   await testClinicaltrialsFacetHonesty();
   await testCensusHonesty();
@@ -14015,6 +14028,428 @@ async function testOfacScreen() {
   });
 
   _resetOfacCacheForTests();
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 64. cve_lookup + cisa_kev_lookup (ADR-0035) — the IT/cyber-compliance lane
+//     (NIST NVD CVE API 2.0 JOINED with the CISA KEV catalog). Covers the six
+//     binding fixes M1–S2 + the honesty invariants P1–P4. A KEV outage must
+//     NEVER fake "not on the mandatory list"; a 403 rate breach must NOT read
+//     as a permanent invalid_input; CVSS versions must never be conflated;
+//     primaryCvss must never null-out a real Secondary. OFFLINE (fetch-mock).
+// ══════════════════════════════════════════════════════════════════════════
+
+/** Run `fn` with NVD_API_KEY set to `val` (or deleted if undefined), restore after. */
+async function withNvdKey(val, fn) {
+  const orig = process.env.NVD_API_KEY;
+  if (val === undefined) delete process.env.NVD_API_KEY;
+  else process.env.NVD_API_KEY = val;
+  try {
+    return await fn();
+  } finally {
+    if (orig === undefined) delete process.env.NVD_API_KEY;
+    else process.env.NVD_API_KEY = orig;
+  }
+}
+
+async function testNvdCveKev() {
+  section("64. cve_lookup + cisa_kev_lookup (ADR-0035 — NVD CVE 2.0 JOIN CISA KEV): M1 kevOnly-outage-THROW + M2 403→rate_limited + M3 not-in-KEV≠safe caveat + M4 primaryCvss Secondary-fallback + P1 exact-total + null-never-0 + never-fake-empty (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  const isNvd = (u) => /services\.nvd\.nist\.gov\/rest\/json\/cves\/2\.0/.test(u);
+  const isKev = (u) => /www\.cisa\.gov\/.*known_exploited_vulnerabilities\.json/.test(u);
+  const jsonRes = (json, status = 200) =>
+    mockResponse({ status, json, headers: { "content-type": "application/json" } });
+
+  // ── NVD fixtures ──
+  const cveWrap = (cve) => ({ cve });
+  const nvdBody = (vulns, total) => ({
+    resultsPerPage: vulns.length, startIndex: 0,
+    totalResults: total === undefined ? vulns.length : total,
+    format: "NVD_CVE", version: "2.0", timestamp: "2026-07-13T00:00:00.000",
+    vulnerabilities: vulns,
+  });
+  // Log4Shell: V31 (Primary nvd@nist.gov 10.0 + Secondary 10.0), V2 (Primary 9.3,
+  // baseSeverity at the METRIC level), and ssvcV203 (no cvssData — must be excluded).
+  const LOG4SHELL = {
+    id: "CVE-2021-44228",
+    sourceIdentifier: "security@apache.org",
+    published: "2021-12-10T10:15:09.143",
+    lastModified: "2023-11-07T03:52:00.000",
+    vulnStatus: "Analyzed",
+    descriptions: [
+      { lang: "en", value: "Apache Log4j2 JNDI features do not protect against attacker-controlled LDAP." },
+      { lang: "es", value: "(spanish)" },
+    ],
+    metrics: {
+      cvssMetricV31: [
+        { source: "nvd@nist.gov", type: "Primary", cvssData: { version: "3.1", vectorString: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", baseScore: 10.0, baseSeverity: "CRITICAL" }, exploitabilityScore: 3.9, impactScore: 6.0 },
+        { source: "security@apache.org", type: "Secondary", cvssData: { version: "3.1", vectorString: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", baseScore: 10.0, baseSeverity: "CRITICAL" }, exploitabilityScore: 3.9, impactScore: 6.0 },
+      ],
+      cvssMetricV2: [
+        // V2 puts baseSeverity at the METRIC level (cvssData has NO baseSeverity).
+        { source: "nvd@nist.gov", type: "Primary", cvssData: { version: "2.0", vectorString: "AV:N/AC:M/Au:N/C:C/I:C/A:C", baseScore: 9.3 }, baseSeverity: "HIGH", exploitabilityScore: 8.6, impactScore: 10.0 },
+      ],
+      ssvcV203: [
+        { source: "cisa-ssvc@cisa.dhs.gov", type: "Primary", data: { id: "CVE-2021-44228", options: [{ Exploitation: "active" }] } },
+      ],
+    },
+    weaknesses: [{ source: "nvd@nist.gov", type: "Primary", description: [{ lang: "en", value: "CWE-502" }] }],
+    references: [{ url: "https://logging.apache.org/log4j/2.x/security.html", source: "security@apache.org" }],
+  };
+  const simpleCve = (id, over = {}) => ({
+    id, vulnStatus: "Analyzed", published: "2021-01-01T00:00:00.000", lastModified: "2021-02-01T00:00:00.000",
+    descriptions: [{ lang: "en", value: `desc ${id}` }],
+    metrics: { cvssMetricV31: [{ source: "nvd@nist.gov", type: "Primary", cvssData: { version: "3.1", baseScore: 7.5, baseSeverity: "HIGH", vectorString: "CVSS:3.1/x" } }] },
+    weaknesses: [], references: [], ...over,
+  });
+  // A CVE with ONLY a Secondary CVSS (deferred/CNA-scored, no NVD Primary) — M4.
+  const SECONDARY_ONLY = {
+    id: "CVE-2024-99999", vulnStatus: "Awaiting Analysis",
+    published: "2024-06-01T00:00:00.000", lastModified: "2024-06-02T00:00:00.000",
+    descriptions: [{ lang: "en", value: "CNA-scored, no NVD primary yet." }],
+    metrics: { cvssMetricV31: [{ source: "cna@vendor.example", type: "Secondary", cvssData: { version: "3.1", baseScore: 9.8, baseSeverity: "CRITICAL", vectorString: "CVSS:3.1/AV:N" } }] },
+    weaknesses: [], references: [],
+  };
+  const REJECTED = {
+    id: "CVE-2099-40000", vulnStatus: "Rejected",
+    published: "2099-01-01T00:00:00.000", lastModified: "2099-01-02T00:00:00.000",
+    descriptions: [{ lang: "en", value: "** REJECT ** This candidate was withdrawn by its CNA." }],
+    metrics: {}, weaknesses: [], references: [],
+  };
+
+  // ── KEV fixtures (floor-passing pad ≥1000; count === length) ──
+  const kevEntry = (o = {}) => ({
+    cveID: "CVE-2000-0001", vendorProject: "Vendor", product: "Product",
+    vulnerabilityName: "Name", dateAdded: "2020-01-01", shortDescription: "d",
+    requiredAction: "Apply updates per vendor instructions.", dueDate: "2020-02-01",
+    knownRansomwareCampaignUse: "Unknown", notes: "", cwes: [], ...o,
+  });
+  const KEV_PAD = Array.from({ length: 1001 }, (_, i) =>
+    kevEntry({ cveID: `CVE-2000-${1000 + i}`, dateAdded: "2020-01-01", dueDate: "2020-02-01" }));
+  const LOG4SHELL_KEV = kevEntry({
+    cveID: "CVE-2021-44228", vendorProject: "Apache", product: "Log4j2",
+    vulnerabilityName: "Apache Log4j2 RCE", dateAdded: "2021-12-10", dueDate: "2021-12-24",
+    knownRansomwareCampaignUse: "Known", requiredAction: "Apply updates per BOD 22-01.",
+    cwes: ["CWE-502"],
+  });
+  const kevBody = (extra = [], over = {}) => {
+    const vulns = [...extra, ...KEV_PAD];
+    return { title: "CISA Catalog of Known Exploited Vulnerabilities", catalogVersion: "2026.07.10", dateReleased: "2026-07-10T17:00:25.7327Z", count: vulns.length, vulnerabilities: vulns, ...over };
+  };
+  const kevMockValid = (extra = []) => (u) => (isKev(u) ? jsonRes(kevBody(extra)) : failClosed()());
+
+  await withNvdKey(undefined, async () => {
+
+  // ─── (A) PURE FIXTURES (no fetch) ────────────────────────────────────────
+  // M4 / (c): Log4Shell CVSS extraction — EXACTLY 3 CVSS metrics (ssvc excluded),
+  // V2 severity=HIGH preserved from the metric level, primaryCvss=V31 Primary 10.0.
+  {
+    const ms = nvdExtractCvss(LOG4SHELL.metrics);
+    ok("64nvd-A extractCvssMetrics ⇒ EXACTLY 3 entries (V31 Primary + V31 Secondary + V2 Primary); ssvcV203 EXCLUDED (never a 'score') — kills (c)",
+      ms.length === 3 && ms.every((m) => m.version !== null), JSON.stringify(ms.map((m) => ({ v: m.version, t: m.type }))));
+    const v2 = ms.find((m) => m.version === "2.0");
+    ok("64nvd-A V2 baseSeverity=HIGH read from the METRIC level (cvssData has none) — the load-bearing V2 fallback",
+      v2 && v2.baseSeverity === "HIGH", JSON.stringify(v2));
+    const prim = nvdPickPrimary(ms);
+    ok("64nvd-A primaryCvss = highest-version PRIMARY (V31 10.0 CRITICAL, type Primary), never a conflated/single-picked version",
+      prim && prim.version === "3.1" && prim.baseScore === 10.0 && prim.baseSeverity === "CRITICAL" && prim.type === "Primary", JSON.stringify(prim));
+  }
+  // M4: a CVE with ONLY a Secondary metric ⇒ primaryCvss NON-NULL, type Secondary
+  // (never null — the false 'no-severity' on a really-scored CVE).
+  {
+    const ms = nvdExtractCvss(SECONDARY_ONLY.metrics);
+    const prim = nvdPickPrimary(ms);
+    ok("64nvd-A M4 Secondary-only CVSS ⇒ primaryCvss NON-NULL with type:'Secondary' (9.8 CRITICAL), NEVER null (kills the false no-severity)",
+      prim !== null && prim.type === "Secondary" && prim.baseScore === 9.8, JSON.stringify(prim));
+  }
+  // (d): a genuinely-empty metrics ⇒ [] + primaryCvss null (null never 0).
+  {
+    const ms = nvdExtractCvss({});
+    ok("64nvd-A empty metrics ⇒ cvssMetrics:[] + primaryCvss:null (a no-CVSS CVE is null-never-0) — kills (d)",
+      ms.length === 0 && nvdPickPrimary(ms) === null);
+    ok("64nvd-A num-parity: nvd.num === coerce.num (single audited copy)", nvdNum === coerceNum);
+    ok("64nvd-A null-never-0: nvdNum(null)===null, nvdNum('')===null, nvdNum('0')===0 (a real 0.0 CVSS stays 0)",
+      nvdNum(null) === null && nvdNum("") === null && nvdNum("0") === 0, JSON.stringify({ a: nvdNum(null), b: nvdNum("0") }));
+  }
+  // (i): KEV floor + count-drift guards (pure parse).
+  {
+    const good = nvdParseKev(kevBody([LOG4SHELL_KEV]), "cisa:kev");
+    ok("64nvd-A parseKevCatalog valid ⇒ byCve has CVE-2021-44228 + count === length",
+      good.byCve.has("CVE-2021-44228") && good.count === good.entries.length);
+    const rBelow = await expectThrow(() => nvdParseKev({ catalogVersion: "x", dateReleased: "y", count: 2, vulnerabilities: [kevEntry(), kevEntry()] }, "cisa:kev"));
+    ok("64nvd-A KEV below-floor (2 entries) ⇒ schema_drift (a near-empty catalog NEVER reads as 'nothing exploited') — kills (i)",
+      rBelow.threw && rBelow.error?.toolError?.kind === "schema_drift", JSON.stringify(rBelow.error?.toolError?.kind));
+    const rMis = await expectThrow(() => nvdParseKev(kevBody([LOG4SHELL_KEV], { count: 99999 }), "cisa:kev"));
+    ok("64nvd-A KEV count(99999) !== length ⇒ schema_drift (a truncated/drifted catalog) — kills (i)",
+      rMis.threw && rMis.error?.toolError?.kind === "schema_drift", JSON.stringify(rMis.error?.toolError?.kind));
+  }
+  // CVE_ID_RE shape.
+  ok("64nvd-A CVE_ID_RE accepts CVE-2021-44228, rejects 'not-a-cve'/'../'",
+    NVD_CVE_ID_RE.test("CVE-2021-44228") && !NVD_CVE_ID_RE.test("not-a-cve") && !NVD_CVE_ID_RE.test("../"));
+
+  // ─── (B) END-TO-END via runTool over the fetch-mock ──────────────────────
+
+  // ★ The JOIN (fixture 1): Log4Shell exact-lookup ⇒ 3 CVSS metrics, V2 HIGH,
+  //   primaryCvss V31 10.0 CRITICAL, kev.listed:true, dueDate + ransomware Known.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody([LOG4SHELL_KEV])) : isNvd(u) ? jsonRes(nvdBody([cveWrap(LOG4SHELL)])) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { cveId: "CVE-2021-44228" }, sam);
+    const m = buildMeta(r.meta);
+    const row = r.data.results[0];
+    ok("64nvd (runTool) Log4Shell ⇒ cvssMetrics has EXACTLY 3 CVSS entries (ssvc excluded) + V2 severity HIGH preserved — kills (c)",
+      row.cvssMetrics.length === 3 && row.cvssMetrics.find((x) => x.version === "2.0")?.baseSeverity === "HIGH", JSON.stringify(row.cvssMetrics.map((x) => x.version)));
+    ok("64nvd (runTool) primaryCvss = V31 10.0 CRITICAL type Primary (highest-version, Primary-preferred)",
+      row.primaryCvss && row.primaryCvss.version === "3.1" && row.primaryCvss.baseScore === 10.0 && row.primaryCvss.type === "Primary", JSON.stringify(row.primaryCvss));
+    ok("64nvd (runTool) THE JOIN: kev.listed:true, dueDate '2021-12-24', ransomware 'Known' (verbatim) — kills (g)/(m)",
+      row.kev.listed === true && row.kev.dueDate === "2021-12-24" && row.kev.ransomware === "Known", JSON.stringify(row.kev));
+    ok("64nvd (runTool) found:true + cwes ['CWE-502'] + the tier disclosure in _meta",
+      r.data.found === true && row.cwes.includes("CWE-502") && m.notes.some((n) => /NVD active rate tier/.test(n)), JSON.stringify({ found: r.data.found, cwes: row.cwes }));
+  });
+
+  // Fixture 2: Rejected CVE ⇒ rejected:true, primaryCvss:null, cvssMetrics:[], note.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes(nvdBody([cveWrap(REJECTED)])) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { cveId: "CVE-2099-40000" }, sam);
+    const m = buildMeta(r.meta);
+    const row = r.data.results[0];
+    ok("64nvd-2 Rejected CVE ⇒ rejected:true + primaryCvss:null + cvssMetrics:[] + the REJECTED disclosure — kills (d)/(e)",
+      row.rejected === true && row.primaryCvss === null && row.cvssMetrics.length === 0 && m.notes.some((n) => /REJECTED\/withdrawn/.test(n)), JSON.stringify({ rej: row.rejected, pc: row.primaryCvss }));
+  });
+
+  // Fixture 3 (M4 end-to-end): Secondary-only CVE ⇒ primaryCvss non-null Secondary.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes(nvdBody([cveWrap(SECONDARY_ONLY)])) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { cveId: "CVE-2024-99999" }, sam);
+    const m = buildMeta(r.meta);
+    const row = r.data.results[0];
+    ok("64nvd-3 M4 Secondary-only CVE ⇒ primaryCvss NON-NULL (9.8 CRITICAL, type Secondary), NEVER null + the Secondary-score note",
+      row.primaryCvss !== null && row.primaryCvss.type === "Secondary" && row.primaryCvss.baseScore === 9.8 && m.notes.some((n) => /only a CNA\/Secondary CVSS/.test(n)), JSON.stringify(row.primaryCvss));
+    ok("64nvd-3 Awaiting-analysis note present (null-score-is-honest-unknown)",
+      m.notes.some((n) => /Awaiting Analysis/.test(n)), JSON.stringify(m.notes.slice(-2)));
+  });
+
+  // Fixture 4 (P1/b): exact-total pagination — totalResults:32, 2 rows ⇒ totalAvailable:32, truncated, nextOffset:2.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes(nvdBody([cveWrap(simpleCve("CVE-2021-0001")), cveWrap(simpleCve("CVE-2021-0002"))], 32)) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { keyword: "log4j", resultsPerPage: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("64nvd-4 P1 pagination from totalResults(32) NOT page length(2): totalAvailable 32, truncated:true, nextOffset 2 — kills (b)",
+      m.totalAvailable === 32 && m.truncated === true && m.pagination.nextOffset === 2, JSON.stringify({ ta: m.totalAvailable, t: m.truncated, no: m.pagination.nextOffset }));
+  });
+
+  // Fixture 5 (M3 on cve_lookup / h): a CVE ABSENT from KEV ⇒ kev.listed:false + the ≠safe caveat.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes(nvdBody([cveWrap(simpleCve("CVE-2021-0001"))])) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { cveId: "CVE-2021-0001" }, sam);
+    const m = buildMeta(r.meta);
+    const row = r.data.results[0];
+    ok("64nvd-5 a CVE not in KEV ⇒ kev.listed:false (NEVER null on a loaded catalog) + the not-in-KEV≠safe caveat VERBATIM — kills (h)",
+      row.kev.listed === false && row.kev.note === KEV_NOT_SAFE_NOTE && m.notes.some((n) => n === KEV_NOT_SAFE_NOTE), JSON.stringify({ listed: row.kev.listed }));
+  });
+
+  // Fixture 6 (a/f + M2): empty-vs-error matrix.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes(nvdBody([], 0)) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { cveId: "CVE-2099-99999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("64nvd-6 genuine totalResults:0 ⇒ found:false + results:[] (HONEST empty, NOT an error) + a 'not found' note — kills (f)",
+      r.data.found === false && r.data.results.length === 0 && m.totalAvailable === 0 && m.notes.some((n) => /not found in NVD/.test(n)), JSON.stringify({ found: r.data.found }));
+  });
+  // ★ M2: a 403 keyless rate breach ⇒ rate_limited (NOT invalid_input) + the NVD_API_KEY escape.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes({}, 403) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cve_lookup", { cveId: "CVE-2021-44228" }, sam));
+    const te = toToolError(error);
+    ok("64nvd-6 ★M2 NVD 403 keyless rate breach ⇒ kind:rate_limited (NOT invalid_input/access_denied), retryable — kills the reused-403→invalid_input mutation",
+      threw && te.kind === "rate_limited" && te.retryable === true, JSON.stringify(threw ? { k: te.kind, r: te.retryable } : "no-throw"));
+    ok("64nvd-6 ★M2 the rate throw carries the NVD_API_KEY tier disclosure + the request-an-api-key escape",
+      /NVD_API_KEY/.test(te.message) && /request-an-api-key/.test(te.message), JSON.stringify(te.message));
+  });
+  // M2: a 429 ⇒ rate_limited too.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes({}, 429) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cve_lookup", { cveId: "CVE-2021-44228" }, sam));
+    ok("64nvd-6 NVD 429 ⇒ rate_limited THROW (never a fake-empty)",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // 500 ⇒ THROW upstream_unavailable (unchanged, never fake-empty).
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes({}, 500) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cve_lookup", { cveId: "CVE-2021-44228" }, sam));
+    ok("64nvd-6 NVD 500 ⇒ THROW upstream_unavailable (never a fake-empty) — kills (a)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // A non-object 200 / non-number totalResults ⇒ schema_drift.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes([]) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cve_lookup", { cveId: "CVE-2021-44228" }, sam));
+    ok("64nvd-6 NVD 200 array body ⇒ schema_drift (never read as empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no"));
+  });
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes({ totalResults: "32", vulnerabilities: [] }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cve_lookup", { cveId: "CVE-2021-44228" }, sam));
+    ok("64nvd-6 NVD non-number totalResults ⇒ schema_drift BEFORE num() (never a fake total)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no"));
+  });
+
+  // Fixture 7 (g/i): KEV outage ⇒ cve_lookup DEGRADES kev.listed:null (never false)
+  //   AND cisa_kev_lookup THROWS.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? (() => { throw new Error("ECONNRESET"); })() : isNvd(u) ? jsonRes(nvdBody([cveWrap(LOG4SHELL)])) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { cveId: "CVE-2021-44228" }, sam);
+    const m = buildMeta(r.meta);
+    const row = r.data.results[0];
+    ok("64nvd-7 KEV outage + NO kevOnly ⇒ cve_lookup returns the real CVSS + kev.listed:NULL (never false) + fieldsUnavailable:['kev'] + note — kills (g)",
+      row.kev.listed === null && row.kev.status === "unavailable" && m.fieldsUnavailable.includes("kev") && m.notes.some((n) => /could not be loaded/.test(n)), JSON.stringify({ kev: row.kev, fu: m.fieldsUnavailable }));
+  });
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? (() => { throw new Error("ECONNRESET"); })() : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cisa_kev_lookup", { cveId: "CVE-2021-44228" }, sam));
+    ok("64nvd-7 cisa_kev_lookup on a KEV outage ⇒ THROWS (never an empty catalog / fake found:false) — kills (g)",
+      threw && (toToolError(error).kind === "upstream_unavailable" || toToolError(error).kind === "rate_limited"), JSON.stringify(threw ? toToolError(error).kind : "no"));
+  });
+  // KEV below-floor / count-drift end-to-end ⇒ cisa_kev_lookup THROWS schema_drift.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes({ catalogVersion: "x", dateReleased: "y", count: 3, vulnerabilities: [kevEntry(), kevEntry(), kevEntry()] }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cisa_kev_lookup", { product: "log4j" }, sam));
+    ok("64nvd-7 KEV below-floor (3 entries) ⇒ cisa_kev_lookup THROWS schema_drift — kills (i)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no"));
+  });
+
+  // ★ Fixture 8 (M1 — BLOCKER): kevOnly:true DURING a KEV outage ⇒ cve_lookup THROWS
+  //   (never an empty/degraded list = a fake 'none on the mandatory-remediation list').
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? (() => { throw new Error("ECONNRESET"); })() : isNvd(u) ? jsonRes(nvdBody([cveWrap(LOG4SHELL)])) : failClosed()()), async () => {
+    const { threw, error, value } = await expectThrow(() => runTool("cve_lookup", { cveId: "CVE-2021-44228", kevOnly: true }, sam));
+    ok("64nvd-8 ★M1 kevOnly:true + KEV outage ⇒ cve_lookup THROWS (a KEV-membership filter is unanswerable without the catalog) — NEVER an empty/degraded row list",
+      threw && (toToolError(error).kind === "upstream_unavailable" || toToolError(error).kind === "rate_limited"), JSON.stringify(threw ? toToolError(error).kind : { returned: value?.data?.results?.length }));
+  });
+
+  // ★ Fixture 8b (D1 — MAJOR): kevOnly:true on a LOADED catalog MUST actually drop
+  //   non-KEV rows, keep found honest, and NEVER dead-end NVD pagination.
+  // D1.1 — a mixed NVD page (one KEV-listed CVE-2021-44228, one non-KEV CVE-2021-0001)
+  //   ⇒ EVERY returned row kev.listed===true (the non-KEV row is DROPPED) + filtersApplied has 'kevOnly'.
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody([LOG4SHELL_KEV])) : isNvd(u) ? jsonRes(nvdBody([cveWrap(LOG4SHELL), cveWrap(simpleCve("CVE-2021-0001"))], 2)) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { keyword: "log4j", kevOnly: true }, sam);
+    const m = buildMeta(r.meta);
+    ok("64nvd-8b D1.1 kevOnly:true (loaded catalog) mixed page ⇒ non-KEV row DROPPED: EXACTLY 1 result, every returned row kev.listed===true (mutate to skip the filter ⇒ 2 rows w/ a listed:false ⇒ RED)",
+      r.data.results.length === 1 && r.data.results.every((x) => x.kev.listed === true) && r.data.results[0].cveId === "CVE-2021-44228", JSON.stringify(r.data.results.map((x) => ({ id: x.cveId, l: x.kev.listed }))));
+    ok("64nvd-8b D1.1 filtersApplied includes 'kevOnly' ONLY because the filter ACTUALLY ran (loaded catalog) + returned reflects the KEV-listed page count (1) + scannedOnPage 2",
+      m.filtersApplied.includes("kevOnly") && m.returned === 1 && r.data.scannedOnPage === 2, JSON.stringify({ fa: m.filtersApplied, ret: m.returned, scanned: r.data.scannedOnPage }));
+  });
+  // D1.2 — exact cveId NOT in KEV + kevOnly ⇒ found:FALSE (the CVE is in NVD but not KEV; the D1 bug returned found:true).
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody([LOG4SHELL_KEV])) : isNvd(u) ? jsonRes(nvdBody([cveWrap(simpleCve("CVE-2021-0001"))], 1)) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { cveId: "CVE-2021-0001", kevOnly: true }, sam);
+    ok("64nvd-8b D1.2 exact cveId present in NVD but NOT in KEV + kevOnly ⇒ found:FALSE + results:[] (the D1 bug yielded found:true) — over-inclusive filter defect closed",
+      r.data.found === false && r.data.results.length === 0, JSON.stringify({ found: r.data.found, n: r.data.results.length }));
+  });
+  // ★ D1.3 — PAGINATION HONESTY GUARD: kevOnly:true where THIS NVD page has 0
+  //   KEV-listed rows BUT more NVD pages remain (startIndex+nvdPageSize < totalResults)
+  //   ⇒ hasMore:true / nextOffset NVD-based (NOT dead-ended from the filtered length).
+  //   This is the regression guard against the naive fix (filter-length pagination).
+  _resetNvdCacheForTests();
+  await withFetch((u) => (isKev(u) ? jsonRes(kevBody([LOG4SHELL_KEV])) : isNvd(u) ? jsonRes(nvdBody([cveWrap(simpleCve("CVE-2021-0001")), cveWrap(simpleCve("CVE-2021-0002"))], 32)) : failClosed()()), async () => {
+    const r = await runTool("cve_lookup", { keyword: "x", kevOnly: true, resultsPerPage: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("64nvd-8b ★D1.3 kevOnly page with 0 KEV-listed rows but MORE NVD pages ⇒ hasMore:TRUE + nextOffset:2 (NVD-based; returned:0) — NEVER a dead-end that hides KEV-listed rows on later pages (deriving hasMore from filtered length ⇒ RED)",
+      r.data.results.length === 0 && m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.totalAvailable === 32, JSON.stringify({ ret: r.data.results.length, hasMore: m.pagination.hasMore, no: m.pagination.nextOffset, ta: m.totalAvailable }));
+    ok("64nvd-8b ★D1.3 the kevOnly page-filter disclosure note is present (totalAvailable = NVD pre-filter total; keep paging while hasMore) + scannedOnPage 2",
+      m.notes.some((n) => /kevOnly is a CLIENT-SIDE filter applied to THIS NVD page/.test(n) && /pre-KEV-filter/.test(n)) && r.data.scannedOnPage === 2, JSON.stringify({ scanned: r.data.scannedOnPage }));
+  });
+
+  // Fixture 9 (M3 on cisa_kev_lookup): a cveId MISS ⇒ found:false + the ≠safe caveat.
+  _resetNvdCacheForTests();
+  await withFetch(kevMockValid([LOG4SHELL_KEV]), async () => {
+    const r = await runTool("cisa_kev_lookup", { cveId: "CVE-2030-12345" }, sam);
+    const m = buildMeta(r.meta);
+    ok("64nvd-9 ★M3 cisa_kev_lookup cveId MISS ⇒ found:false + the not-in-KEV≠safe caveat VERBATIM in _meta.notes (a miss must NOT read as 'safe')",
+      r.data.found === false && m.notes.some((n) => n === KEV_NOT_SAFE_NOTE), JSON.stringify({ found: r.data.found }));
+    // Warm-cache: a HIT resolves standalone.
+    const r2 = await runTool("cisa_kev_lookup", { cveId: "CVE-2021-44228" }, sam);
+    ok("64nvd-9 cisa_kev_lookup cveId HIT ⇒ found:true + the entry (dueDate 2021-12-24, ransomware Known verbatim) + nvdUrl",
+      r2.data.found === true && r2.data.matches[0].dueDate === "2021-12-24" && r2.data.matches[0].knownRansomwareCampaignUse === "Known" && /nvd\.nist\.gov\/vuln\/detail\/CVE-2021-44228/.test(r2.data.matches[0].nvdUrl), JSON.stringify(r2.data.matches[0] ?? null));
+    // ransomwareOnly filter keeps only Known.
+    const r3 = await runTool("cisa_kev_lookup", { ransomwareOnly: true, limit: 5 }, sam);
+    ok("64nvd-9 ransomwareOnly ⇒ every match knownRansomwareCampaignUse==='Known' (verbatim, never defaulted) — kills (m)",
+      r3.data.matches.length >= 1 && r3.data.matches.every((x) => x.knownRansomwareCampaignUse === "Known"), JSON.stringify(r3.data.matches.map((x) => x.knownRansomwareCampaignUse)));
+  });
+
+  // Fixture 10 (k): SSRF / charclass rejects ⇒ invalid_input, 0 fetch (spy).
+  for (const bad of ["../", "not-a-cve", "CVE-XX"]) {
+    _resetNvdCacheForTests();
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("cve_lookup", { cveId: bad }, sam));
+      ok(`64nvd-10 cveId ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (validated BEFORE any KEV/NVD fetch) — kills (k)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no", added: calls.length - before }));
+    });
+  }
+  _resetNvdCacheForTests();
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cve_lookup", { cpeName: "http://evil" }, sam));
+    ok("64nvd-10 cpeName 'http://evil' (non-CPE) ⇒ invalid_input, 0 fetch — kills (k) SSRF half",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no", added: calls.length - before }));
+  });
+  // No selector at all ⇒ invalid_input (never a silent full-DB pull, P4).
+  _resetNvdCacheForTests();
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cve_lookup", {}, sam));
+    ok("64nvd-10 no selector ⇒ invalid_input, 0 fetch (never a silent full-database pull)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no" }));
+  });
+
+  // Fixture 11 (l): span clamp + resultsPerPage cap.
+  _resetNvdCacheForTests();
+  await withFetch((u, init, calls) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes(nvdBody([cveWrap(simpleCve("CVE-2021-0001"))])) : failClosed()()), async (calls) => {
+    const r = await runTool("cve_lookup", { keyword: "x", pubStartDate: "2021-01-01", pubEndDate: "2021-08-01" }, sam);
+    const m = buildMeta(r.meta);
+    const nvdCall = calls.find((c) => isNvd(c.url));
+    const sent = new URL(nvdCall.url);
+    // 2021-01-01..2021-08-01 is 212 days > 120 ⇒ pubStartDate clamped forward to 2021-04-03.
+    ok("64nvd-11 l a >120-day span ⇒ pubStartDate CLAMPED forward (sent start 2021-04-03, not 2021-01-01) BEFORE the request + disclosed",
+      /2021-04-03/.test(sent.searchParams.get("pubStartDate") || "") && m.notes.some((n) => /clamped forward/.test(n)), JSON.stringify({ sent: sent.searchParams.get("pubStartDate") }));
+  });
+  _resetNvdCacheForTests();
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    // The module belt refuses >2000 (behind the server's Zod .max(2000)); call the fn directly.
+    const { threw, error } = await expectThrow(() => nvdCveLookup({ keyword: "x", resultsPerPage: 5000 }));
+    ok("64nvd-11 l resultsPerPage 5000 ⇒ invalid_input, 0 fetch (never a silent clamp)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no" }));
+    // A lone date bound ⇒ invalid_input (NVD 404s a lone bound).
+    const r2 = await expectThrow(() => nvdCveLookup({ pubStartDate: "2021-01-01" }));
+    ok("64nvd-11 a lone pubStartDate (no pubEndDate) ⇒ invalid_input (the pair is all-or-nothing)",
+      r2.threw && toToolError(r2.error).kind === "invalid_input", JSON.stringify(r2.threw ? toToolError(r2.error).kind : "no"));
+  });
+
+  // Fixture 12 (j — K-test): the NVD_API_KEY rides ONLY in the apiKey header, never leaked.
+  await withNvdKey(SENTINEL, async () => {
+    _resetNvdCacheForTests();
+    await withFetch((u) => (isKev(u) ? jsonRes(kevBody()) : isNvd(u) ? jsonRes(nvdBody([cveWrap(simpleCve("CVE-2021-0001"))])) : failClosed()()), async (calls) => {
+      const r = await runTool("cve_lookup", { cveId: "CVE-2021-0001" }, sam);
+      const m = buildMeta(r.meta);
+      const nvdCall = calls.find((c) => isNvd(c.url));
+      const kevCall = calls.find((c) => isKev(c.url));
+      const hdr = nvdCall.init.headers || {};
+      ok("64nvd-12 j KEY set ⇒ the apiKey HEADER carries the sentinel (auth applied, not vacuous)", hdr.apiKey === SENTINEL, JSON.stringify(Object.keys(hdr)));
+      ok("64nvd-12 j KEY NEVER in the URL query string (it is a header, never a URL param)", !nvdCall.url.includes(SENTINEL), nvdCall.url);
+      const leaks = [nvdCall.url, m.source, JSON.stringify(m)].some((s) => typeof s === "string" && s.includes(SENTINEL));
+      ok("64nvd-12 j KEY-NEVER-LEAKS: sentinel absent from url/_meta.source/serialized _meta (only the mode 'NVD_API_KEY' is disclosed) + keylessMode:false",
+        !leaks && /NVD_API_KEY/.test(m.source) && m.keylessMode === false, JSON.stringify({ src: m.source, keyless: m.keylessMode }));
+      const kevHdr = (kevCall && kevCall.init.headers) || {};
+      ok("64nvd-12 j the KEV fetch carries NO apiKey header (the key is NVD-only)", kevHdr.apiKey === undefined, JSON.stringify(Object.keys(kevHdr)));
+      ok("64nvd-12 j resolvedNvdKey() reads the value (the ONLY reader)", resolvedNvdKey() === SENTINEL);
+    });
+  });
+  ok("64nvd-12 j keyless ⇒ resolvedNvdKey() === '' (no NVD_API_KEY configured)", resolvedNvdKey() === "");
+
+  }); // withNvdKey undefined
+
+  _resetNvdCacheForTests();
 }
 
 main().catch((e) => {
