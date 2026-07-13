@@ -93,6 +93,19 @@ import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBui
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
 import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward, tokenizeForDisclosure as nsfTok } from "./dist/nsf.js";
 import { num as blsNum, timeseries as blsTimeseries, oewsWages as blsOews, buildOewsSeriesId, BLS_OEWS_DATATYPES, BLS_OEWS_OCCUPATIONS, BLS_STATE_FIPS } from "./dist/bls.js";
+import {
+  screenEntity as ofacScreen,
+  parsePrimaryList as ofacParsePrimary,
+  parseAltList as ofacParseAlt,
+  buildScopeEntries as ofacBuildEntries,
+  computeScreen as ofacComputeScreen,
+  normName as ofacNormName,
+  classifyMatch as ofacClassifyMatch,
+  isOfacS3Host,
+  OFAC_S3_HOST,
+  OFAC_NOT_DETERMINATION_NOTE,
+  _resetOfacCacheForTests,
+} from "./dist/ofac.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
@@ -13338,6 +13351,7 @@ async function main() {
   await testNsfHonesty();
   await testBlsHonesty();
   await testBlsOewsHonesty();
+  await testOfacScreen();
   await testClinicaltrialsHonesty();
   await testClinicaltrialsFacetHonesty();
   await testCensusHonesty();
@@ -13686,6 +13700,321 @@ async function testRegistryDispatchHonesty() {
     ok("39 sba_size_standard (runTool) unknown NAICS ⇒ found:false + threshold null + standardType 'unknown' (NEVER a fabricated standard)",
       missing.data.found === false && missing.data.threshold === null && missing.data.standardType === "unknown", JSON.stringify(missing.data));
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 63. ofac_screen_entity (ADR-0034) — the SAFETY-critical never-fake-CLEAR
+//     denied-party screen. A false "no match / clear" could authorize an
+//     ILLEGAL transaction, so every fetch failure / SSRF reject / parse drift /
+//     floor-fail MUST THROW (never no_name_match), and `result` is never "clear".
+//     Covers B1, B2, M1–M6, S1 + the core invariants. OFFLINE (fetch-mock).
+// ══════════════════════════════════════════════════════════════════════════
+async function testOfacScreen() {
+  section("63. ofac_screen_entity: never-fake-CLEAR denied-party screening (fetch-mock)");
+  const sam = new SamGovClient({});
+
+  // ── Fixture builders (12-col SDN/CONS_PRIM, 5-col ALT/CONS_ALT). ──
+  const DASH = "-0- "; // the `-0- ` (trailing-space) empty sentinel
+  const q = (s) => `"${s}"`;
+  const sdnRow = (ent, name, { prog = "CUBA", type = DASH, title = DASH, remarks = "-0-" } = {}) =>
+    [ent, q(name), type, q(prog), title, DASH, DASH, DASH, DASH, DASH, DASH, remarks].join(",");
+  const altRow = (ent, altnum, type, name, remarks = "-0-") =>
+    [ent, altnum, type, q(name), remarks].join(",");
+
+  // Floor-passing filler pads (SDN/ALT ≥10,000; CONS_PRIM ≥150; CONS_ALT ≥300).
+  const SDN_PAD = Array.from({ length: 10_001 }, (_, i) => sdnRow(20_000 + i, `FILLER ENTITY ${i}`, { prog: "TEST" })).join("\r\n");
+  const ALT_PAD = Array.from({ length: 10_001 }, (_, i) => altRow(20_000 + i, 1, "aka", `FILLER ALIAS ${i}`)).join("\r\n");
+  const CONS_PRIM_PAD = Array.from({ length: 200 }, (_, i) => sdnRow(30_000 + i, `CONS FILLER ${i}`, { prog: "SSI" })).join("\r\n");
+  const CONS_ALT_PAD = Array.from({ length: 400 }, (_, i) => altRow(30_000 + i, 1, "aka", `CONS ALIAS ${i}`)).join("\r\n");
+
+  // Specific rows we screen against. ent 36 AEROCARIBBEAN (first row, headerless,
+  // S1); ent 306 BANCO NACIONAL DE CUBA (multi-program bracket + a Remarks a.k.a.
+  // 'BNC', B2) with an ALT alias NATIONAL BANK OF CUBA (B2). Bodies END with the
+  // trailing \r\n\x1a SUB sentinel (B1) so the full path exercises the strip.
+  const SDN_BODY =
+    [
+      sdnRow(36, "AEROCARIBBEAN AIRLINES", { prog: "CUBA" }),
+      sdnRow(306, "BANCO NACIONAL DE CUBA", { prog: "CUBA] [SDNTK", remarks: `"a.k.a. 'BNC'."` }),
+    ].join("\r\n") + "\r\n" + SDN_PAD + "\r\n\x1a";
+  const ALT_BODY = altRow(306, 1, "aka", "NATIONAL BANK OF CUBA") + "\r\n" + ALT_PAD + "\r\n\x1a";
+  const CONS_PRIM_BODY = sdnRow(700, "GLOBAL CONS TARGET", { prog: "SSI" }) + "\r\n" + CONS_PRIM_PAD;
+  const CONS_ALT_BODY = altRow(700, 1, "aka", "CONS TARGET ALIAS") + "\r\n" + CONS_ALT_PAD;
+  const BODIES = { sdn: SDN_BODY, alt: ALT_BODY, cons_prim: CONS_PRIM_BODY, cons_alt: CONS_ALT_BODY };
+
+  // URL → list key (cons_* checked first: "cons_alt.csv" also contains "alt.csv").
+  const ofacKey = (u) =>
+    u.includes("cons_prim.csv") ? "cons_prim"
+    : u.includes("cons_alt.csv") ? "cons_alt"
+    : /\/sdn\.csv/.test(u) ? "sdn"
+    : /\/alt\.csv/.test(u) ? "alt"
+    : null;
+  const goodUrl = (key, date = "2026-07-10") =>
+    `https://wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com/${date}/${key}.csv?X-Amz-Signature=abc`;
+  // A spied binary response (arrayBuffer read count → the SSRF "body never read" spy).
+  const spied = (bytes, { url, headers = {}, status = 200 }, spy) => {
+    const r = mockBinaryResponse({ status, bytes, url, redirected: true, headers });
+    const orig = r.arrayBuffer;
+    r.arrayBuffer = async () => { spy.reads++; return orig(); };
+    return r;
+  };
+  const validHandler = (spy) => (u) => {
+    const k = ofacKey(u);
+    if (!k) return failClosed()();
+    return spied(strToBytes(BODIES[k]), { url: goodUrl(k), headers: { "content-type": "text/csv", "last-modified": "Fri, 10 Jul 2026 18:05:43 GMT" } }, spy);
+  };
+
+  // ─── (A) PURE PARSER / MATCH FIXTURES (no cache, no fetch) ────────────────
+
+  // B1 — a body ending \r\n\x1a parses to the EXACT content-row count, no drift.
+  const b1prim = ofacParsePrimary(BODIES.sdn, "SDN", "ofac:sdn");
+  ok("63ofac-B1 trailing \\r\\n\\x1a ⇒ exact content-row count (10003), NO schema_drift (else 100% of live loads die)",
+    b1prim.length === 10_003, `len=${b1prim.length}`);
+  {
+    // The SAME body without the SUB parses to the identical count (B1 is a no-op on clean input).
+    const noSub = ofacParsePrimary(BODIES.sdn.replace(/\r\n\x1a$/, ""), "SDN", "ofac:sdn");
+    ok("63ofac-B1 count is identical with/without the SUB byte (strip is exact, drops no genuine row)", noSub.length === b1prim.length, `${noSub.length} vs ${b1prim.length}`);
+  }
+
+  // -0- sentinel + programs bracket-split + blank-type→entity(inferred) + quoted-comma.
+  {
+    const body = [
+      sdnRow(36, "AEROCARIBBEAN AIRLINES", { prog: "CUBA" }),
+      sdnRow(306, "BANCO NACIONAL DE CUBA", { prog: "CUBA] [SDNTK", remarks: `"a.k.a. 'BNC'."` }),
+      sdnRow(500, "ANGLO-CARIBBEAN CO., LTD.", { prog: "IRAN] [SDGT", type: "individual", title: "-0-" }),
+    ].join("\r\n");
+    const recs = ofacParsePrimary(body, "SDN", "ofac:sdn");
+    const e36 = recs.find((r) => r.entNum === "36");
+    const e306 = recs.find((r) => r.entNum === "306");
+    const e500 = recs.find((r) => r.entNum === "500");
+    ok("63ofac -0- title ⇒ null (never '' / 0)", e500.title === null, JSON.stringify(e500.title));
+    ok("63ofac blank(-0-) SDN_Type ⇒ type:'entity' + typeInferred:true (disclosed)", e36.type === "entity" && e36.typeInferred === true, JSON.stringify({ t: e36.type, inf: e36.typeInferred }));
+    ok("63ofac SDN_Type 'individual' ⇒ type:'individual', typeInferred:false", e500.type === "individual" && e500.typeInferred === false, e500.type);
+    ok("63ofac Program bracket-split 'CUBA] [SDNTK' ⇒ ['CUBA','SDNTK']", JSON.stringify(e306.programs) === JSON.stringify(["CUBA", "SDNTK"]), JSON.stringify(e306.programs));
+    ok("63ofac quoted-comma name 'ANGLO-CARIBBEAN CO., LTD.' kept intact (RFC-4180)", e500.name === "ANGLO-CARIBBEAN CO., LTD.", e500.name);
+    ok("63ofac-B2 Remarks a.k.a. 'BNC' mined into remarksAkas (the flagship false-CLEAR blocker)", e306.remarksAkas.some((a) => a.name === "BNC" && a.akaType === "aka"), JSON.stringify(e306.remarksAkas));
+  }
+
+  // ★ SYMMETRIC column-drift (coordinator FIX-BACK) — a column-ADDITION drift MUST
+  //   THROW, not silently truncate to a blanket false CLEAR. The prior maxCol=cols-1
+  //   capped a too-many-columns row at exactly `cols` stored fields → it PASSED the
+  //   `=== cols` check → SDN_Name shifted → every real party screened no_name_match.
+  {
+    // (a) a 13-column primary row with a NUMERIC prepended record_id (999999) ⇒
+    //     schema_drift. A numeric leading column would PASS the ent_num belt, so
+    //     ONLY the symmetric maxCol=cols count check catches it — this ISOLATES the
+    //     maxCol fix (reverting to cols-1 ⇒ a silent shifted parse = false CLEAR ⇒ RED).
+    const r13 = await expectThrow(() => ofacParsePrimary("999999," + sdnRow(306, "BANCO NACIONAL DE CUBA"), "SDN", "ofac:sdn"));
+    ok("63ofac ★column-ADDITION drift (NUMERIC prepend, ent_num belt does NOT catch it): 13-col SDN row ⇒ schema_drift (NOT a silent truncate-to-12 = blanket false CLEAR)", r13.threw && r13.error?.toolError?.kind === "schema_drift", JSON.stringify(r13.error?.toolError?.kind));
+    // (b) a legit 12-col row whose QUOTED Remarks contains a comma ⇒ still exactly 12, NO false "too many".
+    const commaRem = ofacParsePrimary(sdnRow(306, "BANCO NACIONAL DE CUBA", { remarks: `"a.k.a. 'BNC'; DOB 01 Jan 1970, Havana, Cuba."` }), "SDN", "ofac:sdn");
+    ok("63ofac ★a quoted-comma Remarks (a legit 12-col row) ⇒ EXACTLY 1 record, no false 'too many' (maxCol=cols does not regress on real-shape rows)", commaRem.length === 1 && commaRem[0].remarks.includes("Havana"), JSON.stringify({ n: commaRem.length, r: commaRem[0]?.remarks }));
+    // (c) a 12-col row whose column 0 is NON-NUMERIC (a same-count leading-column shift) ⇒ schema_drift (the ent_num belt).
+    const nonNum = ["ABC", q("SHIFTED NAME"), DASH, q("CUBA"), DASH, DASH, DASH, DASH, DASH, DASH, DASH, "-0-"].join(",");
+    const rNum = await expectThrow(() => ofacParsePrimary(nonNum, "SDN", "ofac:sdn"));
+    ok("63ofac ★non-numeric ent_num (col 0 'ABC', still 12 cols) ⇒ schema_drift (belt catches a same-count leading-column shift)", rNum.threw && rNum.error?.toolError?.kind === "schema_drift", JSON.stringify(rNum.error?.toolError?.kind));
+    // (d) a 6-column ALT row (NUMERIC prepend ⇒ isolates the maxCol fix on ALT) ⇒ schema_drift.
+    const rAlt = await expectThrow(() => ofacParseAlt("999999," + altRow(306, 1, "aka", "NATIONAL BANK OF CUBA"), "SDN", "ofac:alt"));
+    ok("63ofac ★column-ADDITION drift on ALT (6-col alias row) ⇒ schema_drift (a missed AKA would be a false CLEAR)", rAlt.threw && rAlt.error?.toolError?.kind === "schema_drift", JSON.stringify(rAlt.error?.toolError?.kind));
+  }
+
+  // S1 — headerless: the FIRST physical row (AEROCARIBBEAN) is a real entity, screenable.
+  {
+    const recs = ofacParsePrimary([sdnRow(36, "AEROCARIBBEAN AIRLINES"), sdnRow(37, "SECOND CO")].join("\r\n"), "SDN", "ofac:sdn");
+    const entries = ofacBuildEntries(recs, []);
+    const r = ofacComputeScreen(entries, { name: "AEROCARIBBEAN AIRLINES" });
+    ok("63ofac-S1 headerless: screen('AEROCARIBBEAN AIRLINES') ⇒ potential_matches (first row NOT eaten as a header)", r.result === "potential_matches" && r.matches[0].matchQuality === "exact" && r.matches[0].matchedVia === "primary", JSON.stringify(r.result));
+  }
+
+  // B2 — both AKA sources: Remarks-only alias 'BNC' AND ALT-only alias 'NATIONAL BANK OF CUBA'.
+  {
+    const prim = ofacParsePrimary([sdnRow(306, "BANCO NACIONAL DE CUBA", { remarks: `"a.k.a. 'BNC'."` })].join("\r\n"), "SDN", "ofac:sdn");
+    const alt = ofacParseAlt([altRow(306, 1, "aka", "NATIONAL BANK OF CUBA")].join("\r\n"), "SDN", "ofac:alt");
+    const entries = ofacBuildEntries(prim, alt);
+    const viaRemarks = ofacComputeScreen(entries, { name: "BNC" });
+    ok("63ofac-B2 screen('BNC') ⇒ potential_matches via aka(remarks) (NOT in ALT.CSV — the flagship recall gap)", viaRemarks.result === "potential_matches" && viaRemarks.matches[0].matchedVia === "aka(remarks)" && viaRemarks.matches[0].akaType === "aka", JSON.stringify(viaRemarks.matches[0] ?? null));
+    const viaAlt = ofacComputeScreen(entries, { name: "NATIONAL BANK OF CUBA" });
+    ok("63ofac-B2 screen('NATIONAL BANK OF CUBA') ⇒ potential_matches via aka(alt) (ALT.CSV join by ent_num)", viaAlt.result === "potential_matches" && viaAlt.matches[0].matchedVia === "aka(alt)", JSON.stringify(viaAlt.matches[0] ?? null));
+  }
+
+  // M6 — a genuine newline INSIDE a quoted Remarks re-joins to ONE 12-col record.
+  {
+    const body = sdnRow(900, "NEWLINE TARGET CO", { remarks: `"line one\nline two a.k.a. 'M6ALIAS'."` });
+    const recs = ofacParsePrimary(body, "SDN", "ofac:sdn");
+    ok("63ofac-M6 newline inside quoted Remarks ⇒ ONE record (assembler re-joins), NOT a corrupt split", recs.length === 1, `len=${recs.length}`);
+    ok("63ofac-M6 the re-joined Remarks keeps both physical lines + mines the aka", recs[0].remarks.includes("line one") && recs[0].remarks.includes("line two") && recs[0].remarksAkas.some((a) => a.name === "M6ALIAS"), JSON.stringify({ r: recs[0].remarks, akas: recs[0].remarksAkas }));
+    const entries = ofacBuildEntries(recs, []);
+    ok("63ofac-M6 the re-joined record is screenable", ofacComputeScreen(entries, { name: "NEWLINE TARGET CO" }).result === "potential_matches");
+  }
+
+  // M2 — minMatchQuality NEVER flips result to no_name_match while a match exists.
+  {
+    const prim = ofacParsePrimary(sdnRow(306, "BANCO NACIONAL DE CUBA"), "SDN", "ofac:sdn");
+    const entries = ofacBuildEntries(prim, []);
+    const r = ofacComputeScreen(entries, { name: "BANCO NACIONAL", minMatchQuality: "exact" });
+    ok("63ofac-M2 minMatchQuality:'exact' over a STRONG-only match ⇒ STILL potential_matches (existence-first), suppressedCount set + highest suppressed 'strong'",
+      r.result === "potential_matches" && r.matchCount === 1 && r.returnedCount === 0 && r.suppressedCount === 1 && r.highestSuppressedQuality === "strong", JSON.stringify(r));
+  }
+
+  // classifyMatch grading (exact/strong/weak/null).
+  ok("63ofac classifyMatch exact", ofacClassifyMatch(ofacNormName("BANCO NACIONAL DE CUBA"), ofacNormName("BANCO NACIONAL DE CUBA")) === "exact");
+  ok("63ofac classifyMatch strong (token subset)", ofacClassifyMatch(ofacNormName("BANCO NACIONAL"), ofacNormName("BANCO NACIONAL DE CUBA")) === "strong");
+  ok("63ofac classifyMatch null (no shared token) ⇒ a nonsense query does NOT match", ofacClassifyMatch(ofacNormName("ZZZQXNONEXISTENT"), ofacNormName("BANCO NACIONAL DE CUBA")) === null);
+
+  // isOfacS3Host — M4 partition/region pin.
+  ok("63ofac-M4 isOfacS3Host GovCloud exact ⇒ true", isOfacS3Host(OFAC_S3_HOST) === true);
+  ok("63ofac-M4 isOfacS3Host commercial-partition squat (…s3.amazonaws.com) ⇒ false (no us-gov marker)", isOfacS3Host("wc2h-sls-prod-public-published.s3.amazonaws.com") === false);
+  ok("63ofac-M4 isOfacS3Host us-east squat ⇒ false", isOfacS3Host("wc2h-sls-prod-public-published.s3.us-east-1.amazonaws.com") === false);
+  ok("63ofac-M5 isOfacS3Host('') ⇒ false (empty final host unconditionally rejected)", isOfacS3Host("") === false);
+
+  // ─── (B) END-TO-END via runTool over the fetch-mock ──────────────────────
+
+  // Warm-load the full "all" set once, screen a KNOWN SDN entity ⇒ potential_matches.
+  _resetOfacCacheForTests();
+  const spy = { reads: 0 };
+  await withFetch(validHandler(spy), async () => {
+    const res = await runTool("ofac_screen_entity", { name: "BANCO NACIONAL DE CUBA" }, sam);
+    const m = finalMeta(res);
+    ok("63ofac (runTool) known SDN entity ⇒ result:'potential_matches' (NEVER 'clear') + a real match", res.data.result === "potential_matches" && res.data.matchCount >= 1 && res.data.matches.length >= 1, JSON.stringify({ r: res.data.result, c: res.data.matchCount }));
+    ok("63ofac (runTool) result is NEVER 'clear' and there is NO top-level clear:true", res.data.result !== "clear" && res.data.clear === undefined, JSON.stringify(res.data.result));
+    ok("63ofac (runTool) the mandatory never-CLEAR caveat rides in _meta.notes VERBATIM", m.notes.some((n) => n === OFAC_NOT_DETERMINATION_NOTE), JSON.stringify(m.notes.slice(0, 1)));
+    ok("63ofac (runTool) freshness disclosed: snapshot.publishedDate '2026-07-10' (path date) + ageHours present", res.data.snapshot.publishedDate === "2026-07-10" && typeof res.data.snapshot.ageHours === "number", JSON.stringify(res.data.snapshot));
+    ok("63ofac-M4 the GENUINE GovCloud host was ACCEPTED and its body READ (spy.reads>0) — B1 SUB body also parsed in the full path", spy.reads > 0, `reads=${spy.reads}`);
+    ok("63ofac-B2 (full path) the match carries a match on BANCO NACIONAL (SDN primary)", res.data.matches.some((x) => x.matchedVia === "primary" && x.programs.includes("CUBA")), JSON.stringify(res.data.matches[0]));
+  });
+
+  // Warm cache serves subsequent screens with NO network (failClosed proves it).
+  await withFetch(failClosed(), async () => {
+    const res = await runTool("ofac_screen_entity", { name: "ZZZQX NONEXISTENT PARTY 99" }, sam);
+    const m = finalMeta(res);
+    ok("63ofac (runTool, warm) nonsense name + ALL lists loaded ⇒ no_name_match (an HONEST empty, distinct from an outage)", res.data.result === "no_name_match" && res.data.matchCount === 0, JSON.stringify(res.data.result));
+    ok("63ofac (runTool, warm) no_name_match STILL carries the never-CLEAR caveat + is NOT labeled a clearance", m.notes.some((n) => n === OFAC_NOT_DETERMINATION_NOTE) && m.notes.some((n) => /NOT a clearance|not prove/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // Warm: screen the Remarks-only alias BNC end-to-end (B2 in the real dispatch).
+  await withFetch(failClosed(), async () => {
+    const res = await runTool("ofac_screen_entity", { name: "BNC" }, sam);
+    ok("63ofac-B2 (runTool, warm) screen('BNC') ⇒ potential_matches via aka(remarks) — the alias-only party is caught", res.data.result === "potential_matches" && res.data.matches.some((x) => x.matchedVia === "aka(remarks)"), JSON.stringify(res.data.matches.map((x) => x.matchedVia)));
+  });
+
+  // Warm: a program filter that suppresses the only match ⇒ STILL potential_matches
+  // (never-fake-CLEAR under a post-filter), with the suppression disclosed.
+  await withFetch(failClosed(), async () => {
+    const res = await runTool("ofac_screen_entity", { name: "BANCO NACIONAL DE CUBA", program: "IRAN" }, sam);
+    ok("63ofac (runTool, warm) program:'IRAN' over a CUBA-program hit ⇒ STILL potential_matches (existence, not the filter) + returnedCount 0 + suppressedCount>0",
+      res.data.result === "potential_matches" && res.data.returnedCount === 0 && res.data.suppressedCount >= 1, JSON.stringify({ r: res.data.result, ret: res.data.returnedCount, sup: res.data.suppressedCount }));
+  });
+
+  // Warm: minMatchQuality end-to-end (M2 through the dispatcher).
+  await withFetch(failClosed(), async () => {
+    const res = await runTool("ofac_screen_entity", { name: "BANCO NACIONAL", minMatchQuality: "exact" }, sam);
+    ok("63ofac-M2 (runTool, warm) 'BANCO NACIONAL' minMatchQuality:'exact' ⇒ potential_matches + suppressedCount>=1 (never flips to no_name_match)",
+      res.data.result === "potential_matches" && res.data.suppressedCount >= 1, JSON.stringify({ r: res.data.result, sup: res.data.suppressedCount }));
+  });
+
+  // ─── (C) THE never-fake-CLEAR THROWS (outage / SSRF / drift / floor) ──────
+
+  // ★ Core landmine — a COLD download failure (network) THROWS upstream_unavailable,
+  //   NEVER no_name_match (a "download failed" must never read as "not sanctioned").
+  _resetOfacCacheForTests();
+  await withFetch((u) => (ofacKey(u) === "sdn" ? (() => { throw new Error("ECONNRESET"); })() : validHandler({ reads: 0 })(u)), async () => {
+    const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "BANCO NACIONAL DE CUBA", list: "sdn" }, sam));
+    ok("63ofac ★COLD network failure ⇒ THROWS upstream_unavailable (NEVER a fabricated no_name_match/clear)", threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // M3 — partial load: ALT.CSV 5xx on a cold cache + a query matching an ALT alias
+  //   ⇒ THROW (never no_name_match — an AKA-only hit would be missed = false clear).
+  _resetOfacCacheForTests();
+  await withFetch((u) => {
+    const k = ofacKey(u);
+    if (k === "alt") return mockResponse({ status: 503 });
+    if (k === "sdn") return spied(strToBytes(BODIES.sdn), { url: goodUrl("sdn") }, { reads: 0 });
+    return failClosed()();
+  }, async () => {
+    const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "NATIONAL BANK OF CUBA", list: "sdn" }, sam));
+    ok("63ofac-M3 ALT.CSV 5xx (cold) + an ALT-alias query ⇒ THROWS (partial set never screened; NOT no_name_match)", threw && (error?.toolError?.kind === "upstream_unavailable" || error?.toolError?.kind === "rate_limited"), JSON.stringify(error?.toolError?.kind));
+  });
+
+  // M1 — a 2-row SDN (below the 10,000 floor) ⇒ schema_drift, NOT a near-empty screen.
+  _resetOfacCacheForTests();
+  await withFetch((u) => {
+    const k = ofacKey(u);
+    if (k === "sdn") return spied(strToBytes([sdnRow(36, "AEROCARIBBEAN AIRLINES"), sdnRow(306, "BANCO NACIONAL DE CUBA")].join("\r\n")), { url: goodUrl("sdn") }, { reads: 0 });
+    return validHandler({ reads: 0 })(u);
+  }, async () => {
+    const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "BANCO NACIONAL DE CUBA", list: "sdn" }, sam));
+    ok("63ofac-M1 a 2-row SDN (below 10,000 floor) ⇒ schema_drift (a truncated list NEVER reads as a clear)", threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // ★ End-to-end column-ADDITION drift (the reproduced blanket false CLEAR): every
+  //   SDN row gains a leading column ⇒ the SCREEN of a truly-listed party THROWS
+  //   schema_drift, NEVER no_name_match (the exact defect FIX-BACK closes).
+  _resetOfacCacheForTests();
+  await withFetch((u) => {
+    const k = ofacKey(u);
+    if (k === "sdn") {
+      // Prepend a NUMERIC record_id column to every row ⇒ 13 fields each; a numeric
+      // col 0 passes the ent_num belt, so ONLY the maxCol=cols count check catches it.
+      const drifted = BODIES.sdn.split("\r\n").map((ln) => (ln === "\x1a" || ln === "" ? ln : "999999," + ln)).join("\r\n");
+      return spied(strToBytes(drifted), { url: goodUrl("sdn") }, { reads: 0 });
+    }
+    return validHandler({ reads: 0 })(u);
+  }, async () => {
+    const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "BANCO NACIONAL DE CUBA", list: "sdn" }, sam));
+    ok("63ofac ★(runTool) a column-ADDITION-drifted SDN + a TRULY-LISTED party ⇒ THROWS schema_drift, NEVER no_name_match (the blanket false CLEAR the fix closes)", threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // M1 — a legitimate ~200-row CONS_PRIM (≥150 floor) does NOT trip the drift floor.
+  _resetOfacCacheForTests();
+  await withFetch(validHandler({ reads: 0 }), async () => {
+    const res = await runTool("ofac_screen_entity", { name: "GLOBAL CONS TARGET", list: "consolidated" }, sam);
+    ok("63ofac-M1 a valid ~200-row CONS_PRIM (its own 150 floor, NOT SDN's 10,000) ⇒ NO drift + screens (potential_matches on the CONS entity)", res.data.result === "potential_matches" && res.data.matches.some((x) => x.list === "Consolidated"), JSON.stringify({ r: res.data.result }));
+  });
+
+  // M4 — a redirect final host of the COMMERCIAL-partition bucket squat
+  //   (…s3.amazonaws.com) ⇒ invalid_input, and the body is NEVER read (spy 0).
+  _resetOfacCacheForTests();
+  {
+    const readSpy = { reads: 0 };
+    await withFetch((u) => (ofacKey(u) === "sdn"
+      ? spied(strToBytes(BODIES.sdn), { url: "https://wc2h-sls-prod-public-published.s3.amazonaws.com/2026-07-10/sdn.csv?x=1" }, readSpy)
+      : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "BANCO NACIONAL DE CUBA", list: "sdn" }, sam));
+      ok("63ofac-M4 redirect to the COMMERCIAL squat (…s3.amazonaws.com, no us-gov) ⇒ invalid_input", threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError?.kind));
+      ok("63ofac-M4 the attacker-body was NEVER read (arrayBuffer spy count 0 — reject BEFORE read)", readSpy.reads === 0, `reads=${readSpy.reads}`);
+    });
+  }
+
+  // M5 — a redirect with an EMPTY final res.url (redirected:true) ⇒ invalid_input,
+  //   body NEVER read (NO attachments.ts `!res.redirected` escape hatch here).
+  _resetOfacCacheForTests();
+  {
+    const readSpy = { reads: 0 };
+    await withFetch((u) => (ofacKey(u) === "sdn"
+      ? spied(strToBytes(BODIES.sdn), { url: "" }, readSpy)
+      : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "BANCO NACIONAL DE CUBA", list: "sdn" }, sam));
+      ok("63ofac-M5 empty final res.url (redirected) ⇒ invalid_input (empty host UNCONDITIONALLY rejected — no escape hatch)", threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError?.kind));
+      ok("63ofac-M5 body NEVER read on the empty-host reject (spy 0)", readSpy.reads === 0, `reads=${readSpy.reads}`);
+    });
+  }
+
+  // Off-enum list ⇒ invalid_input and NO fetch (the silent-accept trap, killed).
+  _resetOfacCacheForTests();
+  await withFetch(failClosed(), async () => {
+    const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "X", list: "bogus" }, sam));
+    // The Zod enum rejects "bogus" BEFORE the handler (no fetch — failClosed never threw);
+    // the server classifies that ZodError as invalid_input via toToolError (mirrored here).
+    ok("63ofac off-enum list:'bogus' ⇒ invalid_input, NO fetch attempted (Zod enum + runtime re-check)", threw && toToolError(error, "ofac_screen_entity").kind === "invalid_input", JSON.stringify(toToolError(error, "ofac_screen_entity").kind));
+  });
+
+  // Empty name ⇒ invalid_input, NO fetch (never a no-op empty screen).
+  _resetOfacCacheForTests();
+  await withFetch(failClosed(), async () => {
+    const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "   " }, sam));
+    ok("63ofac empty/whitespace name ⇒ invalid_input, NO fetch (never a no-op empty screen)", threw && error?.toolError?.kind === "invalid_input", JSON.stringify(error?.toolError?.kind));
+  });
+
+  _resetOfacCacheForTests();
 }
 
 main().catch((e) => {
