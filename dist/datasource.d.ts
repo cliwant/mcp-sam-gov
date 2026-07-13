@@ -68,6 +68,29 @@ export type GetJsonOptions = {
  */
 export declare function getJson<T = unknown>(url: string, opts: GetJsonOptions): Promise<T>;
 /**
+ * getJsonWithHeaders — the header-exposing sibling of `getJson` (ADR-0038 M1).
+ *
+ * WHY a SEPARATE primitive (and NOT a mutation of getJson): a PostgREST source
+ * (FAC / any Range-paginating REST API) carries its EXACT total in the
+ * `Content-Range` RESPONSE HEADER, but `getJson` returns ONLY `await r.json()`
+ * (the parsed body) and DISCARDS the `Response`/headers — so the header is
+ * unreachable through it. Mutating getJson's return shape would break every one
+ * of its ~9 callers (NOT byte-identical); this additive variant leaves getJson
+ * untouched. It runs the IDENTICAL init assembly + `fetchWithRetry(url, init,
+ * opts.label)` envelope as getJson (same headers / `redirect` / timeout / method
+ * / body / retry-taxonomy), and returns the parsed body PLUS ONLY the
+ * `content-range` header string — it NEVER surfaces the raw `Headers` object, so
+ * no incidental response header (Set-Cookie, a rate-limit token, etc.) can reach
+ * a consumer's `_meta`/output. A 200 non-JSON body makes `r.json()` throw a
+ * `SyntaxError`, exactly as with getJson — the caller reclassifies it (the
+ * fdic.ts / ADR-0038 S1 pattern), keeping the shared envelope free of source
+ * quirks.
+ */
+export declare function getJsonWithHeaders<T = unknown>(url: string, opts: GetJsonOptions): Promise<{
+    body: T;
+    contentRange: string | null;
+}>;
+/**
  * getText — the shared fetch → `r.text()` → error-classify skeleton for the
  * keyless XML/RSS/ATOM sources (far/gao/fpds; ADR-0013). Sibling of `getJson`;
  * returns the RAW body text (each source runs its own bespoke string/regex
