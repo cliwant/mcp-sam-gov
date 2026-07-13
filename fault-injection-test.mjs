@@ -52,7 +52,7 @@ import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
 import { searchGrants, getGrant } from "./dist/grants.js";
-import { searchDocuments as fedRegSearch, getDocument as fedRegGet } from "./dist/federal-register.js";
+import { searchDocuments as fedRegSearch, getDocument as fedRegGet, publicInspection as fedRegPI, computeLeadDays as fedRegLeadDays, buildPublicInspectionUrl as fedRegBuildPIUrl, assertFedRegHost, PRE_PUBLICATION_CAVEAT, LEADDAYS_METHOD_NOTE, SPECIAL_REGULAR_NOTE } from "./dist/federal-register.js";
 import { searchWageDeterminations, getWageRates, benchmarkLaborRates } from "./dist/pricing.js";
 import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
@@ -4302,6 +4302,206 @@ async function testFederalRegisterHonesty() {
         threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError));
     },
   );
+}
+
+// Federal Register PUBLIC INSPECTION (fed_register_public_inspection, ADR-0043) —
+// the "filed but NOT YET published" pre-publication leading indicator. OFFLINE,
+// fetch-monkeypatched. Locks the load-bearing honesty: (a) PRE_PUBLICATION_CAVEAT
+// on every response + NO fabricated citation; (b) leadDays null-never-0 (same-day
+// survives 0, missing→null, negative anomaly verbatim, tz-immune date-part diff);
+// (c) special-vs-regular verbatim + isSpecialFiling never conflated; (d) the
+// date-in-path SSRF trap defeated (date rides conditions[available_on], never a
+// path segment) + calendar round-trip (S1) + year bound (S5) → invalid_input,
+// 0 fetch; (e) empty-vs-outage — a 0-doc envelope → honest empty, 5xx/429 → THROW,
+// 200-non-JSON / count-non-number / results-non-array → schema_drift via
+// ToolErrorCarrier (M2); (f) totalAvailable = the EXACT client-filtered count,
+// never the page length + the overflow lower-bound (S2); (g) agencies[] unflattened;
+// (h) the mandatory notes present. Routed through the REAL runTool (M1 registry).
+async function testFederalRegisterPublicInspectionHonesty() {
+  section("15b. federalregister.gov PUBLIC INSPECTION (fed_register_public_inspection) — pre-publication leading indicator: caveat + leadDays(null-never-0) + special/regular + date-via-conditions[available_on] (path-trap defeated) + empty-vs-outage(schema_drift via ToolErrorCarrier) + exact-filtered-total (fetch-mock, OFFLINE)");
+  const sam = new SamGovClient({});
+  const isPI = (u) => /public-inspection-documents/.test(u);
+  const AG2 = [
+    { raw_name: "Environmental Protection Agency", name: "Environmental Protection Agency", id: 145, slug: "environmental-protection-agency", url: "https://www.federalregister.gov/agencies/environmental-protection-agency", json_url: "https://www.federalregister.gov/api/v1/agencies/145", parent_id: null },
+    { raw_name: "Energy Department", name: "Energy Department", id: 143, slug: "energy-department", url: "https://www.federalregister.gov/agencies/energy-department", json_url: "https://www.federalregister.gov/api/v1/agencies/143", parent_id: 731 },
+  ];
+  const PI_DEFAULTS = {
+    document_number: "2026-14125", type: "Notice", title: "Sunshine Act Meeting",
+    filed_at: "2026-07-10T11:15:00.000-04:00", publication_date: "2026-07-14",
+    filing_type: "regular", agencies: AG2, docket_numbers: ["EPA-HQ-2026-0001"],
+    html_url: "https://www.federalregister.gov/d/2026-14125",
+    pdf_url: "https://s3.amazonaws.com/public-inspection.federalregister.gov/2026-14125.pdf",
+    raw_text_url: "https://www.federalregister.gov/documents/full_text/text/2026/14125.txt",
+    num_pages: 2, subject_1: "Meetings",
+  };
+  const piRow = (o = {}) => ({ ...PI_DEFAULTS, ...o });
+  const piEnv = (rows, extra = {}) => ({ count: rows.length, results: rows, special_filings_updated_at: "2026-07-13T08:45:00.000-04:00", regular_filings_updated_at: "2026-07-13T08:45:00.000-04:00", ...extra });
+
+  // ── (1) HAPPY current — 3 rows: special/4-day-lead multi-agency, regular/missing-pub, regular/same-day. ──
+  await withFetch(
+    (u) => (isPI(u) ? mockResponse({ status: 200, json: piEnv([
+      piRow({ document_number: "2026-0001", type: "Rule", filing_type: "special", filed_at: "2026-07-10T11:15:00.000-04:00", publication_date: "2026-07-14", agencies: AG2 }),
+      piRow({ document_number: "2026-0002", filing_type: "regular", publication_date: undefined }),
+      piRow({ document_number: "2026-0003", filing_type: "regular", filed_at: "2026-07-14T09:00:00.000-04:00", publication_date: "2026-07-14" }),
+    ]) }) : failClosed()()),
+    async () => {
+      const r = await runTool("fed_register_public_inspection", { mode: "current" }, sam);
+      const m = buildMeta(r.meta);
+      const d = r.data.documents;
+      ok("15b-1 current ⇒ 3 rows mapped (fetch-once), returned:3 + NO ad-hoc `found` field (S3 — completeness rides _meta)",
+        d.length === 3 && m.returned === 3 && r.data.found === undefined, JSON.stringify({ n: d.length, ret: m.returned, found: r.data.found }));
+      ok("15b-1 (b) leadDays null-never-0: 4-day lead ⇒ 4; missing publication_date ⇒ null (NEVER 0); same-day (filed date === pub) ⇒ 0 (a genuine zero survives)",
+        d[0].leadDays === 4 && d[1].leadDays === null && d[2].leadDays === 0, JSON.stringify(d.map((x) => x.leadDays)));
+      ok("15b-1 (c) special-vs-regular verbatim + isSpecialFiling never conflated (special⇒true, regular⇒false)",
+        d[0].filingType === "special" && d[0].isSpecialFiling === true && d[1].filingType === "regular" && d[1].isSpecialFiling === false, JSON.stringify(d.map((x) => [x.filingType, x.isSpecialFiling])));
+      ok("15b-1 (g) agencies[] UNFLATTENED — BOTH agencies kept structured {rawName,name,id,slug,parentId} (never collapsed to one string)",
+        Array.isArray(d[0].agencies) && d[0].agencies.length === 2 && d[0].agencies[1].slug === "energy-department" && d[0].agencies[1].id === 143 && d[0].agencies[1].parentId === 731 && d[0].agencies[0].parentId === null, JSON.stringify(d[0].agencies));
+      ok("15b-1 (a) NO fabricated citation/page emitted for any PI doc (pre-publication has none)",
+        d.every((x) => x.citation === undefined && x.pageCount === undefined && x.page === undefined), JSON.stringify(Object.keys(d[0])));
+      ok("15b-1 (h) the 3 mandatory notes present: PRE_PUBLICATION_CAVEAT + LEADDAYS_METHOD_NOTE + SPECIAL_REGULAR_NOTE",
+        m.notes.includes(PRE_PUBLICATION_CAVEAT) && m.notes.includes(LEADDAYS_METHOD_NOTE) && m.notes.includes(SPECIAL_REGULAR_NOTE), JSON.stringify(m.notes.length));
+      ok("15b-1 filedAt/publicationDate surfaced verbatim + typeCode via TYPE_MAP (Rule⇒RULE, Notice⇒NOTICE) + keyless source",
+        d[0].filedAt === "2026-07-10T11:15:00.000-04:00" && d[0].publicationDate === "2026-07-14" && d[0].typeCode === "RULE" && d[1].typeCode === "NOTICE" && m.keylessMode === true && /public-inspection-documents \(keyless\)/.test(m.source), JSON.stringify({ t0: d[0].typeCode, t1: d[1].typeCode, src: m.source }));
+      ok("15b-1 (f) totalAvailable = the exact set count (3), servedTotal 3, NOT the page length; stamps surfaced",
+        m.totalAvailable === 3 && r.data.servedTotal === 3 && r.data.specialFilingsUpdatedAt === "2026-07-13T08:45:00.000-04:00", JSON.stringify({ ta: m.totalAvailable, st: r.data.servedTotal }));
+    },
+  );
+
+  // ── (2) DATE mode + empty — the date rides conditions[available_on] (NEVER a path
+  //    segment: the wrong-answer trap), a 0-doc day ⇒ honest empty, S4 stamps absent ⇒ null. ──
+  await withFetch(
+    (u) => (isPI(u) ? mockResponse({ status: 200, json: { count: 0, results: [] } }) : failClosed()()),
+    async (calls) => {
+      const r = await runTool("fed_register_public_inspection", { mode: "date", date: "2026-07-13" }, sam);
+      const m = buildMeta(r.meta);
+      const wireUrl = calls[calls.length - 1].url;
+      ok("15b-2 (d) date-in-path TRAP DEFEATED: the built URL carries the date ONLY in conditions[available_on] (%5Bavailable_on%5D=2026-07-13), path is …/public-inspection-documents.json — NEVER …/2026-07-13.json",
+        /public-inspection-documents\.json/.test(wireUrl) && /conditions%5Bavailable_on%5D=2026-07-13/.test(wireUrl) && !/public-inspection-documents\/2026-07-13\.json/.test(wireUrl), wireUrl);
+      ok("15b-2 (e) a 0-doc day ⇒ HONEST EMPTY (returned:0, totalAvailable:0, complete:true) — NOT an error, NOT a fabricated row",
+        r.data.documents.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.documents.length, ta: m.totalAvailable, c: m.complete }));
+      ok("15b-2 (S4) special/regular_filings_updated_at ABSENT on the empty day ⇒ null (null-safe str, NOT a schema_drift throw)",
+        r.data.specialFilingsUpdatedAt === null && r.data.regularFilingsUpdatedAt === null, JSON.stringify({ s: r.data.specialFilingsUpdatedAt, rr: r.data.regularFilingsUpdatedAt }));
+      ok("15b-2 (h) the caveat notes still ride an EMPTY response + an empty-note is present",
+        m.notes.includes(PRE_PUBLICATION_CAVEAT) && m.notes.some((n) => /honest empty result, not an error/.test(n)), JSON.stringify(m.notes.length));
+    },
+  );
+
+  // ── (3) SEARCH mode — term rides conditions[term]&per_page=1000; client type filter
+  //    narrows to the EXACT filtered total (never the raw server count); pagination window. ──
+  const searchRows = Array.from({ length: 75 }, (_, i) => piRow({ document_number: `2026-9${String(i).padStart(3, "0")}`, type: i < 8 ? "Rule" : "Notice", filing_type: i < 4 ? "special" : "regular" }));
+  await withFetch(
+    (u) => (isPI(u) ? mockResponse({ status: 200, json: { description: "on inspection", count: 75, total_pages: 1, results: searchRows } }) : failClosed()()),
+    async (calls) => {
+      const r = await runTool("fed_register_public_inspection", { mode: "search", term: "acquisition", limit: 20, offset: 0 }, sam);
+      const m = buildMeta(r.meta);
+      const wireUrl = calls[calls.length - 1].url;
+      ok("15b-3 search ⇒ term rides conditions[term]=acquisition + per_page=1000 (fetch-once over the on-inspection corpus)",
+        /conditions%5Bterm%5D=acquisition/.test(wireUrl) && /per_page=1000/.test(wireUrl), wireUrl);
+      ok("15b-3 (f) no client filter: totalAvailable 75 (real), servedTotal 75, returned 20, hasMore true, nextOffset 20 — totalAvailable is NEVER the page length (20)",
+        m.totalAvailable === 75 && r.data.servedTotal === 75 && m.returned === 20 && m.pagination.hasMore === true && m.pagination.nextOffset === 20, JSON.stringify({ ta: m.totalAvailable, st: r.data.servedTotal, ret: m.returned, pg: m.pagination }));
+    },
+  );
+  await withFetch(
+    (u) => (isPI(u) ? mockResponse({ status: 200, json: { description: "on inspection", count: 75, total_pages: 1, results: searchRows } }) : failClosed()()),
+    async () => {
+      const r = await runTool("fed_register_public_inspection", { mode: "search", type: "RULE" }, sam);
+      const m = buildMeta(r.meta);
+      ok("15b-3 (f) type:RULE client-side ⇒ totalAvailable 8 (the EXACT filtered set), servedTotal 75, all returned rows RULE — the raw-vs-filtered note discloses both",
+        m.totalAvailable === 8 && r.data.servedTotal === 75 && r.data.documents.length === 8 && r.data.documents.every((x) => x.typeCode === "RULE") && m.notes.some((n) => /Served 75 document\(s\); after client filters/.test(n)), JSON.stringify({ ta: m.totalAvailable, st: r.data.servedTotal, n: r.data.documents.length }));
+    },
+  );
+  // (3b) overflow (S2): count 1500 > fetched rows ⇒ truncated + lower-bound honesty.
+  await withFetch(
+    (u) => (isPI(u) ? mockResponse({ status: 200, json: { description: "on inspection", count: 1500, total_pages: 2, results: [piRow({ document_number: "2026-1", type: "Rule" }), piRow({ document_number: "2026-2", type: "Notice" }), piRow({ document_number: "2026-3", type: "Notice" })] } }) : failClosed()()),
+    async () => {
+      const rNo = await runTool("fed_register_public_inspection", { mode: "search" }, sam);
+      const mNo = buildMeta(rNo.meta);
+      ok("15b-3b (S2) overflow, NO client filter ⇒ totalAvailable = the server's EXACT 1500, truncated:true + the 'first 3 of 1500' lower-bound note",
+        mNo.totalAvailable === 1500 && mNo.truncated === true && mNo.notes.some((n) => /Only the first 3 of 1500/.test(n)), JSON.stringify({ ta: mNo.totalAvailable, tr: mNo.truncated }));
+      const rF = await runTool("fed_register_public_inspection", { mode: "search", type: "RULE" }, sam);
+      const mF = buildMeta(rF.meta);
+      ok("15b-3b (S2) overflow WITH a client filter ⇒ totalAvailable = the client-filtered first-page count (1), totalIsLowerBound:true (never the raw 1500 which mixes all types)",
+        mF.totalAvailable === 1 && mF.totalIsLowerBound === true && mF.truncated === true && mF.notes.some((n) => /LOWER BOUND on the client-filtered set/.test(n)), JSON.stringify({ ta: mF.totalAvailable, lb: mF.totalIsLowerBound }));
+    },
+  );
+
+  // ── (4) leadDays matrix (direct, offline, deterministic) — null-never-0, tz-immune. ──
+  ok("15b-4 leadDays: pub−filed = 4 ⇒ 4",
+    fedRegLeadDays("2026-07-10T11:15:00.000-04:00", "2026-07-14") === 4, String(fedRegLeadDays("2026-07-10T11:15:00.000-04:00", "2026-07-14")));
+  ok("15b-4 leadDays: same-day (filed date === pub) ⇒ 0 (a genuine zero SURVIVES, never nulled)",
+    fedRegLeadDays("2026-07-14T09:00:00.000-04:00", "2026-07-14") === 0, String(fedRegLeadDays("2026-07-14T09:00:00.000-04:00", "2026-07-14")));
+  ok("15b-4 leadDays: missing pub ⇒ null (NEVER 0); missing filed ⇒ null; unparseable ⇒ null",
+    fedRegLeadDays("2026-07-10T...", null) === null && fedRegLeadDays(undefined, "2026-07-14") === null && fedRegLeadDays("garbage", "2026-07-14") === null, JSON.stringify([fedRegLeadDays("2026-07-10T...", null), fedRegLeadDays(undefined, "2026-07-14"), fedRegLeadDays("garbage", "2026-07-14")]));
+  ok("15b-4 leadDays: pub < filed (anomaly) ⇒ the verbatim NEGATIVE (−6), never clamped to 0 or nulled",
+    fedRegLeadDays("2026-07-20T11:15:00.000-04:00", "2026-07-14") === -6, String(fedRegLeadDays("2026-07-20T11:15:00.000-04:00", "2026-07-14")));
+  ok("15b-4 leadDays tz-immune: an EST (-05:00) filed_at ⇒ the DATE-part diff is DST-skew-free (2019-12-27 → 2020-01-03 = 7)",
+    fedRegLeadDays("2019-12-27T16:15:00.000-05:00", "2020-01-03") === 7, String(fedRegLeadDays("2019-12-27T16:15:00.000-05:00", "2020-01-03")));
+
+  // ── (5) SSRF/date — invalid/off-calendar/off-year dates ⇒ invalid_input, ZERO fetch. ──
+  for (const date of ["2026-13-40", "2026-2-3", "2026-02-30", "../etc", "", "1993-12-31", "3000-01-01"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("fed_register_public_inspection", { mode: "date", date }, sam));
+      ok(`15b-5 (d/S1/S5) date ${JSON.stringify(date)} ⇒ invalid_input, 0 fetch (regex + real-calendar round-trip + [1994, yr+1] bound — never a retryable 500)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  {
+    const u = fedRegBuildPIUrl("date", { date: "2026-07-13" });
+    ok("15b-5 buildPublicInspectionUrl('date') ⇒ fixed host + date ONLY in conditions[available_on], path …/public-inspection-documents.json, NO /{date}.json path segment",
+      /^https:\/\/www\.federalregister\.gov\/api\/v1\/public-inspection-documents\.json\?/.test(u) && /conditions%5Bavailable_on%5D=2026-07-13/.test(u) && !/public-inspection-documents\/2026-07-13\.json/.test(u), u);
+    const off = await expectThrow(async () => assertFedRegHost("http://169.254.169.254/api/v1/public-inspection-documents/current.json"));
+    const dg = await expectThrow(async () => assertFedRegHost("http://www.federalregister.gov/api/v1/public-inspection-documents/current.json"));
+    ok("15b-5 assertFedRegHost rejects a non-federalregister host AND an http:// downgrade ⇒ invalid_input (fixed-host SSRF guard bites)",
+      off.threw && toToolError(off.error).kind === "invalid_input" && dg.threw && toToolError(dg.error).kind === "invalid_input", JSON.stringify({ off: off.threw, dg: dg.threw }));
+  }
+
+  // ── (6) error matrix — outage/rate-limit THROW; 200-non-JSON / envelope drift ⇒
+  //    schema_drift via ToolErrorCarrier (M2); genuine empty ⇒ honest empty — none conflated. ──
+  await withFetch((u) => (isPI(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fed_register_public_inspection", { mode: "current" }, sam));
+    ok("15b-6 (e) 503 ⇒ THROW upstream_unavailable (retryable) — NEVER a fake empty 'nothing on inspection'",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch((u) => (isPI(u) ? mockResponse({ status: 429 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fed_register_public_inspection", { mode: "current" }, sam));
+    ok("15b-6 (e) 429 ⇒ THROW rate_limited (retried then thrown), never a fake empty",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch((u) => (isPI(u) ? ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>404</html>" }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fed_register_public_inspection", { mode: "current" }, sam));
+    ok("15b-6 (e/M2) a 200 NON-JSON body (HTML masquerade) ⇒ schema_drift via ToolErrorCarrier (SyntaxError reclassified) — never a fake empty, never `unknown`",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch((u) => (isPI(u) ? mockResponse({ status: 200, json: { count: "75", results: [] } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fed_register_public_inspection", { mode: "current" }, sam));
+    ok("15b-6 (e/M2) count NON-number ⇒ schema_drift THROW (assertInspectionEnvelope via ToolErrorCarrier, not `unknown`)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch((u) => (isPI(u) ? mockResponse({ status: 200, json: { count: 5, results: "not-an-array" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fed_register_public_inspection", { mode: "current" }, sam));
+    ok("15b-6 (e/M2) results NON-array ⇒ schema_drift THROW (never read positionally, never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch((u) => (isPI(u) ? mockResponse({ status: 200, json: { count: 0, results: [] } }) : failClosed()()), async () => {
+    const r = await runTool("fed_register_public_inspection", { mode: "current" }, sam);
+    const m = buildMeta(r.meta);
+    ok("15b-6 (e) a GENUINE {count:0,results:[]} ⇒ honest empty (returned:0, complete:true) — NOT conflated with the schema_drift/outage cases above",
+      r.data.documents.length === 0 && m.returned === 0 && m.complete === true, JSON.stringify({ n: r.data.documents.length, c: m.complete }));
+  });
+
+  // ── (7) agency any-match filter (multi-agency doc) + term-outside-search guard. ──
+  await withFetch((u) => (isPI(u) ? mockResponse({ status: 200, json: piEnv([piRow({ agencies: AG2 })]) }) : failClosed()()), async () => {
+    const r = await runTool("fed_register_public_inspection", { mode: "current", agency: "energy-department" }, sam);
+    ok("15b-7 (g) agency filter matches ANY of a doc's agencies[].slug (the 2nd agency) AND the matched row still lists BOTH agencies",
+      r.data.documents.length === 1 && r.data.documents[0].agencies.length === 2, JSON.stringify(r.data.documents.map((x) => x.agencies.map((a) => a.slug))));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("fed_register_public_inspection", { mode: "current", term: "acquisition" }, sam));
+    ok("15b-7 `term` outside mode='search' ⇒ invalid_input, 0 fetch (never silently full-text a non-search mode)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
 }
 
 // Pricing — wage determinations (sam_search_wage_determinations / sam_get_wage_rates),
@@ -14149,6 +14349,7 @@ async function main() {
   await testFetchAttachmentText();
   await testGrantsHonesty();
   await testFederalRegisterHonesty();
+  await testFederalRegisterPublicInspectionHonesty();
   await testPricingHonesty();
   await testGaoHonesty();
   await testParserFuzz();
