@@ -85,6 +85,15 @@ import {
   charterClassOf as fdicCharterClassOf,
   industrySummary as fdicIndustrySummary,
   FDIC_SUMMARY_FILTER_FIELDS,
+  buildRatioFilters as fdicBuildRatioFilters,
+  isCblrFramework as fdicIsCblr,
+  riskRatios as fdicRiskRatios,
+  RATIO_FILTER_FIELDS as FDIC_RATIO_FILTER_FIELDS,
+  RATIO_CATALOG as FDIC_RATIO_CATALOG,
+  buildSodFilters as fdicBuildSodFilters,
+  branchDeposits as fdicBranchDeposits,
+  SOD_FILTER_FIELDS as FDIC_SOD_FILTER_FIELDS,
+  FIN_FILTER_FIELDS as FDIC_FIN_FILTER_FIELDS,
 } from "./dist/fdic.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
 import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
@@ -9463,6 +9472,247 @@ async function testFdicSummaryHonesty() {
   });
 }
 
+// §69: FDIC BankFind ratios + branch deposits (ADR-0040) — the 6th & 7th FDIC tools
+// (source 30 unchanged; snapshot 103→105), WITHIN-SOURCE DEPTH on the shipped adapter.
+// (6) fdic_risk_ratios projects the curated RISK-RATIO catalog on the ALREADY-wired
+// /banks/financials endpoint (per-field units in the key; percent verbatim via num,
+// tier-1 capital ×1000); (7) fdic_branch_deposits reads /banks/sod (ONE new endpoint
+// constant). Reuses the C116/C118 adapter VERBATIM, so this section pins ONLY the NEW
+// surface + a P1/P2/SSRF smoke. All OFFLINE (mock fetch), deterministic, NON-VACUOUS.
+//   (★M1 BLOCKER) the CBLR RBCRWAJ=0 sentinel → null (BOTH risk-based capital ratios)
+//        via FDIC's CBLRIND flag + cblrFramework:true; a non-CBLR RBCRWAJ passes through
+//        verbatim; genuine zeros (NTLNLSR:0 / DEPSUMBR:0) survive as 0 (NOT blanket 0→null).
+//   (★S1) RATIO_FILTER_FIELDS {CERT,REPDTE} + SOD_FILTER_FIELDS {CERT,STALPBR,YEAR} — two
+//        DISTINCT Sets; FIN_FILTER_FIELDS ({CERT}) would THROW on REPDTE (regression).
+//   (★S2) per-code notReported marker + explicit-null read via num (ROE:null [key present]
+//        ⇒ null, never via 'ROE' in rec / === undefined).
+//   (★P3) *Pct verbatim via num (NO scale / NO recompute); RBCT1J ×1000 → tier1CapitalUSD;
+//        DEPSUMBR ×1000 → depositsUSD; null-never-0. Units baked into the output KEY.
+//   (★C118) state → STALPBR:"OR" (QUOTED); numeric CERT/YEAR bare.
+//   (P1) totalAvailable === meta.total (NOT page length). (P2) 400/404/non-JSON/drift
+//        THROW; genuine total:0 ⇒ complete:true + the empty-scope note. (SSRF) fixed
+//        host/path/https + redirect:'error' + keyless + bounded l/o. (notes) the mandatory
+//        RATIO_UNITS_NOTE (corrected, does NOT promise every 0 is real) +
+//        RATIO_NOT_DETERMINATION_NOTE + SOD units/snapshot notes.
+const isFdicSod = (u) => /api\.fdic\.gov\/banks\/sod\?/.test(u);
+const FDIC_SOD_INDEX = { name: "sod_1769439439907", createTimestamp: "2026-01-26T14:57:19Z" };
+const fdicSodMock = (spec) => (u) => (isFdicSod(u) ? mockResponse({ status: 200, json: fdicBody({ ...spec, index: spec.index ?? FDIC_SOD_INDEX }) }) : failClosed()());
+const fdicSodUrl = (calls) => { const c = calls.find((x) => isFdicSod(x.url)); return c ? new URL(c.url) : null; };
+// The catalog output keys (unit-suffixed) — the exact ratio key-set every row must carry.
+const RATIO_OUTPUT_KEYS = FDIC_RATIO_CATALOG.map((e) => e.outputKey);
+// A full non-CBLR /financials ratio row (CERT 10004 REPDTE 20240630, live-anchored).
+const RATIO_ROW = { CERT: 10004, REPDTE: "20240630", CBLRIND: 0, ROA: 0.6476, ROAPTX: 0.7946, ROE: 6.8, NIMY: 3.6827, EEFFR: 77.9802, NTLNLSR: 0.00311, RBC1AAJ: 8.7122, RBC1RWAJ: 10.07, RBCRWAJ: 10.8193, RBCT1J: 20086, ID: "10004_20240630" };
+// A CBLR filer (CBLRIND:1) — RBCRWAJ a LITERAL 0 sentinel, RBC1RWAJ null, leverage populated + solvent.
+const RATIO_CBLR_ROW = { CERT: 10012, REPDTE: "20240630", CBLRIND: 1, ROA: 1.2, ROE: 11.0, NIMY: 3.4, EEFFR: 60.0, NTLNLSR: 0, RBC1AAJ: 11.65, RBC1RWAJ: null, RBCRWAJ: 0, RBCT1J: 30000, ID: "10012_20240630" };
+
+async function testFdicRatiosSodHonesty() {
+  section("69. FDIC BankFind ratios + branch deposits (ADR-0040) — ★M1 CBLR RBCRWAJ=0 sentinel → null (via CBLRIND) + cblrFramework + genuine-zeros survive + ★S1 two DISTINCT filter Sets + ★S2 per-code marker + explicit-null via num + ★P3 units-in-key (percent verbatim, RBCT1J/DEPSUMBR ×1000, no recompute) + ★C118 STALPBR quote + P1/P2/SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  // ─── fdic_risk_ratios ───────────────────────────────────────────
+  // (happy) full row — percent verbatim, tier1CapitalUSD ×1000, keys ⊆ catalog, non-CBLR.
+  await withFetch(fdicFinMock({ records: [RATIO_ROW], total: 4610 }), async () => {
+    const r = await runTool("fdic_risk_ratios", { cert: 10004, reportDate: 20240630 }, sam);
+    const row = r.data.ratios[0];
+    const m = buildMeta(r.meta);
+    ok("69 happy: percent ratios surfaced VERBATIM via num (ROA 0.6476, ROE 6.8, NIMY 3.6827, EEFFR 77.9802, leverageRatioPct 8.7122) — any ×1000/scale ⇒ RED",
+      row.returnOnAssetsPct === 0.6476 && row.returnOnEquityPct === 6.8 && row.netInterestMarginPct === 3.6827 && row.efficiencyRatioPct === 77.9802 && row.leverageRatioPct === 8.7122,
+      JSON.stringify({ roa: row.returnOnAssetsPct, roe: row.returnOnEquityPct, eff: row.efficiencyRatioPct, lev: row.leverageRatioPct }));
+    ok("69 ★P3 tier1CapitalUSD === RBCT1J 20086 × 1000 = 20,086,000 ($thousands → USD; NOT ×1000'ing a percent, NOT surfacing RBCT1J raw ⇒ RED)", row.tier1CapitalUSD === 20086 * 1000, JSON.stringify(row.tier1CapitalUSD));
+    ok("69 ★P3 non-CBLR: totalRiskBasedCapitalRatioPct 10.8193 + tier1RiskBasedCapitalRatioPct 10.07 verbatim; cblrFramework:false", row.totalRiskBasedCapitalRatioPct === 10.8193 && row.tier1RiskBasedCapitalRatioPct === 10.07 && row.cblrFramework === false, JSON.stringify({ trbc: row.totalRiskBasedCapitalRatioPct, t1rbc: row.tier1RiskBasedCapitalRatioPct, cblr: row.cblrFramework }));
+    ok("69 output keys === {cert,reportDate,cblrFramework,id} ∪ the 10 catalog outputKeys (no extra / no missing ratio key ⇒ RED)",
+      RATIO_OUTPUT_KEYS.every((k) => k in row) && Object.keys(row).length === RATIO_OUTPUT_KEYS.length + 4, JSON.stringify(Object.keys(row)));
+    ok("69 ★P1 totalAvailable === meta.total 4610 (NOT page length 1); returned 1 ⇒ hasMore:true, nextOffset:1", m.totalAvailable === 4610 && m.returned === 1 && m.pagination.hasMore === true && m.pagination.nextOffset === 1, JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore }));
+    eq("69 output: cert←num 10004, reportDate←num(REPDTE) 20240630 (string field → int)", `${row.cert}/${row.reportDate}`, "10004/20240630");
+  });
+
+  // (★M1 BLOCKER) the CBLR RBCRWAJ=0 sentinel → null for BOTH risk-based capital ratios;
+  // cblrFramework:true; leverageRatioPct populated verbatim; genuine NTLNLSR:0 SURVIVES as 0.
+  await withFetch(fdicFinMock({ records: [RATIO_CBLR_ROW], total: 1 }), async () => {
+    const row = (await runTool("fdic_risk_ratios", { cert: 10012 }, sam)).data.ratios[0];
+    ok("69 ★M1 CBLR: totalRiskBasedCapitalRatioPct === null (RBCRWAJ:0 is a CBLR literal-0 sentinel, NOT a real 0% total capital — num(0)=0 ⇒ a false 'insolvent' ⇒ RED)", row.totalRiskBasedCapitalRatioPct === null, JSON.stringify(row.totalRiskBasedCapitalRatioPct));
+    ok("69 ★M1 CBLR: tier1RiskBasedCapitalRatioPct === null (RBC1RWAJ:null under CBLR — mapped null, never 0)", row.tier1RiskBasedCapitalRatioPct === null, JSON.stringify(row.tier1RiskBasedCapitalRatioPct));
+    ok("69 ★M1 CBLR: cblrFramework === true (from CBLRIND:1 — explains the null capital ratios; drop the flag ⇒ RED)", row.cblrFramework === true, JSON.stringify(row.cblrFramework));
+    ok("69 ★M1 NO blanket 0→null: leverageRatioPct === 11.65 (RBC1AAJ populated + solvent — proves CBLR banks are NOT insolvent) AND ★genuine-zero NTLNLSR:0 → netChargeOffsToLoansPct === 0 (a REAL zero net-charge-offs SURVIVES; nulling it ⇒ RED = the blanket-0→null overreach)",
+      row.leverageRatioPct === 11.65 && row.netChargeOffsToLoansPct === 0, JSON.stringify({ lev: row.leverageRatioPct, nco: row.netChargeOffsToLoansPct }));
+    // and the OTHER percent ratios still surface verbatim under CBLR
+    ok("69 ★M1 CBLR row still surfaces the non-capital ratios verbatim (ROA 1.2, ROE 11.0) + tier1CapitalUSD 30000×1000", row.returnOnAssetsPct === 1.2 && row.returnOnEquityPct === 11.0 && row.tier1CapitalUSD === 30000 * 1000, JSON.stringify({ roa: row.returnOnAssetsPct, t1: row.tier1CapitalUSD }));
+  });
+
+  // (isCblrFramework unit) CBLRIND:1 ⇒ true; 0/absent ⇒ false (detection via FDIC's flag).
+  ok("69 ★M1 isCblrFramework({CBLRIND:1}) === true (flag-based detection; a derived/recomputed ratio ⇒ RED)", fdicIsCblr({ CBLRIND: 1 }) === true && fdicIsCblr({ CBLRIND: "1" }) === true, JSON.stringify([fdicIsCblr({ CBLRIND: 1 }), fdicIsCblr({ CBLRIND: "1" })]));
+  ok("69 ★M1 isCblrFramework({CBLRIND:0}) / {} === false (a non-CBLR / absent-flag bank passes the risk-based ratios through verbatim)", fdicIsCblr({ CBLRIND: 0 }) === false && fdicIsCblr({}) === false, JSON.stringify([fdicIsCblr({ CBLRIND: 0 }), fdicIsCblr({})]));
+
+  // (non-CBLR verbatim + genuine 0) {CBLRIND:0, RBCRWAJ:14.59} ⇒ 14.59 verbatim; {NTLNLSR:0} ⇒ 0.
+  await withFetch(fdicFinMock({ records: [{ CERT: 1, REPDTE: "20240630", CBLRIND: 0, RBCRWAJ: 14.59, NTLNLSR: 0, ID: "1" }], total: 1 }), async () => {
+    const row = (await runTool("fdic_risk_ratios", { cert: 1 }, sam)).data.ratios[0];
+    ok("69 non-CBLR {CBLRIND:0, RBCRWAJ:14.59} ⇒ totalRiskBasedCapitalRatioPct 14.59 VERBATIM (nulling a non-CBLR real ratio ⇒ RED) + cblrFramework:false; NTLNLSR:0 ⇒ netChargeOffsToLoansPct 0 (genuine zero survives)",
+      row.totalRiskBasedCapitalRatioPct === 14.59 && row.cblrFramework === false && row.netChargeOffsToLoansPct === 0, JSON.stringify({ trbc: row.totalRiskBasedCapitalRatioPct, cblr: row.cblrFramework, nco: row.netChargeOffsToLoansPct }));
+  });
+
+  // (★S2 explicit-null via num) ROE:null [key PRESENT] ⇒ null; omitted key ⇒ null; ""/"null" ⇒ null; never 0.
+  for (const [roe, why] of [[null, "explicit JSON null (key present)"], [undefined, "absent key"], ["", "empty string"], ["null", "literal 'null' string"]]) {
+    const rec = { CERT: 2, REPDTE: "20240630", CBLRIND: 0, ID: "2" };
+    if (roe !== undefined) rec.ROE = roe;
+    await withFetch(fdicFinMock({ records: [rec], total: 1 }), async () => {
+      const row = (await runTool("fdic_risk_ratios", { cert: 2 }, sam)).data.ratios[0];
+      ok(`69 ★S2 null-ratio (${why}): returnOnEquityPct === null, NEVER 0 (a not-reported ROE read as 0 = a false 'no profitability' ⇒ RED; read via num, not 'ROE' in rec)`, row.returnOnEquityPct === null, JSON.stringify(row.returnOnEquityPct));
+    });
+  }
+
+  // (★S2 no-recompute) FDIC ROE:6.8 with NETINC/EQ that would compute a DIFFERENT ROE ⇒ output 6.8 (FDIC's field).
+  await withFetch(fdicFinMock({ records: [{ CERT: 3, REPDTE: "20240630", CBLRIND: 0, ROE: 6.8, NETINC: 762, EQ: 100, ID: "3" }], total: 1 }), async () => {
+    const row = (await runTool("fdic_risk_ratios", { cert: 3 }, sam)).data.ratios[0];
+    ok("69 ★no-recompute: FDIC ROE 6.8 surfaced verbatim (NETINC 762 / EQ 100 = 762% would be the fabricated computed value ⇒ RED); the mapper never reads NETINC/EQ", row.returnOnEquityPct === 6.8, JSON.stringify(row.returnOnEquityPct));
+  });
+
+  // (★S1 ratio filter Set) buildRatioFilters + filterTerm on RATIO_FILTER_FIELDS {CERT,REPDTE};
+  // FIN_FILTER_FIELDS {CERT} would THROW on REPDTE (the S1 regression).
+  eq("69 ★S1 buildRatioFilters({cert:10004}) === 'CERT:10004' (numeric bare)", fdicBuildRatioFilters({ cert: 10004 }), "CERT:10004");
+  eq("69 ★S1 buildRatioFilters({cert:10004,reportDate:20240630}) === 'CERT:10004 AND REPDTE:20240630' (both numeric bare, AND-joined)", fdicBuildRatioFilters({ cert: 10004, reportDate: 20240630 }), "CERT:10004 AND REPDTE:20240630");
+  eq("69 ★S1 filterTerm('REPDTE','20240630',RATIO_FILTER_FIELDS) succeeds bare (numeric) === 'REPDTE:20240630'", fdicFilterTerm("REPDTE", "20240630", FDIC_RATIO_FILTER_FIELDS), "REPDTE:20240630");
+  {
+    const bad = await expectThrow(async () => fdicFilterTerm("STALPBR", "OR", FDIC_RATIO_FILTER_FIELDS));
+    ok("69 ★S1 filterTerm('STALPBR',…,RATIO_FILTER_FIELDS) ⇒ invalid_input (STALPBR not on the ratio allowlist)", bad.threw && toToolError(bad.error).kind === "invalid_input", JSON.stringify({ threw: bad.threw }));
+    const regr = await expectThrow(async () => fdicFilterTerm("REPDTE", "20240630", FDIC_FIN_FILTER_FIELDS));
+    ok("69 ★S1 REGRESSION proof: filterTerm('REPDTE',…,FIN_FILTER_FIELDS {CERT}) THROWS invalid_input — this is WHY RATIO_FILTER_FIELDS is a DISTINCT Set (reuse FIN_FILTER_FIELDS ⇒ a valid reportDate becomes a hard error ⇒ RED)", regr.threw && toToolError(regr.error).kind === "invalid_input", JSON.stringify({ threw: regr.threw }));
+  }
+
+  // (wire) end-to-end: /banks/financials path, filters=CERT:10004 AND REPDTE:20240630, fields=RATIO_FIELDS
+  // (incl. CBLRIND), format=json, sort_by=REPDTE&sort_order=DESC (default), redirect:'error', keyless.
+  await withFetch(fdicFinMock({ records: [RATIO_ROW], total: 4610 }), async (calls) => {
+    await runTool("fdic_risk_ratios", { cert: 10004, reportDate: 20240630 }, sam);
+    const url = fdicFinUrl(calls);
+    const c = calls.find((x) => isFdicFin(x.url));
+    ok("69 wire: filters === 'CERT:10004 AND REPDTE:20240630' + fixed host/path https://api.fdic.gov/banks/financials (filters a query param, NOT the path)",
+      !!url && url.searchParams.get("filters") === "CERT:10004 AND REPDTE:20240630" && url.hostname === "api.fdic.gov" && url.protocol === "https:" && url.pathname === "/banks/financials", JSON.stringify(c?.url));
+    ok("69 wire: fields carries CBLRIND (★M1 sentinel detection) + the catalog codes + format=json + sort_by=REPDTE&sort_order=DESC (default); NEVER a `search=` param",
+      /(^|,)CBLRIND(,|$)/.test(url.searchParams.get("fields")) && /RBCRWAJ/.test(url.searchParams.get("fields")) && /RBCT1J/.test(url.searchParams.get("fields")) && url.searchParams.get("format") === "json" && url.searchParams.get("sort_by") === "REPDTE" && url.searchParams.get("sort_order") === "DESC" && url.searchParams.get("search") === null, JSON.stringify(url?.searchParams.get("fields")));
+    ok("69 SSRF redirect:'error' + keyless (NO headers — byte-clean init) on the ratios fetch (drop redirect ⇒ RED)", !!c && c.init && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
+  });
+
+  // (notes) RATIO_UNITS_NOTE (corrected — CBLR-aware, does NOT promise every 0 is real) +
+  // RATIO_NOT_DETERMINATION_NOTE + freshness + source-inline, all present & non-vacuous.
+  await withFetch(fdicFinMock({ records: [RATIO_ROW], total: 4610 }), async () => {
+    const m = buildMeta((await runTool("fdic_risk_ratios", { cert: 10004 }, sam)).meta);
+    ok("69 ★notes RATIO_UNITS_NOTE present: *Pct verbatim + tier1CapitalUSD ×1000 + a null ratio is NOT 0% + CBLR framework null artifact (drop ⇒ RED)",
+      m.notes.some((n) => /\*Pct field is an FDIC-published PERCENTAGE/.test(n) && /Community Bank Leverage Ratio/.test(n) && /null risk-based capital ratio/.test(n) && /none is recomputed/.test(n)), JSON.stringify(m.notes));
+    ok("69 ★notes RATIO_UNITS_NOTE does NOT promise every shown 0 is real (M1 correction — it explains the CBLR literal-0 sentinel instead)",
+      !m.notes.some((n) => /every shown 0 is real|a shown 0 is real|every 0 is real/i.test(n)), JSON.stringify(m.notes));
+    ok("69 ★notes RATIO_NOT_DETERMINATION_NOTE present (reported metrics, NOT a soundness rating; a single period is a snapshot; cross-check)",
+      m.notes.some((n) => /NOT a soundness rating/.test(n) && /single-period ratio is a snapshot/.test(n)), JSON.stringify(m.notes));
+    ok("69 source set INLINE (A1) to the financials endpoint provenance", m.source === "api.fdic.gov/banks/financials (BankFind, keyless)", JSON.stringify(m.source));
+  });
+
+  // (P2 error matrix + genuine empty) 400/404/non-JSON/drift THROW; total:0 ⇒ complete:true + empty note.
+  await withFetch((u) => (isFdicFin(u) ? mockResponse({ status: 400, json: { errors: [{ status: 400, detail: "leaky" }] } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_risk_ratios", { cert: 10004 }, sam));
+    ok("69 ★P2 400 errors[] ⇒ invalid_input THROW (never a fake empty)", r.threw && toToolError(r.error).kind === "invalid_input", JSON.stringify(toToolError(r.error).kind));
+  });
+  await withFetch((u) => (isFdicFin(u) ? mockResponse({ status: 404, json: { message: "Cannot GET /banks/financialz", statusCode: 404 } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_risk_ratios", { cert: 10004 }, sam));
+    ok("69 ★P2 404 {message,statusCode} ⇒ not_found THROW", r.threw && toToolError(r.error).kind === "not_found", JSON.stringify(toToolError(r.error).kind));
+  });
+  const finHtmlResp = () => ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token <"); }, text: async () => "<html/>" });
+  await withFetch((u) => (isFdicFin(u) ? finHtmlResp() : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_risk_ratios", { cert: 10004 }, sam));
+    ok("69 ★P2 200 non-JSON ⇒ schema_drift", r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(toToolError(r.error).kind));
+  });
+  await withFetch(fdicFinMock({ records: [], total: 0 }), async () => {
+    const r = await runTool("fdic_risk_ratios", { cert: 999999999 }, sam);
+    const m = buildMeta(r.meta);
+    ok("69 genuine-empty (meta.total:0 + data:[]) ⇒ returned:0, totalAvailable:0, complete:true + the empty-scope note fires (the ONLY honest empty)",
+      r.data.ratios.length === 0 && m.totalAvailable === 0 && m.complete === true && m.returned === 0 && m.notes.some((n) => /No financial report is on record for this CERT\/period/.test(n)), JSON.stringify({ ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // (sortBy allowlist) unknown sortBy ⇒ invalid_input BEFORE fetch (0 fetch), module + runTool paths.
+  await withFetch(failClosed(), async (calls) => {
+    const r = await expectThrow(() => fdicRiskRatios({ cert: 1, sortBy: "NOTAFIELD" }));
+    ok("69 ★sortBy Set.has (module): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch", r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ fetches: calls.length }));
+    const rz = await expectThrow(() => runTool("fdic_risk_ratios", { cert: 1, sortBy: "NOTAFIELD" }, sam));
+    ok("69 ★sortBy Zod enum (runTool): sortBy 'NOTAFIELD' ⇒ invalid_input, 0 fetch", rz.threw && toToolError(rz.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ fetches: calls.length }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const rc = await expectThrow(() => runTool("fdic_risk_ratios", { cert: 0 }, sam));
+    ok("69 SSRF ratios cert:0 ⇒ invalid_input (cert.int().min(1)), 0 fetch", rc.threw && toToolError(rc.error).kind === "invalid_input" && calls.length === 0, JSON.stringify(rc.threw));
+  });
+
+  // ─── fdic_branch_deposits (/banks/sod) ──────────────────────────
+  // (★C118 quote + builder) state → STALPBR:"OR" QUOTED; numeric CERT/YEAR bare; compound.
+  eq("69 ★C118 buildSodFilters({state:'OR'}) === 'STALPBR:\"OR\"' (QUOTED — bare STALPBR:OR is a live HTTP 400 ⇒ RED)", fdicBuildSodFilters({ state: "OR" }), 'STALPBR:"OR"');
+  eq("69 ★C118 buildSodFilters({state:'CA'}) === 'STALPBR:\"CA\"' (QUOTED)", fdicBuildSodFilters({ state: "CA" }), 'STALPBR:"CA"');
+  eq("69 buildSodFilters({cert:10004}) === 'CERT:10004' (numeric BARE)", fdicBuildSodFilters({ cert: 10004 }), "CERT:10004");
+  eq("69 buildSodFilters({year:2023}) === 'YEAR:2023' (numeric BARE)", fdicBuildSodFilters({ year: 2023 }), "YEAR:2023");
+  eq("69 buildSodFilters compound: CERT:10004 AND STALPBR:\"OR\" AND YEAR:2023 (numeric bare, non-numeric quoted)", fdicBuildSodFilters({ cert: 10004, state: "OR", year: 2023 }), 'CERT:10004 AND STALPBR:"OR" AND YEAR:2023');
+  eq("69 buildSodFilters({}) === '' (⇒ no filters param)", fdicBuildSodFilters({}), "");
+
+  // (★S1 allowlist) SOD_FILTER_FIELDS {CERT,STALPBR,YEAR}; BOGUS/PSTALP rejected (the /sod
+  // false-empty landmine — a bad field is a silent total:0, NOT a 400, so this throw is load-bearing).
+  {
+    const bad = await expectThrow(async () => fdicFilterTerm("BOGUS", "x", FDIC_SOD_FILTER_FIELDS));
+    ok("69 ★S1 filterTerm('BOGUS',…,SOD_FILTER_FIELDS) ⇒ invalid_input (a bad /sod field is a SILENT total:0 false-empty, not a 400 — reject by construction; remove ⇒ RED)", bad.threw && toToolError(bad.error).kind === "invalid_input", JSON.stringify({ threw: bad.threw }));
+    const badP = await expectThrow(async () => fdicFilterTerm("PSTALP", "OR", FDIC_SOD_FILTER_FIELDS));
+    ok("69 ★S1 filterTerm('PSTALP',…,SOD_FILTER_FIELDS) ⇒ invalid_input (/sod uses STALPBR, NOT PSTALP)", badP.threw && toToolError(badP.error).kind === "invalid_input", JSON.stringify({ threw: badP.threw }));
+    eq("69 ★S1 filterTerm('STALPBR','OR',SOD_FILTER_FIELDS) === 'STALPBR:\"OR\"' (allowlisted + C118-quoted)", fdicFilterTerm("STALPBR", "OR", FDIC_SOD_FILTER_FIELDS), 'STALPBR:"OR"');
+  }
+
+  // (happy + snapshot + units) a branch row DEPSUMBR 30536 → depositsUSD ×1000; a DEPSUMBR:0
+  // GENUINE 0 stays 0; an ABSENT DEPSUMBR → null; year via num; the DISTINCT sod_* snapshot disclosed.
+  const SOD_ROW = { CERT: 10004, NAMEFULL: "Bank A", BRNUM: 1, NAMEBR: "Main", CITYBR: "Markesan", STALPBR: "WI", ZIPBR: "53946", ADDRESBR: "100 Main St", DEPSUMBR: 30536, YEAR: 1994, ID: "sod_10004_1" };
+  const SOD_ZERO = { CERT: 10004, NAMEFULL: "Bank A", BRNUM: 2, NAMEBR: "Vault", CITYBR: "Markesan", STALPBR: "WI", ZIPBR: "53946", ADDRESBR: "200 Main St", DEPSUMBR: 0, YEAR: 1994, ID: "sod_10004_2" };
+  const SOD_ABSENT = { CERT: 10004, NAMEFULL: "Bank A", BRNUM: 3, NAMEBR: "New", CITYBR: "Markesan", STALPBR: "WI", ZIPBR: "53946", ADDRESBR: "300 Main St", YEAR: 1994, ID: "sod_10004_3" };
+  await withFetch(fdicSodMock({ records: [SOD_ROW, SOD_ZERO, SOD_ABSENT], total: 74 }), async () => {
+    const r = await runTool("fdic_branch_deposits", { cert: 10004 }, sam);
+    const m = buildMeta(r.meta);
+    const rows = r.data.branches;
+    ok("69 ★P3 depositsUSD === DEPSUMBR 30536 × 1000 = 30,536,000 ($thousands → USD; drop ×1000 ⇒ RED); year←num(YEAR) 1994", rows[0].depositsUSD === 30536 * 1000 && rows[0].year === 1994, JSON.stringify({ d: rows[0].depositsUSD, y: rows[0].year }));
+    ok("69 ★P3 genuine 0: DEPSUMBR:0 ⇒ depositsUSD === 0 (a real 0-deposit branch SURVIVES; nulling it ⇒ RED)", rows[1].depositsUSD === 0, JSON.stringify(rows[1].depositsUSD));
+    ok("69 ★P3 absent: no DEPSUMBR key ⇒ depositsUSD === null (×1000-before-null-guard would make it 0 ⇒ RED)", rows[2].depositsUSD === null, JSON.stringify(rows[2].depositsUSD));
+    ok("69 output: institutionName←NAMEFULL, branchName←NAMEBR, city←CITYBR, state←STALPBR, zip←ZIPBR, address←ADDRESBR, branchNumber←num(BRNUM)",
+      rows[0].institutionName === "Bank A" && rows[0].branchName === "Main" && rows[0].city === "Markesan" && rows[0].state === "WI" && rows[0].zip === "53946" && rows[0].address === "100 Main St" && rows[0].branchNumber === 1, JSON.stringify(rows[0]));
+    ok("69 ★P1 totalAvailable === meta.total 74 (NOT page length 3); returned 3 ⇒ hasMore:true, nextOffset:3", m.totalAvailable === 74 && m.returned === 3 && m.pagination.hasMore === true && m.pagination.nextOffset === 3, JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore }));
+    ok("69 ★freshness: the DISTINCT annual snapshot sod_1769439439907 + createTimestamp 2026-01-26T14:57:19Z disclosed", m.notes.some((n) => /sod_1769439439907/.test(n) && /2026-01-26T14:57:19Z/.test(n) && /snapshot/i.test(n)), JSON.stringify(m.notes));
+    ok("69 ★notes SOD_UNITS_NOTE (DEPSUMBR $thousands→USD ×1000; a real 0 stays 0, absent→null) + SOD_SNAPSHOT_NOTE (annual June-30 snapshot; resolve CERT via fdic_search_institutions) present",
+      m.notes.some((n) => /DEPSUMBR.*\$thousands/.test(n) && /real 0 stays 0/.test(n)) && m.notes.some((n) => /June-30 branch-office snapshot/.test(n) && /fdic_search_institutions/.test(n)), JSON.stringify(m.notes));
+    ok("69 source set INLINE (A1) to the /sod endpoint provenance", m.source === "api.fdic.gov/banks/sod (BankFind Summary of Deposits, keyless)", JSON.stringify(m.source));
+  });
+
+  // (wire) end-to-end: /banks/sod path, filters=STALPBR:"OR" AND YEAR:2023 (the C118 raw-URL
+  // check), fields=SOD_FIELDS, format=json, sort_by=YEAR&sort_order=DESC, redirect:'error', keyless.
+  await withFetch(fdicSodMock({ records: [{ ...SOD_ROW, STALPBR: "OR", CITYBR: "Portland" }], total: 31093 }), async (calls) => {
+    const r = await runTool("fdic_branch_deposits", { state: "OR", year: 2023 }, sam);
+    const url = fdicSodUrl(calls);
+    const c = calls.find((x) => isFdicSod(x.url));
+    ok("69 ★C118 wire: decoded filters === 'STALPBR:\"OR\" AND YEAR:2023' + raw URL carries STALPBR%3A%22OR%22 and NEVER bare STALPBR%3AOR (revert filterTerm ⇒ RED = live HTTP 400)",
+      !!url && url.searchParams.get("filters") === 'STALPBR:"OR" AND YEAR:2023' && !!c && /STALPBR%3A%22OR%22/.test(c.url) && !/STALPBR%3AOR(?!%22)/.test(c.url), JSON.stringify(url?.searchParams.get("filters")));
+    ok("69 wire: fixed host/path https://api.fdic.gov/banks/sod + fields=SOD_FIELDS + format=json + sort_by=YEAR&sort_order=DESC (default) + NEVER a `search=` param",
+      !!url && url.hostname === "api.fdic.gov" && url.pathname === "/banks/sod" && url.searchParams.get("fields") === "CERT,NAMEFULL,BRNUM,NAMEBR,CITYBR,STALPBR,ZIPBR,ADDRESBR,DEPSUMBR,YEAR,ID" && url.searchParams.get("format") === "json" && url.searchParams.get("sort_by") === "YEAR" && url.searchParams.get("sort_order") === "DESC" && url.searchParams.get("search") === null, JSON.stringify(url?.search));
+    ok("69 SSRF redirect:'error' + keyless (NO headers) on the /sod fetch", !!c && c.init && c.init.redirect === "error" && !("headers" in c.init), JSON.stringify({ r: c?.init?.redirect, keys: Object.keys(c?.init ?? {}) }));
+    ok("69 ★C118 Oregon returns rows (totalAvailable 31093) — NOT a thrown 400", r.data.branches.length === 1 && buildMeta(r.meta).totalAvailable === 31093, JSON.stringify({ n: r.data.branches.length }));
+  });
+
+  // (P2 + genuine empty) 400/non-JSON THROW; total:0 ⇒ complete:true + the SOD empty note.
+  await withFetch((u) => (isFdicSod(u) ? mockResponse({ status: 400, json: { errors: [{ status: 400 }] } }) : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fdic_branch_deposits", { cert: 10004 }, sam));
+    ok("69 ★P2 /sod 400 errors[] ⇒ invalid_input THROW (never a fake empty)", r.threw && toToolError(r.error).kind === "invalid_input", JSON.stringify(toToolError(r.error).kind));
+  });
+  await withFetch(fdicSodMock({ records: [], total: 0 }), async () => {
+    const r = await runTool("fdic_branch_deposits", { cert: 999999999 }, sam);
+    const m = buildMeta(r.meta);
+    ok("69 /sod genuine-empty (meta.total:0 + data:[]) ⇒ returned:0, complete:true + the SOD empty-scope note fires",
+      r.data.branches.length === 0 && m.totalAvailable === 0 && m.complete === true && m.notes.some((n) => /No Summary-of-Deposits branch records match/.test(n)), JSON.stringify({ ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // (sortBy allowlist) unknown sortBy ⇒ invalid_input BEFORE fetch (0 fetch), module + runTool paths.
+  await withFetch(failClosed(), async (calls) => {
+    const r = await expectThrow(() => fdicBranchDeposits({ sortBy: "NOTAFIELD" }));
+    ok("69 ★sortBy Set.has (/sod module): 'NOTAFIELD' ⇒ invalid_input, 0 fetch", r.threw && toToolError(r.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ fetches: calls.length }));
+    const rz = await expectThrow(() => runTool("fdic_branch_deposits", { sortBy: "NOTAFIELD" }, sam));
+    ok("69 ★sortBy Zod enum (/sod runTool): 'NOTAFIELD' ⇒ invalid_input, 0 fetch", rz.threw && toToolError(rz.error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ fetches: calls.length }));
+  });
+}
+
 // §45: api.data.gov KEYED trio (ADR-0007) — Regulations.gov + Congress.gov. The
 // project's FIRST keyed source. The load-bearing guarantee is the KEY-NEVER-LEAKS
 // discipline (§2): the secret rides ONLY in the X-Api-Key header, never the URL /
@@ -13396,6 +13646,7 @@ async function main() {
   await testFdicFailuresHonesty();
   await testFdicHistoryHonesty();
   await testFdicSummaryHonesty();
+  await testFdicRatiosSodHonesty();
   await testDatagovHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
