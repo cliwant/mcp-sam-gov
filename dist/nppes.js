@@ -316,7 +316,23 @@ async function nppesGet(params) {
     if (built.hostname !== NPPES_HOST || built.protocol !== "https:") {
         throw invalidInput(`Constructed NPPES URL host ${JSON.stringify(built.hostname)} (${built.protocol}) is not ${NPPES_HOST} over https — refusing to fetch (SSRF safety).`);
     }
-    return throughGate("nppes", NPPES_GATE_MIN_INTERVAL_MS, () => getJson(built.toString(), { label: NPPES_LABEL, redirect: "error" }));
+    // ★ W3-2 — the SyntaxError→schema_drift catch-ladder (fema.ts:262-275 shape).
+    // getJson's r.json() runs OUTSIDE fetchWithRetry, so a 200 non-JSON body (an
+    // npiregistry HTML/WAF/maintenance masquerade) throws a raw SyntaxError; toToolError
+    // has NO schema_drift branch → it would degrade to kind:"unknown". Preserve the
+    // fetchWithRetry taxonomy (429/404/5xx/400/timeout ToolErrorCarrier) FIRST (a
+    // broader catch would reclassify a 429 to schema_drift), reclassify the SyntaxError
+    // SECOND, bare-rethrow LAST.
+    try {
+        return await throughGate("nppes", NPPES_GATE_MIN_INTERVAL_MS, () => getJson(built.toString(), { label: NPPES_LABEL, redirect: "error" }));
+    }
+    catch (e) {
+        if (e instanceof ToolErrorCarrier)
+            throw e;
+        if (e instanceof SyntaxError)
+            throw driftError(NPPES_LABEL, "NPPES returned a non-JSON body at HTTP 200 — schema drift.");
+        throw e;
+    }
 }
 /**
  * Validate the HTTP-200 body envelope. Guard ORDER (a 200 body can carry an error):
