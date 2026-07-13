@@ -446,6 +446,46 @@ const FedRegListAgenciesInput = z.object({
   perPage: z.number().min(1).max(500).optional(),
 });
 
+const FedRegPublicInspectionInput = z.object({
+  mode: z
+    .enum(["current", "date", "search"])
+    .optional()
+    .describe(
+      "Retrieval surface (default current): 'current' = all documents on public inspection now; 'date' = a specific inspection day (requires `date`); 'search' = server-side full-text over the on-inspection set (via `term`).",
+    ),
+  date: z
+    .string()
+    .optional()
+    .describe(
+      "YYYY-MM-DD; REQUIRED iff mode='date'. Rides conditions[available_on] as a query param (never a path segment). Validated (real calendar date, 1994..currentYear+1) before any fetch.",
+    ),
+  term: z
+    .string()
+    .optional()
+    .describe(
+      "Full-text query; VALID only in mode='search'. Rides conditions[term] (server-side).",
+    ),
+  type: z
+    .enum(["RULE", "PRORULE", "NOTICE", "PRESDOCU"])
+    .optional()
+    .describe("Client-side document-type filter (applied in all modes)."),
+  agency: z
+    .string()
+    .regex(/^[a-z0-9-]+$/)
+    .optional()
+    .describe(
+      "Client-side agency-slug filter; matches ANY of a doc's agencies[].slug. Resolve slugs via fed_register_list_agencies.",
+    ),
+  specialOnly: z
+    .boolean()
+    .optional()
+    .describe(
+      "Client-side filter keeping only filing_type='special' (off-cycle/emergency — a stronger, sooner signal).",
+    ),
+  limit: z.number().min(1).max(200).optional().describe("Page size (default 20)."),
+  offset: z.number().min(0).optional().describe("Page offset (default 0)."),
+});
+
 // eCFR
 const EcfrSearchInput = z.object({
   query: z.string(),
@@ -4017,7 +4057,7 @@ const TOOLS: ToolDef[] = [
     handler: (input) => usas.listToptierAgencies(input),
   }),
 
-  // ━━━ Federal Register (3) ━━━
+  // ━━━ Federal Register (4) ━━━
   defineTool({
     name: "fed_register_search_documents",
     description:
@@ -4038,6 +4078,13 @@ const TOOLS: ToolDef[] = [
       "List all Federal Register agencies with slugs (needed for fed_register_search_documents). Use to resolve 'what's the FedReg slug for Veterans Affairs?'",
     inputSchema: FedRegListAgenciesInput,
     handler: (input) => fedreg.listAgencies(input),
+  }),
+  defineTool({
+    name: "fed_register_public_inspection",
+    description:
+      "Federal Register PUBLIC INSPECTION desk — documents FILED with the Office of the Federal Register but NOT YET published (a pre-publication LEADING INDICATOR, ~1-to-several days ahead of the official publication_date). mode: 'current' (all on inspection now), 'date' (a specific available_on day), 'search' (full-text over the on-inspection set). Returns per-doc leadDays (pre-publication head-start), filing_type special-vs-regular, and unflattened agencies. NOTE: a public-inspection doc is NOT the authoritative published rule (no FR citation/page yet; may change or be withdrawn) — after publication_date cross-check fed_register_get_document.",
+    inputSchema: FedRegPublicInspectionInput,
+    handler: (input) => fedreg.publicInspection(input),
   }),
 
   // ━━━ eCFR (5) ━━━

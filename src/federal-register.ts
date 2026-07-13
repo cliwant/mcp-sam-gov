@@ -17,9 +17,10 @@
  * Rate-limit: documented as ~1000 req/hour per IP (informal).
  */
 
-import { fetchWithRetry } from "./errors.js";
+import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
 import { memoize } from "./cache.js";
 import { withMeta } from "./meta.js";
+import { num, str } from "./coerce.js";
 
 const FED_REG = "https://www.federalregister.gov/api/v1";
 
@@ -241,5 +242,436 @@ export async function listAgencies(args: { perPage?: number }) {
         parentId: a.parent_id,
       })),
     };
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public Inspection desk — the "filed but NOT YET published" leading indicator
+// (ADR-0043). Additive: everything below is NEW; `fetchJson`/`TYPE_MAP`/the three
+// existing tools above are UNTOUCHED. Documents FILED with the Office of the
+// Federal Register are on PUBLIC INSPECTION hours-to-days BEFORE their official
+// `publication_date` — the earliest legal signal of an upcoming rule/notice.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PI_BASE = `${FED_REG}/public-inspection-documents`;
+const PI_HOST = "www.federalregister.gov";
+
+/**
+ * The mandatory pre-publication caveat — rides `_meta.notes` on EVERY response.
+ * A public-inspection doc is FILED, not PUBLISHED: no final FR citation/page yet,
+ * and it may CHANGE or be WITHDRAWN before publication. Load-bearing honesty:
+ * presenting a PI doc as the authoritative published rule is the forbidden lie.
+ */
+export const PRE_PUBLICATION_CAVEAT =
+  "These are PRE-PUBLICATION documents on PUBLIC INSPECTION — filed with the Office of the Federal Register but NOT YET published. This is a LEADING INDICATOR, not the authoritative published rule/notice: there is NO final Federal Register citation or page number yet, and the content CAN CHANGE or be WITHDRAWN before its publication_date. After the publication_date, cross-check fed_register_get_document (by document_number) for the authoritative published version.";
+
+/** Discloses how `leadDays` is derived (null-never-0). */
+export const LEADDAYS_METHOD_NOTE =
+  "leadDays = publication_date minus the calendar date of filed_at, in whole days (the pre-publication head-start); null when either date is missing/unparseable, a genuine same-day filing is 0, a negative value (publication before filing) is a surfaced-verbatim anomaly.";
+
+/** Discloses the special-vs-regular distinction (never conflated). */
+export const SPECIAL_REGULAR_NOTE =
+  "filing_type 'special' = filed OFF-CYCLE for immediate/emergency public inspection (a stronger, SOONER signal — often same/next-day publication); 'regular' = filed for the next regular business-day inspection. Surfaced verbatim; the two are not conflated.";
+
+export type FedRegPublicInspectionMode = "current" | "date" | "search";
+
+export type FedRegPublicInspectionInput = {
+  mode?: FedRegPublicInspectionMode;
+  date?: string;
+  term?: string;
+  type?: "RULE" | "PRORULE" | "NOTICE" | "PRESDOCU";
+  agency?: string;
+  specialOnly?: boolean;
+  limit?: number;
+  offset?: number;
+};
+
+type RawAgency = {
+  raw_name?: string;
+  name?: string;
+  id?: number;
+  url?: string;
+  json_url?: string;
+  parent_id?: number | null;
+  slug?: string;
+};
+
+type RawInspectionRow = {
+  document_number?: string;
+  type?: string;
+  title?: string;
+  filed_at?: string;
+  publication_date?: string;
+  filing_type?: string;
+  agencies?: RawAgency[];
+  agency_names?: string[];
+  docket_numbers?: string[];
+  html_url?: string;
+  pdf_url?: string;
+  raw_text_url?: string;
+  json_url?: string;
+  num_pages?: number;
+  subject_1?: string;
+  subject_2?: string;
+  subject_3?: string;
+};
+
+type InspectionEnvelope = {
+  count: number;
+  results: RawInspectionRow[];
+  special_filings_updated_at?: string;
+  regular_filings_updated_at?: string;
+  total_pages?: number;
+  next_page_url?: string;
+};
+
+const PI_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * `leadDays` = publication_date − the CALENDAR DATE of filed_at, in whole days.
+ * tz-immune (compares the sliced YYYY-MM-DD strings — both on FR's Eastern basis,
+ * so no -04:00/-05:00 DST off-by-one). NULL-NEVER-0: null when either date is
+ * missing/unparseable; a genuine same-day filing survives as 0; a negative
+ * (publication before filing — a data anomaly) is surfaced VERBATIM, never
+ * clamped or nulled.
+ */
+export function computeLeadDays(
+  filedAt: string | null | undefined,
+  publicationDate: string | null | undefined,
+): number | null {
+  if (
+    filedAt === null ||
+    filedAt === undefined ||
+    publicationDate === null ||
+    publicationDate === undefined
+  ) {
+    return null;
+  }
+  const filedDate = String(filedAt).slice(0, 10);
+  const pubDate = String(publicationDate).slice(0, 10);
+  if (!PI_DATE_RE.test(filedDate) || !PI_DATE_RE.test(pubDate)) return null;
+  const fp = filedDate.split("-");
+  const pp = pubDate.split("-");
+  const ms =
+    Date.UTC(Number(pp[0]), Number(pp[1]) - 1, Number(pp[2])) -
+    Date.UTC(Number(fp[0]), Number(fp[1]) - 1, Number(fp[2]));
+  return Math.round(ms / 86_400_000);
+}
+
+/**
+ * SSRF host re-assertion (defense-in-depth; ADR-0043 §Q7). The only caller
+ * values that reach the wire are `date` (→ conditions[available_on]) and `term`
+ * (→ conditions[term]), both URLSearchParams QUERY params on the fixed host — no
+ * caller-controlled PATH segment. Re-assert the constructed URL is https on
+ * www.federalregister.gov; anything else → invalid_input (never fetched).
+ */
+export function assertFedRegHost(urlStr: string): void {
+  let u: URL;
+  try {
+    u = new URL(urlStr);
+  } catch {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `Refusing to fetch a non-URL public-inspection target.`,
+      retryable: false,
+      upstreamEndpoint: "federal-register:public-inspection",
+    });
+  }
+  if (u.protocol !== "https:" || u.hostname !== PI_HOST) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `Refusing to fetch a non-${PI_HOST} public-inspection URL (${u.protocol}//${u.hostname}).`,
+      retryable: false,
+      upstreamEndpoint: "federal-register:public-inspection",
+    });
+  }
+}
+
+/**
+ * Build the wire URL per mode. ★The date rides `conditions[available_on]` (a
+ * QUERY param), NEVER a `/{date}.json` path segment (fact 6: that path silently
+ * returns a WRONG unrelated doc). `term` rides `conditions[term]`. Both via
+ * URLSearchParams. `new URL` + host re-assert closes host-escape/downgrade.
+ */
+export function buildPublicInspectionUrl(
+  mode: FedRegPublicInspectionMode,
+  opts: { date?: string; term?: string } = {},
+): string {
+  let url: URL;
+  if (mode === "current") {
+    url = new URL(`${PI_BASE}/current.json`);
+  } else if (mode === "date") {
+    url = new URL(`${PI_BASE}.json`);
+    url.searchParams.set("conditions[available_on]", opts.date ?? "");
+  } else {
+    url = new URL(`${PI_BASE}.json`);
+    if (opts.term) url.searchParams.set("conditions[term]", opts.term);
+    // per_page ≫ any observed on-inspection count (live ≤95) → one page.
+    url.searchParams.set("per_page", "1000");
+  }
+  const built = url.toString();
+  assertFedRegHost(built);
+  return built;
+}
+
+/**
+ * Envelope-shape guard (M2). The list envelopes (`current`/`date`/`search`) are
+ * `{count:number, results:array, …}`. `fetchJson` casts `as T` without checking,
+ * so a 200 body of the wrong shape would map to garbage. Throw a `schema_drift`
+ * ToolErrorCarrier (NOT a plain Error — `toToolError` has no branch for a bare
+ * Error, so it would degrade to `unknown`). The two `*_filings_updated_at` stamps
+ * are OPTIONAL (S4: a zero-result day omits them) and are NOT asserted here.
+ */
+export function assertInspectionEnvelope(
+  json: unknown,
+  endpoint: string,
+): asserts json is InspectionEnvelope {
+  const j = json as { count?: unknown; results?: unknown } | null;
+  if (
+    json === null ||
+    typeof json !== "object" ||
+    typeof j?.count !== "number" ||
+    !Array.isArray(j?.results)
+  ) {
+    throw new ToolErrorCarrier({
+      kind: "schema_drift",
+      message: `Federal Register public-inspection envelope drift at ${endpoint}: expected {count:number, results:array}.`,
+      retryable: false,
+      upstreamEndpoint: endpoint,
+    });
+  }
+}
+
+function mapInspectionRow(r: RawInspectionRow) {
+  const typeVerbatim = str(r.type);
+  return {
+    documentNumber: str(r.document_number),
+    type: typeVerbatim,
+    typeCode: TYPE_MAP[r.type ?? ""] ?? "UNKNOWN",
+    title: str(r.title),
+    filedAt: str(r.filed_at),
+    publicationDate: str(r.publication_date),
+    // null-never-0; same-day survives as 0; negative anomaly verbatim.
+    leadDays: computeLeadDays(r.filed_at, r.publication_date),
+    filingType: str(r.filing_type),
+    isSpecialFiling: r.filing_type === "special",
+    // agencies[] surfaced UNFLATTENED — a doc can name multiple agencies.
+    agencies: (Array.isArray(r.agencies) ? r.agencies : []).map((a) => ({
+      rawName: str(a.raw_name),
+      name: str(a.name),
+      id: num(a.id),
+      slug: str(a.slug),
+      url: str(a.url),
+      jsonUrl: str(a.json_url),
+      parentId: num(a.parent_id),
+    })),
+    htmlUrl: str(r.html_url),
+    pdfUrl: str(r.pdf_url),
+    rawTextUrl: str(r.raw_text_url),
+    docketNumbers: (Array.isArray(r.docket_numbers) ? r.docket_numbers : [])
+      .map((s) => str(s))
+      .filter((s): s is string => s !== null),
+    numPages: num(r.num_pages),
+    subjects: [r.subject_1, r.subject_2, r.subject_3]
+      .map((s) => str(s))
+      .filter((s): s is string => s !== null),
+  };
+}
+
+/**
+ * `fed_register_public_inspection` — the pre-publication leading indicator.
+ * mode {current, date, search}; fetch-once + client-side window; every response
+ * carries the pre-publication caveat + the leadDays/special-vs-regular notes.
+ */
+export async function publicInspection(input: FedRegPublicInspectionInput) {
+  const mode: FedRegPublicInspectionMode = input.mode ?? "current";
+  const limit = input.limit ?? 20;
+  const offset = input.offset ?? 0;
+
+  // `term` is only meaningful in search mode — never silently full-text a
+  // non-search mode.
+  if (input.term && mode !== "search") {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `\`term\` is only valid in mode='search' (got mode='${mode}').`,
+      retryable: false,
+      upstreamEndpoint: "federal-register:public-inspection",
+    });
+  }
+
+  // ── mode=date validation: regex + real-calendar round-trip (S1) + plausibility
+  //    bound (S5), ALL pre-fetch. An off-calendar available_on (2026-02-30)
+  //    returns HTTP 500 that fetchWithRetry would mis-taxonomize as a retryable
+  //    outage — so a bad date MUST be rejected with `invalid_input` and ZERO fetch.
+  let asOfDate: string | null = null;
+  if (mode === "date") {
+    const date = input.date;
+    if (!date || !PI_DATE_RE.test(date)) {
+      throw new ToolErrorCarrier({
+        kind: "invalid_input",
+        message: `mode='date' requires a \`date\` matching YYYY-MM-DD (got ${JSON.stringify(date)}).`,
+        retryable: false,
+        upstreamEndpoint: "federal-register:public-inspection:date",
+      });
+    }
+    const parts = date.split("-");
+    const y = Number(parts[0]);
+    const m = Number(parts[1]);
+    const d = Number(parts[2]);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    if (
+      dt.getUTCFullYear() !== y ||
+      dt.getUTCMonth() !== m - 1 ||
+      dt.getUTCDate() !== d
+    ) {
+      throw new ToolErrorCarrier({
+        kind: "invalid_input",
+        message: `date '${date}' is not a real calendar date (off-calendar available_on returns HTTP 500 upstream — rejected before any fetch).`,
+        retryable: false,
+        upstreamEndpoint: "federal-register:public-inspection:date",
+      });
+    }
+    const currentYear = new Date().getUTCFullYear();
+    if (y < 1994 || y > currentYear + 1) {
+      throw new ToolErrorCarrier({
+        kind: "invalid_input",
+        message: `date year ${y} is outside the plausible window [1994, ${currentYear + 1}].`,
+        retryable: false,
+        upstreamEndpoint: "federal-register:public-inspection:date",
+      });
+    }
+    asOfDate = date;
+  }
+
+  const url = buildPublicInspectionUrl(mode, {
+    date: asOfDate ?? undefined,
+    term: input.term,
+  });
+  const endpoint = `federal-register:public-inspection:${mode}`;
+
+  // M2: a 200 body that is NOT valid JSON → fetchJson's `.json()` throws a
+  // SyntaxError → reclassify as `schema_drift` THROW (never a fake empty). A
+  // ToolErrorCarrier from fetchWithRetry (503/404/429) is rethrown UNCHANGED.
+  let json: unknown;
+  try {
+    json = await fetchJson<unknown>(url);
+  } catch (e) {
+    if (e instanceof SyntaxError) {
+      throw new ToolErrorCarrier({
+        kind: "schema_drift",
+        message: `Federal Register public-inspection returned a 200 non-JSON body at ${endpoint}.`,
+        retryable: false,
+        upstreamEndpoint: endpoint,
+      });
+    }
+    throw e;
+  }
+  assertInspectionEnvelope(json, endpoint);
+  const env = json;
+
+  const rawRows = env.results;
+  const servedTotal = env.count;
+  // S4: both freshness stamps are OPTIONAL — null-safe (absent → null).
+  const specialFilingsUpdatedAt = str(env.special_filings_updated_at);
+  const regularFilingsUpdatedAt = str(env.regular_filings_updated_at);
+
+  // Client-side filters (uniform across all modes — dodges the API quirks where
+  // available_on ignores type/per_page and the date-in-path trap).
+  let rows = rawRows.map(mapInspectionRow);
+  if (input.type) rows = rows.filter((r) => r.typeCode === input.type);
+  if (input.agency)
+    rows = rows.filter((r) => r.agencies.some((a) => a.slug === input.agency));
+  if (input.specialOnly) rows = rows.filter((r) => r.isSpecialFiling === true);
+  const filteredTotal = rows.length;
+  const hasClientFilter = Boolean(
+    input.type || input.agency || input.specialOnly,
+  );
+
+  // Overflow (S2): search corpus > per_page (server paginated; we fetched one
+  // page). Live-UNREACHABLE at the ~75-doc corpus, defensive-only.
+  const overflow = mode === "search" && servedTotal > rawRows.length;
+
+  let totalAvailable: number;
+  let totalIsLowerBound = false;
+  if (overflow && hasClientFilter) {
+    // A client filter over ONLY the fetched first page → the exact server total
+    // (all types) would MISREPRESENT the filtered set. Report the filtered
+    // first-page count as a documented LOWER BOUND.
+    totalAvailable = filteredTotal;
+    totalIsLowerBound = true;
+  } else if (overflow) {
+    // No client filter → the server's exact total is honest (returned rows are
+    // the lower bound, disclosed via truncated + note).
+    totalAvailable = servedTotal;
+  } else {
+    // The exact count of the client-filtered set (never the page length).
+    totalAvailable = filteredTotal;
+  }
+
+  const pageRows = rows.slice(offset, offset + limit);
+  const returned = pageRows.length;
+  const hasMore = offset + returned < totalAvailable;
+  const nextOffset = hasMore ? offset + returned : null;
+
+  const notes: string[] = [
+    PRE_PUBLICATION_CAVEAT,
+    LEADDAYS_METHOD_NOTE,
+    SPECIAL_REGULAR_NOTE,
+  ];
+  notes.push(
+    `Served ${servedTotal} document(s); after client filters (type/agency/specialOnly) → ${totalAvailable}${totalIsLowerBound ? "+ (lower bound)" : ""} pageable. The full ${mode} set was fetched in ONE request; limit/offset is a client-side window over the fetched rows.`,
+  );
+  notes.push(
+    "Filters type/agency/specialOnly are applied CLIENT-SIDE over the fetched set; date (→ conditions[available_on]) and term (→ conditions[term]) are server-side query params.",
+  );
+  if (pageRows.some((r) => typeof r.leadDays === "number" && r.leadDays < 0)) {
+    notes.push(
+      "At least one row has a NEGATIVE leadDays (publication_date precedes the filing date) — a source data anomaly, surfaced verbatim (not clamped/nulled).",
+    );
+  }
+  if (filteredTotal === 0) {
+    notes.push(
+      `No documents on public inspection for mode='${mode}'${asOfDate ? ` (available_on=${asOfDate})` : ""}${hasClientFilter ? " matching the requested filters" : ""}. This is an honest empty result, not an error.`,
+    );
+  }
+  if (overflow) {
+    notes.push(
+      hasClientFilter
+        ? `Server matched ${servedTotal} before client filters but only the first ${rawRows.length} rows were retrieved — totalAvailable is a LOWER BOUND on the client-filtered set. Narrow with a more specific term/type.`
+        : `Only the first ${rawRows.length} of ${servedTotal} documents were retrieved (server pagination) — totalAvailable is the exact server total; returned rows are a lower bound. Narrow with a more specific term/type.`,
+    );
+  }
+
+  const filtersApplied: string[] = ["mode"];
+  if (asOfDate) filtersApplied.push("date");
+  if (input.term) filtersApplied.push("term");
+  if (input.type) filtersApplied.push("type");
+  if (input.agency) filtersApplied.push("agency");
+  if (input.specialOnly) filtersApplied.push("specialOnly");
+
+  const data = {
+    mode,
+    asOfDate,
+    specialFilingsUpdatedAt,
+    regularFilingsUpdatedAt,
+    servedTotal,
+    totalAvailable,
+    returned,
+    documents: pageRows,
+  };
+
+  return withMeta(data, {
+    source:
+      "www.federalregister.gov/api/v1/public-inspection-documents (keyless)",
+    keylessMode: true,
+    returned,
+    totalAvailable,
+    ...(totalIsLowerBound ? { totalIsLowerBound: true } : {}),
+    ...(overflow ? { truncated: true } : {}),
+    filtersApplied,
+    filtersDropped: [],
+    fieldsUnavailable: [],
+    pagination: { offset, limit, hasMore, nextOffset },
+    notes,
   });
 }
