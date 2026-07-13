@@ -47,7 +47,7 @@ import { runTool, TOOLS } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier, fetchWithRetry } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards, searchRecipients, glossary } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards, searchRecipients, glossary, autocompleteRecipient } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
@@ -5157,6 +5157,55 @@ async function testUsasPaginationTruthfulness() {
       bud.pagination.nextOffset === null && bud.pagination.hasMore === true && bud.truncated === true &&
       bud.notes.some((n) => /NOT page-reachable/i.test(n) && /limit/.test(n)),
       JSON.stringify({ pg: bud.pagination, notes: bud.notes }));
+  });
+
+  // ── W3-8. Exhaust the non-consumable-cursor class in the TWO remaining shared
+  // usaspending meta-builders. Both emit a numeric nextOffset (the page length)
+  // while NONE of their callers exposes an offset/page arg — so following that
+  // cursor re-fetches the SAME page forever. Fix: nextOffset:null (both), + for
+  // referenceMeta offset:null too (reference lookups are not offset-pageable AT ALL,
+  // mirroring govinfo cursor tools). hasMore/truncated stay honest.
+
+  // W3-8 LIE #1 — categoryAggregateMeta drives the SIX top-N category tools
+  // (psc/state/cfda/federal_account/agency/subagency); all post page:1 with ONLY a
+  // `limit` arg. A TRUNCATED page (page_metadata.hasNext:true) ⇒ hasMore+truncated
+  // stay TRUE but nextOffset MUST be null + a not-page-reachable note fires.
+  // NON-VACUITY: revert categoryAggregateMeta:165 to `truncated ? opts.returned : null`
+  // ⇒ nextOffset 2 ⇒ RED. (searchCfdaSpending exercises the shared helper.)
+  await withFetch((u) => (/spending_by_category\/cfda/.test(u)
+    ? mockResponse({ status: 200, json: { results: [{ code: "93.778", name: "Medicaid", amount: 5e9 }, { code: "93.767", name: "CHIP", amount: 3e9 }], page_metadata: { hasNext: true } } })
+    : failClosed()()), async () => {
+    const cat = finalize(await searchCfdaSpending({ agency: "HHS", limit: 2 }));
+    ok("W3-8 categoryAggregateMeta (usas_search_cfda_spending) ⇒ hasNext:true ⇒ truncated + hasMore TRUE BUT pagination.nextOffset===null (NOT consumable — all 6 callers post page:1, no offset arg; revert :165 to `truncated?opts.returned:null` ⇒ nextOffset 2 ⇒ RED) + not-page-reachable note",
+      cat.pagination.nextOffset === null && cat.pagination.hasMore === true && cat.truncated === true &&
+      cat.notes.some((n) => /NOT page-reachable/i.test(n) && /limit/.test(n)),
+      JSON.stringify({ pg: cat.pagination, notes: cat.notes }));
+  });
+
+  // W3-8 LIE #2 — referenceMeta drives the THREE reference lookups (autocomplete_naics /
+  // autocomplete_recipient / glossary); each forwards only searchText/search + limit
+  // (no offset/page). These are NOT offset-pageable at all ⇒ BOTH offset:null AND
+  // nextOffset:null. (a) truncated glossary: returned(2) < count(151) ⇒ hasMore true.
+  // NON-VACUITY: revert referenceMeta:230 to `hasMore ? returned : null` ⇒ nextOffset 2 ⇒ RED.
+  _clearCache();
+  await withFetch((u) => (/references\/glossary\//.test(u)
+    ? mockResponse({ status: 200, json: { results: [{ term: "Obligation", slug: "obligation", plain: "…" }, { term: "Outlay", slug: "outlay", plain: "…" }], page_metadata: { count: 151 } } })
+    : failClosed()()), async () => {
+    const gl = finalize(await glossary({ search: "w3-8-glossary-trunc-uniqkey", limit: 2 }));
+    ok("W3-8 referenceMeta (usas_glossary) ⇒ returned(2)<count(151) ⇒ truncated + hasMore TRUE BUT pagination.offset===null AND nextOffset===null (reference lookups are not offset-pageable; revert :230 ⇒ nextOffset 2 ⇒ RED)",
+      gl.pagination.offset === null && gl.pagination.nextOffset === null && gl.pagination.hasMore === true && gl.truncated === true && gl.totalAvailable === 151,
+      JSON.stringify(gl.pagination));
+  });
+  // (b) FULL-page autocomplete_recipient (no upstream total): returned(3) >= limit(3) ⇒
+  // truncated + hasMore true; offset:null AND nextOffset:null.
+  _clearCache();
+  await withFetch((u) => (/autocomplete\/recipient/.test(u)
+    ? mockResponse({ status: 200, json: { count: 3, results: [{ recipient_name: "ACME A", uei: "A1" }, { recipient_name: "ACME B", uei: "B2" }, { recipient_name: "ACME C", uei: "C3" }] } })
+    : failClosed()()), async () => {
+    const rc = finalize(await autocompleteRecipient({ searchText: "w3-8-recip-full-uniqkey", limit: 3 }));
+    ok("W3-8 referenceMeta (usas_autocomplete_recipient) ⇒ FULL page (returned 3 === limit 3, no upstream total) ⇒ truncated + hasMore TRUE BUT pagination.offset===null AND nextOffset===null (not offset-pageable; revert :230 ⇒ nextOffset 3 ⇒ RED)",
+      rc.pagination.offset === null && rc.pagination.nextOffset === null && rc.pagination.hasMore === true && rc.truncated === true,
+      JSON.stringify(rc.pagination));
   });
 
   // S2. total known, page reaches total ⇒ complete.
