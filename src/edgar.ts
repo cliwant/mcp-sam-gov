@@ -2539,3 +2539,445 @@ export async function dailyFilingIndex(args: {
     edgarMeta(meta),
   );
 }
+
+// ─── Tool 8: edgar_company_concept (ADR-0041) ─────────────────────
+// ONE filer × ONE XBRL concept × the COMPLETE reported time-series (with the
+// amendment/restatement history + multi-unit disclosure) — the focused
+// financial-TREND / entity-vetting primitive that sits BETWEEN company_facts
+// (all curated concepts for one filer) and edgar_xbrl_frames (one concept across
+// ALL filers for one period). Reuses the C105/C106-hardened edgar.ts adapter
+// VERBATIM (getEdgar transport + self-throttle gate + UA + 403 disambiguation,
+// padCik + resolveCik, num/str null-never-0, edgarMeta, notFoundBundle, withMeta,
+// FRAMES_TAG_RE) — getEdgar UNTOUCHED, so the other 7 edgar tools stay byte-identical.
+//
+// LIVE-pinned (ADR-0041, 5 keyless GETs, SEC UA, data.sec.gov):
+//   GET https://data.sec.gov/api/xbrl/companyconcept/CIK{cik10}/{taxonomy}/{Concept}.json
+//   → { cik, taxonomy, tag, label, description, entityName, units:{ "USD":[…], "shares":[…] } }
+//   Each unit key maps to its OWN row array; each row { start?, end, val, accn, fy, fp,
+//   form, filed, (frame?) }. `unit` is a BODY key (filtered CLIENT-SIDE), NOT a path
+//   segment. 404 (bad CIK/taxonomy/concept) → XML NoSuchKey → getEdgar throws not_found
+//   BEFORE any JSON parse → notFoundBundle (never a fabricated val:0).
+//
+// ★M1 (period identity = the (start,end) PAIR, not `end` alone): every output row
+//   carries `start` (null for INSTANT concepts, the ISO date for DURATION concepts).
+//   The SAME `end` with a DIFFERENT `start` is a different-duration fact (a 3-month
+//   quarter vs the 12-month year — LIVE: Apple NetIncomeLoss end=2009-09-26 carries
+//   BOTH CY2009 (start 2008-09-28) + CY2009Q3 (start 2009-06-28), both frame-tagged
+//   canonical), NOT a revision. A revision is ONLY multiple rows sharing the SAME
+//   (start,end) with a differing accn/filed/val.
+// ★M2 (canonicalOnly dedup key = (unit,start,end)): partition by unit FIRST, then keep
+//   ONE row per distinct (start,end) — never collapsing a whole unit's row.
+// ★S1 (unitsAvailable[].count = the RAW units[key].length, pre-filter).
+// ★S2 (CONCEPT_TAXONOMIES = {us-gaap, dei, ifrs-full} — all three live-confirmed; srt DROPPED).
+
+/** The companyconcept endpoint base (same data.sec.gov the other edgar tools use). */
+const CONCEPT_BASE = "https://data.sec.gov/api/xbrl/companyconcept";
+
+/**
+ * The `taxonomy` path-segment enum — the SSRF guard for that segment (no free value
+ * reaches the host). us-gaap + dei live-confirmed on Apple; ifrs-full live-confirmed on
+ * Spotify (CIK0001639920 / ifrs-full / Assets → 200, unit EUR, frame CY2017Q4I). `srt`
+ * is DROPPED (S2 — it was NOT probed to a resolving 200; a valid-but-unreported tuple is
+ * an honest 404, so a slightly-broad enum can never fabricate — but ship only confirmed).
+ */
+export const CONCEPT_TAXONOMIES = ["us-gaap", "dei", "ifrs-full"] as const;
+
+/** A 10-digit CIK path segment (post-padCik; rejects an 11-digit overflow). */
+const CIK10_RE = /^\d{10}$/;
+
+/** Throw the pre-fetch injection-guard error (invalid_input, 0 fetch). */
+function conceptInvalid(message: string): never {
+  throw new ToolErrorCarrier({
+    kind: "invalid_input",
+    message,
+    retryable: false,
+    upstreamEndpoint: "edgar:companyconcept",
+  });
+}
+
+/**
+ * Build the companyconcept URL from the THREE validated path segments (COPIES the
+ * buildFramesUrl S1/S2 doctrine — with THREE segments, NOT four; `unit` is a BODY key,
+ * never a path segment). BELT-AND-SUSPENDERS: re-run the cik regex + the taxonomy enum
+ * + the concept regex and hard-throw invalid_input (0 fetch) on any mismatch — do NOT
+ * trust that Zod already ran, and do NOT rely on the hostname assertion alone (it passes
+ * a same-host `../` traversal). THEN assert the built URL is https on the fixed
+ * data.sec.gov host (guards host-escape/downgrade).
+ */
+function buildConceptUrl(cik10: string, taxonomy: string, tag: string): string {
+  if (!CIK10_RE.test(cik10)) {
+    conceptInvalid(
+      `edgar_company_concept: CIK ${JSON.stringify(cik10)} must be exactly 10 digits after padding (an 11-digit overflow is rejected) — refused before any fetch (path-segment injection guard).`,
+    );
+  }
+  if (!(CONCEPT_TAXONOMIES as readonly string[]).includes(taxonomy)) {
+    conceptInvalid(
+      `edgar_company_concept: taxonomy ${JSON.stringify(taxonomy)} is not one of {${CONCEPT_TAXONOMIES.join(", ")}} — refused before any fetch (path-segment injection guard).`,
+    );
+  }
+  if (!FRAMES_TAG_RE.test(tag)) {
+    conceptInvalid(
+      `edgar_company_concept: concept ${JSON.stringify(tag)} must match ^[A-Za-z0-9]+$ (XBRL tags are alphanumeric CamelCase, e.g. NetIncomeLoss; slash/dot/percent/backslash/'..'/%2F/%2E/%00 are rejected) — refused before any fetch (path-segment injection guard).`,
+    );
+  }
+  const built = `${CONCEPT_BASE}/CIK${cik10}/${taxonomy}/${tag}.json`;
+  let parsed: URL;
+  try {
+    parsed = new URL(built);
+  } catch {
+    conceptInvalid(
+      `edgar_company_concept: could not construct a valid URL from the segments — refused before any fetch.`,
+    );
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname !== "data.sec.gov") {
+    conceptInvalid(
+      `edgar_company_concept: constructed URL host/scheme is not https://data.sec.gov (${parsed.protocol}//${parsed.hostname}) — refused before any fetch (fixed-host assertion).`,
+    );
+  }
+  return built;
+}
+
+/** One output row: unit-tagged, (start,end)-keyed, canonical = frame present. */
+export type ConceptRow = {
+  unit: string;
+  start: string | null; // null for INSTANT concepts; the ISO period-start for DURATION concepts (M1)
+  end: string | null;
+  val: number | null; // num() null-never-0 (a real reported 0 survives)
+  accn: string | null;
+  fy: number | null;
+  fp: string | null;
+  form: string | null;
+  filed: string | null;
+  frame: string | null; // SEC's canonical-consolidation tag, verbatim (null when absent)
+  canonical: boolean; // frame != null — SEC's OWN consolidated-value marker
+};
+
+type ConceptRowRaw = {
+  start?: unknown;
+  end?: unknown;
+  val?: unknown;
+  accn?: unknown;
+  fy?: unknown;
+  fp?: unknown;
+  form?: unknown;
+  filed?: unknown;
+  frame?: unknown;
+};
+type ConceptBody = {
+  cik?: unknown;
+  taxonomy?: unknown;
+  tag?: unknown;
+  label?: unknown;
+  description?: unknown;
+  entityName?: unknown;
+  units?: unknown;
+};
+
+/**
+ * The all-rows default disclosure note (M1-corrected). Rides on EVERY found:true
+ * response. The load-bearing correction vs v1: for flow/duration concepts the same
+ * `end` with a different `start` is a DIFFERENT-DURATION fact, NOT a revision.
+ */
+const AMENDMENT_DISCLOSURE_NOTE =
+  "Rows are SEC's COMPLETE reported history for this concept, each tagged with its unit. Period identity is the (start,end) PAIR: `start` is null for INSTANT (balance-sheet) concepts and the ISO period-start date for DURATION (flow) concepts. For flow/duration concepts the same `end` with a different `start` is a different-duration fact (a 3-month quarter vs the 12-month year), NOT a revision; a revision is only multiple rows sharing the same (start,end) with different accn/filed/val — read the filed dates. `canonical:true` (a `frame` tag present) marks SEC's consolidated value for that (start,end) period; `canonical:false` rows are earlier/superseded/intra-year reports. Values are surfaced verbatim (val is null-never-0); none is recomputed.";
+
+/** The (unit,start,end) group key (M1/M2). A space joiner keeps the three fields distinct. */
+function periodKey(r: ConceptRow): string {
+  return `${r.unit} ${r.start ?? ""} ${r.end ?? ""}`;
+}
+
+/**
+ * Deterministic canonicalOnly tiebreak within a (unit,start,end) group: prefer a
+ * frame-tagged row, then max `filed`, then max `accn`. ALWAYS a verbatim selection of
+ * an existing row (never a merge/recompute).
+ */
+function preferCanonical(a: ConceptRow, b: ConceptRow): ConceptRow {
+  const af = a.frame != null;
+  const bf = b.frame != null;
+  if (af !== bf) return af ? a : b;
+  const afiled = a.filed ?? "";
+  const bfiled = b.filed ?? "";
+  if (afiled !== bfiled) return afiled > bfiled ? a : b;
+  const aaccn = a.accn ?? "";
+  const baccn = b.accn ?? "";
+  return aaccn >= baccn ? a : b;
+}
+
+/**
+ * One filer × one XBRL concept × the COMPLETE reported time-series. Reuses resolveCik
+ * (ticker→CIK path EXISTS) + buildConceptUrl (the frames path-segment SSRF doctrine,
+ * THREE segments) + getEdgar VERBATIM. `unit`/`form`/`fy` are CLIENT-SIDE filters;
+ * `canonicalOnly` (default false) dedups to one canonical row per (unit,start,end),
+ * FULLY DISCLOSED. limit/offset window the already-fully-fetched set.
+ *
+ * HONESTY (ADR-0041 v2):
+ *  - ★M1 — every row carries `start`; period identity is the (start,end) PAIR. A
+ *    same-`end` different-`start` pair is a different-duration fact, NOT a revision.
+ *  - ★M2 — canonicalOnly dedup key = (unit,start,end): partition by unit first, keep
+ *    one canonical row per distinct (start,end) — never dropping a whole unit's row.
+ *  - ★S1 — unitsAvailable[].count = the RAW units[key].length (pre-filter).
+ *  - val null-never-0 via num(); every row unit-tagged (no USD↔shares conflation).
+ *  - 404 (bad CIK/taxonomy/concept) → notFoundBundle (never a fabricated val:0);
+ *    5xx/timeout/non-JSON/units-shape-drift → THROW; a bad `unit` filter → honest empty
+ *    + the available-units note (unit is CLIENT-SIDE, never a path segment).
+ */
+export async function companyConcept(args: {
+  cikOrTicker: string;
+  concept: string;
+  taxonomy?: string;
+  unit?: string;
+  form?: string;
+  fy?: number;
+  canonicalOnly?: boolean;
+  limit?: number;
+  offset?: number;
+}): Promise<MetaBundle> {
+  const resolved = await resolveCik(args.cikOrTicker);
+  if (!resolved) {
+    return notFoundBundle(
+      args.cikOrTicker,
+      `Could not resolve "${args.cikOrTicker}" to a CIK (not a numeric CIK and no exact-ticker/title match in company_tickers.json).`,
+    );
+  }
+  const cik = resolved.cik;
+  const taxonomy = args.taxonomy ?? "us-gaap";
+  const concept = args.concept;
+
+  // S1/S2 — build (and re-validate) the path BEFORE any fetch. Throws invalid_input
+  // with 0 fetches on any bad segment or a non-fixed-host URL.
+  const url = buildConceptUrl(cik, taxonomy, concept);
+
+  let body: ConceptBody;
+  try {
+    const r = await getEdgar(url, "edgar:companyconcept");
+    // A 200 body that is NOT valid JSON (an HTML/XML outage slipping through with 200)
+    // → SyntaxError → schema_drift THROW (ADR-0003 doctrine), never a fake empty.
+    try {
+      body = (await r.json()) as ConceptBody;
+    } catch {
+      throw new ToolErrorCarrier({
+        kind: "schema_drift",
+        message: `edgar:companyconcept returned an HTTP 200 body that is not valid JSON for CIK ${cik} / ${taxonomy} / ${concept} — an outage/error page masquerading as a 200. Refusing rather than fabricating an empty result.`,
+        retryable: false,
+        upstreamEndpoint: "edgar:companyconcept",
+      });
+    }
+  } catch (e) {
+    // 404 (bad CIK / bad taxonomy / a concept the filer never reported) ⇒ getEdgar throws
+    // not_found BEFORE any .json() (the XML NoSuchKey body is never parsed) ⇒ notFoundBundle.
+    if (e instanceof ToolErrorCarrier && e.toolError.kind === "not_found") {
+      return notFoundBundle(
+        `${cik}/${taxonomy}/${concept}`,
+        `No XBRL companyconcept matched CIK ${cik} / ${taxonomy} / ${concept} (HTTP 404). The filer did NOT report this concept under this exact taxonomy — this is NOT a value of 0. Check the tag spelling/case (XBRL tags are CamelCase, e.g. NetIncomeLoss) and the taxonomy (us-gaap vs dei vs ifrs-full).`,
+      );
+    }
+    throw e;
+  }
+
+  // Drift guard: `units` MISSING / not an object / an array ⇒ schema_drift THROW (the
+  // envelope changed) — never a fabricated empty.
+  const units = body.units;
+  if (units === null || typeof units !== "object" || Array.isArray(units)) {
+    throw new ToolErrorCarrier({
+      kind: "schema_drift",
+      message: `edgar:companyconcept returned HTTP 200 without a units{} object for CIK ${cik} / ${taxonomy} / ${concept} — the companyconcept envelope changed.`,
+      retryable: false,
+      upstreamEndpoint: "edgar:companyconcept",
+    });
+  }
+  const unitsObj = units as Record<string, unknown>;
+  const unitKeys = Object.keys(unitsObj);
+
+  // ★S1 — unitsAvailable[].count = the RAW per-unit array length, computed BEFORE any
+  // unit/form/fy/canonicalOnly/limit/offset filtering (a filtered count is a masquerade).
+  const unitsAvailable = unitKeys.map((k) => ({
+    unit: k,
+    count: Array.isArray(unitsObj[k]) ? (unitsObj[k] as unknown[]).length : 0,
+  }));
+
+  // Build ALL rows, TAGGED with unit (P3 — never conflate USD with shares). Iterate the
+  // unit keys in a DETERMINISTIC order (ascending) for a stable window; each unit's rows
+  // stay in SEC's returned order (no blind re-sort — the edgar_company_filings doctrine).
+  const sortedUnitKeys = [...unitKeys].sort();
+  const allRows: ConceptRow[] = [];
+  for (const uKey of sortedUnitKeys) {
+    const arr = unitsObj[uKey];
+    if (!Array.isArray(arr)) continue; // defensive — a non-array unit contributes no rows
+    for (const raw of arr as ConceptRowRaw[]) {
+      const frame = str(raw.frame);
+      allRows.push({
+        unit: uKey,
+        start: str(raw.start), // null for INSTANT concepts; ISO date for DURATION (M1)
+        end: str(raw.end),
+        val: num(raw.val), // null-never-0
+        accn: str(raw.accn),
+        fy: typeof raw.fy === "number" ? raw.fy : null,
+        fp: str(raw.fp),
+        form: str(raw.form),
+        filed: str(raw.filed),
+        frame,
+        canonical: frame != null,
+      });
+    }
+  }
+
+  // Defensive empty (Q5): a 200 whose units{} has ZERO keys or ALL-empty arrays ⇒ an
+  // honest empty (found:false, complete:true), NOT a crash and NOT a fabricated row.
+  if (allRows.length === 0) {
+    return withMeta(
+      {
+        found: false,
+        cik,
+        entityName: str(body.entityName),
+        taxonomy,
+        concept,
+        label: str(body.label),
+        description: str(body.description),
+        unitsAvailable,
+        rows: [] as ConceptRow[],
+      },
+      edgarMeta({
+        returned: 0,
+        totalAvailable: 0,
+        complete: true,
+        filtersApplied: ["concept", "taxonomy"],
+        notes: [
+          `The companyconcept document for CIK ${cik} / ${taxonomy} / ${concept} has no reported data points (units{} is empty). This is an honest empty — NOT a value of 0 and NOT an outage.`,
+        ],
+      }),
+    );
+  }
+
+  // ── CLIENT-SIDE filters (unit/form/fy) — none reaches the URL. ──
+  const unitFilter = args.unit?.trim() ? args.unit.trim() : null;
+  const formFilter = args.form?.trim() ? args.form.trim().toLowerCase() : null;
+  const fyFilter = typeof args.fy === "number" ? args.fy : null;
+  const canonicalOnly = args.canonicalOnly ?? false;
+
+  let filtered = allRows;
+  if (unitFilter !== null) filtered = filtered.filter((r) => r.unit === unitFilter);
+  if (formFilter !== null)
+    filtered = filtered.filter((r) => r.form != null && r.form.toLowerCase() === formFilter);
+  if (fyFilter !== null) filtered = filtered.filter((r) => r.fy === fyFilter);
+
+  // Group the FILTERED rows by (unit,start,end) ONCE — used for BOTH revision detection
+  // (over the pre-dedup set) and the canonicalOnly dedup (M1/M2).
+  const groups = new Map<string, ConceptRow[]>();
+  const groupOrder: string[] = [];
+  for (const r of filtered) {
+    const key = periodKey(r);
+    let g = groups.get(key);
+    if (!g) {
+      g = [];
+      groups.set(key, g);
+      groupOrder.push(key);
+    }
+    g.push(r);
+  }
+
+  // ★M1 revision detection: a GENUINE restatement is ≥2 rows sharing the SAME
+  // (unit,start,end) with ≥2 DISTINCT non-null vals. A same-`end` different-`start`
+  // pair lands in DIFFERENT groups (singletons) ⇒ NOT flagged as a revision.
+  const revisedPeriods = groupOrder
+    .map((k) => groups.get(k) as ConceptRow[])
+    .filter((g) => {
+      if (g.length < 2) return false;
+      const vals = new Set(g.filter((r) => r.val !== null).map((r) => r.val));
+      return vals.size >= 2;
+    })
+    .map((g) => {
+      const first = g[0] as ConceptRow;
+      return { unit: first.unit, start: first.start, end: first.end };
+    });
+
+  // ★M2 canonicalOnly — partition by unit FIRST (already reflected in the (unit,start,end)
+  // key), keep ONE row per distinct (start,end): frame-tagged, else the latest-filed
+  // fallback (marked canonical:false). Deterministic tiebreak via preferCanonical.
+  if (canonicalOnly) {
+    filtered = groupOrder.map((k) => (groups.get(k) as ConceptRow[]).reduce(preferCanonical));
+  }
+
+  // ── Pagination — client-side window over the (unit,start,end)-keyed filtered set. ──
+  const totalAvailable = filtered.length;
+  const limit = args.limit ?? 100;
+  const offset = args.offset ?? 0;
+  const page = filtered.slice(offset, offset + limit);
+  const returned = page.length;
+  const hasMore = offset + returned < totalAvailable;
+  const nextOffset = hasMore ? offset + returned : null;
+
+  const filtersApplied: string[] = ["concept", "taxonomy"];
+  if (unitFilter !== null) filtersApplied.push("unit");
+  if (formFilter !== null) filtersApplied.push("form");
+  if (fyFilter !== null) filtersApplied.push("fy");
+  if (canonicalOnly) filtersApplied.push("canonicalOnly");
+
+  const notes: string[] = [AMENDMENT_DISCLOSURE_NOTE];
+
+  // Unit-filter disclosure (Q2-c) — NEVER hide the other units.
+  if (unitFilter !== null) {
+    if (unitKeys.includes(unitFilter)) {
+      const others = unitKeys.filter((k) => k !== unitFilter);
+      notes.push(
+        others.length
+          ? `unit filter '${unitFilter}' applied; this concept is ALSO reported in unit(s) ${others.join(", ")} for this filer (not shown). Re-request without the unit filter, or with a different unit, to see them.`
+          : `unit filter '${unitFilter}' applied; it is the only unit this filer reports for this concept.`,
+      );
+    } else {
+      notes.push(
+        `unit filter '${unitFilter}' matched NONE of this filer's reported unit(s) for this concept (available: ${unitKeys.join(", ") || "none"}). Returning 0 rows for that filter — this is NOT a value of 0; re-request with one of the available units, or omit unit.`,
+      );
+    }
+  }
+
+  // ★M1 revision note — a distinctive phrase so a caller (and the fault fixtures) can
+  // tell a GENUINE restatement from ordinary duration-multiplicity.
+  if (revisedPeriods.length) {
+    const ex = revisedPeriods
+      .slice(0, 3)
+      .map(
+        (p) =>
+          `(unit ${p.unit}, ${p.start != null ? `start ${p.start}, ` : ""}end ${p.end})`,
+      )
+      .join("; ");
+    notes.push(
+      `Restatement/revision detected: ${revisedPeriods.length} (unit,start,end) period(s) carry MULTIPLE rows with a DIFFERING val — the figure WAS revised for ${ex}${revisedPeriods.length > 3 ? " (and more)" : ""}. Read the filed dates; the frame-tagged (canonical) row carries SEC's consolidated value.`,
+    );
+  }
+
+  // canonicalOnly disclosure (Q3) — the dedup is FULLY disclosed, never silent.
+  if (canonicalOnly) {
+    notes.push(
+      "canonicalOnly=true: reduced to ONE row per distinct (unit,start,end) period — the frame-tagged canonical value, or (for a period SEC has not yet consolidated) the latest-filed row, marked canonical:false. SUPERSEDED/amendment rows sharing the same (start,end) were REMOVED; a value may have been revised — re-request with canonicalOnly=false to see the full amendment history. NOTE: the same `end` with a different `start` is a DIFFERENT period (kept separately), not a duplicate.",
+    );
+  }
+
+  // Raw-vs-filtered total disclosure (Q4) — fetch-once, exact filtered total.
+  notes.push(
+    `served ${allRows.length} row(s) across unit(s) ${unitKeys.join(", ")}; after filters (${filtersApplied.join(", ")}) → ${totalAvailable} pageable; totalAvailable reflects the FILTERED (unit,start,end)-keyed set. The full per-unit series was fetched in ONE request (SEC does not paginate companyconcept); limit/offset is a client-side window.`,
+  );
+
+  if (resolved.title)
+    notes.push(`Resolved "${args.cikOrTicker}" → ${resolved.title} (CIK ${cik}).`);
+
+  return withMeta(
+    {
+      found: true,
+      cik,
+      entityName: str(body.entityName),
+      taxonomy,
+      concept,
+      label: str(body.label),
+      description: str(body.description),
+      unitsAvailable,
+      rows: page,
+    },
+    edgarMeta({
+      returned,
+      totalAvailable,
+      filtersApplied,
+      pagination: { offset, limit, hasMore, nextOffset },
+      notes,
+    }),
+  );
+}
