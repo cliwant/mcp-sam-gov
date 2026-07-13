@@ -1043,6 +1043,50 @@
     }
   },
   {
+    "name": "fac_get_findings",
+    "description": "Drill into the audit-RISK findings for an entity from the Federal Audit Clearinghouse (keyless via the api.data.gov DEMO_KEY; api.fac.gov PostgREST `findings` table) — the risk-detail step after fac_search_audits. At least ONE of `auditeeUei` (12-char UEI → auditee_uei) or `reportId` (→ report_id, from a fac_search_audits row) is REQUIRED (an empty query is refused, never a whole-table scan); optional `auditYear` (int), `limit` (≤100, def 50), `offset`. Returns { findings:[{ report_id, auditee_uei, audit_year, award_reference, reference_number, is_material_weakness, is_modified_opinion, is_questioned_costs, is_repeat_finding, is_significant_deficiency, is_other_findings, is_other_matters, type_requirement, prior_finding_ref_numbers, riskFlags:{materialWeakness, modifiedOpinion, questionedCosts, repeatFinding, significantDeficiency, otherFindings, otherMatters} }] } + honest _meta. ★RISK-FLAG HONESTY: the is_* flags are surfaced VERBATIM as the auditor reported them (\"Y\"/\"N\") PLUS a typed riskFlags tri-state (\"Y\"→true / \"N\"→false / blank/absent/other → null=UNKNOWN) — a null flag is NEVER rendered as false/\"no material weakness\" (the false-CLEAR class). ★EMPTY ≠ CLEAN: an empty findings list does NOT confirm a clean audit — the entity may not have filed a Single Audit (below the $750K threshold), the audit may predate FAC coverage, or the UEI may be wrong; a disclosure note fires on any empty result telling you to confirm an ACCEPTED audit exists via fac_search_audits. ★PII: a HARDCODED select-allowlist (NO caller column param) surfaces only entity + audit-risk fields — no personal contact. totalAvailable is the EXACT Content-Range total ('*'/absent ⇒ null + hedge, never 0); a bad column ⇒ 400 ⇒ invalid_input; 400/403/5xx/timeout/HTML/non-array THROW (206 = success). NOT a debarment/determination — cross-check SAM exclusions + OFAC + the specific finding text. Keyless-first via DEMO_KEY (~10 req/hr; set DATA_GOV_API_KEY — never logged).",
+    "inputSchema": {
+      "type": "string"
+    }
+  },
+  {
+    "name": "fac_search_audits",
+    "description": "Search entity Single Audit summaries from the Federal Audit Clearinghouse (keyless via the api.data.gov DEMO_KEY; api.fac.gov PostgREST `general` table) — the SUBCONTRACTOR / teaming AUDIT-RISK vetting entry point (2 CFR 200 Subpart F / Single Audit Act; every entity expending ≥$750K/yr in federal awards). Structured filters (all optional, AND-combined): `auditeeUei` (12-char SAM UEI — the PRIMARY join key to SAM/USAspending/EDGAR, → auditee_uei), `auditeeState` (2-letter → auditee_state), `auditYear` (int → audit_year), `totalExpendedMin`/`totalExpendedMax` (USD → total_amount_expended gte/lte). `limit` (≤100, def 25), `offset`. Returns { audits:[{ report_id, auditee_uei, audit_year, auditee_name, auditee_ein, auditee_state, auditee_city, total_amount_expended, fac_accepted_date }] } + honest _meta. Feed a row's report_id (or the UEI) to fac_get_findings for the audit-RISK flags. ★PII: a HARDCODED select-allowlist surfaces ONLY entity + audit-summary fields and DELIBERATELY EXCLUDES the auditee's personal-contact columns (email/phone/certifying-official name) — the vetting subject is the ENTITY; there is NO caller `select`/column param. HONESTY: totalAvailable is the EXACT Content-Range total (a response header under Prefer:count=exact; a '*'/absent/non-numeric denominator ⇒ totalAvailable:null + a page-fullness hedge, NEVER 0); total_amount_expended is null-never-0 (a missing amount is null, never 0); a bad column ⇒ PostgREST 400 ⇒ invalid_input (filtersDropped is ALWAYS empty); a genuine [] ⇒ honest empty; 400/403/5xx/timeout/HTML/non-array THROW (206 = success, never a fake empty). NOT a debarment/exclusion/fitness determination — an audit finding is the auditor's opinion; cross-check SAM exclusions + OFAC. Keyless-first via DEMO_KEY (~10 req/hr shared ceiling; set DATA_GOV_API_KEY for production — never logged).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "auditeeUei": {
+          "type": "string",
+          "description": "Filter by 12-char SAM UEI (^[A-Z0-9]{12}$; → auditee_uei=eq. — the PRIMARY join key to SAM/USAspending/EDGAR). e.g. 'ZQGGHJH74DW7'."
+        },
+        "auditeeState": {
+          "type": "string",
+          "description": "Filter by 2-letter US state code (uppercase; → auditee_state=eq.). e.g. 'CA'."
+        },
+        "auditYear": {
+          "type": "number",
+          "description": "Filter by audit year (int, → audit_year=eq.). e.g. 2024."
+        },
+        "totalExpendedMin": {
+          "type": "number",
+          "description": "Minimum total federal awards expended (USD, → total_amount_expended=gte.)."
+        },
+        "totalExpendedMax": {
+          "type": "number",
+          "description": "Maximum total federal awards expended (USD, → total_amount_expended=lte.)."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page, 1..100, default 25."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset for pagination (default 0)."
+        }
+      }
+    }
+  },
+  {
     "name": "far_clause_lookup",
     "description": "Authoritative FAR/DFARS clause text + its PRESCRIPTION (the 'As prescribed in …' rule for when the clause applies), from the eCFR versioner-full endpoint (Title 48). Use this — NOT ecfr_search — for an EXACT clause number: full-text search mis-ranks '52.212-4' (returns GSAM 552.212-4 above the real FAR clause). Returns heading, revision date, clause/provision kind, regulation (FAR/DFARS/GSAM), full text, the prescribing section, and ecfrUrl. Every response carries farOverhaulRisk — a structural currency caveat that eCFR reflects only the CODIFIED FAR, so a clause may be superseded by a Revolutionary-FAR-Overhaul agency class deviation not shown here. A genuinely-absent clause returns a not_found error (never a fake empty clause). Keyless.",
     "inputSchema": {

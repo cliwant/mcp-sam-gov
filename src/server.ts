@@ -60,6 +60,7 @@ import * as ofac from "./ofac.js";
 import * as nvd from "./nvd.js";
 import * as nppes from "./nppes.js";
 import * as cms from "./cms.js";
+import * as fac from "./fac.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
@@ -1105,6 +1106,97 @@ const CmsQueryDatasetInput = z.object({
     .optional()
     .describe("Default true (return rows). Set false for COUNT/SCHEMA-discovery mode: no rows, pagination disabled, but the EXACT count + every column's schema are returned. (`count` is NOT a toggle — count=true is always on the wire.)"),
 });
+
+// ─── FAC (Federal Audit Clearinghouse) Single Audit — ADR-0038 ──────
+// ★ PII crux: the tools expose ONLY structured, validated filters — NO caller
+// `select`/`order`/free-column param (that is why v1 uses purpose-built tools,
+// not a generic fac_query). The select-allowlist is a hardcoded module constant
+// in fac.ts; no caller value can name a column (PostgREST would project a
+// personal-contact column the instant `select=` named it).
+const FacSearchAuditsInput = z.object({
+  auditeeUei: z
+    .string()
+    .regex(/^[A-Z0-9]{12}$/)
+    .optional()
+    .describe(
+      "Filter by 12-char SAM UEI (^[A-Z0-9]{12}$; → auditee_uei=eq. — the PRIMARY join key to SAM/USAspending/EDGAR). e.g. 'ZQGGHJH74DW7'.",
+    ),
+  auditeeState: z
+    .string()
+    .regex(/^[A-Z]{2}$/)
+    .optional()
+    .describe("Filter by 2-letter US state code (uppercase; → auditee_state=eq.). e.g. 'CA'."),
+  auditYear: z
+    .number()
+    .int()
+    .min(2016)
+    .max(2100)
+    .optional()
+    .describe("Filter by audit year (int, → audit_year=eq.). e.g. 2024."),
+  totalExpendedMin: z
+    .number()
+    .finite()
+    .optional()
+    .describe("Minimum total federal awards expended (USD, → total_amount_expended=gte.)."),
+  totalExpendedMax: z
+    .number()
+    .finite()
+    .optional()
+    .describe("Maximum total federal awards expended (USD, → total_amount_expended=lte.)."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(25)
+    .describe("Rows per page, 1..100, default 25."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe("0-based row offset for pagination (default 0)."),
+});
+
+const FacGetFindingsInput = z
+  .object({
+    auditeeUei: z
+      .string()
+      .regex(/^[A-Z0-9]{12}$/)
+      .optional()
+      .describe("Filter by 12-char SAM UEI (^[A-Z0-9]{12}$; → auditee_uei=eq.)."),
+    reportId: z
+      .string()
+      .regex(/^[0-9A-Za-z-]+$/)
+      .max(64)
+      .optional()
+      .describe("Filter by FAC report_id (^[0-9A-Za-z-]+$; → report_id=eq. — from a fac_search_audits row)."),
+    auditYear: z
+      .number()
+      .int()
+      .min(2016)
+      .max(2100)
+      .optional()
+      .describe("Filter by audit year (int, → audit_year=eq.)."),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .default(50)
+      .describe("Rows per page, 1..100, default 50."),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe("0-based row offset for pagination (default 0)."),
+  })
+  .refine((v) => v.auditeeUei !== undefined || v.reportId !== undefined, {
+    message:
+      "fac_get_findings requires at least one of `auditeeUei` or `reportId` (an empty query would scan the whole 670K-row findings table).",
+    path: ["auditeeUei"],
+  });
 
 // GAO bid-protest lookup (keyless RSS + decision-page parse)
 const GaoProtestInput = z.object({
@@ -3823,6 +3915,21 @@ const TOOLS: ToolDef[] = [
       "Query a CMS Open Payments DKAN datastore distribution by datasetId + index (keyless; openpaymentsdata.cms.gov) — the healthcare industry-financial-relationship / COI-vetting + market-intelligence lane NPPES (provider identity) cannot answer. GET /api/1/datastore/query/{datasetId}/{index} with server-side `conditions` filters, an EXACT `count`, offset/limit pagination, and a `properties` projection. Returns { datasetId, index, results (mode), fields:[{name,type,mysqlType,description}] (from the DKAN schema), rows:[…verbatim…] } + honest _meta. A confirmed target: 2025 Research Payment Data 'f0d1de67-6852-4093-a036-c9328c256a05' index 0 (count 931959; + a recipient_state='CA' condition → 92097). ★HONESTY: `count` is the EXACT grand total (P1) → totalAvailable=count + real offset pagination (NOT a page-length lower bound); `conditions` are server-side and self-policing — a valid column narrows the count, a BAD column ⇒ HTTP 400 ⇒ invalid_input, so filtersDropped is ALWAYS empty (no silent-drop path, P4); limit ≤ 500 is the HARD API cap (a higher limit ⇒ invalid_input, no silent clamp); every column is text, so amounts (total_amount_of_payment_usdollars, …) arrive as STRINGS surfaced verbatim (a missing amount is null-never-0, P3). ★results:false = a COUNT/SCHEMA-discovery mode: no rows, pagination disabled (no livelock), but the EXACT count + every column's schema returned (count=true is ALWAYS on the wire — not a caller toggle). A genuine {count:0} ⇒ honest empty; a 400 (bad column/limit) / 404 (bad datasetId/index) / HTML (SPA/WAF) / 5xx / timeout / a missing schema anchor or non-array results (in results:true) ⇒ THROW (never a fake empty). ★SSRF: datasetId (36-char lowercase UUID) + index interpolate into the URL PATH (validated before interpolation). ★PII: Open Payments is PUBLIC transparency-BY-LAW data (in-scope per the NPPES precedent) naming physicians + amounts verbatim — bounded to targeted vetting (offset ≤ 2000 reach cap), NO enrichment, NO covered_recipient_npi→NPPES auto-join. NOT a conflict-of-interest finding / fitness / exclusion determination — cross-check SAM exclusions + OFAC + the OIG-LEIE. The caveat + reach-cap disclosure ride EVERY response.",
     inputSchema: CmsQueryDatasetInput,
     handler: (input) => cms.queryDataset(input),
+  }),
+  // ━━━ FAC Federal Audit Clearinghouse — Single Audit audit-risk vetting (2) ━━━ ADR-0038
+  defineTool({
+    name: "fac_search_audits",
+    description:
+      "Search entity Single Audit summaries from the Federal Audit Clearinghouse (keyless via the api.data.gov DEMO_KEY; api.fac.gov PostgREST `general` table) — the SUBCONTRACTOR / teaming AUDIT-RISK vetting entry point (2 CFR 200 Subpart F / Single Audit Act; every entity expending ≥$750K/yr in federal awards). Structured filters (all optional, AND-combined): `auditeeUei` (12-char SAM UEI — the PRIMARY join key to SAM/USAspending/EDGAR, → auditee_uei), `auditeeState` (2-letter → auditee_state), `auditYear` (int → audit_year), `totalExpendedMin`/`totalExpendedMax` (USD → total_amount_expended gte/lte). `limit` (≤100, def 25), `offset`. Returns { audits:[{ report_id, auditee_uei, audit_year, auditee_name, auditee_ein, auditee_state, auditee_city, total_amount_expended, fac_accepted_date }] } + honest _meta. Feed a row's report_id (or the UEI) to fac_get_findings for the audit-RISK flags. ★PII: a HARDCODED select-allowlist surfaces ONLY entity + audit-summary fields and DELIBERATELY EXCLUDES the auditee's personal-contact columns (email/phone/certifying-official name) — the vetting subject is the ENTITY; there is NO caller `select`/column param. HONESTY: totalAvailable is the EXACT Content-Range total (a response header under Prefer:count=exact; a '*'/absent/non-numeric denominator ⇒ totalAvailable:null + a page-fullness hedge, NEVER 0); total_amount_expended is null-never-0 (a missing amount is null, never 0); a bad column ⇒ PostgREST 400 ⇒ invalid_input (filtersDropped is ALWAYS empty); a genuine [] ⇒ honest empty; 400/403/5xx/timeout/HTML/non-array THROW (206 = success, never a fake empty). NOT a debarment/exclusion/fitness determination — an audit finding is the auditor's opinion; cross-check SAM exclusions + OFAC. Keyless-first via DEMO_KEY (~10 req/hr shared ceiling; set DATA_GOV_API_KEY for production — never logged).",
+    inputSchema: FacSearchAuditsInput,
+    handler: (input) => fac.searchAudits(input),
+  }),
+  defineTool({
+    name: "fac_get_findings",
+    description:
+      "Drill into the audit-RISK findings for an entity from the Federal Audit Clearinghouse (keyless via the api.data.gov DEMO_KEY; api.fac.gov PostgREST `findings` table) — the risk-detail step after fac_search_audits. At least ONE of `auditeeUei` (12-char UEI → auditee_uei) or `reportId` (→ report_id, from a fac_search_audits row) is REQUIRED (an empty query is refused, never a whole-table scan); optional `auditYear` (int), `limit` (≤100, def 50), `offset`. Returns { findings:[{ report_id, auditee_uei, audit_year, award_reference, reference_number, is_material_weakness, is_modified_opinion, is_questioned_costs, is_repeat_finding, is_significant_deficiency, is_other_findings, is_other_matters, type_requirement, prior_finding_ref_numbers, riskFlags:{materialWeakness, modifiedOpinion, questionedCosts, repeatFinding, significantDeficiency, otherFindings, otherMatters} }] } + honest _meta. ★RISK-FLAG HONESTY: the is_* flags are surfaced VERBATIM as the auditor reported them (\"Y\"/\"N\") PLUS a typed riskFlags tri-state (\"Y\"→true / \"N\"→false / blank/absent/other → null=UNKNOWN) — a null flag is NEVER rendered as false/\"no material weakness\" (the false-CLEAR class). ★EMPTY ≠ CLEAN: an empty findings list does NOT confirm a clean audit — the entity may not have filed a Single Audit (below the $750K threshold), the audit may predate FAC coverage, or the UEI may be wrong; a disclosure note fires on any empty result telling you to confirm an ACCEPTED audit exists via fac_search_audits. ★PII: a HARDCODED select-allowlist (NO caller column param) surfaces only entity + audit-risk fields — no personal contact. totalAvailable is the EXACT Content-Range total ('*'/absent ⇒ null + hedge, never 0); a bad column ⇒ 400 ⇒ invalid_input; 400/403/5xx/timeout/HTML/non-array THROW (206 = success). NOT a debarment/determination — cross-check SAM exclusions + OFAC + the specific finding text. Keyless-first via DEMO_KEY (~10 req/hr; set DATA_GOV_API_KEY — never logged).",
+    inputSchema: FacGetFindingsInput,
+    handler: (input) => fac.getFindings(input),
   }),
   // ━━━ GAO — Bid Protests (1) ━━━
   defineTool({

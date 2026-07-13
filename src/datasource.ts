@@ -92,6 +92,43 @@ export async function getJson<T = unknown>(
 }
 
 /**
+ * getJsonWithHeaders — the header-exposing sibling of `getJson` (ADR-0038 M1).
+ *
+ * WHY a SEPARATE primitive (and NOT a mutation of getJson): a PostgREST source
+ * (FAC / any Range-paginating REST API) carries its EXACT total in the
+ * `Content-Range` RESPONSE HEADER, but `getJson` returns ONLY `await r.json()`
+ * (the parsed body) and DISCARDS the `Response`/headers — so the header is
+ * unreachable through it. Mutating getJson's return shape would break every one
+ * of its ~9 callers (NOT byte-identical); this additive variant leaves getJson
+ * untouched. It runs the IDENTICAL init assembly + `fetchWithRetry(url, init,
+ * opts.label)` envelope as getJson (same headers / `redirect` / timeout / method
+ * / body / retry-taxonomy), and returns the parsed body PLUS ONLY the
+ * `content-range` header string — it NEVER surfaces the raw `Headers` object, so
+ * no incidental response header (Set-Cookie, a rate-limit token, etc.) can reach
+ * a consumer's `_meta`/output. A 200 non-JSON body makes `r.json()` throw a
+ * `SyntaxError`, exactly as with getJson — the caller reclassifies it (the
+ * fdic.ts / ADR-0038 S1 pattern), keeping the shared envelope free of source
+ * quirks.
+ */
+export async function getJsonWithHeaders<T = unknown>(
+  url: string,
+  opts: GetJsonOptions,
+): Promise<{ body: T; contentRange: string | null }> {
+  const init: RequestInit = {
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 15_000),
+  };
+  if (opts.headers !== undefined) init.headers = opts.headers;
+  if (opts.redirect) init.redirect = opts.redirect;
+  if (opts.method !== undefined) init.method = opts.method;
+  if (opts.body !== undefined) init.body = opts.body;
+  const r = await fetchWithRetry(url, init, opts.label);
+  return {
+    body: (await r.json()) as T,
+    contentRange: r.headers.get("content-range"),
+  };
+}
+
+/**
  * getText — the shared fetch → `r.text()` → error-classify skeleton for the
  * keyless XML/RSS/ATOM sources (far/gao/fpds; ADR-0013). Sibling of `getJson`;
  * returns the RAW body text (each source runs its own bespoke string/regex
