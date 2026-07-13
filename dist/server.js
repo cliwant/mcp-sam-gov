@@ -2539,6 +2539,68 @@ const BlsOewsWagesInput = z.object({
         .optional()
         .describe('One or more measures (default ["annual_mean"]): annual_mean (dollars/year), annual_median (dollars/year), hourly_mean (dollars/hour), hourly_median (dollars/hour), employment (count jobs). Each row carries measure.units from this map (H3 — never mislabel).'),
 });
+// ─── BLS QCEW — county×NAICS market-size / wages / location-quotient ── ADR-0042
+// A THIRD BLS tool but a SECOND, DIFFERENT, keyless, un-rate-limited BLS DOMAIN:
+// the QCEW Open Data Access CSV files on data.bls.gov/cew (NOT the rate-limited
+// api.bls.gov/publicAPI timeseries API the two tools above share). SSRF surface =
+// a compile-time-CONSTANT host + charclass-validated path segments (year `^\d{4}$`,
+// quarter `^[1-4]$`, mode enum {area,industry}, area `^[0-9A-Za-z]{1,6}$`, industry
+// DIGIT-ONLY `^[0-9]{1,6}$` — a hyphenated NAICS 31-33 404s). Client-side filters
+// (ownership/aggregationLevel/sizeCode/narrow) NEVER touch the URL. Honesty crux:
+// the block/code/field-scoped disclosure→null (never 0). NO BLS_API_KEY on this
+// keyless path; a NEW self-throttle gate key ("bls_qcew"), NOT "bls".
+const BlsQcewInput = z.object({
+    mode: z
+        .enum(["area", "industry"])
+        .describe("REQUIRED — the slice shape: 'area' (all industries × ownership × aggregation levels for ONE area_fips) or 'industry' (all areas for ONE NAICS). A fixed enum interpolated as a LITERAL path segment."),
+    area: z
+        .string()
+        .regex(/^[0-9A-Za-z]{1,6}$/)
+        .optional()
+        .describe("The area_fips (^[0-9A-Za-z]{1,6}$): county 01005, statewide 01000, national US000, MSA C1018, CSA CS122. REQUIRED when mode=area (the path segment). When mode=industry it is an OPTIONAL client-side narrow (keep only rows for this area_fips)."),
+    industry: z
+        .string()
+        .regex(/^[0-9]{1,6}$/)
+        .optional()
+        .describe("The NAICS code (DIGIT-ONLY ^[0-9]{1,6}$): 5415, or the aggregate 10. REQUIRED when mode=industry (the path segment). When mode=area it is an OPTIONAL client-side narrow (keep only rows for this NAICS). A hyphenated NAICS supersector (31-33, 44-45) 404s on QCEW — pass its digit aggregate code, never the hyphenated form."),
+    year: z
+        .number()
+        .int()
+        .min(1990)
+        .max(bls.YEAR_MAX)
+        .describe(`REQUIRED — the 4-digit year (1990..${bls.YEAR_MAX}). QCEW Open Data coverage begins ~1990; a pre-coverage or future year is an honest per-tuple HTTP 404 (found:false), NOT zero establishments.`),
+    quarter: z
+        .enum(["1", "2", "3", "4"])
+        .describe("REQUIRED — the quarter '1'|'2'|'3'|'4' (all four live-servable). The annual 'a' is not enabled this build."),
+    ownership: z
+        .string()
+        .regex(/^[0-9A-Za-z]{1,3}$/)
+        .optional()
+        .describe("Optional CLIENT-SIDE filter on own_code (e.g. 0=Total, 1=Federal, 2=State, 3=Local, 5=Private). Never on the URL (no SSRF surface)."),
+    aggregationLevel: z
+        .string()
+        .regex(/^[0-9A-Za-z]{1,3}$/)
+        .optional()
+        .describe("Optional CLIENT-SIDE filter on agglvl_code (e.g. 70=total-all-industries, 78=6-digit-NAICS-by-ownership). Filter to ONE agglvl_code for a coherent, non-double-counted total."),
+    sizeCode: z
+        .string()
+        .regex(/^[0-9A-Za-z]{1,3}$/)
+        .optional()
+        .describe("Optional CLIENT-SIDE filter on size_code."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(50)
+        .describe("Rows per page (CLIENT-SIDE window over the fetched-once slice), 1..1000, default 50."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("0-based row offset for CLIENT-SIDE pagination over the filtered set (QCEW has no server-side pagination), default 0."),
+});
 // ─── US Census Geocoder (keyless source #22) — input schemas ──────
 // ADR-0023. KEYLESS, single fixed host (geocoding.geo.census.gov) + two fixed
 // endpoint paths (the SSRF core — no free host/path; NO id in the path). benchmark /
@@ -3612,6 +3674,23 @@ const TOOLS = [
         description: "Benchmark US occupational wages & employment from BLS OEWS (Occupational Employment & Wage Statistics) — the LEVEL layer for labor-rate benchmarking (keyless; api.bls.gov Public Data API, POST/JSON batch). The actual mean/median annual & hourly wage a labor category commands, by area — next to gsa_benchmark_labor_rates (GSA CALC), sam wage determinations, and bls_timeseries (the CPI/ECI escalation layer). OEWS series IDs are 25 chars (area×occupation×industry×datatype), EXCEEDING bls_timeseries's raw-seriesId cap, so this tool BUILDS the ID INTERNALLY from validated structured inputs. Inputs (at least one of occupation/soc REQUIRED; all arrays batch into ONE POST — the cartesian product area×occupation×datatype is capped at the active tier's series cap and refused over-cap WITH THE COUNT NAMED, never silently truncated): `occupation` — a CURATED 16-key SOC enum (typo-proof; e.g. software_developer=15-1252, civil_engineer=17-2051, management_analyst=13-1111); `soc` — raw 6-digit HYPHENLESS SOC codes for the ~830-SOC long tail (use 151252, not 15-1252); `area` — default [\"national\"]; each is \"national\", a 2-letter USPS state code (CA/TX/DC…), or a 5-digit CBSA metro code (19100 = Dallas-Fort Worth); `datatype` — default [\"annual_mean\"]: annual_mean/annual_median (dollars/year), hourly_mean/hourly_median (dollars/hour), employment (count jobs). NO year input — OEWS is ANNUAL and the API serves only the latest release; the tool requests a recent window internally and DISCLOSES the reference year. Returns { results:[{ area:{type,code,label}, occupation:{soc,key,label}, measure:{key,code,units}, value:number|null, valueUnavailable, referenceYear, referencePeriod, footnotes, seriesId }] } + honest _meta. HONESTY: (H1) OEWS is an ANNUAL point-in-time snapshot (reference May <year>, period A01), NOT monthly/current-quarter — disclosed every call; (H2) a built ID that returns empty/absent ⇒ value:null, valueUnavailable:FALSE (the occupation is not surveyed/estimated there OR the cell is suppressed for confidentiality) + the not-published note + the surfaced upstream \"Series does not exist\" message + the ID in fieldsUnavailable — NEVER a fabricated 0; a PRESENT \"-\" in-band value ⇒ null + valueUnavailable:true + footnote; (H3) each row's measure.units labels the datatype (never read an employment count as a wage); (H4) the API returns real numerics (no top-code); a non-SUCCESS status THROWS (REQUEST_NOT_PROCESSED ⇒ rate_limited with the tier disclosure; a non-JSON 200 ⇒ schema_drift). Every response discloses the active tier. An OPTIONAL free BLS_API_KEY lifts to v2 and is sent ONLY in the request body — never a URL/header/log.",
         inputSchema: BlsOewsWagesInput,
         handler: (input) => bls.oewsWages(input),
+    }),
+    // ━━━ BLS QCEW — county×NAICS market-size / wages / location-quotient (3rd BLS tool) ━━━ ADR-0042
+    // A SECOND, DIFFERENT, keyless, un-rate-limited BLS DOMAIN (data.bls.gov/cew — the
+    // QCEW Open Data Access CSV, NOT the rate-limited api.bls.gov/publicAPI timeseries
+    // API). Answers the market-size / competition-density question no existing tool can:
+    // establishment COUNT (market size / competitor density), county×NAICS employment,
+    // avg weekly wage (labor cost), and the LOCATION QUOTIENT (concentration vs national).
+    // Honesty crux: a suppressed employment/wage 0-sentinel → null (never 0), block/code/
+    // field-scoped (base/lq/oty each keyed on its OWN *_disclosure_code; qtrly_estabs /
+    // lq_qtrly_estabs / oty_qtrly_estabs_chg stay disclosed under 'N'). Symmetric CSV
+    // column-drift + a POST-parse quoted-header assertion → schema_drift. A per-tuple 404
+    // → honest empty. NEW gate key "bls_qcew"; NO BLS_API_KEY on this keyless path.
+    defineTool({
+        name: "bls_qcew",
+        description: "BLS QCEW (Quarterly Census of Employment & Wages) — county×NAICS MARKET-SIZE / wages / location-quotient (keyless; data.bls.gov/cew Open Data Access CSV, a SECOND un-rate-limited BLS domain — NOT the ~25/day api.bls.gov timeseries API). Answers the market-size / competition-density question no other tool can: for ONE area_fips (county/state/metro/US) OR ONE NAICS × quarter — establishment COUNT (market size / competitor density), county×NAICS employment, average weekly wage (labor cost), and the LOCATION QUOTIENT (lq_* = concentration vs the national average; >1.00 = more concentrated / higher competition density). Inputs: `mode` (REQUIRED {area,industry}); `area` (area_fips ^[0-9A-Za-z]{1,6}$ — REQUIRED path segment for mode=area, else an optional client-side narrow); `industry` (NAICS ^[0-9]{1,6}$ DIGIT-ONLY — REQUIRED path segment for mode=industry, else an optional narrow; a hyphenated 31-33 404s, use the digit aggregate); `year` (REQUIRED 1990..current), `quarter` (REQUIRED 1|2|3|4); client-side `ownership`(own_code)/`aggregationLevel`(agglvl_code)/`sizeCode`; `limit` (≤1000, def 50)/`offset`. Wire: GET data.bls.gov/cew/data/api/{year}/{quarter}/{mode}/{code}.csv. Returns { found, mode, area|industry, year, quarter, rows:[{ area_fips, own_code, industry_code, agglvl_code, size_code, base:{ disclosed, disclosureCode, qtrly_estabs, month1/2/3_emplvl, total_qtrly_wages, taxable_qtrly_wages, qtrly_contributions, avg_wkly_wage }, locationQuotient:{ disclosed, disclosureCode, lq_qtrly_estabs, lq_… }, overTheYear:{ disclosed, disclosureCode, oty_qtrly_estabs_chg, oty_…_pct_chg } }] } + honest _meta. ★DISCLOSURE-SUPPRESSION HONESTY (the crux): each row carries THREE disclosure codes (base/lq/oty), each governing its block. QCEW encodes a SUPPRESSED (confidential) employment/wage value as a literal 0 — so under 'N' the confidential emplvl/wage/avg-wkly fields map to null (WITHHELD, never a fabricated $0), while the establishment COUNT (qtrly_estabs / lq_qtrly_estabs) AND its over-the-year change (oty_qtrly_estabs_chg / _pct_chg) stay DISCLOSED (real); under '-' the WHOLE block incl. the estabs field(s) → null; under blank a genuine reported/NEGATIVE 0 SURVIVES (the disclosed federal taxable=0/contrib=0 and the oty_*_chg=0 'no change'). NEVER a blanket 0→null. A null carries disclosed:false + the raw disclosureCode; a suppression note fires whenever any page row is suppressed. HONESTY: totalAvailable is the EXACT filtered row count (fetch-once + client-side limit/offset — QCEW does not paginate; never the page length); a per-tuple HTTP 404 ⇒ honest empty (found:false, the HTML 404 body NEVER parsed as CSV); a 5xx/timeout ⇒ THROW; a 200 non-CSV / a renamed/±column header / a wrong field-count row ⇒ schema_drift THROW (symmetric drift guard). The file MIXES aggregation levels + ownerships — a do-NOT-sum-across-agglvl/ownership note rides every response. PUBLIC AGGREGATE stats (the suppression mechanism keeps small-cell data non-identifying — no PII). Keyless, un-rate-limited; NO BLS_API_KEY is read.",
+        inputSchema: BlsQcewInput,
+        handler: (input) => bls.qcew(input),
     }),
     // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (2) ━━━ ADR-0016
     defineTool({

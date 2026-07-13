@@ -101,7 +101,7 @@ import { num as govinfoNum, listCollections as govinfoListCollections, searchPac
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
 import { num as nsfNum, searchAwards as nsfSearchAwards, getAward as nsfGetAward, tokenizeForDisclosure as nsfTok } from "./dist/nsf.js";
-import { num as blsNum, timeseries as blsTimeseries, oewsWages as blsOews, buildOewsSeriesId, BLS_OEWS_DATATYPES, BLS_OEWS_OCCUPATIONS, BLS_STATE_FIPS } from "./dist/bls.js";
+import { num as blsNum, timeseries as blsTimeseries, oewsWages as blsOews, buildOewsSeriesId, BLS_OEWS_DATATYPES, BLS_OEWS_OCCUPATIONS, BLS_STATE_FIPS, qcew as blsQcew, buildQcewUrl, QCEW_COLUMNS, mapQcewRow } from "./dist/bls.js";
 import {
   screenEntity as ofacScreen,
   parsePrimaryList as ofacParsePrimary,
@@ -12577,6 +12577,291 @@ async function testBlsOewsHonesty() {
   }); // withBlsKey(undefined)
 }
 
+// §62c-qcew: BLS QCEW county×NAICS market-size / wages / location-quotient
+// (bls_qcew, ADR-0042 — the 3rd BLS tool; a SECOND, keyless, un-rate-limited BLS
+// DOMAIN on data.bls.gov/cew, the QCEW Open Data Access CSV, NOT the rate-limited
+// api.bls.gov timeseries API). NON-VACUOUS, OFFLINE, deterministic (fetch-mock).
+// Each assertion pins a value + names the mutation it RED-s (ADR §Q7 a–i + M1/M2/S2/S3):
+//   (a) a suppressed 'N' emplvl/wage surfaced as real 0 (not null) ⇒ RED.
+//   (b) a blanket 0→null destroying a genuine federal taxable/contrib 0 or oty_*_chg=0 ⇒ RED.
+//   (c) qtrly_estabs nulled under 'N' OR surfaced real under '-' ⇒ RED.
+//   (d) the LQ/OTY block mapped with the BASE code ⇒ RED.
+//   (M1) the OTY estabs-change pair nulled under 'N' (v1's lie) ⇒ RED.
+//   (e) a renamed/±col header or a wrong field-count row read positionally ⇒ RED.
+//   (M2) a QUOTED 42-cell header rejected by a raw pre-parse compare ⇒ RED (would be DOA).
+//   (f) a 404 read as found:true / HTML parsed as CSV, or a 5xx read as empty ⇒ RED.
+//   (g) a path-segment SSRF (../, %2F, whitespace, hyphenated NAICS, bad mode/year/quarter) accepted ⇒ RED.
+//   (h) the mixed-agglvl do-not-sum note missing when ≥2 agglvl/own ⇒ RED.
+//   (i) totalAvailable = page length, or a full page not hasMore ⇒ RED.
+//   (S3) an over-cap content-length read instead of an honest THROW ⇒ RED.
+const isQcew = (u) => /data\.bls\.gov\/cew\/data\/api\//.test(u);
+// The 42 header cells, each DOUBLE-QUOTED — the LIVE wire shape (M2).
+const qcewHeaderLine = () => QCEW_COLUMNS.map((c) => `"${c}"`).join(",");
+const QCEW_QUOTED_COLS = new Set(["area_fips", "own_code", "industry_code", "agglvl_code", "size_code", "year", "qtr", "disclosure_code", "lq_disclosure_code", "oty_disclosure_code"]);
+// Build a 42-cell content line from a value map (defaults each cell to "0"); the
+// code/id columns are double-quoted (mirroring live), the numeric columns bare.
+function qcewRowLine(o) {
+  return QCEW_COLUMNS.map((name) => {
+    const v = o[name] !== undefined ? String(o[name]) : "0";
+    return QCEW_QUOTED_COLS.has(name) ? `"${v}"` : v;
+  }).join(",");
+}
+const qcewBase = (o = {}) => ({ year: "2023", qtr: "1", ...o });
+// Assemble a CSV body (CRLF, trailing newline) from content lines.
+const qcewCsv = (lines) => qcewHeaderLine() + "\r\n" + lines.join("\r\n") + "\r\n";
+// A 200 text/csv response for the QCEW slice (arrayBuffer path; no stream).
+function qcewMock(body, { contentType = "text/csv", contentLength = undefined, spy } = {}) {
+  return (u) => {
+    if (!isQcew(u)) return failClosed()();
+    const headers = { "content-type": contentType };
+    if (contentLength !== undefined) headers["content-length"] = String(contentLength);
+    const r = mockBinaryResponse({ status: 200, bytes: strToBytes(body), url: u, headers });
+    if (spy) { const orig = r.arrayBuffer; r.arrayBuffer = async () => { spy.reads++; return orig(); }; }
+    return r;
+  };
+}
+
+async function testBlsQcewHonesty() {
+  section("62c. BLS QCEW county×NAICS market-size/wages/location-quotient (ADR-0042 — the 3rd BLS tool; a SECOND keyless, un-rate-limited BLS domain data.bls.gov/cew) — the block/code/field-scoped disclosure→null-never-0 mapper (base/lq/oty; ★M1 OTY estabs-change exception; '-' whole-block-null; genuine-0-survives) + ★M2 POST-parse quoted-header assert + symmetric CSV column-drift + S2 digit-only industry + S3 readCappedBody cap + 404→honest-empty + path-segment SSRF + NEW gate key / NO BLS_API_KEY (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── Fixture 1: happy area slice (disclosure '' / 'N' / '-', own {0,1,5},
+  //    agglvl {70,78}) ⇒ per-block disclosure mapping + the mandatory notes. ──
+  {
+    const rowA = qcewRowLine(qcewBase({ area_fips: "01005", own_code: "1", industry_code: "10", agglvl_code: "70", size_code: "0",
+      disclosure_code: "", qtrly_estabs: "5", month1_emplvl: "100", month2_emplvl: "101", month3_emplvl: "102",
+      total_qtrly_wages: "904962", taxable_qtrly_wages: "0", qtrly_contributions: "0", avg_wkly_wage: "1200",
+      lq_disclosure_code: "", lq_qtrly_estabs: "1.00", lq_month1_emplvl: "0.33", lq_avg_wkly_wage: "1.1",
+      oty_disclosure_code: "", oty_qtrly_estabs_chg: "-13", oty_qtrly_estabs_pct_chg: "0",
+      oty_month1_emplvl_chg: "5", oty_avg_wkly_wage_pct_chg: "-0.3" }));
+    const rowB = qcewRowLine(qcewBase({ area_fips: "01005", own_code: "5", industry_code: "5415", agglvl_code: "78", size_code: "0",
+      disclosure_code: "N", qtrly_estabs: "2", month1_emplvl: "0", month2_emplvl: "0", month3_emplvl: "0",
+      total_qtrly_wages: "0", taxable_qtrly_wages: "0", qtrly_contributions: "0", avg_wkly_wage: "0",
+      lq_disclosure_code: "N", lq_qtrly_estabs: "21.10", lq_month1_emplvl: "0", lq_avg_wkly_wage: "0",
+      oty_disclosure_code: "N", oty_qtrly_estabs_chg: "-1", oty_qtrly_estabs_pct_chg: "-50.0" }));
+    const rowC = qcewRowLine(qcewBase({ area_fips: "01005", own_code: "0", industry_code: "10", agglvl_code: "70", size_code: "0",
+      disclosure_code: "-", lq_disclosure_code: "-", oty_disclosure_code: "-" }));
+    await withFetch(qcewMock(qcewCsv([rowA, rowB, rowC])), async () => {
+      const r = await runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam);
+      const m = buildMeta(r.meta);
+      const rows = r.data.rows;
+      ok("62qcew-1 found:true + 3 rows parsed (fetch-once, full slice)", r.data.found === true && rows.length === 3, JSON.stringify({ f: r.data.found, n: rows.length }));
+      const a = rows[0], b = rows[1], c = rows[2];
+      ok("62qcew-1 (b) disclosed federal row: total_qtrly_wages 904962 real WITH taxable_qtrly_wages===0 AND qtrly_contributions===0 SURVIVING (a blanket 0→null ⇒ RED)",
+        a.base.total_qtrly_wages === 904962 && a.base.taxable_qtrly_wages === 0 && a.base.qtrly_contributions === 0, JSON.stringify(a.base));
+      ok("62qcew-1 (b) disclosed oty: oty_qtrly_estabs_chg===-13 (negative survives) AND oty_qtrly_estabs_pct_chg===0 (genuine 'no change' 0 survives)",
+        a.overTheYear.oty_qtrly_estabs_chg === -13 && a.overTheYear.oty_qtrly_estabs_pct_chg === 0, JSON.stringify(a.overTheYear));
+      ok("62qcew-1 disclosed row base/lq/oty all disclosed:true + disclosureCode:null",
+        a.base.disclosed === true && a.base.disclosureCode === null && a.locationQuotient.disclosed === true && a.overTheYear.disclosed === true, JSON.stringify({ b: a.base.disclosed, l: a.locationQuotient.disclosed, o: a.overTheYear.disclosed }));
+      ok("62qcew-1 (a) BASE 'N': qtrly_estabs===2 REAL but month1/2/3_emplvl + all wages + avg_wkly_wage ALL null (the literal 0 is a suppressed sentinel — surfaced as 0 ⇒ RED)",
+        b.base.qtrly_estabs === 2 && b.base.month1_emplvl === null && b.base.total_qtrly_wages === null && b.base.taxable_qtrly_wages === null && b.base.qtrly_contributions === null && b.base.avg_wkly_wage === null, JSON.stringify(b.base));
+      ok("62qcew-1 (a) base.disclosed===false + disclosureCode==='N' on the 'N' row", b.base.disclosed === false && b.base.disclosureCode === "N", JSON.stringify({ d: b.base.disclosed, c: b.base.disclosureCode }));
+      ok("62qcew-1 (c/d) LQ 'N': lq_qtrly_estabs===21.1 REAL, lq_month1_emplvl + lq_avg_wkly_wage null, lq.disclosed===false (mapped by lq_disclosure_code, not base)",
+        b.locationQuotient.lq_qtrly_estabs === 21.1 && b.locationQuotient.lq_month1_emplvl === null && b.locationQuotient.lq_avg_wkly_wage === null && b.locationQuotient.disclosed === false, JSON.stringify(b.locationQuotient));
+      ok("62qcew-1 ★M1 OTY 'N': oty_qtrly_estabs_chg===-1 AND oty_qtrly_estabs_pct_chg===-50 SURVIVE (real, disclosed) while the other 14 oty fields null (v1 nulls the pair ⇒ RED)",
+        b.overTheYear.oty_qtrly_estabs_chg === -1 && b.overTheYear.oty_qtrly_estabs_pct_chg === -50 && b.overTheYear.oty_month1_emplvl_chg === null && b.overTheYear.oty_avg_wkly_wage_pct_chg === null && b.overTheYear.disclosed === false, JSON.stringify(b.overTheYear));
+      ok("62qcew-1 (c) BASE '-': the WHOLE base block incl qtrly_estabs===null (estabs is withheld under '-', surfacing it real ⇒ RED)",
+        c.base.qtrly_estabs === null && c.base.avg_wkly_wage === null && c.base.disclosed === false && c.base.disclosureCode === "-", JSON.stringify(c.base));
+      ok("62qcew-1 (c/M1) LQ '-' + OTY '-': lq_qtrly_estabs===null AND oty_qtrly_estabs_chg===null AND oty_qtrly_estabs_pct_chg===null (the estabs exception is 'N'-only, NOT extended to '-')",
+        c.locationQuotient.lq_qtrly_estabs === null && c.overTheYear.oty_qtrly_estabs_chg === null && c.overTheYear.oty_qtrly_estabs_pct_chg === null, JSON.stringify({ lq: c.locationQuotient.lq_qtrly_estabs, o1: c.overTheYear.oty_qtrly_estabs_chg }));
+      ok("62qcew-1 SUPPRESSION note present (rows B/C suppressed) — a null is disclosed WITHHELD-not-zero",
+        m.notes.some((n) => /WITHHELD, NOT zero/.test(n)), JSON.stringify(m.notes));
+      ok("62qcew-1 (h) MIXED-agglvl do-not-sum note present (agglvl {70,78} + own {0,1,5} on the page)",
+        m.notes.some((n) => /MIXES aggregation levels/.test(n) && /double-counts/.test(n)), JSON.stringify(m.notes));
+      ok("62qcew-1 LQ-ratio note present (lq_* is a ratio vs national; 1.00 = national)",
+        m.notes.some((n) => /RATIO vs the national average/.test(n)), JSON.stringify(m.notes));
+      ok("62qcew-1 fieldsUnavailable lists suppressed field names (avg_wkly_wage + lq_avg_wkly_wage among them)",
+        m.fieldsUnavailable.includes("avg_wkly_wage") && m.fieldsUnavailable.includes("lq_avg_wkly_wage"), JSON.stringify(m.fieldsUnavailable));
+      ok("62qcew-1 keylessMode:true + source discloses the keyless CSV domain (NO BLS_API_KEY on this path)",
+        m.keylessMode === true && /data\.bls\.gov\/cew QCEW Open Data Access \(keyless CSV\)/.test(m.source), JSON.stringify(m.source));
+    });
+  }
+
+  // ── Fixture 2: wrong-block disclosure — each block keyed on its OWN code. ──
+  {
+    const rowD = qcewRowLine(qcewBase({ area_fips: "01005", own_code: "5", industry_code: "5415", agglvl_code: "78",
+      disclosure_code: "", qtrly_estabs: "7", avg_wkly_wage: "999", total_qtrly_wages: "5000",
+      lq_disclosure_code: "", lq_qtrly_estabs: "2.0", lq_avg_wkly_wage: "1.2",
+      oty_disclosure_code: "N", oty_qtrly_estabs_chg: "-1", oty_qtrly_estabs_pct_chg: "-50.0", oty_avg_wkly_wage_chg: "0" }));
+    const rowE = qcewRowLine(qcewBase({ area_fips: "01005", own_code: "5", industry_code: "5416", agglvl_code: "78",
+      disclosure_code: "N", qtrly_estabs: "3", avg_wkly_wage: "0", total_qtrly_wages: "0",
+      lq_disclosure_code: "", lq_qtrly_estabs: "4.32", lq_avg_wkly_wage: "1.5",
+      oty_disclosure_code: "", oty_qtrly_estabs_chg: "2", oty_avg_wkly_wage_chg: "10" }));
+    const rowF = qcewRowLine(qcewBase({ area_fips: "01005", own_code: "5", industry_code: "5417", agglvl_code: "78",
+      disclosure_code: "", qtrly_estabs: "9", avg_wkly_wage: "800",
+      lq_disclosure_code: "", lq_qtrly_estabs: "1.5",
+      oty_disclosure_code: "-", oty_qtrly_estabs_chg: "5", oty_qtrly_estabs_pct_chg: "3" }));
+    await withFetch(qcewMock(qcewCsv([rowD, rowE, rowF])), async () => {
+      const r = await runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam);
+      const [d, e, f] = r.data.rows;
+      ok("62qcew-2 (d/M1) base='' + oty='N': BASE real (qtrly_estabs 7, avg_wkly_wage 999) while OTY estabs-chg pair (-1,-50) REAL + other 14 null + oty.disclosed:false (the base code must NOT govern the oty block)",
+        d.base.qtrly_estabs === 7 && d.base.avg_wkly_wage === 999 && d.overTheYear.oty_qtrly_estabs_chg === -1 && d.overTheYear.oty_qtrly_estabs_pct_chg === -50 && d.overTheYear.oty_avg_wkly_wage_chg === null && d.overTheYear.disclosed === false, JSON.stringify({ b: d.base.qtrly_estabs, o: d.overTheYear }));
+      ok("62qcew-2 (d) base='N' + lq='': BASE suppressed (avg_wkly_wage null, qtrly_estabs 3 real) while LQ FULLY REAL (lq_qtrly_estabs 4.32, lq_avg_wkly_wage 1.5, lq.disclosed:true) — lq keyed on lq_disclosure_code, not base",
+        e.base.avg_wkly_wage === null && e.base.qtrly_estabs === 3 && e.locationQuotient.lq_qtrly_estabs === 4.32 && e.locationQuotient.lq_avg_wkly_wage === 1.5 && e.locationQuotient.disclosed === true, JSON.stringify({ b: e.base, l: e.locationQuotient }));
+      ok("62qcew-2 (M1 conservative) oty='-': ALL 16 oty null INCLUDING the estabs-change pair (the exception is 'N'-only, never extended to '-')",
+        f.overTheYear.oty_qtrly_estabs_chg === null && f.overTheYear.oty_qtrly_estabs_pct_chg === null && f.overTheYear.oty_avg_wkly_wage_chg === null && f.overTheYear.disclosed === false, JSON.stringify(f.overTheYear));
+    });
+  }
+
+  // ── Fixture 3: column-drift ⇒ schema_drift; the QUOTED 42-col header PASSES (M2). ──
+  {
+    const goodRow = qcewRowLine(qcewBase({ area_fips: "01005", disclosure_code: "", qtrly_estabs: "1" }));
+    await withFetch(qcewMock(qcewCsv([goodRow])), async () => {
+      const r = await runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam);
+      ok("62qcew-3 ★M2 the LIVE fully-double-quoted 42-cell header PASSES post-parse (compared quote-STRIPPED vs the pinned names; a raw pre-parse compare ⇒ schema_drift on every fetch = DOA)",
+        r.data.found === true && r.data.rows.length === 1, JSON.stringify({ f: r.data.found, n: r.data.rows.length }));
+    });
+    const renamedHeader = QCEW_COLUMNS.map((c) => (c === "avg_wkly_wage" ? '"avg_weekly_wage"' : `"${c}"`)).join(",");
+    await withFetch(qcewMock(renamedHeader + "\r\n" + goodRow + "\r\n"), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam));
+      ok("62qcew-3 (e/M2) a RENAMED header (avg_wkly_wage→avg_weekly_wage) ⇒ schema_drift THROW (a shifted schema must never be read positionally)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(qcewMock(qcewHeaderLine() + ',"extra_col"' + "\r\n" + goodRow + ",0\r\n"), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam));
+      ok("62qcew-3 (e) a +1-COLUMN header (43 cells) ⇒ schema_drift THROW (symmetric maxCol=42 — a column ADDITION must not be silently capped)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(qcewMock(QCEW_COLUMNS.slice(0, 41).map((c) => `"${c}"`).join(",") + "\r\n"), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam));
+      ok("62qcew-3 (e) a -1-COLUMN header (41 cells) ⇒ schema_drift THROW (too few — a truncated/renamed schema)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(qcewMock(qcewHeaderLine() + "\r\n" + goodRow + ",99\r\n"), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam));
+      ok("62qcew-3 (e) a 43-FIELD content row (header OK) ⇒ schema_drift THROW (per-row symmetric field-count guard, too many)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(qcewMock(qcewHeaderLine() + "\r\n" + QCEW_COLUMNS.slice(0, 41).map(() => "0").join(",") + "\r\n"), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam));
+      ok("62qcew-3 (e) a 41-FIELD content row (header OK) ⇒ schema_drift THROW (too few — a truncated download)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+  }
+
+  // ── Fixture 4: path-segment SSRF ⇒ invalid_input, 0 fetch. ──
+  for (const area of ["../../etc", "01005/../x", "a%2Fb", "01005 ", "US000\n"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => blsQcew({ mode: "area", area, year: 2023, quarter: "1" }));
+      ok(`62qcew-4 (g) area ${JSON.stringify(area)} ⇒ invalid_input, 0 fetch (charclass ^[0-9A-Za-z]{1,6}$ rejects /, ., %, whitespace, a trailing newline)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  for (const industry of ["31-33", "5415;rm", "5415 "]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => blsQcew({ mode: "industry", industry, year: 2023, quarter: "1" }));
+      ok(`62qcew-4 (g/S2) industry ${JSON.stringify(industry)} ⇒ invalid_input, 0 fetch (DIGIT-ONLY ^[0-9]{1,6}$ — a hyphenated NAICS 31-33 404s + widens the charclass)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const r1 = await expectThrow(() => blsQcew({ mode: "evil", area: "01005", year: 2023, quarter: "1" }));
+    const r2 = await expectThrow(() => blsQcew({ mode: "area", area: "01005", year: 20, quarter: "1" }));
+    const r3 = await expectThrow(() => blsQcew({ mode: "area", area: "01005", year: 2023, quarter: "5" }));
+    ok("62qcew-4 (g) mode:'evil' / year:20 / quarter:'5' ⇒ invalid_input, 0 fetch (each path segment validated PRE-interpolation)",
+      r1.threw && toToolError(r1.error).kind === "invalid_input" && r2.threw && toToolError(r2.error).kind === "invalid_input" && r3.threw && toToolError(r3.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ added: calls.length - before }));
+  });
+  {
+    const url = buildQcewUrl("area", 2023, "1", "01005");
+    ok("62qcew-4 buildQcewUrl builds the pinned host+path (https://data.bls.gov/cew/data/api/2023/1/area/01005.csv)",
+      url === "https://data.bls.gov/cew/data/api/2023/1/area/01005.csv", url);
+    const { threw, error } = await expectThrow(async () => buildQcewUrl("area", 2023, "1", "01005/../x"));
+    ok("62qcew-4 buildQcewUrl('01005/../x') ⇒ invalid_input (the per-segment charclass is the real host-escape guard)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    const url2 = buildQcewUrl("industry", 2023, "1", "10");
+    ok("62qcew-4 buildQcewUrl industry mode ⇒ .../industry/10.csv (digit aggregate)",
+      url2 === "https://data.bls.gov/cew/data/api/2023/1/industry/10.csv", url2);
+  }
+
+  // ── Fixture 5: 404 → honest empty (HTML never parsed); 5xx → THROW; 200
+  //    non-CSV → schema_drift; over-cap content-length → invalid_input (S3). ──
+  {
+    const spy = { reads: 0 };
+    await withFetch((u) => {
+      if (!isQcew(u)) return failClosed()();
+      const r = mockBinaryResponse({ status: 404, bytes: strToBytes("<html><title>404 Not Found</title></html>"), url: u, headers: { "content-type": "text/html" } });
+      const orig = r.arrayBuffer; r.arrayBuffer = async () => { spy.reads++; return orig(); };
+      return r;
+    }, async () => {
+      const r = await runTool("bls_qcew", { mode: "area", area: "99999", year: 2023, quarter: "1" }, sam);
+      const m = buildMeta(r.meta);
+      ok("62qcew-5 (f) HTTP 404 ⇒ found:false, rows:[], totalAvailable:0, complete:true + the 'absent slice, NOT zero establishments' note (a fabricated all-zero row ⇒ RED)",
+        r.data.found === false && r.data.rows.length === 0 && m.totalAvailable === 0 && m.complete === true && m.notes.some((n) => /absent slice, NOT zero establishments/i.test(n)), JSON.stringify({ f: r.data.found, t: m.totalAvailable, c: m.complete }));
+      ok("62qcew-5 (f) the HTML 404 body is NEVER read as CSV (arrayBuffer read count === 0 — classified on status before any parse)",
+        spy.reads === 0, `reads=${spy.reads}`);
+    });
+    await withFetch((u) => (isQcew(u) ? mockResponse({ status: 503, json: "err", headers: { "content-type": "text/html" } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam));
+      const te = toToolError(error);
+      ok("62qcew-5 (f) HTTP 503 ⇒ THROW upstream_unavailable (retryable), NEVER a fake empty",
+        threw && te.kind === "upstream_unavailable" && te.retryable === true, JSON.stringify(threw ? { k: te.kind, r: te.retryable } : "no-throw"));
+    });
+    await withFetch(qcewMock(qcewCsv([qcewRowLine(qcewBase({ area_fips: "01005", disclosure_code: "" }))]), { contentType: "text/html" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam));
+      ok("62qcew-5 (f) HTTP 200 with Content-Type text/html (an interstitial) ⇒ schema_drift THROW (never read a non-CSV 200 as data)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    const capSpy = { reads: 0 };
+    await withFetch(qcewMock(qcewCsv([qcewRowLine(qcewBase({ area_fips: "01005", disclosure_code: "" }))]), { contentLength: 17 * 1024 * 1024, spy: capSpy }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1" }, sam));
+      ok("62qcew-5 (S3) a content-length over the 16 MB cap (17 MB) ⇒ invalid_input THROW BEFORE buffering (a truncated read to the parser ⇒ RED)",
+        threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+      ok("62qcew-5 (S3) the over-cap body is NEVER buffered (arrayBuffer read count === 0 — the content-length pre-check fires first)",
+        capSpy.reads === 0, `reads=${capSpy.reads}`);
+    });
+  }
+
+  // ── Fixture 6: pagination — totalAvailable = the EXACT filtered row count. ──
+  {
+    const many = Array.from({ length: 60 }, (_, i) => qcewRowLine(qcewBase({ area_fips: "01005", own_code: i % 2 === 0 ? "5" : "1", industry_code: "5415", agglvl_code: "78", disclosure_code: "", qtrly_estabs: String(i + 1), avg_wkly_wage: String(1000 + i), lq_disclosure_code: "", oty_disclosure_code: "" })));
+    await withFetch(qcewMock(qcewCsv(many)), async () => {
+      const r = await runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1", limit: 50, offset: 0 }, sam);
+      const m = buildMeta(r.meta);
+      ok("62qcew-6 (i) 60 parsed rows, limit 50, offset 0 ⇒ totalAvailable:60 (the FILTERED set — using limit 50 as the total ⇒ RED), returned:50, hasMore:true, nextOffset:50",
+        m.totalAvailable === 60 && m.returned === 50 && m.pagination.hasMore === true && m.pagination.nextOffset === 50, JSON.stringify({ t: m.totalAvailable, r: m.returned, p: m.pagination }));
+      ok("62qcew-6 (i) the raw-vs-filtered note discloses parsed 60 + fetch-once/client-side-window (QCEW does not paginate)",
+        m.notes.some((n) => /Parsed 60 content row\(s\)/.test(n) && /QCEW does not paginate/.test(n)), JSON.stringify(m.notes));
+    });
+    await withFetch(qcewMock(qcewCsv(many)), async () => {
+      const r = await runTool("bls_qcew", { mode: "area", area: "01005", year: 2023, quarter: "1", ownership: "5", limit: 50 }, sam);
+      const m = buildMeta(r.meta);
+      ok("62qcew-6 (i) ownership:'5' filter ⇒ totalAvailable:30 (the FILTERED count, not the raw 60) + returned:30 + hasMore:false + 'ownership:5' in filtersApplied",
+        m.totalAvailable === 30 && m.returned === 30 && m.pagination.hasMore === false && m.filtersApplied.some((f) => /ownership:5/.test(f)), JSON.stringify({ t: m.totalAvailable, r: m.returned, fa: m.filtersApplied }));
+    });
+    const mix = [
+      qcewRowLine(qcewBase({ area_fips: "01005", own_code: "5", industry_code: "5415", agglvl_code: "78", disclosure_code: "", qtrly_estabs: "1" })),
+      qcewRowLine(qcewBase({ area_fips: "06037", own_code: "5", industry_code: "5415", agglvl_code: "78", disclosure_code: "", qtrly_estabs: "2" })),
+    ];
+    await withFetch(qcewMock(qcewCsv(mix)), async (calls) => {
+      const r = await runTool("bls_qcew", { mode: "industry", industry: "5415", area: "01005", year: 2023, quarter: "1" }, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((x) => isQcew(x.url));
+      ok("62qcew-6 industry-mode narrow area:'01005' ⇒ 1 row kept (client-side) + the URL is the INDUSTRY slice (…/industry/5415.csv — the narrow NEVER touches the URL)",
+        m.totalAvailable === 1 && r.data.rows[0].area_fips === "01005" && /\/industry\/5415\.csv/.test(call.url), JSON.stringify({ t: m.totalAvailable, url: call.url }));
+    });
+  }
+
+  // ── Fixture 7: num-parity + the pure mapper (direct, no fetch). ──
+  ok("62qcew-7 bls.num === coerce.num (one shared audited impl — QCEW decides suppression THEN num; no local num)", blsNum === coerceNum, "diverged");
+  {
+    const rec = QCEW_COLUMNS.map((name) => {
+      if (name === "disclosure_code" || name === "lq_disclosure_code" || name === "oty_disclosure_code") return "N";
+      if (name === "qtrly_estabs") return "2";
+      if (name === "lq_qtrly_estabs") return "21.10";
+      if (name === "oty_qtrly_estabs_chg") return "-1";
+      if (name === "oty_qtrly_estabs_pct_chg") return "-50.0";
+      if (name === "area_fips") return "01005";
+      return "0";
+    });
+    const row = mapQcewRow(rec);
+    ok("62qcew-7 mapQcewRow('N' all-blocks): qtrly_estabs 2 + lq_qtrly_estabs 21.1 + oty estabs-chg pair (-1,-50) REAL; emplvl/wage/other-oty null — the block/code/field mapper (pure)",
+      row.base.qtrly_estabs === 2 && row.base.avg_wkly_wage === null && row.locationQuotient.lq_qtrly_estabs === 21.1 && row.locationQuotient.lq_avg_wkly_wage === null && row.overTheYear.oty_qtrly_estabs_chg === -1 && row.overTheYear.oty_qtrly_estabs_pct_chg === -50 && row.overTheYear.oty_month1_emplvl_chg === null, JSON.stringify(row));
+  }
+}
+
 // §53-clinicaltrials: ClinicalTrials.gov API v2 (clinicaltrials.gov/api/v2/studies,
 // ADR-0021, source #21 — the trial-REGISTRATION sibling of NIH/NSF grants on the
 // getJson GET port). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a
@@ -13915,6 +14200,7 @@ async function main() {
   await testNsfHonesty();
   await testBlsHonesty();
   await testBlsOewsHonesty();
+  await testBlsQcewHonesty();
   await testOfacScreen();
   await testNppesHonesty();
   await testCmsHonesty();
