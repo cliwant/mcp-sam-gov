@@ -148,7 +148,7 @@ function categoryAggregateMeta(opts: {
   const notes: string[] = [];
   if (truncated) {
     notes.push(
-      `Capped at the top ${opts.limit} categories by amount; more categories may exist. This endpoint reports no grand total, so the true number of categories is unknown (totalAvailable is null, NOT the returned count) — page with a larger limit to see more.`,
+      `Capped at the top ${opts.limit} categories by amount; more categories may exist. This endpoint reports no grand total, so the true number of categories is unknown (totalAvailable is null, NOT the returned count). These extra categories are NOT page-reachable — all six callers post page:1 with NO offset/page input (nextOffset is null). Raise limit (up to 50) or narrow filters to see the rest.`,
     );
   }
   if (opts.extraNotes) notes.push(...opts.extraNotes);
@@ -162,7 +162,15 @@ function categoryAggregateMeta(opts: {
     pagination: {
       offset: 0,
       limit: opts.limit,
-      nextOffset: truncated ? opts.returned : null,
+      // W3-8 (honesty; mirrors awardPagination :488 / searchRecipients M1): all SIX
+      // callers (searchPscSpending / searchStateSpending / searchCfdaSpending /
+      // searchFederalAccountSpending / searchAgencySpending / searchSubAgencySpending)
+      // hardcode page:1 and expose ONLY `limit` (no offset/page arg) — so `nextOffset`
+      // is NOT consumable. Emitting `opts.returned` (the page length) made an agent
+      // re-fetch the SAME top-N forever while ranked-below-`limit` categories stayed
+      // unreachable. Emit null unconditionally; `truncated`/`hasMore` stay honest — the
+      // extras are reachable ONLY by raising `limit` (≤50) or narrowing filters.
+      nextOffset: null,
       hasMore: truncated,
     },
     filtersApplied: opts.filters ? filtersAppliedFromFilters(opts.filters) : [],
@@ -225,9 +233,16 @@ function referenceMeta(opts: {
     totalAvailable,
     truncated,
     pagination: {
-      offset: 0,
+      // W3-8 (honesty; mirrors govinfo.ts:406-408 "no numeric offset"): the three
+      // callers (autocompleteNaics / autocompleteRecipient / glossary) forward only
+      // searchText/search + limit — NO offset/page input — so these reference lookups
+      // are not offset-pageable AT ALL. Emit BOTH offset:null and nextOffset:null;
+      // emitting `returned` for nextOffset made an agent re-fetch the SAME page forever.
+      // `hasMore`/`truncated` stay honest — the truncation notes already say "raise
+      // limit" (the only real way to widen), so no page cursor is implied.
+      offset: null,
       limit,
-      nextOffset: hasMore ? returned : null,
+      nextOffset: null,
       hasMore,
     },
     filtersApplied: [],
