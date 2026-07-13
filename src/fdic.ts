@@ -1567,3 +1567,486 @@ export async function industrySummary(args: {
     } satisfies Partial<ResponseMeta>,
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool 6: fdic_risk_ratios (ADR-0040) — the FDIC counterparty-SOUNDNESS lane, a
+// WITHIN-SOURCE DEPTH tool on the ALREADY-WIRED `/banks/financials` endpoint (NO new
+// endpoint constant). The 5 existing FDIC tools surface only $-aggregates (assets /
+// deposits / net income); this tool projects the CURATED RISK-RATIO catalog
+// (profitability ROA/ROE, margin NIM, cost efficiency, capital adequacy leverage /
+// tier-1 / total risk-based, asset quality net charge-offs) + the tier-1 capital
+// LEVEL, keyed on CERT. Reuses the C116/C118-hardened adapter VERBATIM (getFdic /
+// parseEnvelope 3-envelope guard / filterTerm allowlist + Set.has / sortParams
+// enum+Set.has / EXACT meta.total pagination / freshness / thousandsToUsd / num). The
+// NEW surface is the PER-FIELD-UNITS ratio catalog + honesty, all live-verified
+// 2026-07-13:
+//   ★P3 UNITS-IN-THE-KEY — a MODULE-CONSTANT catalog fieldCode→{outputKey,label,unit,
+//     route}. The 9 PERCENT ratios (ROA/ROAPTX/ROE/NIMY/EEFFR/NTLNLSR/RBC1AAJ/RBC1RWAJ/
+//     RBCRWAJ) route through `num` and are surfaced VERBATIM (NO scale, NO recompute);
+//     the ONE $-amount (RBCT1J, tier-1 capital in $thousands) routes through
+//     thousandsToUsd → tier1CapitalUSD (×1000). The unit rides the output KEY (…Pct /
+//     …USD) AND the mandatory RATIO_UNITS_NOTE — a consumer never reads a 77.98%
+//     efficiency ratio as a dollar amount or ×1000-scales a percent.
+//   ★P3 NULL-NEVER-0 — a not-reported ratio → null (via `num`, which maps BOTH JSON
+//     null and undefined → null), NEVER 0 (a false "no return / no capital"). FDIC
+//     returns a not-reported ratio as an EXPLICIT null (key present, value null), NOT
+//     an absent key — so we read every ratio via `num(rec.CODE)`, NEVER via
+//     `'CODE' in rec` / `=== undefined` / hasOwnProperty (S2).
+//   ★M1 (the BLOCKER) — the CBLR `RBCRWAJ=0` sentinel. LIVE: 37% of banks are
+//     Community-Bank-Leverage-Ratio filers (CBLRIND:1) that return RBCRWAJ as a
+//     LITERAL 0 (not null) while RBC1RWAJ is null and the leverage ratio RBC1AAJ is
+//     populated + solvent. Routing RBCRWAJ verbatim through num yields num(0)=0 = a
+//     false "0% total capital / insolvent" on healthy banks. FIX (CBLR-scoped, no
+//     recompute, NO blanket 0→null): CBLRIND is added to the projection; when
+//     CBLRIND===1 we map BOTH totalRiskBasedCapitalRatioPct AND
+//     tier1RiskBasedCapitalRatioPct to null ("not applicable — CBLR framework") and
+//     surface a per-row cblrFramework:boolean. Detection is via FDIC's OWN CBLRIND
+//     flag — never a derived/recomputed ratio. Genuine zeros on OTHER fields
+//     (NTLNLSR:0 = zero net charge-offs; /sod DEPSUMBR:0) are UNTOUCHED — this is NOT
+//     a blanket 0→null.
+//   ★P3 NO-RECOMPUTE — every ratio is FDIC's published value surfaced verbatim; the
+//     tool never computes ROE=NETINC/EQ (or any ratio) itself (a computed ratio would
+//     diverge from FDIC's official figure = a fabrication).
+//   ★S2 per-code not-reported marker — each catalog entry carries an explicit
+//     `notReported` marker ('null' | 'zero-sentinel-when-CBLR'): FDIC's not-reported
+//     encoding is FIELD-SPECIFIC (RBC1RWAJ uses JSON null; RBCRWAJ uses a literal-0
+//     sentinel in the CBLR cohort; NTLNLSR/EEFFR/NIMY 0 are GENUINE zeros). Any newly
+//     added code MUST be live-validated for its 0/null encoding before shipping —
+//     never assume the ROA/ROE null path generalizes.
+// ═══════════════════════════════════════════════════════════════════
+
+// ★P3 — the per-field UNIT of a catalog ratio: a PERCENT (surfaced verbatim via num,
+// no scale) or a $-amount FDIC publishes in $thousands (×1000 via thousandsToUsd).
+type RatioUnit = "percent" | "usd-thousands";
+// ★S2 — the FIELD-SPECIFIC not-reported encoding marker. 'null' = FDIC returns an
+// explicit JSON null when not reported (the ROA/ROE/… path). 'zero-sentinel-when-CBLR'
+// = FDIC returns a LITERAL 0 sentinel for the risk-based capital ratios when the bank
+// files under the CBLR framework (the M1 blocker) — a 0 there is NOT a real 0%.
+type RatioNotReported = "null" | "zero-sentinel-when-CBLR";
+type RatioEntry = {
+  code: string; // the FDIC field code (live-verified valid — a typo would silently drop off the wire)
+  outputKey: string; // the output key WITH its unit suffix (…Pct / …USD)
+  label: string; // human label (from the FDIC RIS / Call-Report data dictionary)
+  unit: RatioUnit;
+  notReported: RatioNotReported;
+};
+
+// ★P3 — the CURATED ratio catalog (a MODULE CONSTANT). Every code live-verified valid
+// + its unit pinned from the FDIC data dictionary AND the live values. Do NOT include
+// ROAA/ROEA (invalid codes — silently dropped from the record). Exported for the
+// catalog-shape fault fixture.
+const RATIO_CATALOG: readonly RatioEntry[] = [
+  { code: "ROA", outputKey: "returnOnAssetsPct", label: "Return on assets", unit: "percent", notReported: "null" },
+  { code: "ROAPTX", outputKey: "preTaxReturnOnAssetsPct", label: "Pretax return on assets", unit: "percent", notReported: "null" },
+  { code: "ROE", outputKey: "returnOnEquityPct", label: "Return on equity", unit: "percent", notReported: "null" },
+  { code: "NIMY", outputKey: "netInterestMarginPct", label: "Net interest margin", unit: "percent", notReported: "null" },
+  { code: "EEFFR", outputKey: "efficiencyRatioPct", label: "Efficiency ratio (noninterest expense / revenue)", unit: "percent", notReported: "null" },
+  { code: "NTLNLSR", outputKey: "netChargeOffsToLoansPct", label: "Net charge-offs to loans & leases", unit: "percent", notReported: "null" },
+  { code: "RBC1AAJ", outputKey: "leverageRatioPct", label: "Leverage (core capital) ratio", unit: "percent", notReported: "null" },
+  // ★M1 — the two risk-based capital ratios carry the CBLR literal-0 / null sentinel.
+  { code: "RBC1RWAJ", outputKey: "tier1RiskBasedCapitalRatioPct", label: "Tier-1 risk-based capital ratio", unit: "percent", notReported: "zero-sentinel-when-CBLR" },
+  { code: "RBCRWAJ", outputKey: "totalRiskBasedCapitalRatioPct", label: "Total risk-based capital ratio", unit: "percent", notReported: "zero-sentinel-when-CBLR" },
+  { code: "RBCT1J", outputKey: "tier1CapitalUSD", label: "Tier-1 (core) capital", unit: "usd-thousands", notReported: "null" },
+] as const;
+
+export { RATIO_CATALOG };
+
+// Fixed field projection on the wire (CERT/REPDTE/ID + CBLRIND [★M1 sentinel detection]
+// + every catalog code). Built FROM the catalog so a catalog edit can never drift from
+// the wire projection.
+const RATIO_CODES: readonly string[] = RATIO_CATALOG.map((e) => e.code);
+const RATIO_FIELDS = ["CERT", "REPDTE", "CBLRIND", ...RATIO_CODES, "ID"].join(",");
+// The returned-fields (B) disclosure projection. FDIC returns a not-reported ratio as
+// an EXPLICIT null (key PRESENT) — so a code shows in Object.keys even when null, and
+// fieldsUnavailable fires ONLY on a genuinely-absent key (real schema drift / a code
+// FDIC does not publish for these rows), never on a normal not-reported null.
+const RATIO_PROJECTION = ["CERT", "REPDTE", "CBLRIND", ...RATIO_CODES, "ID"] as const;
+
+// ★S1 — the ratio filter-FIELD allowlist (P4 belt-and-suspenders). CERT + optional
+// REPDTE, both NUMERIC (emitted bare by filterTerm). Do NOT reuse FIN_FILTER_FIELDS
+// ({CERT}) — it would THROW on REPDTE. Exported for the fault fixture.
+const RATIO_FILTER_FIELDS: ReadonlySet<string> = new Set(["CERT", "REPDTE"]);
+// sortBy allowlist (mirrors the server's Zod enum; a Set.has recheck in sortParams →
+// an unknown sort field is invalid_input BEFORE fetch).
+const RATIO_SORT_FIELDS: ReadonlySet<string> = new Set(["REPDTE", "ROA", "ROE", "RBCRWAJ", "EEFFR"]);
+
+export { RATIO_FILTER_FIELDS };
+
+/**
+ * Build the risk-ratio `filters` string — `cert`→`CERT:<int>` (REQUIRED, numeric →
+ * bare) + optional `reportDate`→`REPDTE:<int>` (numeric → bare, a YYYYMMDD quarter-end).
+ * Both fields are on RATIO_FILTER_FIELDS (NOT FIN_FILTER_FIELDS, which is {CERT} and
+ * would throw on REPDTE — S1). Terms joined with ` AND `. Exported for the fault fixtures.
+ */
+export function buildRatioFilters(inp: { cert: number; reportDate?: number }): string {
+  const terms: string[] = [];
+  terms.push(filterTerm("CERT", String(inp.cert), RATIO_FILTER_FIELDS));
+  if (inp.reportDate !== undefined)
+    terms.push(filterTerm("REPDTE", String(inp.reportDate), RATIO_FILTER_FIELDS));
+  return terms.join(" AND ");
+}
+
+/**
+ * ★M1 — detect the Community Bank Leverage Ratio framework via FDIC's OWN `CBLRIND`
+ * flag (CBLRIND===1). A CBLR filer does NOT report risk-based capital ratios: FDIC
+ * returns RBCRWAJ as a LITERAL 0 sentinel (not null) and RBC1RWAJ as null. Detection is
+ * strictly the flag — NO derived/recomputed ratio, NO blanket 0→null. Exported for the
+ * fault fixture. (num maps a string/number/null CBLRIND consistently; an absent CBLRIND
+ * → null → not CBLR → the ratios pass through verbatim.)
+ */
+export function isCblrFramework(rec: Record<string, unknown>): boolean {
+  return num(rec.CBLRIND) === 1;
+}
+
+export type FdicRiskRatios = {
+  cert: number | null;
+  reportDate: number | null;
+  cblrFramework: boolean;
+  returnOnAssetsPct: number | null;
+  preTaxReturnOnAssetsPct: number | null;
+  returnOnEquityPct: number | null;
+  netInterestMarginPct: number | null;
+  efficiencyRatioPct: number | null;
+  netChargeOffsToLoansPct: number | null;
+  leverageRatioPct: number | null;
+  tier1RiskBasedCapitalRatioPct: number | null;
+  totalRiskBasedCapitalRatioPct: number | null;
+  tier1CapitalUSD: number | null;
+  id: string | null;
+};
+
+/**
+ * ★P3 + ★M1 — map ONE `/financials` record to the ratio row. The catalog drives the
+ * per-field route: a PERCENT code → `num` VERBATIM (no scale, null-never-0); the
+ * $-amount RBCT1J → `thousandsToUsd` (×1000, null-guard BEFORE the multiply). ★M1: when
+ * the bank files under CBLR (CBLRIND===1) the two `zero-sentinel-when-CBLR` codes
+ * (RBCRWAJ / RBC1RWAJ) map to NULL (never the 0 sentinel / never a false 0% capital);
+ * a per-row `cblrFramework` explains the null. Genuine zeros on the other codes
+ * (NTLNLSR:0 …) are surfaced verbatim by `num` — this is NOT a blanket 0→null.
+ */
+function mapRiskRatios(rec: Record<string, unknown>): FdicRiskRatios {
+  const cblr = isCblrFramework(rec);
+  const r: Record<string, number | null> = {};
+  for (const entry of RATIO_CATALOG) {
+    // ★M1 — CBLR-scoped sentinel → null (BOTH risk-based capital ratios), never 0.
+    if (cblr && entry.notReported === "zero-sentinel-when-CBLR") {
+      r[entry.outputKey] = null;
+      continue;
+    }
+    // ★P3 — $-amount ×1000 (thousandsToUsd); percent verbatim (num, no scale). Both
+    // are null-never-0 (num / thousandsToUsd map null/undefined/""/"null" → null).
+    r[entry.outputKey] =
+      entry.unit === "usd-thousands" ? thousandsToUsd(rec[entry.code]) : num(rec[entry.code]);
+  }
+  // Each key is guaranteed populated by the catalog loop above; `?? null` only
+  // satisfies noUncheckedIndexedAccess (an unexpected catalog-key drift → null,
+  // never undefined — still null-never-0).
+  return {
+    cert: num(rec.CERT),
+    reportDate: num(rec.REPDTE),
+    cblrFramework: cblr,
+    returnOnAssetsPct: r.returnOnAssetsPct ?? null,
+    preTaxReturnOnAssetsPct: r.preTaxReturnOnAssetsPct ?? null,
+    returnOnEquityPct: r.returnOnEquityPct ?? null,
+    netInterestMarginPct: r.netInterestMarginPct ?? null,
+    efficiencyRatioPct: r.efficiencyRatioPct ?? null,
+    netChargeOffsToLoansPct: r.netChargeOffsToLoansPct ?? null,
+    leverageRatioPct: r.leverageRatioPct ?? null,
+    tier1RiskBasedCapitalRatioPct: r.tier1RiskBasedCapitalRatioPct ?? null,
+    totalRiskBasedCapitalRatioPct: r.totalRiskBasedCapitalRatioPct ?? null,
+    tier1CapitalUSD: r.tier1CapitalUSD ?? null,
+    id: str(rec.ID),
+  };
+}
+
+// ─── risk-ratio disclosure notes ───────────────────────────────────
+// ★P3 + ★M1 — units in the key + the corrected CBLR honesty (does NOT promise every
+// shown 0 is real; a null capital ratio on a CBLR bank is a normal framework artifact).
+const RATIO_UNITS_NOTE =
+  "Each *Pct field is an FDIC-published PERCENTAGE surfaced verbatim (ROA/ROE/margin/efficiency/capital ratios) — do NOT read it as a dollar amount and do NOT ×1000-scale it. tier1CapitalUSD is a DOLLAR amount (FDIC publishes it in $thousands; normalized here ×1,000). A null ratio means FDIC did not report that ratio for this bank/period — it is NOT 0% (never read a null ratio as 'no return / no capital'). Banks reporting under the Community Bank Leverage Ratio (CBLR) framework (cblrFramework:true) do NOT report the risk-based capital ratios: FDIC returns a literal 0 for the total risk-based ratio, which this tool maps to null for BOTH tier1RiskBasedCapitalRatioPct and totalRiskBasedCapitalRatioPct — a null risk-based capital ratio here is frequently a NORMAL framework artifact (read it alongside the populated leverageRatioPct), not a red flag or a real 0% capital reading. Ratios are surfaced exactly as FDIC computes them; none is recomputed.";
+const RATIO_NOT_DETERMINATION_NOTE =
+  "FDIC risk ratios are reported regulatory metrics from the bank's Call Report, NOT a soundness rating, safety-and-soundness examination result, or failure prediction. A single-period ratio is a snapshot; read the time-series and cross-check the institution's condition (fdic_search_institutions for status, fdic_bank_failures for resolution history, fdic_institution_history for structural changes). FDIC keys on CERT, not SAM UEI/DUNS.";
+const RATIO_EMPTY_NOTE =
+  "No financial report is on record for this CERT/period — this does NOT mean the bank is unsound or unrated; the CERT may be wrong, or the bank may not have filed for this period. Confirm the CERT via fdic_search_institutions.";
+
+/**
+ * FDIC counterparty RISK RATIOS for ONE institution by `cert` (`/banks/financials` —
+ * the ALREADY-wired endpoint; NO new endpoint constant). Structured inputs: `cert`
+ * (REQUIRED → CERT), optional `reportDate` (→ REPDTE, a YYYYMMDD quarter-end), plus
+ * `limit`/`offset`/`sortBy` (allowlist {REPDTE,ROA,ROE,RBCRWAJ,EEFFR}, default REPDTE)/
+ * `sortOrder` (default DESC → newest quarter first). Consumes the IDENTICAL fetch →
+ * 3-envelope guard → pagination machinery as tools 1–5.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1); the 3-envelope
+ * drift-guard makes the ONLY honest empty `200 + total:0 + data:[]`, everything else
+ * THROWS (P2); ★P3 percent ratios surfaced VERBATIM via num (null-never-0, NO scale, NO
+ * recompute), the ONE $-amount (RBCT1J) via thousandsToUsd → tier1CapitalUSD; ★M1 the
+ * CBLR risk-based capital ratios map to null (never the 0 sentinel) with a per-row
+ * cblrFramework flag; a projected field absent from all records → fieldsUnavailable (B);
+ * the snapshot build time is disclosed.
+ */
+export async function riskRatios(args: {
+  cert: number;
+  reportDate?: number;
+  limit?: number;
+  offset?: number;
+  sortBy?: string;
+  sortOrder?: string;
+}): Promise<MetaBundle> {
+  const limit = args.limit ?? 100;
+  const offset = args.offset ?? 0;
+  // Default REPDTE DESC (newest quarter first) when the server's Zod default did not
+  // supply one (defensive — the server always defaults sortBy=REPDTE/DESC).
+  const sort = sortParams(
+    args.sortBy ?? "REPDTE",
+    args.sortOrder ?? "DESC",
+    RATIO_SORT_FIELDS,
+    "financials",
+  );
+
+  const params = new URLSearchParams();
+  params.set("filters", buildRatioFilters({ cert: args.cert, reportDate: args.reportDate }));
+  params.set("fields", RATIO_FIELDS);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  if (sort.sort_by) {
+    params.set("sort_by", sort.sort_by);
+    params.set("sort_order", sort.sort_order as string);
+  }
+  params.set("format", "json");
+
+  const body = await getFdic(ENDPOINT_FINANCIALS, params);
+  const env = parseEnvelope(body);
+  const records = env.records.map(mapRiskRatios);
+  const returned = records.length;
+  const totalAvailable = env.totalAvailable;
+  const hasMore = offset + returned < totalAvailable;
+  const nextOffset = hasMore ? offset + returned : null;
+
+  const filtersApplied: string[] = ["cert"];
+  if (args.reportDate !== undefined) filtersApplied.push("reportDate");
+  if (sort.sort_by) filtersApplied.push("sort");
+
+  const notes: string[] = [
+    freshnessNote(env.indexName, env.indexCreated),
+    RATIO_UNITS_NOTE,
+    RATIO_NOT_DETERMINATION_NOTE,
+  ];
+  if (totalAvailable === 0) notes.push(RATIO_EMPTY_NOTE);
+  const fu = fieldsUnavailable(env.records, RATIO_PROJECTION);
+  if (fu.length > 0) {
+    notes.push(
+      `Requested field(s) ${fu.join(", ")} were not returned by FDIC for any record in this result set — the affected values are surfaced as null (never fabricated); this can be a ratio FDIC does not publish for these institution(s)/period(s), or a schema change.`,
+    );
+  }
+
+  return withMeta(
+    { cert: args.cert, ratios: records },
+    {
+      source: "api.fdic.gov/banks/financials (BankFind, keyless)",
+      keylessMode: true,
+      returned,
+      totalAvailable,
+      filtersApplied,
+      filtersDropped: [],
+      fieldsUnavailable: fu,
+      pagination: { offset, limit, hasMore, nextOffset },
+      notes,
+    } satisfies Partial<ResponseMeta>,
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool 7: fdic_branch_deposits (ADR-0040) — the FDIC branch-deposit footprint
+// (`/banks/sod`, Summary of Deposits): the annual June-30 branch-office deposit
+// distribution ("where does this bank hold deposits, and how concentrated?"). ONE new
+// fixed endpoint constant `ENDPOINT_SOD = "sod"` on getFdic's `/banks/${endpoint}`
+// template (NO caller value on the path). Reuses the C116/C118-hardened adapter VERBATIM
+// (getFdic / parseEnvelope 3-envelope guard / filterTerm allowlist + Set.has + the C118
+// non-numeric quote / sortParams enum+Set.has / EXACT meta.total pagination / freshness /
+// thousandsToUsd / num / str), live-verified 2026-07-13:
+//   ★S1 — the SOD filter-FIELD allowlist is {CERT, STALPBR, YEAR} (its OWN Set — NOT
+//     FIN_FILTER_FIELDS). LOAD-BEARING: a bad /sod filter field silently returns
+//     total:0 (a FALSE-empty, NOT a 400), so an un-allowlisted/mistyped/injected field
+//     must be rejected BY CONSTRUCTION before the wire.
+//   ★C118 — the state field STALPBR is non-numeric → filterTerm DOUBLE-QUOTES it
+//     (Oregon `STALPBR:"OR"` is Lucene-operator-safe; bare `STALPBR:OR` → live HTTP 400).
+//   ★P3 — DEPSUMBR (branch deposits, $thousands) → thousandsToUsd → depositsUSD
+//     (null-guard BEFORE the ×1000); a GENUINE 0 stays 0, an absent value → null. YEAR
+//     is a JSON integer via num; names/city/address/zip via str.
+//   ★freshness — the /sod index is a DISTINCT ANNUAL snapshot (sod_*), far less fresh
+//     than the quarterly /financials index — disclosed via freshnessNote + a snapshot note.
+//   No PII — bank-BRANCH facility data (branch name/address/city/state/zip/deposits),
+//   public commercial-bank infrastructure; no officer/personal-contact fields.
+// ═══════════════════════════════════════════════════════════════════
+
+// Fixed endpoint constant — the TOOL chooses it; NO caller value on the path (SSRF core).
+const ENDPOINT_SOD = "sod";
+
+// Fixed field projection on the wire (every field live-verified valid).
+const SOD_FIELDS = "CERT,NAMEFULL,BRNUM,NAMEBR,CITYBR,STALPBR,ZIPBR,ADDRESBR,DEPSUMBR,YEAR,ID";
+const SOD_PROJECTION = [
+  "CERT",
+  "NAMEFULL",
+  "BRNUM",
+  "NAMEBR",
+  "CITYBR",
+  "STALPBR",
+  "ZIPBR",
+  "ADDRESBR",
+  "DEPSUMBR",
+  "YEAR",
+  "ID",
+] as const;
+
+// ★S1 — the SOD filter-FIELD allowlist (P4 belt-and-suspenders; LOAD-BEARING — a bad
+// /sod field is a silent total:0 false-empty, NOT a 400). CERT/YEAR numeric (bare),
+// STALPBR non-numeric (C118-quoted). Do NOT reuse FIN_FILTER_FIELDS ({CERT} — would
+// throw on STALPBR/YEAR). Exported for the fault fixture.
+const SOD_FILTER_FIELDS: ReadonlySet<string> = new Set(["CERT", "STALPBR", "YEAR"]);
+// sortBy allowlist (mirrors the server's Zod enum; a Set.has recheck in sortParams →
+// an unknown sort field is invalid_input BEFORE fetch; live `sort_by=NOTAFIELD` → 400).
+const SOD_SORT_FIELDS: ReadonlySet<string> = new Set(["YEAR", "DEPSUMBR"]);
+
+export { SOD_FILTER_FIELDS };
+
+/**
+ * Build the /sod `filters` string — `cert`→`CERT:<int>` (numeric → bare), `state`→
+ * `STALPBR:"<code>"` (★C118 non-numeric → DOUBLE-QUOTED; Oregon `STALPBR:"OR"` is
+ * operator-safe), `year`→`YEAR:<int>` (numeric → bare). All fields on SOD_FILTER_FIELDS
+ * (★S1). Terms joined with ` AND `. Returns "" when there is no structured filter clause.
+ * Exported for the fault fixtures.
+ */
+export function buildSodFilters(inp: { cert?: number; state?: string; year?: number }): string {
+  const terms: string[] = [];
+  if (inp.cert !== undefined) terms.push(filterTerm("CERT", String(inp.cert), SOD_FILTER_FIELDS));
+  if (inp.state !== undefined) terms.push(filterTerm("STALPBR", inp.state, SOD_FILTER_FIELDS));
+  if (inp.year !== undefined) terms.push(filterTerm("YEAR", String(inp.year), SOD_FILTER_FIELDS));
+  return terms.join(" AND ");
+}
+
+export type FdicBranchDeposit = {
+  cert: number | null;
+  institutionName: string | null;
+  branchNumber: number | null;
+  branchName: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  address: string | null;
+  depositsUSD: number | null;
+  year: number | null;
+  id: string | null;
+};
+
+function mapBranchDeposit(rec: Record<string, unknown>): FdicBranchDeposit {
+  return {
+    cert: num(rec.CERT),
+    institutionName: str(rec.NAMEFULL),
+    branchNumber: num(rec.BRNUM),
+    branchName: str(rec.NAMEBR),
+    city: str(rec.CITYBR),
+    state: str(rec.STALPBR),
+    zip: str(rec.ZIPBR),
+    address: str(rec.ADDRESBR),
+    // ★P3 — DEPSUMBR is $thousands → whole USD ×1000 (null-guard BEFORE the multiply);
+    // a GENUINE 0 stays 0, an absent value → null (never 0).
+    depositsUSD: thousandsToUsd(rec.DEPSUMBR),
+    year: num(rec.YEAR),
+    id: str(rec.ID),
+  };
+}
+
+// ─── /sod disclosure notes ─────────────────────────────────────────
+const SOD_UNITS_NOTE =
+  "depositsUSD is FDIC's DEPSUMBR (branch-office deposits), published in $thousands and normalized here to whole USD (×1,000). A real 0 stays 0; an absent value is null (never 0).";
+const SOD_SNAPSHOT_NOTE =
+  "Summary of Deposits is an ANNUAL June-30 branch-office snapshot (a DISTINCT index, far less fresh than the quarterly /financials data). Branch name/city/address are shown per row but the endpoint filters only by cert/state/year — resolve a bank's CERT via fdic_search_institutions.";
+const SOD_EMPTY_NOTE =
+  "No Summary-of-Deposits branch records match — the bank may report no branches for this year, or the CERT/state/year filter may not match; SOD is an annual June-30 snapshot. Confirm the CERT via fdic_search_institutions.";
+
+/**
+ * FDIC branch-deposit footprint (`/banks/sod`, Summary of Deposits). Structured inputs
+ * (all optional, AND-combined; ≥1 recommended): `cert` (→ CERT), `state` (→ STALPBR,
+ * ★C118-quoted), `year` (→ YEAR), plus `limit`/`offset`/`sortBy` (allowlist
+ * {YEAR,DEPSUMBR}, default YEAR)/`sortOrder` (default DESC → newest snapshot first).
+ * Consumes the IDENTICAL fetch → 3-envelope guard → pagination machinery as tools 1–6.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1; live: CERT 10004 →
+ * 74, STALPBR:"OR" → 31093); the 3-envelope drift-guard makes the ONLY honest empty
+ * `200 + total:0 + data:[]`, everything else THROWS (P2); ★the /sod false-empty landmine
+ * (a bad filter field → silent total:0) is neutralized by the S1 allowlist-by-
+ * construction; DEPSUMBR is $thousands → whole USD ×1000 null-never-0 (P3; a genuine 0
+ * stays 0, absent → null); a projected field absent from all records → fieldsUnavailable
+ * (B); the DISTINCT annual snapshot build time is disclosed.
+ */
+export async function branchDeposits(args: {
+  cert?: number;
+  state?: string;
+  year?: number;
+  limit?: number;
+  offset?: number;
+  sortBy?: string;
+  sortOrder?: string;
+}): Promise<MetaBundle> {
+  const limit = args.limit ?? 100;
+  const offset = args.offset ?? 0;
+  // Default YEAR DESC (newest snapshot first) when the server's Zod default did not
+  // supply one (defensive — the server always defaults sortBy=YEAR/DESC).
+  const sort = sortParams(args.sortBy ?? "YEAR", args.sortOrder ?? "DESC", SOD_SORT_FIELDS, "sod");
+
+  const filters = buildSodFilters({ cert: args.cert, state: args.state, year: args.year });
+
+  const params = new URLSearchParams();
+  if (filters) params.set("filters", filters);
+  params.set("fields", SOD_FIELDS);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  if (sort.sort_by) {
+    params.set("sort_by", sort.sort_by);
+    params.set("sort_order", sort.sort_order as string);
+  }
+  params.set("format", "json");
+
+  const body = await getFdic(ENDPOINT_SOD, params);
+  const env = parseEnvelope(body);
+  const records = env.records.map(mapBranchDeposit);
+  const returned = records.length;
+  const totalAvailable = env.totalAvailable;
+  const hasMore = offset + returned < totalAvailable;
+  const nextOffset = hasMore ? offset + returned : null;
+
+  const filtersApplied: string[] = [];
+  if (args.cert !== undefined) filtersApplied.push("cert");
+  if (args.state !== undefined) filtersApplied.push("state");
+  if (args.year !== undefined) filtersApplied.push("year");
+  if (sort.sort_by) filtersApplied.push("sort");
+
+  const notes: string[] = [
+    freshnessNote(env.indexName, env.indexCreated),
+    SOD_UNITS_NOTE,
+    SOD_SNAPSHOT_NOTE,
+  ];
+  if (totalAvailable === 0) notes.push(SOD_EMPTY_NOTE);
+  const fu = fieldsUnavailable(env.records, SOD_PROJECTION);
+  if (fu.length > 0) {
+    notes.push(
+      `Requested field(s) ${fu.join(", ")} were not returned by FDIC for any record — possible schema drift / rename.`,
+    );
+  }
+
+  return withMeta(
+    { branches: records },
+    {
+      source: "api.fdic.gov/banks/sod (BankFind Summary of Deposits, keyless)",
+      keylessMode: true,
+      returned,
+      totalAvailable,
+      filtersApplied,
+      filtersDropped: [],
+      fieldsUnavailable: fu,
+      pagination: { offset, limit, hasMore, nextOffset },
+      notes,
+    } satisfies Partial<ResponseMeta>,
+  );
+}
