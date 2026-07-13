@@ -5672,6 +5672,43 @@ async function testCalcBenchmarkDistribution() {
     ok("30e degraded read ⇒ currentRate.min still exact (100)", d.currentRate.min === 100, JSON.stringify(d.currentRate));
     ok("30e degraded read ⇒ _meta.truncated === true (not the full picture)", res.meta.truncated === true, JSON.stringify(res.meta.truncated));
   });
+
+  // (f) D2 (W3-5) — SHAPE-DRIFT guard on the CALC envelope. A valid-JSON 200 with a
+  //     DRIFTED shape (hits:null, or hits.hits absent) must THROW schema_drift rather
+  //     than being silently mapped to a fabricated-empty distribution. A GENUINE
+  //     zero-results response (a WELL-FORMED envelope: hits.hits:[] + total.value 0)
+  //     must STAY an honest empty (returned 0, complete), NOT a throw. NON-VACUITY:
+  //     removing the assertCalcEnvelope() calls makes the two drift cases return an
+  //     empty distribution instead of throwing ⇒ the two throw-assertions go RED.
+  const calcDriftNullHits = (u) => (/\/calc\/v3\/api\/ceilingrates\//.test(u)
+    ? mockResponse({ status: 200, json: { hits: null } })
+    : failClosed()());
+  await withFetch(calcDriftNullHits, async () => {
+    const { threw, error } = await expectThrow(() => benchmarkLaborRates({ laborCategory: "Widget Analyst" }));
+    ok("30f drift hits:null ⇒ THROWS schema_drift (NOT a fabricated-empty distribution)",
+      threw && error?.toolError?.kind === "schema_drift" && error?.toolError?.retryable === false, JSON.stringify(error?.toolError));
+  });
+  const calcDriftNoHitsArray = (u) => (/\/calc\/v3\/api\/ceilingrates\//.test(u)
+    ? mockResponse({ status: 200, json: { hits: { total: { value: 5, relation: "eq" } } } }) // hits.hits ABSENT
+    : failClosed()());
+  await withFetch(calcDriftNoHitsArray, async () => {
+    const { threw, error } = await expectThrow(() => benchmarkLaborRates({ laborCategory: "Widget Analyst" }));
+    ok("30f drift hits.hits absent (present total, no rows array) ⇒ THROWS schema_drift (envelope changed, never a silent empty)",
+      threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError));
+  });
+  const calcGenuineZero = (u) => (/\/calc\/v3\/api\/ceilingrates\//.test(u)
+    ? mockResponse({ status: 200, json: { hits: { total: { value: 0, relation: "eq" }, hits: [] } } })
+    : failClosed()());
+  await withFetch(calcGenuineZero, async () => {
+    const { threw, value: res } = await expectThrow(() => benchmarkLaborRates({ laborCategory: "Nonexistent Category" }));
+    ok("30f GENUINE zero (well-formed hits.hits:[] + total 0) ⇒ HONEST empty, NOT a throw: matchCount 0, returned 0",
+      threw === false && res?.data?.matchCount === 0 && res?.meta?.returned === 0, JSON.stringify(threw ? "THREW" : { matchCount: res?.data?.matchCount, returned: res?.meta?.returned }));
+    if (!threw) {
+      const m = buildMeta(res.meta);
+      ok("30f GENUINE zero ⇒ totalAvailable 0 + truncated false + complete true (an honest no-match, DISTINCT from a shape drift)",
+        m.totalAvailable === 0 && m.truncated === false && m.complete === true, JSON.stringify(m));
+    }
+  });
 }
 
 // §31: usas_search_recompetes bounded-scan / early-stop / truncation truthfulness.
@@ -6514,6 +6551,46 @@ async function testEdgarHonesty() {
     const rLatest = await runTool("edgar_company_facts", { cikOrTicker: "320193", concepts: ["Assets"], latest: true }, sam);
     ok("41f latest=true ⇒ Assets reduced to its single most-recent point (end 2024-09-28)",
       rLatest.data.concepts[0].points.length === 1 && rLatest.data.concepts[0].points[0].end === "2024-09-28", JSON.stringify(rLatest.data.concepts[0].points));
+  });
+
+  // (f2) D1 (W3-5) — a DURATION concept (Revenues) with TWO points sharing the same
+  // `end` but DIFFERENT `start` (a 3-month Q4 quarter AND the 12-month FY year) MUST
+  // emit `start` on every point (so the quarter and the year stay distinguishable) +
+  // fire a same-end-multiple-duration note. An INSTANT concept (Assets) carries
+  // start:null. NON-VACUITY: dropping `start: str(p.start)` from the companyFacts
+  // mapper makes every point.start undefined ⇒ both the distinct-start AND the note
+  // assertions go RED (a Q4 figure would become indistinguishable from the full year).
+  const factsDocDuration = {
+    cik: 320193, entityName: "Apple Inc.",
+    facts: {
+      "us-gaap": {
+        Revenues: { label: "Revenues", units: { USD: [
+          { start: "2023-07-02", end: "2023-09-30", val: 89498000000, accn: "r1", fy: 2023, fp: "Q4", form: "10-K", filed: "2023-11-03" }, // 3-month quarter
+          { start: "2022-10-01", end: "2023-09-30", val: 383285000000, accn: "r2", fy: 2023, fp: "FY", form: "10-K", filed: "2023-11-03" }, // 12-month year — SAME end
+        ] } },
+        Assets: { label: "Assets", units: { USD: [
+          { end: "2023-09-30", val: 352583000000, accn: "a1", fy: 2023, fp: "FY", form: "10-K", filed: "2023-11-03" }, // INSTANT — no `start`
+        ] } },
+      },
+    },
+  };
+  _clearCache(); // isolate from the memoized facts doc of the 41f block (same CIK 320193).
+  await withFetch((u) => (isEdgarFacts(u) ? mockResponse({ status: 200, json: factsDocDuration }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_facts", { cikOrTicker: "320193", concepts: ["Revenues", "Assets"], unit: "USD" }, sam);
+    const byName = Object.fromEntries(r.data.concepts.map((c) => [c.concept, c]));
+    const rev = byName.Revenues.points;
+    ok("41f2 D1: DURATION concept emits `start` on every point — the two same-`end` points carry DISTINCT starts (2023-07-02 quarter vs 2022-10-01 year); RED if the mapper drops start",
+      rev.length === 2 && rev.every((p) => typeof p.start === "string") && rev[0].start !== rev[1].start && rev.every((p) => p.end === "2023-09-30"), JSON.stringify(rev));
+    ok("41f2 D1: the Q4 quarter (89.498B) and the FY year (383.285B) coexist as SEPARATE (start,end)-keyed points (never collapsed to one value)",
+      rev.some((p) => p.val === 89498000000) && rev.some((p) => p.val === 383285000000), JSON.stringify(rev.map((p) => ({ start: p.start, val: p.val }))));
+    ok("41f2 D1: an INSTANT concept (Assets) carries start:null (no fabricated period-start on a balance-sheet fact)",
+      byName.Assets.points[0].start === null, JSON.stringify(byName.Assets.points[0]));
+    ok("41f2 D1: a note FLAGS the same-end multiple-duration coexistence for Revenues (so a consumer never reads Q4 as the full year)",
+      buildMeta(r.meta).notes.some((n) => /Revenues/.test(n) && /(MULTIPLE durations|full year|Q4)/i.test(n)), JSON.stringify(buildMeta(r.meta).notes));
+    // latest=true ⇒ the single selected point still carries its `start` (a duration value is never presented unqualified, D1 guidance (4)).
+    const rLatestDur = await runTool("edgar_company_facts", { cikOrTicker: "320193", concepts: ["Revenues"], unit: "USD", latest: true }, sam);
+    ok("41f2 D1: latest=true ⇒ the one selected Revenues point STILL carries a non-null `start` (duration never unqualified)",
+      rLatestDur.data.concepts[0].points.length === 1 && typeof rLatestDur.data.concepts[0].points[0].start === "string", JSON.stringify(rLatestDur.data.concepts[0].points));
   });
 
   // (g) FTS — totalAvailable = hits.total.value (NOT hits.length); F7 filingIndexUrl from adsh.

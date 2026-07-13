@@ -16,8 +16,14 @@
  * The defining constraint of the CALC tool: it returns a DISTRIBUTION of
  * awarded CEILING (catalog) rates that are FULLY BURDENED — never a single
  * "the rate". Its total count SATURATES at 10000 (relation:"gte") for broad
- * queries and its page size is CAPPED at 20 rows server-side, so all
- * distribution stats are computed over the fetched sample and disclosed as such.
+ * queries. It honors page_size up to at least 200 (we request 100 rows/page),
+ * and its rows are GLOBALLY sorted ASCENDING by current_price. So when the exact
+ * total is KNOWN we read the true min/median/max at the quantile RANKS of that
+ * sorted index (exact stats over all matches, from a few targeted pages — NOT a
+ * leading subsample); only when the count is SATURATED (true total unknown) do we
+ * fall back to a leading-rows sample and DISCLOSE median/max as a downward-biased
+ * lower bound. A drifted CALC envelope (no hits{} / hits.hits not an array / no
+ * numeric total) THROWS schema_drift rather than fabricating an empty distribution.
  */
 export declare function searchWageDeterminations(args: {
     coverage: string;
@@ -67,7 +73,7 @@ export declare function benchmarkLaborRates(args: {
     maxSamplePages?: number;
 }): Promise<import("./meta.js").MetaBundle<{
     laborCategory: string;
-    matcher: "q" | "search";
+    matcher: "search" | "q";
     fuzzy: boolean;
     matchCount: number;
     matchCountSaturated: boolean;
