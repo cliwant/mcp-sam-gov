@@ -132,8 +132,11 @@ const LIST_LABEL: Record<OfacListKey, "SDN" | "Consolidated"> = {
 };
 
 /** Column counts: primary (SDN/CONS_PRIM) = 12; alt (ALT/CONS_ALT) = 5. */
-const PRIMARY_COLS = 12; // maxCol 11
-const ALT_COLS = 5; // maxCol 4
+const PRIMARY_COLS = 12;
+const ALT_COLS = 5;
+
+/** ent_num (column 0) is a non-negative integer by OFAC's spec — the shape anchor. */
+const ENT_NUM_RE = /^\d+$/;
 
 // ─── ★ H1 — the mandatory never-"clear" caveat (verbatim constant) ──────────
 
@@ -273,11 +276,22 @@ function isEmptyRecord(fields: string[]): boolean {
  * ★ M6 — assemble physical lines into LOGICAL CSV records, correctly re-joining
  * a record whose quoted field (Remarks) contains a newline. Replicates
  * gsa-csv.ts's PRIVATE `makeRecordAssembler` using `parseRecordFields`' returned
- * `inQuotes` flag (NO gsa-csv edit). Empty content rows are skipped (B1). Passes
- * an explicit `maxCol` (11 primary / 4 alt).
+ * `inQuotes` flag (NO gsa-csv edit). Empty content rows are skipped (B1).
+ *
+ * ★ SYMMETRIC-DRIFT — we pass `maxCol = cols` (12 primary / 5 alt), NOT `cols-1`.
+ * `parseRecordFields` STOPS STORING fields past `maxCol` (while still scanning for
+ * quote parity), so `cols-1` would CAP a too-many-columns row at exactly `cols`
+ * stored fields — silently PASSING the downstream `rec.length !== cols` check on a
+ * column-ADDITION drift (e.g. OFAC prepends a `record_id`: every row → cols+1
+ * fields, SDN_Name shifts, and every real party screens as no_name_match = a
+ * blanket false CLEAR). With `maxCol = cols`, a genuine `cols`-field row still
+ * materializes exactly `cols` fields, but a >`cols`-field row materializes
+ * `cols+1` fields → trips the drift check → schema_drift. The guard is now
+ * symmetric (too-few AND too-many both THROW), honoring the "exactly N columns or
+ * THROW" contract in BOTH directions.
  */
 function assembleRecords(body: string, cols: number): string[][] {
-  const maxCol = cols - 1;
+  const maxCol = cols;
   const text = stripTrailingSub(body);
   const lines = text.split("\n");
   const records: string[][] = [];
@@ -376,10 +390,21 @@ export function parsePrimaryList(
     if (rec.length !== PRIMARY_COLS) {
       throw driftError(
         label,
-        `OFAC ${label} content row ${rowNo} has ${rec.length} column(s), expected ${PRIMARY_COLS} — the download was truncated or the file schema drifted. Refusing to screen a drifted list (a near-empty parse must never read as a clear).`,
+        `OFAC ${label} content row ${rowNo} has ${rec.length} column(s), expected exactly ${PRIMARY_COLS} — the download was truncated (too few) or the file schema drifted (a column added/removed, too many). Refusing to screen a drifted list (a truncated OR column-shifted parse must never read as a clear).`,
       );
     }
-    const entNum = cell(rec[0]) ?? "";
+    // ★ Belt-and-suspenders shape assert: ent_num (column 0) is a non-negative
+    // integer by OFAC's spec. A non-numeric column 0 on a genuine content row
+    // means a leading-column INSERTION/REPLACEMENT shifted every field (which can
+    // otherwise keep the field COUNT at `cols`) → schema_drift, never a false clear.
+    const entRaw = (rec[0] ?? "").trim();
+    if (!ENT_NUM_RE.test(entRaw)) {
+      throw driftError(
+        label,
+        `OFAC ${label} content row ${rowNo} has a non-numeric ent_num ${JSON.stringify(entRaw)} in column 0 — the file schema drifted (a leading-column insertion/replacement shifts SDN_Name off index 1). Refusing to screen (a shifted parse must never read as a clear).`,
+      );
+    }
+    const entNum = entRaw;
     const name = cell(rec[1]);
     if (name === null) continue; // a nameless row is not screenable
     const { type, inferred } = mapType(cell(rec[2]));
@@ -418,13 +443,22 @@ export function parseAltList(
     if (rec.length !== ALT_COLS) {
       throw driftError(
         label,
-        `OFAC ${label} content row ${rowNo} has ${rec.length} column(s), expected ${ALT_COLS} — the download was truncated or the file schema drifted. Refusing to screen a drifted alias list (missing an AKA would be a false clear).`,
+        `OFAC ${label} content row ${rowNo} has ${rec.length} column(s), expected exactly ${ALT_COLS} — the download was truncated (too few) or the file schema drifted (a column added/removed, too many). Refusing to screen a drifted alias list (a truncated OR column-shifted parse would miss an AKA = a false clear).`,
+      );
+    }
+    // ★ Shape assert (see parsePrimaryList): ent_num (column 0) is a non-negative
+    // integer; a non-numeric column 0 means a leading-column shift → schema_drift.
+    const entRaw = (rec[0] ?? "").trim();
+    if (!ENT_NUM_RE.test(entRaw)) {
+      throw driftError(
+        label,
+        `OFAC ${label} content row ${rowNo} has a non-numeric ent_num ${JSON.stringify(entRaw)} in column 0 — the alias file schema drifted (a leading-column shift). Refusing to screen (a shifted parse must never read as a clear).`,
       );
     }
     const name = cell(rec[3]);
     if (name === null) continue;
     out.push({
-      entNum: cell(rec[0]) ?? "",
+      entNum: entRaw,
       altNum: cell(rec[1]),
       akaType: mapAltType(cell(rec[2])),
       name,

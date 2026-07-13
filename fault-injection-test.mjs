@@ -13794,6 +13794,29 @@ async function testOfacScreen() {
     ok("63ofac-B2 Remarks a.k.a. 'BNC' mined into remarksAkas (the flagship false-CLEAR blocker)", e306.remarksAkas.some((a) => a.name === "BNC" && a.akaType === "aka"), JSON.stringify(e306.remarksAkas));
   }
 
+  // ★ SYMMETRIC column-drift (coordinator FIX-BACK) — a column-ADDITION drift MUST
+  //   THROW, not silently truncate to a blanket false CLEAR. The prior maxCol=cols-1
+  //   capped a too-many-columns row at exactly `cols` stored fields → it PASSED the
+  //   `=== cols` check → SDN_Name shifted → every real party screened no_name_match.
+  {
+    // (a) a 13-column primary row with a NUMERIC prepended record_id (999999) ⇒
+    //     schema_drift. A numeric leading column would PASS the ent_num belt, so
+    //     ONLY the symmetric maxCol=cols count check catches it — this ISOLATES the
+    //     maxCol fix (reverting to cols-1 ⇒ a silent shifted parse = false CLEAR ⇒ RED).
+    const r13 = await expectThrow(() => ofacParsePrimary("999999," + sdnRow(306, "BANCO NACIONAL DE CUBA"), "SDN", "ofac:sdn"));
+    ok("63ofac ★column-ADDITION drift (NUMERIC prepend, ent_num belt does NOT catch it): 13-col SDN row ⇒ schema_drift (NOT a silent truncate-to-12 = blanket false CLEAR)", r13.threw && r13.error?.toolError?.kind === "schema_drift", JSON.stringify(r13.error?.toolError?.kind));
+    // (b) a legit 12-col row whose QUOTED Remarks contains a comma ⇒ still exactly 12, NO false "too many".
+    const commaRem = ofacParsePrimary(sdnRow(306, "BANCO NACIONAL DE CUBA", { remarks: `"a.k.a. 'BNC'; DOB 01 Jan 1970, Havana, Cuba."` }), "SDN", "ofac:sdn");
+    ok("63ofac ★a quoted-comma Remarks (a legit 12-col row) ⇒ EXACTLY 1 record, no false 'too many' (maxCol=cols does not regress on real-shape rows)", commaRem.length === 1 && commaRem[0].remarks.includes("Havana"), JSON.stringify({ n: commaRem.length, r: commaRem[0]?.remarks }));
+    // (c) a 12-col row whose column 0 is NON-NUMERIC (a same-count leading-column shift) ⇒ schema_drift (the ent_num belt).
+    const nonNum = ["ABC", q("SHIFTED NAME"), DASH, q("CUBA"), DASH, DASH, DASH, DASH, DASH, DASH, DASH, "-0-"].join(",");
+    const rNum = await expectThrow(() => ofacParsePrimary(nonNum, "SDN", "ofac:sdn"));
+    ok("63ofac ★non-numeric ent_num (col 0 'ABC', still 12 cols) ⇒ schema_drift (belt catches a same-count leading-column shift)", rNum.threw && rNum.error?.toolError?.kind === "schema_drift", JSON.stringify(rNum.error?.toolError?.kind));
+    // (d) a 6-column ALT row (NUMERIC prepend ⇒ isolates the maxCol fix on ALT) ⇒ schema_drift.
+    const rAlt = await expectThrow(() => ofacParseAlt("999999," + altRow(306, 1, "aka", "NATIONAL BANK OF CUBA"), "SDN", "ofac:alt"));
+    ok("63ofac ★column-ADDITION drift on ALT (6-col alias row) ⇒ schema_drift (a missed AKA would be a false CLEAR)", rAlt.threw && rAlt.error?.toolError?.kind === "schema_drift", JSON.stringify(rAlt.error?.toolError?.kind));
+  }
+
   // S1 — headerless: the FIRST physical row (AEROCARIBBEAN) is a real entity, screenable.
   {
     const recs = ofacParsePrimary([sdnRow(36, "AEROCARIBBEAN AIRLINES"), sdnRow(37, "SECOND CO")].join("\r\n"), "SDN", "ofac:sdn");
@@ -13920,6 +13943,24 @@ async function testOfacScreen() {
   }, async () => {
     const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "BANCO NACIONAL DE CUBA", list: "sdn" }, sam));
     ok("63ofac-M1 a 2-row SDN (below 10,000 floor) ⇒ schema_drift (a truncated list NEVER reads as a clear)", threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // ★ End-to-end column-ADDITION drift (the reproduced blanket false CLEAR): every
+  //   SDN row gains a leading column ⇒ the SCREEN of a truly-listed party THROWS
+  //   schema_drift, NEVER no_name_match (the exact defect FIX-BACK closes).
+  _resetOfacCacheForTests();
+  await withFetch((u) => {
+    const k = ofacKey(u);
+    if (k === "sdn") {
+      // Prepend a NUMERIC record_id column to every row ⇒ 13 fields each; a numeric
+      // col 0 passes the ent_num belt, so ONLY the maxCol=cols count check catches it.
+      const drifted = BODIES.sdn.split("\r\n").map((ln) => (ln === "\x1a" || ln === "" ? ln : "999999," + ln)).join("\r\n");
+      return spied(strToBytes(drifted), { url: goodUrl("sdn") }, { reads: 0 });
+    }
+    return validHandler({ reads: 0 })(u);
+  }, async () => {
+    const { threw, error } = await expectThrow(() => runTool("ofac_screen_entity", { name: "BANCO NACIONAL DE CUBA", list: "sdn" }, sam));
+    ok("63ofac ★(runTool) a column-ADDITION-drifted SDN + a TRULY-LISTED party ⇒ THROWS schema_drift, NEVER no_name_match (the blanket false CLEAR the fix closes)", threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
   });
 
   // M1 — a legitimate ~200-row CONS_PRIM (≥150 floor) does NOT trip the drift floor.
