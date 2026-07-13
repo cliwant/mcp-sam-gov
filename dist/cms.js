@@ -367,7 +367,20 @@ export async function queryDataset(args) {
         hasMore = false; // S1 — results:false is a count/schema mode; no rows to page.
         notes.push("results:false is a COUNT/SCHEMA-discovery mode: no rows are returned and pagination is disabled (hasMore:false). To page rows, set results:true with limit/offset. totalAvailable is the EXACT match count and `fields` describes every column.");
     }
-    const nextOffset = hasMore ? offset + returned : null;
+    // W3-6 (dogfood): the raw next offset (`offset + returned`) can exceed
+    // CMS_MAX_OFFSET (the deliberate reach cap validated at the top of this fn). If
+    // it does, a follow-up call with that offset would be HARD-REJECTED as
+    // invalid_input — so advertising it as `nextOffset` is a false promise. Mirror
+    // the edgar-FTS / regulations-dockets ceiling doctrine: keep `hasMore` honest
+    // (more matches DO exist upstream) but set `nextOffset` to null (not
+    // page-reachable via this tool) + a disclosing note. A genuine non-ceiling
+    // next page stays reachable.
+    const rawNextOffset = offset + returned;
+    const nextReachable = rawNextOffset <= CMS_MAX_OFFSET;
+    const nextOffset = hasMore && nextReachable ? rawNextOffset : null;
+    if (hasMore && !nextReachable) {
+        notes.push(`More matches exist upstream, but the next page (offset ${rawNextOffset}) exceeds this vetting tool's offset ≤ ${CMS_MAX_OFFSET} reach cap — nextOffset is null (not page-reachable here; a follow-up at that offset would be rejected as invalid_input). Narrow your conditions to reach deeper matches.`);
+    }
     notes.push(CMS_OPEN_PAYMENTS_NOT_DETERMINATION_NOTE, CMS_OPEN_PAYMENTS_REACH_CAP_NOTE);
     const meta = {
         source: SOURCE,
