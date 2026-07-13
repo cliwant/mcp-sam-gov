@@ -1786,6 +1786,121 @@
     }
   },
   {
+    "name": "nppes_lookup_provider",
+    "description": "Keyless CMS/HHS NPPES NPI Registry lookup — the authoritative PUBLIC registry of every US healthcare provider (individual NPI-1 + organization NPI-2), for VA/HHS/CMS subcontractor/provider/teaming due-diligence (validate an NPI, confirm taxonomy/specialty, enumeration status, practice state, org/name match). Host npiregistry.cms.hhs.gov/api (version=2.1). Mode is inferred from `number` (no mode flag). EXACT-NPI mode (`number` given): the NPI is CMS-Luhn-validated client-side (Luhn over 80840+first-9) ⇒ a typo'd NPI is invalid_input, NEVER a fake 'does not exist'; ★the wire query carries `number` (+version) ALONE — any co-supplied filter (last_name/state/…) is DROPPED from the wire and checked CLIENT-SIDE (disclosed in data.filterMatch:{field:bool} + data.filtersDropped), because NPPES AND-combines a number with filters and a mismatch would falsely zero a real active provider into found:false. SEARCH mode: required-one of { first_name, last_name, organization_name, taxonomy_description, city, postal_code } (state + enumeration_type are REFINERS ONLY — rejected alone); a trailing '*' wildcard on a name/org field needs ≥2 leading literal chars. Returns EXACT-mode { found, provider:{ number, enumerationType, active, status, basic{…individual OR org fields, null-never-fabricated…}, taxonomies[{code,desc,primary,state,license,taxonomyGroup}], addresses[{purpose,address1,city,state,postalCode,telephone,fax,countryCode}], practiceLocations[…same, SEPARATE from addresses], identifiers[], otherNames[], endpoints[], createdEpoch, lastUpdatedEpoch }, filterMatch? } OR SEARCH-mode { providers:[…] } + honest _meta. HONESTY: active = basic.status==='A' (a deactivated/absent NPI is NOT active); epochs are ms numeric STRINGS → number|null (null-never-0); addresses[] and practiceLocations[] are kept SEPARATE (a provider can practice in a state that appears ONLY in practiceLocations); NPPES exposes NO match total, so a full page ⇒ totalAvailable is a disclosed LOWER BOUND (totalIsLowerBound) + a ~1,200-row-per-query reach cap (limit ≤ 200, skip ≤ 1,000 — OUR policy, a PER-QUERY cap only; cross-query enumeration is not architecturally prevented). A genuine {result_count:0} ⇒ honest found:false/empty; a {Errors:[…]} 200 body (no results key) ⇒ THROWS invalid_input (never a fake empty); any 4xx/5xx/timeout/off-host-redirect ⇒ THROWS; result_count !== results.length ⇒ schema_drift. ★NOT a fitness/exclusion/licensure/sanctions determination — cross-check SAM exclusions + OFAC; individual (NPI-1) records may surface personal/home addresses + phone/fax verbatim with NO enrichment. The caveat + reach-cap disclosure ride EVERY response.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "number": {
+          "type": "string",
+          "description": "Exact NPI — 10 digits (^\\d{10}$). Triggers EXACT-NPI mode: the wire query carries number (+version) ALONE (any co-supplied filter is DROPPED from the wire and checked client-side, disclosed in data.filterMatch — NPPES AND-combines a number with filters, so a mismatched filter would falsely zero a real active provider). Also client-side CMS-Luhn-validated (Luhn over 80840+first-9): a typo'd NPI ⇒ invalid_input, NEVER a fake 'does not exist'. e.g. '1104130236'."
+        },
+        "enumeration_type": {
+          "type": "string",
+          "enum": [
+            "NPI-1",
+            "NPI-2"
+          ],
+          "description": "REFINER only (NPI-1 = individual, NPI-2 = organization). Never sufficient alone (⇒ invalid_input) — must accompany a required criterion."
+        },
+        "first_name": {
+          "type": "string",
+          "description": "Individual provider first name (a required-one criterion). A trailing '*' wildcard needs ≥2 leading literal chars. e.g. 'John'."
+        },
+        "last_name": {
+          "type": "string",
+          "description": "Individual provider last name (a required-one criterion). Trailing '*' wildcard: ≥2 leading chars. e.g. 'Smith'."
+        },
+        "organization_name": {
+          "type": "string",
+          "description": "Organization (NPI-2) name (a required-one criterion). Trailing '*' wildcard: ≥2 leading chars. e.g. 'Mayo Clinic'."
+        },
+        "taxonomy_description": {
+          "type": "string",
+          "description": "Provider taxonomy/specialty description (a required-one criterion). e.g. 'Internal Medicine'."
+        },
+        "city": {
+          "type": "string",
+          "description": "Address city (a required-one criterion). e.g. 'Baltimore'."
+        },
+        "postal_code": {
+          "type": "string",
+          "description": "Address postal/ZIP code (a required-one criterion; a prefix like '212' is allowed). e.g. '21218'."
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "AL",
+            "AK",
+            "AZ",
+            "AR",
+            "CA",
+            "CO",
+            "CT",
+            "DE",
+            "DC",
+            "FL",
+            "GA",
+            "HI",
+            "ID",
+            "IL",
+            "IN",
+            "IA",
+            "KS",
+            "KY",
+            "LA",
+            "ME",
+            "MD",
+            "MA",
+            "MI",
+            "MN",
+            "MS",
+            "MO",
+            "MT",
+            "NE",
+            "NV",
+            "NH",
+            "NJ",
+            "NM",
+            "NY",
+            "NC",
+            "ND",
+            "OH",
+            "OK",
+            "OR",
+            "PA",
+            "RI",
+            "SC",
+            "SD",
+            "TN",
+            "TX",
+            "UT",
+            "VT",
+            "VA",
+            "WA",
+            "WV",
+            "WI",
+            "WY",
+            "AS",
+            "GU",
+            "MP",
+            "PR",
+            "VI"
+          ],
+          "description": "US state/territory 2-letter USPS code — a REFINER only (never sufficient alone ⇒ invalid_input; NPPES rejects 'state' as the sole criterion). e.g. 'MD'."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Providers per page, 1..200, default 10. NPPES silently clamps >200; this tool rejects it loudly. Search mode only."
+        },
+        "skip": {
+          "type": "number",
+          "description": "0-based pagination offset, 0..1000 (default 0). ★POLICY cap: this vetting tool reaches at most the first ~1,200 matches/query (a deliberate targeted-lookup boundary — NPPES itself no longer enforces a skip ceiling); skip > 1000 ⇒ invalid_input. Search mode only."
+        }
+      }
+    }
+  },
+  {
     "name": "nsf_get_award",
     "description": "Fetch ONE NSF award by its numeric award id (keyless; api.nsf.gov/services/v1/awards.json). Input `awardId` (all-digit, 5..9 digits — NSF ids are 7-digit numeric, live-verified; numeric-only is injection-safe). Returns { found, award:{ …the FULL curated record INCLUDING abstractText… } } + honest _meta. A nonexistent id ⇒ a genuine empty (totalCount:0) ⇒ found:false / award:null (NEVER a fabricated record). HONESTY: NSF Awards are RESEARCH GRANTS, NOT procurement contracts (ueiNumber joins to SAM/USAspending but the award nature differs — disclosed every response); fundsObligatedAmt/estimatedTotalAmt arrive as STRINGS → number|null (a real $0 is 0, absent is null); a serviceNotification at HTTP 200 ⇒ invalid_input/upstream_unavailable THROWS; an outage/5xx ⇒ THROWS; a 200 body that isn't {response:{award,metadata}} ⇒ schema_drift (never a fabricated record).",
     "inputSchema": {

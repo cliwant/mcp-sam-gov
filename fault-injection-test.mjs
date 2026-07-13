@@ -118,6 +118,14 @@ import {
   resolvedNvdKey,
   _resetNvdCacheForTests,
 } from "./dist/nvd.js";
+import {
+  num as nppesNum,
+  lookupProvider as nppesLookup,
+  cmsLuhnValid as nppesLuhn,
+  NPPES_NOT_DETERMINATION_NOTE,
+  NPPES_REACH_CAP_NOTE,
+  NPPES_STATES,
+} from "./dist/nppes.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
@@ -13364,6 +13372,7 @@ async function main() {
   await testBlsHonesty();
   await testBlsOewsHonesty();
   await testOfacScreen();
+  await testNppesHonesty();
   await testNvdCveKev();
   await testClinicaltrialsHonesty();
   await testClinicaltrialsFacetHonesty();
@@ -13713,6 +13722,300 @@ async function testRegistryDispatchHonesty() {
     ok("39 sba_size_standard (runTool) unknown NAICS ⇒ found:false + threshold null + standardType 'unknown' (NEVER a fabricated standard)",
       missing.data.found === false && missing.data.threshold === null && missing.data.standardType === "unknown", JSON.stringify(missing.data));
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 65. nppes_lookup_provider (ADR-0036, source #27) — the keyless CMS/HHS NPPES
+//     NPI Registry healthcare-provider vetting lane. NON-VACUOUS, OFFLINE,
+//     deterministic. Each assertion pins a value + names the load-bearing
+//     mutation (ADR Q6 a–k) it turns RED:
+//       ★M1 exact-NPI mode sends `number` ALONE (a co-supplied filter dropped +
+//         client-side-annotated; a mismatched filter NEVER zeros found:true → false);
+//       ★S1 practiceLocations[] surfaced SEPARATE from addresses[] (a practice
+//         state that appears ONLY in practiceLocations is found);
+//       ★S2 required-one gate (state/enumeration_type refiners rejected alone;
+//         a <2-leading-char wildcard rejected);
+//       ★S3 caveat + reach-cap disclosure on EVERY response;
+//       (a) {Errors} body ⇒ THROW not fake-empty; (b) full page ⇒ lower-bound;
+//       (c) result_count!==len ⇒ driftError; (e) Luhn-invalid ⇒ invalid_input;
+//       (g) active from status==='A'; (h) epochs null-never-0; (j) arrays never
+//       flattened; (i) SSRF/charclass reject 0-fetch. + num-parity guard.
+// ══════════════════════════════════════════════════════════════════════════
+const NPPES_URL_RE = /npiregistry\.cms\.hhs\.gov\/api/;
+const isNppes = (u) => NPPES_URL_RE.test(u);
+const nppesBody = (result_count, results) => ({ result_count, results });
+const nppesMock = (body, status = 200) => (u) => (isNppes(u) ? mockResponse({ status, json: body }) : failClosed()());
+const nppesQuery = (calls) => new URL(calls.find((x) => isNppes(x.url)).url).searchParams;
+// A real-structured NPI-1 individual record: 2 taxonomies, LOCATION+MAILING
+// addresses (CA), a practiceLocations entry in a DIFFERENT state (NV — appears
+// ONLY here), endpoints, ms-string epochs. number 1104130236 is CMS-Luhn-valid.
+const NPPES_NPI1 = {
+  number: "1104130236",
+  enumeration_type: "NPI-1",
+  basic: {
+    first_name: "JANE", last_name: "AKEY", middle_name: "Q", credential: "MD",
+    sole_proprietor: "NO", sex: "F", status: "A",
+    enumeration_date: "2006-05-23", last_updated: "2010-07-30",
+    name_prefix: "Dr.", name_suffix: "--",
+  },
+  taxonomies: [
+    { code: "207R00000X", desc: "Internal Medicine", primary: true, state: "CA", license: "A12345", taxonomy_group: "" },
+    { code: "208D00000X", desc: "General Practice", primary: false, state: "CA", license: "B67890", taxonomy_group: "" },
+  ],
+  addresses: [
+    { address_purpose: "LOCATION", address_1: "100 MAIN ST", city: "LOS ANGELES", state: "CA", postal_code: "900010000", telephone_number: "310-555-0100", fax_number: "310-555-0101", country_code: "US", country_name: "United States", address_type: "DOM" },
+    { address_purpose: "MAILING", address_1: "PO BOX 1", city: "LOS ANGELES", state: "CA", postal_code: "900020000", country_code: "US" },
+  ],
+  practiceLocations: [
+    { address_purpose: "LOCATION", address_1: "200 CLINIC RD", city: "RENO", state: "NV", postal_code: "895010000", telephone_number: "775-555-0200", country_code: "US" },
+  ],
+  identifiers: [{ identifier: "X1", code: "05", desc: "MEDICAID", state: "CA", issuer: null }],
+  other_names: [{ organization_name: "AKEY MEDICAL", type: "3" }],
+  endpoints: [{ endpointType: "DIRECT", endpoint: "jane@direct.example" }],
+  created_epoch: "1280524286000",
+  last_updated_epoch: "1280524286000",
+};
+// A real-structured NPI-2 organization record.
+const NPPES_NPI2 = {
+  number: "1972660900",
+  enumeration_type: "NPI-2",
+  basic: {
+    organization_name: "MAYO CLINIC", organizational_subpart: "NO", status: "A",
+    authorized_official_first_name: "JOHN", authorized_official_last_name: "OFFICER",
+    authorized_official_middle_name: "P", authorized_official_title_or_position: "CFO",
+    authorized_official_telephone_number: "507-555-0300",
+    enumeration_date: "2007-01-10", last_updated: "2011-02-02",
+  },
+  taxonomies: [{ code: "282N00000X", desc: "General Acute Care Hospital", primary: true, state: "MN", license: "H1", taxonomy_group: "" }],
+  addresses: [{ address_purpose: "LOCATION", address_1: "200 1ST ST SW", city: "ROCHESTER", state: "MN", postal_code: "559050001", telephone_number: "507-555-0301", country_code: "US" }],
+  practiceLocations: [],
+  identifiers: [],
+  other_names: [],
+  endpoints: [],
+  created_epoch: "1168387200000",
+  last_updated_epoch: "1296604800000",
+};
+
+async function testNppesHonesty() {
+  section("65. nppes_lookup_provider (ADR-0036) — NPPES NPI Registry vetting: M1 number-only-wire + S1 practiceLocations + S2 gate + S3 caveats + Luhn/loud-fail/lower-bound/SSRF honesty (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (1) NPI-1 exact lookup: full mapping, S1 arrays, active/epochs (kills g/h/j). ──
+  await withFetch(nppesMock(nppesBody(1, [NPPES_NPI1])), async (calls) => {
+    const r = await runTool("nppes_lookup_provider", { number: "1104130236" }, sam);
+    const m = buildMeta(r.meta);
+    const p = r.data.provider;
+    ok("65-1 exact NPI ⇒ found:true, provider mapped (number/enumerationType NPI-1/active from status:'A')",
+      r.data.found === true && p.number === "1104130236" && p.enumerationType === "NPI-1" && p.active === true && p.status === "A",
+      JSON.stringify({ found: r.data.found, num: p.number, et: p.enumerationType, act: p.active }));
+    ok("65-1 [j] BOTH taxonomies preserved (never flattened to the primary) ⇒ 2 entries, primary flag intact",
+      p.taxonomies.length === 2 && p.taxonomies[0].code === "207R00000X" && p.taxonomies[0].primary === true && p.taxonomies[1].primary === false,
+      JSON.stringify(p.taxonomies.map((t) => [t.code, t.primary])));
+    ok("65-1 [j] LOCATION + MAILING addresses kept SEPARATE (never merged) ⇒ 2 entries with distinct purposes",
+      p.addresses.length === 2 && p.addresses[0].purpose === "LOCATION" && p.addresses[1].purpose === "MAILING" && p.addresses[0].city === "LOS ANGELES",
+      JSON.stringify(p.addresses.map((a) => [a.purpose, a.state])));
+    ok("65-1 ★S1 practiceLocations[] surfaced as its OWN array (SEPARATE from addresses[]) with the NV practice site — drop/merge it ⇒ RED (practice-state coverage lost)",
+      Array.isArray(p.practiceLocations) && p.practiceLocations.length === 1 && p.practiceLocations[0].state === "NV" && p.practiceLocations[0].city === "RENO",
+      JSON.stringify(p.practiceLocations));
+    ok("65-1 ★S1 endpoints[] + identifiers[] + otherNames[] surfaced verbatim (never dropped)",
+      p.endpoints.length === 1 && p.identifiers.length === 1 && p.otherNames.length === 1, JSON.stringify({ e: p.endpoints.length, i: p.identifiers.length, o: p.otherNames.length }));
+    ok("65-1 [h] epochs: ms numeric STRING '1280524286000' → number 1280524286000 (coerce.num, null-never-0)",
+      p.createdEpoch === 1280524286000 && p.lastUpdatedEpoch === 1280524286000, JSON.stringify({ c: p.createdEpoch, l: p.lastUpdatedEpoch }));
+    ok("65-1 ★S3 the not-a-fitness caveat + the reach-cap disclosure ride the response (kills k)",
+      m.notes.includes(NPPES_NOT_DETERMINATION_NOTE) && m.notes.includes(NPPES_REACH_CAP_NOTE), JSON.stringify(m.notes.length));
+    ok("65-1 pure number lookup (no co-filters) ⇒ filtersDropped empty, complete:true, no filterMatch",
+      m.filtersDropped.length === 0 && m.complete === true && r.data.filterMatch === undefined, JSON.stringify({ fd: m.filtersDropped, c: m.complete }));
+    const q = nppesQuery(calls);
+    ok("65-1 ★M1/SSRF wire query = number + version ONLY, host npiregistry.cms.hhs.gov, redirect:'error'",
+      q.get("number") === "1104130236" && q.get("version") === "2.1" && new URL(calls.find((x) => isNppes(x.url)).url).hostname === "npiregistry.cms.hhs.gov" && calls.find((x) => isNppes(x.url)).init.redirect === "error",
+      JSON.stringify([...q.keys()]));
+  });
+
+  // ── (2) ★M1 — exact NPI + MISMATCHED co-filters ⇒ found:true FROM NUMBER ALONE,
+  //    co-filters dropped from the wire + client-side-annotated (NEVER found:false). ──
+  await withFetch(nppesMock(nppesBody(1, [NPPES_NPI1])), async (calls) => {
+    const r = await runTool("nppes_lookup_provider", { number: "1104130236", last_name: "Zztypo", state: "NY" }, sam);
+    const m = buildMeta(r.meta);
+    ok("65-2 ★M1 number + mismatched last_name/state ⇒ found:true (a real active provider is NEVER zeroed into found:false by a co-filter) — the whole reason the wire carries number alone",
+      r.data.found === true && r.data.provider.number === "1104130236", JSON.stringify({ found: r.data.found }));
+    const q = nppesQuery(calls);
+    ok("65-2 ★M1 the co-filters are NOT on the wire (number+version ONLY) — forward last_name/state ⇒ NPPES AND-combines → result_count:0 → a FALSE 'does not exist' ⇒ RED",
+      q.get("last_name") === null && q.get("state") === null && q.get("number") === "1104130236" && [...q.keys()].sort().join(",") === "number,version",
+      JSON.stringify([...q.keys()]));
+    ok("65-2 ★M1 the dropped co-filters are DISCLOSED (data.filterMatch + filtersDropped + a note) — silent drop ⇒ RED",
+      r.data.filterMatch.last_name === false && r.data.filterMatch.state === false && r.data.filtersDropped.sort().join(",") === "last_name,state" && m.notes.some((n) => /EXACT NPI lookup/.test(n) && /NOT sent to the wire/.test(n)),
+      JSON.stringify({ fm: r.data.filterMatch, fd: r.data.filtersDropped }));
+  });
+
+  // ── (3) ★S1 client-side value — number + state:'NV' MATCHES via practiceLocations
+  //    (NV appears ONLY in practiceLocations) ⇒ filterMatch.state:true. Drop/merge
+  //    practiceLocations ⇒ the NV practice state is invisible ⇒ filterMatch.state:false ⇒ RED. ──
+  await withFetch(nppesMock(nppesBody(1, [NPPES_NPI1])), async () => {
+    const r = await runTool("nppes_lookup_provider", { number: "1104130236", state: "NV" }, sam);
+    ok("65-3 ★S1 number + state:'NV' ⇒ filterMatch.state:true because NV is in practiceLocations (a practice state that appears ONLY there) — the practice-state vetting the tool advertises",
+      r.data.found === true && r.data.filterMatch.state === true, JSON.stringify({ fm: r.data.filterMatch }));
+    const r2 = await runTool("nppes_lookup_provider", { number: "1104130236", state: "CA" }, sam);
+    ok("65-3 number + state:'CA' ⇒ filterMatch.state:true (CA is in addresses[] + taxonomies)", r2.data.filterMatch.state === true, JSON.stringify(r2.data.filterMatch));
+  });
+
+  // ── (4) NPI-2 org record: org basic fields + authorized_official_* + enumerationType. ──
+  await withFetch(nppesMock(nppesBody(1, [NPPES_NPI2])), async () => {
+    const r = await runTool("nppes_lookup_provider", { number: "1972660900" }, sam);
+    const p = r.data.provider;
+    ok("65-4 NPI-2 org ⇒ enumerationType 'NPI-2', basic.organizationName + authorizedOfficial* mapped, active from status:'A'",
+      p.enumerationType === "NPI-2" && p.basic.organizationName === "MAYO CLINIC" && p.basic.authorizedOfficialLastName === "OFFICER" && p.basic.authorizedOfficialTitleOrPosition === "CFO" && p.active === true,
+      JSON.stringify({ et: p.enumerationType, org: p.basic.organizationName, ao: p.basic.authorizedOfficialLastName }));
+  });
+
+  // ── (5) [a] {Errors} body-level loud-fail (no results key) ⇒ THROW invalid_input. ──
+  await withFetch(nppesMock({ Errors: [{ description: "NPI must be 10 digits", field: "number", number: "06" }] }), async () => {
+    const { threw, error } = await expectThrow(() => nppesLookup({ number: "1104130236" }));
+    ok("65-5 [a] {Errors:[…]} 200 body with NO results key ⇒ invalid_input THROWS (surfacing the description) — read the missing results as an empty found:false ⇒ RED (the NSF serviceNotification twin)",
+      threw && toToolError(error).kind === "invalid_input" && /NPI must be 10 digits/.test(toToolError(error).message), JSON.stringify(threw ? toToolError(error) : "no-throw"));
+  });
+
+  // ── (6) [e] Luhn matrix: invalid ⇒ invalid_input 0-fetch; valid-unassigned ⇒ found:false. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => nppesLookup({ number: "1234567890" }));
+    ok("65-6 [e] Luhn-INVALID '1234567890' ⇒ invalid_input, 0 fetch (a typo must NEVER read as found:false — NPPES validates only length, so the client-side Luhn is load-bearing)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before && /check-digit|Luhn/i.test(toToolError(error).message), JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  await withFetch(nppesMock(nppesBody(0, [])), async () => {
+    // 9999999995 is CMS-Luhn-VALID (proves the check passes real NPIs) but unassigned.
+    const r = await runTool("nppes_lookup_provider", { number: "9999999995" }, sam);
+    const m = buildMeta(r.meta);
+    ok("65-6 [e] Luhn-VALID but UNASSIGNED (result_count:0) ⇒ honest found:false / provider:null (DISTINCT from the loud-fail throw) + caveat still present",
+      r.data.found === false && r.data.provider === null && m.notes.includes(NPPES_NOT_DETERMINATION_NOTE) && m.notes.includes(NPPES_REACH_CAP_NOTE), JSON.stringify({ found: r.data.found, p: r.data.provider }));
+  });
+  ok("65-6 cmsLuhnValid passes 6 real NPIs + rejects the +1 typo (will NOT reject valid NPIs)",
+    ["1104130236", "1972660900", "9999999995"].every((n) => nppesLuhn(n)) && !nppesLuhn("1104130237") && !nppesLuhn("1234567890"),
+    JSON.stringify(["1104130236", "1972660900", "9999999995"].map((n) => nppesLuhn(n))));
+
+  // ── (7) [c] parity + shape + outage guards ⇒ driftError / upstream_unavailable. ──
+  await withFetch(nppesMock({ result_count: 2, results: [NPPES_NPI1] }), async () => {
+    const { threw, error } = await expectThrow(() => nppesLookup({ number: "1104130236" }));
+    ok("65-7 [c] result_count(2) !== results.length(1) ⇒ schema_drift (the count-parity guard) — accept the mismatch ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nppesMock([NPPES_NPI1]), async () => {
+    const { threw, error } = await expectThrow(() => nppesLookup({ number: "1104130236" }));
+    ok("65-7 200 body is an ARRAY (not {result_count,results}) ⇒ schema_drift (never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nppesMock({ results: [NPPES_NPI1] }), async () => {
+    const { threw, error } = await expectThrow(() => nppesLookup({ number: "1104130236" }));
+    ok("65-7 200 body missing result_count (with results present, no Errors) ⇒ schema_drift", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nppesMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => nppesLookup({ number: "1104130236" }));
+    ok("65-7 503 ⇒ upstream_unavailable THROWS (a DOWN NPPES is NEVER a returned:0 — getJson/fetchWithRetry throws)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (8) [b] pagination/lower-bound: full page ⇒ totalIsLowerBound + hasMore. ──
+  await withFetch(nppesMock(nppesBody(200, Array.from({ length: 200 }, () => NPPES_NPI1))), async () => {
+    const r = await runTool("nppes_lookup_provider", { last_name: "Smith", limit: 200 }, sam);
+    const m = buildMeta(r.meta);
+    ok("65-8 [b] full page (result_count===limit 200) ⇒ totalIsLowerBound:true + a note (NPPES exposes NO total; ≥200 exist) + truncated/complete:false — present result_count as a grand total ⇒ RED",
+      m.totalIsLowerBound === true && m.totalAvailable === 200 && m.truncated === true && m.complete === false && m.notes.some((n) => /AT LEAST 200/.test(n)),
+      JSON.stringify({ lb: m.totalIsLowerBound, ta: m.totalAvailable, t: m.truncated }));
+    ok("65-8 full page within skip cap ⇒ hasMore:true, nextOffset:200 (skip+returned)", m.pagination.hasMore === true && m.pagination.nextOffset === 200, JSON.stringify(m.pagination));
+  });
+  await withFetch(nppesMock(nppesBody(7, Array.from({ length: 7 }, () => NPPES_NPI1))), async () => {
+    const r = await runTool("nppes_lookup_provider", { last_name: "Smith", limit: 200 }, sam);
+    const m = buildMeta(r.meta);
+    ok("65-8 [b] SHORT page (7 < limit 200) ⇒ exact reachable end: totalAvailable:7, NO totalIsLowerBound, hasMore:false, nextOffset:null, complete:true",
+      m.totalAvailable === 7 && m.totalIsLowerBound === undefined && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.complete === true,
+      JSON.stringify({ ta: m.totalAvailable, lb: m.totalIsLowerBound, pg: m.pagination }));
+  });
+  // Full page whose next skip would exceed the ≤1000 policy cap ⇒ hasMore:false + disclosure.
+  await withFetch(nppesMock(nppesBody(200, Array.from({ length: 200 }, () => NPPES_NPI1))), async () => {
+    const r = await runTool("nppes_lookup_provider", { last_name: "Smith", limit: 200, skip: 1000 }, sam);
+    const m = buildMeta(r.meta);
+    ok("65-8 full page at skip:1000 ⇒ candidateNext 1200 > policy cap ⇒ nextOffset:null, hasMore:false, still totalIsLowerBound + truncated + a reach-cap note (never a complete:true that hides more)",
+      m.pagination.nextOffset === null && m.pagination.hasMore === false && m.totalIsLowerBound === true && m.truncated === true && m.notes.some((n) => /skip ≤ 1000|NOT reachable/i.test(n)),
+      JSON.stringify({ pg: m.pagination, lb: m.totalIsLowerBound }));
+  });
+
+  // ── (9) genuine empty search ⇒ honest empty list. ──
+  await withFetch(nppesMock(nppesBody(0, [])), async () => {
+    const r = await runTool("nppes_lookup_provider", { last_name: "Zzqxwvimpossible" }, sam);
+    const m = buildMeta(r.meta);
+    ok("65-9 genuine {result_count:0} search ⇒ providers:[] honest empty (complete:true, returned:0) + caveat present — distinct from a loud-fail throw",
+      r.data.providers.length === 0 && m.returned === 0 && m.complete === true && m.notes.includes(NPPES_NOT_DETERMINATION_NOTE), JSON.stringify({ n: r.data.providers.length, c: m.complete }));
+  });
+
+  // ── (10) ★S2 required-one gate + wildcard rule ⇒ invalid_input, 0 fetch. ──
+  for (const [args, why] of [
+    [{ state: "CA" }, "state alone (a REFINER — NPPES rejects it as the sole criterion)"],
+    [{ enumeration_type: "NPI-1" }, "enumeration_type alone (a REFINER)"],
+    [{}, "no criterion at all"],
+    [{ last_name: "a*" }, "wildcard 'a*' with <2 leading literal chars (NPPES loud-fails it)"],
+    [{ organization_name: "x*y" }, "a non-trailing '*' wildcard"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => nppesLookup(args));
+      ok(`65-10 ★S2 ${why} ⇒ invalid_input, 0 fetch`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // A valid ≥2-leading-char trailing wildcard + a city-only search ⇒ pass to the wire.
+  await withFetch(nppesMock(nppesBody(1, [NPPES_NPI1])), async (calls) => {
+    const r = await runTool("nppes_lookup_provider", { last_name: "sm*", state: "CA" }, sam);
+    const q = nppesQuery(calls);
+    ok("65-10 ★S2 'sm*' (≥2 leading chars) + state:'CA' refiner ⇒ passes; last_name + state + limit + skip built into the wire query",
+      r.data.providers.length === 1 && q.get("last_name") === "sm*" && q.get("state") === "CA" && q.get("limit") === "10" && q.get("skip") === "0", JSON.stringify([...q.keys()]));
+  });
+  await withFetch(nppesMock(nppesBody(1, [NPPES_NPI1])), async () => {
+    const r = await runTool("nppes_lookup_provider", { city: "Baltimore" }, sam);
+    ok("65-10 city-only search is a VALID required-one criterion ⇒ passes (never rejected)", r.data.providers.length === 1, JSON.stringify(r.data.providers.length));
+  });
+
+  // ── (11) [d] reach-cap / limit guards ⇒ invalid_input, 0 fetch. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => nppesLookup({ last_name: "Smith", skip: 1001 }));
+    ok("65-11 [d] skip:1001 ⇒ invalid_input, 0 fetch (the ≤1000 POLICY reach cap — silently bypassing it = un-capped enumeration ⇒ RED)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before && /skip/.test(toToolError(error).message), JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => nppesLookup({ last_name: "Smith", limit: 201 }));
+    ok("65-11 [d] limit:201 ⇒ invalid_input, 0 fetch (refused loudly + disclosure; NPPES silently clamps >200)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── (12) [i] SSRF/charclass rejects ⇒ invalid_input, 0 fetch; a crafted value
+  //    stays INSIDE its param (host unchanged). ──
+  for (const [args, why] of [
+    [{ number: "../" }, "number '../' (fails ^\\d{10}$)"],
+    [{ number: "12345678901" }, "an 11-digit number"],
+    [{ state: "ZZ" }, "a non-USPS state 'ZZ'"],
+    [{ enumeration_type: "NPI-3" }, "an off-enum enumeration_type"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => nppesLookup(args));
+      ok(`65-12 [i] ${why} ⇒ invalid_input, 0 fetch (grammar guard)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  await withFetch(nppesMock(nppesBody(0, [])), async (calls) => {
+    await runTool("nppes_lookup_provider", { organization_name: "http://evil.example/x" }, sam);
+    const c = calls.find((x) => isNppes(x.url));
+    const host = new URL(c.url).hostname;
+    const q = nppesQuery(calls);
+    ok("65-12 [i] a crafted organization_name 'http://evil…' stays percent-encoded INSIDE the param — host is STILL npiregistry.cms.hhs.gov (no host/path breakout)",
+      host === "npiregistry.cms.hhs.gov" && q.get("organization_name") === "http://evil.example/x", JSON.stringify({ host, org: q.get("organization_name") }));
+  });
+
+  // ── (13) num-parity guard. ──
+  eq("65-13 num(null) ⇒ null", nppesNum(null), null);
+  eq("65-13 num(0) ⇒ 0 (genuine zero preserved)", nppesNum(0), 0);
+  eq("65-13 num('') ⇒ null (Number('') is 0 — must be caught)", nppesNum(""), null);
+  eq("65-13 num('1280524286000') ⇒ 1280524286000 (ms epoch string parses)", nppesNum("1280524286000"), 1280524286000);
+  ok("65-13 nppes.num === coerce.num (one shared audited impl — a num regression fails together; NO local num in nppes.ts)", nppesNum === coerceNum, "nppes.num diverged from coerce.num");
+  ok("65-13 NPPES_STATES is the frozen USPS enum (56 entries) exported for the server Zod enum", Array.isArray(NPPES_STATES) && NPPES_STATES.length === 56 && NPPES_STATES.includes("CA"), JSON.stringify(NPPES_STATES.length));
 }
 
 // ══════════════════════════════════════════════════════════════════════════
