@@ -57,6 +57,7 @@ import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
 import * as ofac from "./ofac.js";
+import * as nvd from "./nvd.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
@@ -825,6 +826,105 @@ const OfacScreenInput = z.object({
     .max(200)
     .optional()
     .describe("Max matches returned (default 50, max 200). Over-limit truncation is disclosed, never silent."),
+});
+
+// ━━━ NVD + CISA KEV — the IT/cyber-compliance lane (2) ━━━ ADR-0035
+// cve_lookup: NVD CVE detail/search JOINED with CISA KEV status.
+const CveLookupInput = z.object({
+  cveId: z
+    .string()
+    .optional()
+    .describe(
+      "Exact CVE identifier CVE-YYYY-NNNN (^CVE-\\d{4}-\\d+$, validated client-side). Exact-lookup mode; a malformed cveId is rejected (invalid_input) — a malformed cveId 404s upstream. At least one of cveId/keyword/cpeName/cvssV3Severity/a date range is REQUIRED.",
+    ),
+  keyword: z
+    .string()
+    .optional()
+    .describe(
+      "Free-text keyword search (NVD keywordSearch) over CVE descriptions (e.g. 'log4j', 'apache struts'). Control chars stripped, length-capped; rides only as a query param (SSRF-safe).",
+    ),
+  cpeName: z
+    .string()
+    .optional()
+    .describe(
+      "A CPE 2.3 formatted string to match affected products (cpe:2.3:[aho]:… — e.g. cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*). Non-CPE input is rejected (invalid_input).",
+    ),
+  cvssV3Severity: z
+    .enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"])
+    .optional()
+    .describe("Filter to a CVSS v3 base severity band (LOW|MEDIUM|HIGH|CRITICAL)."),
+  pubStartDate: z
+    .string()
+    .optional()
+    .describe(
+      "Publication-date window START (ISO YYYY-MM-DD). PAIRED with pubEndDate (both required together — NVD 404s a lone bound). A span >120 days is clamped forward to 120 days BEFORE the request and disclosed.",
+    ),
+  pubEndDate: z
+    .string()
+    .optional()
+    .describe("Publication-date window END (ISO YYYY-MM-DD). Paired with pubStartDate."),
+  lastModStartDate: z
+    .string()
+    .optional()
+    .describe(
+      "Last-modified window START (ISO YYYY-MM-DD). PAIRED with lastModEndDate (both required together). A span >120 days is clamped + disclosed.",
+    ),
+  lastModEndDate: z
+    .string()
+    .optional()
+    .describe("Last-modified window END (ISO YYYY-MM-DD). Paired with lastModStartDate."),
+  kevOnly: z
+    .boolean()
+    .optional()
+    .describe(
+      "When true, return ONLY rows listed in the CISA KEV catalog. ★If the KEV catalog cannot be loaded, this THROWS (a KEV-membership filter is unanswerable without a loaded catalog) — it NEVER returns a silently-empty set (which would falsely read as 'none on the mandatory-remediation list').",
+    ),
+  resultsPerPage: z
+    .number()
+    .min(1)
+    .max(2000)
+    .optional()
+    .describe("Rows per page (default 50, max 2000 — NVD's cap). Over-cap is refused, never silently clamped."),
+  startIndex: z
+    .number()
+    .min(0)
+    .optional()
+    .describe("Zero-based page offset (default 0). Pagination derives from NVD's exact totalResults, never the page length."),
+});
+
+// cisa_kev_lookup: filter the KEV catalog standalone.
+const CisaKevLookupInput = z.object({
+  cveId: z
+    .string()
+    .optional()
+    .describe("Exact CVE identifier CVE-YYYY-NNNN to check for KEV membership. A miss returns found:false + the not-in-KEV≠safe caveat (absence is NOT a safety clearance)."),
+  vendorProject: z
+    .string()
+    .optional()
+    .describe("Case-insensitive substring filter on the vendor/project (e.g. 'Microsoft', 'Apache')."),
+  product: z
+    .string()
+    .optional()
+    .describe("Case-insensitive substring filter on the product (e.g. 'Log4j', 'Exchange Server')."),
+  ransomwareOnly: z
+    .boolean()
+    .optional()
+    .describe("When true, keep only entries with knownRansomwareCampaignUse === 'Known'."),
+  addedSince: z
+    .string()
+    .optional()
+    .describe("Keep only entries with dateAdded >= this ISO date (YYYY-MM-DD)."),
+  dueBefore: z
+    .string()
+    .optional()
+    .describe("Keep only entries with dueDate < this ISO date (YYYY-MM-DD) — the CISA-mandated remediation deadline."),
+  limit: z
+    .number()
+    .min(1)
+    .max(1000)
+    .optional()
+    .describe("Max matches returned (default 100, max 1000)."),
+  offset: z.number().min(0).optional().describe("Zero-based page offset (default 0)."),
 });
 
 // GAO bid-protest lookup (keyless RSS + decision-page parse)
@@ -3500,6 +3600,27 @@ const TOOLS: ToolDef[] = [
       "Keyless OFAC denied-party sanctions screening — the legally-required leg that SAM exclusions does NOT cover (31 CFR ch. V, strict-liability). Screens a `name` against OFAC's published SDN + Consolidated bulk lists (primary names AND AKAs from ALT.CSV joined by ent_num AND a.k.a./f.k.a./n.k.a. aliases mined from SDN/CONS Remarks — so an alias-only party like 'BNC' for BANCO NACIONAL DE CUBA is caught). Optional post-filters: type (individual|entity|vessel|aircraft), program (e.g. CUBA/IRAN/SDGT), list (sdn|consolidated|all, default all), minMatchQuality (exact|strong|weak, default weak), limit. Returns result ('potential_matches' | 'no_name_match' — NEVER 'clear'), matchCount, and per-match { name, matchedVia (primary|aka(alt)|aka(remarks)), akaType, matchQuality, list, programs, type, entNum, ofacSearchUrl }. ★SAFETY: this is a NAME SCREEN, NOT a legal determination — a no_name_match is NOT a clearance (transliterations/variants can miss a real hit) and a weak/strong hit is a REVIEW CANDIDATE requiring human adjudication against OFAC's Sanctions List Search. Every fetch failure / SSRF reject / parse drift / floor-fail THROWS (a download failure is NEVER read as a clear). minMatchQuality/type/program only trim returned matches — result reflects existence at any quality. Snapshot freshness (publish date + cache age) rides in _meta.",
     inputSchema: OfacScreenInput,
     handler: (input) => ofac.screenEntity(input),
+  }),
+  // ━━━ NVD + CISA KEV — the IT/CYBER-COMPLIANCE lane (2) ━━━ ADR-0035
+  // Opens the FedRAMP/CMMC/SBOM IT-compliance lane the server lacked: NIST NVD
+  // CVE/CVSS severity JOINED with the CISA KEV mandatory-remediation catalog.
+  // Keyless (an OPTIONAL free NVD_API_KEY lifts the rate; header-only, never
+  // logged). Never-fake: a genuine totalResults:0/found:false is honest, but any
+  // 403/429/404/5xx/timeout/redirect-off-host THROWS; a KEV outage degrades
+  // kev.listed to null (never false), and a kevOnly filter during an outage THROWS.
+  defineTool({
+    name: "cve_lookup",
+    description:
+      "Look up NIST NVD CVE records (keyless; services.nvd.nist.gov CVE API 2.0) — exact by `cveId` (CVE-YYYY-NNNN) OR search by `keyword`/`cpeName`/`cvssV3Severity`/a publication or last-modified date range — each row JOINED with its CISA KEV (Known Exploited Vulnerabilities) status. THE B2G unlock for FedRAMP/CMMC/SBOM IT-compliance: CVSS severity AND whether CISA mandates remediation by a date, in one row. Returns { results:[{ cveId, vulnStatus, rejected, published, lastModified, description, cvssMetrics:[{version,source,type,baseScore,baseSeverity,vectorString,exploitabilityScore,impactScore}], primaryCvss:{version,baseScore,baseSeverity,type}|null, cwes, references, kev }] } + honest _meta. Optional `kevOnly` (KEV-listed rows only), `resultsPerPage` (≤2000, def 50), `startIndex`. CVSS HONESTY: every metrics key matching ^cvssMetric (V2/V30/V31/V40) is surfaced as its own cvssMetrics[] element — versions are NEVER conflated and ssvcV203/non-CVSS keys are excluded; V2 baseSeverity reads from the metric level; primaryCvss is the highest-version metric, preferring type:'Primary' but FALLING BACK to the highest Secondary (a real CNA score is never dropped), null ONLY when no CVSS exists (Rejected/Awaiting) — base scores are null-never-0. KEV HONESTY: kev is {listed:true,dateAdded,dueDate,ransomware,requiredAction,catalogVersion} | {listed:false,note} | {listed:null,status:'unavailable'}; a not-listed result carries the not-in-KEV≠safe caveat (absence is NOT a clearance); if the KEV catalog cannot load, kev.listed degrades to NULL (never false) with fieldsUnavailable:['kev'], and a kevOnly filter during that outage THROWS (a KEV-membership filter is unanswerable without the catalog). PAGINATION is from NVD's EXACT totalResults, never page length. A genuine totalResults:0 is an honest found:false; a 403/429 rate breach THROWS rate_limited with the NVD_API_KEY tier disclosure; 404/5xx/timeout/off-host-redirect THROW (never a fake-empty). An OPTIONAL free NVD_API_KEY (env; https://nvd.nist.gov/developers/request-an-api-key) lifts the rate and is sent ONLY in the apiKey header — never a URL/label/_meta/log.",
+    inputSchema: CveLookupInput,
+    handler: (input) => nvd.cveLookup(input),
+  }),
+  defineTool({
+    name: "cisa_kev_lookup",
+    description:
+      "Filter the CISA Known Exploited Vulnerabilities (KEV) catalog standalone (keyless; www.cisa.gov feed, cached) — the mandatory-remediation list carrying BINDING due-dates under BOD 22-01 / its 2026 successor BOD 26-04. Works even when NVD is rate-limited (a separate host, no key). Filters (all optional, AND-combined, client-side): `cveId` (exact KEV membership check), `vendorProject`/`product` (case-insensitive substring), `ransomwareOnly` (knownRansomwareCampaignUse === 'Known'), `addedSince`/`dueBefore` (ISO YYYY-MM-DD); `limit` (≤1000, def 100), `offset`. Returns { catalogVersion, dateReleased, count, found?, matches:[{ cveID, vendorProject, product, vulnerabilityName, dateAdded, dueDate, knownRansomwareCampaignUse, shortDescription, requiredAction, cwes, nvdUrl }] } + honest _meta. ★HONESTY: knownRansomwareCampaignUse and requiredAction are surfaced VERBATIM (never defaulted); dueDate is the CISA-mandated remediation deadline. A cveId NOT in the catalog ⇒ found:false — but the not-in-KEV≠safe caveat rides on EVERY response: KEV is a CURATED SUBSET of confirmed in-the-wild exploitation, so absence means CISA has not catalogued it, NOT that the component is unexploited/safe. A catalog download failure / floor-fail / count-drift THROWS (a truncated/near-empty catalog must never read as 'nothing is exploited') — never a fake-empty. The snapshot freshness (catalogVersion + release date + cache age) is disclosed.",
+    inputSchema: CisaKevLookupInput,
+    handler: (input) => nvd.cisaKevLookup(input),
   }),
   // ━━━ GAO — Bid Protests (1) ━━━
   defineTool({
