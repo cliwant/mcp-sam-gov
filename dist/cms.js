@@ -160,7 +160,23 @@ async function getDatastore(datasetId, index, params) {
     if (built.hostname !== CMS_HOST || built.protocol !== "https:") {
         throw invalidInput(`Constructed CMS URL host ${JSON.stringify(built.hostname)} (${built.protocol}) does not match ${CMS_HOST} over https — refusing to fetch (SSRF safety).`);
     }
-    return throughGate(CMS_HOST, CMS_GATE_MIN_INTERVAL_MS, () => getJson(url, { label: CMS_LABEL, redirect: "error" }));
+    // ★ W3-2 — the SyntaxError→schema_drift catch-ladder (fema.ts:262-275 shape).
+    // getJson's r.json() runs OUTSIDE fetchWithRetry, so a 200 non-JSON body (a DKAN
+    // SPA/WAF/maintenance HTML masquerade) throws a raw SyntaxError; toToolError has
+    // NO schema_drift branch → it would degrade to kind:"unknown". Preserve the
+    // fetchWithRetry taxonomy (429/404/5xx/400/timeout ToolErrorCarrier) FIRST (a
+    // broader catch would reclassify a 429 to schema_drift), reclassify the SyntaxError
+    // SECOND, bare-rethrow LAST.
+    try {
+        return await throughGate(CMS_HOST, CMS_GATE_MIN_INTERVAL_MS, () => getJson(url, { label: CMS_LABEL, redirect: "error" }));
+    }
+    catch (e) {
+        if (e instanceof ToolErrorCarrier)
+            throw e;
+        if (e instanceof SyntaxError)
+            throw driftError(CMS_LABEL, "CMS DKAN datastore returned a non-JSON body at HTTP 200 — schema drift.");
+        throw e;
+    }
 }
 /**
  * GET the DKAN DCAT metastore catalog (fixed path; no id interpolation).
@@ -182,7 +198,20 @@ async function getMetastore() {
     if (built.hostname !== CMS_HOST || built.protocol !== "https:") {
         throw invalidInput(`Constructed CMS metastore URL host ${JSON.stringify(built.hostname)} does not match ${CMS_HOST} over https — refusing to fetch (SSRF safety).`);
     }
-    return throughGate(CMS_HOST, CMS_GATE_MIN_INTERVAL_MS, () => getJson(url, { label: CMS_LABEL, redirect: "error" }));
+    // ★ W3-2 — the IDENTICAL SyntaxError→schema_drift catch-ladder as getDatastore
+    // (fema.ts:262-275 shape). A 200 non-JSON metastore body (HTML/WAF) throws a raw
+    // SyntaxError from r.json() → without this it degrades to kind:"unknown". Preserve
+    // the ToolErrorCarrier taxonomy FIRST, reclassify SECOND, bare-rethrow LAST.
+    try {
+        return await throughGate(CMS_HOST, CMS_GATE_MIN_INTERVAL_MS, () => getJson(url, { label: CMS_LABEL, redirect: "error" }));
+    }
+    catch (e) {
+        if (e instanceof ToolErrorCarrier)
+            throw e;
+        if (e instanceof SyntaxError)
+            throw driftError(CMS_LABEL, "CMS DKAN metastore returned a non-JSON body at HTTP 200 — schema drift.");
+        throw e;
+    }
 }
 function rec(x) {
     return x !== null && typeof x === "object" && !Array.isArray(x)

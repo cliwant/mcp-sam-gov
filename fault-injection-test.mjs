@@ -10442,6 +10442,33 @@ async function testDatagovHonesty() {
         threw && te.kind === "rate_limited" && te.retryable === true && te.retryAfterSeconds === 25832, JSON.stringify({ kind: te.kind, ra: te.retryAfterSeconds }));
     });
 
+    // ── (h2) ★ W3-2 — the regulationsSearch SyntaxError→schema_drift catch-ladder (the
+    // ladder its searchDockets/getDocket siblings already had). getDatagov→getJson's
+    // r.json() runs OUTSIDE fetchWithRetry, so a 200 non-JSON body (an HTML/WAF/
+    // maintenance masquerade off /v4/documents or /v4/comments) throws a raw
+    // SyntaxError; toToolError has NO schema_drift branch → WITHOUT the ladder this
+    // degrades to kind:"unknown". Mutation guarded: remove the `if (e instanceof
+    // SyntaxError)` branch ⇒ kind:"unknown" ⇒ RED. The 45h 429 test above already
+    // proves the ToolErrorCarrier-first rung (a 429 stays rate_limited, not reclassified).
+    await withFetch((u) => (isRegDocs(u) ? ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>maintenance</html>" }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_documents", { searchTerm: "x" }, sam));
+      ok("45h2 [W3-2] /v4/documents GENUINE 200 non-JSON body (r.json() throws SyntaxError) ⇒ schema_drift via the regulationsSearch ladder (never kind:'unknown', never a fake empty)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch((u) => (isRegComments(u) ? ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>maintenance</html>" }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_comments", { searchTerm: "x" }, sam));
+      ok("45h2 [W3-2] /v4/comments GENUINE 200 non-JSON body (r.json() throws SyntaxError) ⇒ schema_drift via the SAME regulationsSearch ladder (the comments sibling shares the wrapped core)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    // ★ W3-2 non-vacuity — a 429 on /v4/comments through the SAME wrapped call still
+    // yields rate_limited (proving the ToolErrorCarrier-first rung for the comments
+    // path, symmetric with the 45h documents 429).
+    await withFetch((u) => (isRegComments(u) ? mockResponse({ status: 429, headers: { "Retry-After": "25832" } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_comments", { searchTerm: "x" }, sam));
+      ok("45h2 [W3-2] /v4/comments 429 ⇒ rate_limited THROW (the ladder rethrows a ToolErrorCarrier FIRST — never schema_drift)",
+        threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
     // ── (i) DEMO_KEY disclosure + keylessMode:false (env unset here).
     await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 1, total: 1 }) }) : failClosed()()), async () => {
       const r = await runTool("regulations_search_documents", { searchTerm: "x" }, sam);
@@ -15327,6 +15354,24 @@ async function testNppesHonesty() {
     const { threw, error } = await expectThrow(() => nppesLookup({ number: "1104130236" }));
     ok("65-7 503 ⇒ upstream_unavailable THROWS (a DOWN NPPES is NEVER a returned:0 — getJson/fetchWithRetry throws)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
   });
+  // ★ W3-2 — a GENUINE 200 non-JSON body (r.json() throws a raw SyntaxError — an
+  // npiregistry HTML/WAF/maintenance masquerade) ⇒ schema_drift via the nppesGet
+  // ladder. WITHOUT the ladder this degrades to kind:"unknown" (toToolError has no
+  // schema_drift branch). Mutation guarded: remove the SyntaxError branch ⇒ "unknown" ⇒ RED.
+  await withFetch((u) => (isNppes(u) ? ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>down</html>" }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => nppesLookup({ number: "1104130236" }));
+    ok("65-7 [W3-2] a GENUINE 200 non-JSON body (r.json() throws SyntaxError) ⇒ schema_drift via the nppesGet ladder (never kind:'unknown', never a fake found:false)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ★ W3-2 non-vacuity — a 429 through the SAME wrapped nppesGet call still yields
+  // rate_limited (the ToolErrorCarrier-first rung is preserved). Mutation guarded:
+  // broaden the catch to an unconditional driftError (dropping the ToolErrorCarrier-first
+  // rung) ⇒ the 429 carrier ⇒ schema_drift ⇒ RED.
+  await withFetch(nppesMock("", 429), async () => {
+    const { threw, error } = await expectThrow(() => nppesLookup({ number: "1104130236" }));
+    ok("65-7 [W3-2] HTTP 429 ⇒ rate_limited THROW (the ladder rethrows a ToolErrorCarrier FIRST — never schema_drift)",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
 
   // ── (8) [b] pagination/lower-bound: full page ⇒ totalIsLowerBound + hasMore. ──
   await withFetch(nppesMock(nppesBody(200, Array.from({ length: 200 }, () => NPPES_NPI1))), async () => {
@@ -15464,6 +15509,13 @@ const cmsSchema = () => ({
 const cmsDatastoreMock = (body, status = 200) => (u) => (isCmsDatastore(u) ? mockResponse({ status, json: body }) : failClosed()());
 const cmsMetastoreMock = (arr, status = 200) => (u) => (isCmsMetastore(u) ? mockResponse({ status, json: arr }) : failClosed()());
 const cmsQ = (calls) => new URL(calls.find((x) => isCmsDatastore(x.url)).url).searchParams;
+// ★ W3-2 — a GENUINE 200 non-JSON body whose r.json() throws a raw SyntaxError (the
+// real DKAN SPA/WAF/maintenance masquerade). The prior 66-3 "HTML" fixture handed the
+// HTML to mockResponse as `json`, which returns it verbatim from r.json() (a parsed
+// STRING — NO throw), so it exercised the no-schema-anchor driftError path and DODGED
+// the SyntaxError path entirely (a false-green). This is the honest fixture that
+// exercises the getDatastore/getMetastore SyntaxError→schema_drift ladder.
+const cmsNonJsonResp = (pred) => (u) => (pred(u) ? ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>Access Denied</html>" }) : failClosed()());
 const cmsMetaItem = (i, title, desc) => ({
   identifier: `00000000-0000-0000-0000-${String(i).padStart(12, "0")}`,
   title,
@@ -15542,15 +15594,30 @@ async function testCmsHonesty() {
     ok("66-3 [P2] HTTP 404 (bad datasetId/index) ⇒ not_found THROW (never a fake empty)",
       threw && toToolError(error).kind === "not_found", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
   });
-  await withFetch(cmsDatastoreMock("<!DOCTYPE html><html>Access Denied</html>"), async () => {
+  // ★ W3-2 — FLIPPED false-green: a GENUINE 200 non-JSON body (r.json() throws a raw
+  // SyntaxError) ⇒ schema_drift via the getDatastore ladder. The OLD fixture returned
+  // the HTML as a parsed STRING, so it passed through the no-schema-anchor path and
+  // NEVER exercised the SyntaxError reclassification — WITHOUT the ladder this now
+  // surfaces kind:"unknown" (toToolError has no schema_drift branch). Mutation guarded:
+  // remove the `if (e instanceof SyntaxError)` branch ⇒ kind:"unknown" ⇒ RED.
+  await withFetch(cmsNonJsonResp(isCmsDatastore), async () => {
     const { threw, error } = await expectThrow(() => runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID }, sam));
-    ok("66-3 [P2] an HTML 200 body (SPA/WAF wrong-route) ⇒ THROW schema_drift (no usable schema anchor), never a fake empty",
+    ok("66-3 [P2/W3-2] a GENUINE 200 non-JSON body (r.json() throws SyntaxError) ⇒ THROW schema_drift via the getDatastore ladder (was a false-green kind:'unknown'), never a fake empty",
       threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
   });
   await withFetch(cmsDatastoreMock({}, 503), async () => {
     const { threw, error } = await expectThrow(() => runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID }, sam));
     ok("66-3 [P2] HTTP 503 ⇒ upstream_unavailable THROW (a DOWN host is NEVER a returned:0)",
       threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ★ W3-2 non-vacuity — a 429 through the SAME wrapped getDatastore call still yields
+  // rate_limited (the ToolErrorCarrier-first rung). Mutation guarded: broaden the catch
+  // to an unconditional driftError (dropping the `instanceof ToolErrorCarrier` first
+  // rung) ⇒ the 429/404/503 carriers get reclassified to schema_drift ⇒ RED.
+  await withFetch(cmsDatastoreMock({}, 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID }, sam));
+    ok("66-3 [P2/W3-2] HTTP 429 ⇒ rate_limited THROW (the ladder rethrows a ToolErrorCarrier FIRST — never reclassified to schema_drift)",
+      threw && toToolError(error).kind === "rate_limited" && toToolError(error).retryable === true, JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
   });
   await withFetch(cmsDatastoreMock({ count: 0, results: [], schema: cmsSchema() }), async () => {
     const r = await runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID, conditions: [{ property: "recipient_state", value: "ZZ" }] }, sam);
@@ -15735,6 +15802,21 @@ async function testCmsHonesty() {
     const { threw, error } = await expectThrow(() => cmsSearchDatasets({}));
     ok("66-7e metastore 503 ⇒ upstream_unavailable THROW (a DOWN metastore is NEVER an empty catalog)",
       threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ★ W3-2 — a GENUINE 200 non-JSON metastore body (r.json() throws SyntaxError) ⇒
+  // schema_drift via the getMetastore ladder (WITHOUT it → kind:"unknown"). Mutation
+  // guarded: remove the getMetastore SyntaxError branch ⇒ kind:"unknown" ⇒ RED.
+  await withFetch(cmsNonJsonResp(isCmsMetastore), async () => {
+    const { threw, error } = await expectThrow(() => cmsSearchDatasets({}));
+    ok("66-7e [W3-2] a GENUINE 200 non-JSON metastore body (r.json() throws SyntaxError) ⇒ schema_drift via the getMetastore ladder (never kind:'unknown', never a fake empty catalog)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ★ W3-2 non-vacuity — a 429 through the SAME wrapped getMetastore call still yields
+  // rate_limited (the ToolErrorCarrier-first rung is preserved, not reclassified).
+  await withFetch(cmsMetastoreMock({}, 429), async () => {
+    const { threw, error } = await expectThrow(() => cmsSearchDatasets({}));
+    ok("66-7e [W3-2] metastore 429 ⇒ rate_limited THROW (ToolErrorCarrier rethrown FIRST — never schema_drift)",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
   });
 
   // ── (8) exports sanity. ──
