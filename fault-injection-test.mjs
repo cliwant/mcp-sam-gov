@@ -5107,8 +5107,56 @@ async function testUsasPaginationTruthfulness() {
       meta.returned === 10 && res.data.awards.length === 10, JSON.stringify({ r: meta.returned, n: res.data.awards.length }));
     ok("usas individual TRUTHFULNESS ⇒ totalAvailable = companion count SUM (250), NOT the page length (10)",
       meta.totalAvailable === 250, JSON.stringify(meta.totalAvailable));
-    ok("usas individual ⇒ page(10)<total(250) ⇒ truncated + hasMore + nextOffset=10 + complete:false",
-      meta.truncated === true && meta.pagination.hasMore === true && meta.pagination.nextOffset === 10 && meta.complete === false, JSON.stringify(meta.pagination));
+    // W3-7 (non-consumable cursor): page(10)<total(250) ⇒ MORE matches exist, so
+    // truncated + hasMore + complete:false all stay TRUE — but nextOffset MUST be null,
+    // NOT 10. searchIndividualAwards hardcodes upstream page:1 and has no offset input,
+    // so a `nextOffset:10` re-fetches the SAME top-10 forever (the W3-1 M1 lie caught in
+    // this sibling by the confirmation pass). NON-VACUITY: revert awardPagination to
+    // `hasMore ? offset+returned : null` ⇒ nextOffset 10 ⇒ RED.
+    ok("W3-7 usas individual ⇒ page(10)<total(250) ⇒ truncated + hasMore + complete:false BUT nextOffset===null (NOT consumable — no offset input; revert awardPagination ⇒ nextOffset 10 ⇒ RED)",
+      meta.truncated === true && meta.pagination.hasMore === true && meta.pagination.nextOffset === null && meta.complete === false, JSON.stringify(meta.pagination));
+    ok("W3-7 usas individual ⇒ not-page-reachable note present when more matches exist (raise limit / narrow filters)",
+      meta.notes.some((n) => /NOT page-reachable/i.test(n) && /limit/.test(n)), JSON.stringify(meta.notes));
+  });
+
+  // S1b (W3-7 SIBLINGS). The confirmation pass caught the SAME non-consumable-cursor
+  // lie in searchIndividualAwards' three siblings — all share the awardPagination
+  // helper and all pass offset:0 with NO offset/page input, so their nextOffset was the
+  // page length (a false cursor). Pin the fix in each: when total>limit ⇒ hasMore +
+  // truncated stay TRUE while nextOffset===null AND a not-page-reachable note fires.
+  // NON-VACUITY (each): revert awardPagination to `hasMore ? offset+returned : null`
+  // ⇒ nextOffset becomes 10 ⇒ RED. searchAwardsByRecipient + searchSubawards use the
+  // SAME spending_by_award(+_count) endpoints, so the §21 usasHandler mock drives them.
+  await withFetch(usasHandler({ page: awardRows(10), hasNext: true, count: { contracts: 240, idvs: 10 } }), async () => {
+    const rec = finalize(await searchAwardsByRecipient({ recipientName: "ACME CO", limit: 10 }));
+    ok("W3-7 usas_search_awards_by_recipient ⇒ total(250)>limit(10) ⇒ hasMore+truncated true BUT pagination.nextOffset===null (NOT consumable — no offset input; revert awardPagination ⇒ nextOffset 10 ⇒ RED) + not-page-reachable note present",
+      rec.pagination.nextOffset === null && rec.pagination.hasMore === true && rec.truncated === true &&
+      rec.notes.some((n) => /NOT page-reachable/i.test(n) && /limit/.test(n)),
+      JSON.stringify({ pg: rec.pagination, notes: rec.notes }));
+  });
+  await withFetch(usasHandler({ page: awardRows(10), hasNext: true, count: { subcontracts: 500, subgrants: 0 } }), async () => {
+    const sub = finalize(await searchSubawards({ primeRecipientName: "ACME CO", limit: 10 }));
+    ok("W3-7 usas_search_subawards ⇒ total(500)>limit(10) ⇒ hasMore+truncated true BUT pagination.nextOffset===null (NOT consumable — no offset input; revert awardPagination ⇒ nextOffset 10 ⇒ RED) + not-page-reachable note present",
+      sub.pagination.nextOffset === null && sub.pagination.hasMore === true && sub.truncated === true &&
+      sub.notes.some((n) => /NOT page-reachable/i.test(n) && /limit/.test(n)),
+      JSON.stringify({ pg: sub.pagination, notes: sub.notes }));
+  });
+  // budget_function uses a DIFFERENT endpoint (agency/{code}/budget_function) — its own
+  // mock. total(6)>limit(2) ⇒ nextOffset null (was `hasMore ? results.length : null` = 2).
+  // NON-VACUITY: revert nextOffset to `hasMore ? results.length : null` ⇒ nextOffset 2 ⇒ RED.
+  await withFetch((u) => (/budget_function/.test(u) ? mockResponse({ status: 200, json: {
+    toptier_code: "097", fiscal_year: 2026,
+    results: [
+      { name: "National Defense", children: [{ name: "Army", obligated_amount: 1000, gross_outlay_amount: 900 }] },
+      { name: "Income Security", children: [{ name: "Retirement", obligated_amount: 50, gross_outlay_amount: 48 }] },
+    ],
+    page_metadata: { page: 1, total: 6, hasNext: true },
+  } }) : failClosed()()), async () => {
+    const bud = finalize(await getAgencyBudgetFunction({ toptierCode: "097", fiscalYear: 2026, limit: 2 }));
+    ok("W3-7 usas_get_agency_budget_function ⇒ total(6)>limit(2) ⇒ hasMore+truncated true BUT pagination.nextOffset===null (was `hasMore ? results.length : null` = 2; revert ⇒ nextOffset 2 ⇒ RED) + not-page-reachable note present",
+      bud.pagination.nextOffset === null && bud.pagination.hasMore === true && bud.truncated === true &&
+      bud.notes.some((n) => /NOT page-reachable/i.test(n) && /limit/.test(n)),
+      JSON.stringify({ pg: bud.pagination, notes: bud.notes }));
   });
 
   // S2. total known, page reaches total ⇒ complete.
@@ -5421,8 +5469,13 @@ async function testRealUsasReplay() {
       a0.awardId === "ZW05" && a0.recipient === "TYONEK MANUFACTURING, LLC" && a0.amount === 23712.4 && a0.naicsCode === "541512" && a0.naicsDescription === "COMPUTER SYSTEMS DESIGN SERVICES", JSON.stringify(a0));
     ok("real usas ⇒ maps real Awarding Sub Agency + generated_internal_id; ignores real extra fields (internal_id/agency_slug not surfaced)",
       a0.awardingSubAgency === "Department of the Army" && a0.generatedInternalId === "CONT_AWD_ZW05_9700_W912HZ05D0013_9700" && a0.internal_id === undefined && a0.agency_slug === undefined, JSON.stringify({ sub: a0.awardingSubAgency, gid: a0.generatedInternalId }));
-    ok("real usas ⇒ page(2) < total(49990) ⇒ truncated + hasMore + nextOffset 2 + complete:false (real 'more exists' signal)",
-      meta.truncated === true && meta.pagination.hasMore === true && meta.pagination.nextOffset === 2 && meta.complete === false, JSON.stringify(meta.pagination));
+    // W3-7 (non-consumable cursor): page(2)<total(49990) ⇒ MORE exists (truncated +
+    // hasMore + complete:false stay true) but nextOffset MUST be null, NOT 2 — this real
+    // fixture ALSO encoded the W3-1 M1 lie (a `nextOffset:2` on a page-1-only, no-offset
+    // tool re-fetches the SAME top-2 forever). NON-VACUITY: revert awardPagination to
+    // `hasMore ? offset+returned : null` ⇒ nextOffset 2 ⇒ RED.
+    ok("W3-7 real usas ⇒ page(2) < total(49990) ⇒ truncated + hasMore + complete:false BUT nextOffset===null (NOT consumable; revert awardPagination ⇒ nextOffset 2 ⇒ RED)",
+      meta.truncated === true && meta.pagination.hasMore === true && meta.pagination.nextOffset === null && meta.complete === false, JSON.stringify(meta.pagination));
   });
 }
 
