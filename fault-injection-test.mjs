@@ -96,7 +96,7 @@ import {
   FIN_FILTER_FIELDS as FDIC_FIN_FILTER_FIELDS,
 } from "./dist/fdic.js";
 import { num as echoNum, echoGet } from "./dist/echo.js";
-import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill } from "./dist/datagov.js";
+import { num as datagovNum, searchDocuments as dgSearchDocuments, searchComments as dgSearchComments, searchBills as dgSearchBills, getBill as dgGetBill, searchDockets as dgSearchDockets, getDocket as dgGetDocket } from "./dist/datagov.js";
 import { num as govinfoNum, listCollections as govinfoListCollections, searchPackages as govinfoSearchPackages, getPackage as govinfoGetPackage } from "./dist/govinfo.js";
 import { num as fpdsNum, buildQuery as fpdsBuildQuery, buildSearchUrl as fpdsBuildSearchUrl } from "./dist/fpds.js";
 import { num as nihNum, searchProjects as nihSearchProjects } from "./dist/nih.js";
@@ -10471,6 +10471,283 @@ async function testDatagovHonesty() {
   });
 }
 
+// §45D: Regulations.gov DOCKETS (ADR-0044) — the rulemaking/nonrulemaking CONTAINER
+// (GET /v4/dockets list + /v4/dockets/{docketId} detail) added as WITHIN-SOURCE
+// DEPTH on the SAME api.data.gov keyed adapter. The load-bearing pins:
+//   (1) total-honesty: totalAvailable = meta.totalElements (EXACT), NEVER totalPages.
+//   (2) min-5 client-slice: limit<5 ⇒ wire page[size]=5, returned=limit, pagination.limit=limit (S3), totalAvailable exact, nextOffset=null + note.
+//   (3) M1 429 through the catch ladder ⇒ rate_limited (NOT schema_drift), no fake-empty.
+//   (4) M1 404 (detail) ⇒ not_found; (4b) detail 200 data absent/non-object ⇒ schema_drift (S2, no fabrication).
+//   (5) schema_drift: list data non-array / meta.totalElements non-number / meta absent / 200 non-JSON (SyntaxError reclassify).
+//   (6) S1 docketId charclass reject (incl. '..'/'.') ⇒ invalid_input, 0 fetch.
+//   (7) rin null-when-absent + detail-only (list rows carry NO rin; highlightedContent only when searchTerm sent).
+//   (8) empty-vs-outage: totalElements:0/data:[] ⇒ returned:0/total:0/complete:true (NOT an error).
+//   (9) K-test + M2 keylessMode:false for BOTH tools.
+//   (10) docketType enum reject ⇒ invalid_input, 0 fetch.
+// All OFFLINE (mock fetch), deterministic, NON-VACUOUS.
+const isRegDocketsList = (u) => /\/v4\/dockets(?:\?|$)/.test(u);
+const isRegDocketDetail = (u) => /\/v4\/dockets\/[^?/]/.test(u);
+// A /v4/dockets LIST row (attributes verbatim — NOTE no `rin` upstream in list).
+const docketListItem = (i) => ({
+  id: `DKT-${i}`,
+  type: "dockets",
+  attributes: {
+    agencyId: "BLM",
+    objectId: `0b00006480abc0${i}`,
+    docketId: `BLM-2026-000${i}`,
+    docketType: "Rulemaking",
+    highlightedContent: `...grazing ${i}...`,
+    title: `Docket ${i}`,
+    lastModifiedDate: "2026-03-01T00:00:00Z",
+  },
+});
+const docketListBody = ({ n = 0, total, totalPages = 40 }) => ({
+  data: Array.from({ length: n }, (_, i) => docketListItem(i)),
+  meta: { totalElements: total, totalPages, pageNumber: 1, pageSize: 20 },
+});
+// The /v4/dockets/{id} DETAIL object. `omitRin:true` ⇒ the rin key is ABSENT
+// upstream (so we can assert null-when-absent, never ""). NOTE: passing
+// `{rin:undefined}` would re-trigger the destructuring default — hence a distinct
+// `omitRin` flag rather than an undefined sentinel.
+const docketDetailBody = ({ rin = "1004-AE82", omitRin = false } = {}) => ({
+  data: {
+    id: "BLM-2026-0001",
+    type: "dockets",
+    attributes: {
+      displayProperties: [{ label: "x" }],
+      keywords: ["public lands", "grazing"],
+      modifyDate: "2026-03-01T00:00:00Z",
+      dkAbstract: "An abstract of the rulemaking.",
+      agencyId: "BLM",
+      program: "Land Management",
+      shortTitle: "Grazing Rule",
+      subType2: null,
+      title: "A BLM Rulemaking Docket",
+      generic: "GEN",
+      field1: "F1",
+      docketType: "Rulemaking",
+      petitionNbr: null,
+      ...(omitRin ? {} : { rin }),
+      organization: "BLM",
+      legacyId: "LEGACY-1",
+      subType: null,
+      category: null,
+      field2: "F2",
+      effectiveDate: null,
+      objectId: "0b00006480abc01",
+    },
+  },
+});
+// A 200 response whose `.json()` throws SyntaxError (a non-JSON body at HTTP 200)
+// — exercises the M1 catch ladder's SyntaxError→schema_drift reclassification.
+const nonJsonResponse = () => ({
+  ok: true,
+  status: 200,
+  headers: { get: () => null },
+  json: async () => {
+    throw new SyntaxError("Unexpected token < in JSON at position 0");
+  },
+  text: async () => "<html>maintenance</html>",
+});
+
+async function testDatagovDocketsHonesty() {
+  section("45D. Regulations.gov DOCKETS (ADR-0044) — total-honesty (meta.totalElements EXACT), min-5 client-slice (S3), M1 catch ladder (429→rate_limited / 404→not_found / non-JSON→schema_drift), S1 docketId charclass, S2 detail fabrication guard, rin null-when-absent + detail-only, M2 keylessMode:false, K-test (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  await withEnvKey(undefined, async () => {
+    // ── (a) SSRF/URL correctness + DEMO_KEY disclosure + keylessMode:false.
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: docketListBody({ n: 1, total: 1 }) }) : failClosed()()), async (calls) => {
+      const r = await runTool("regulations_search_dockets", { agencyId: "BLM" }, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((c) => isRegDocketsList(c.url));
+      const url = new URL(call.url);
+      ok("45D-a dockets fetch on https://api.regulations.gov/v4/dockets (fixed host, https, exact path); sort/page[size]/page[number] in query; key NOT in URL; redirect:error; X-Api-Key:DEMO_KEY",
+        url.hostname === "api.regulations.gov" && url.protocol === "https:" && url.pathname === "/v4/dockets" && url.searchParams.get("sort") === "-lastModifiedDate" && url.searchParams.get("page[size]") === "20" && !/api_key=/i.test(call.url) && call.init.redirect === "error" && call.init.headers["X-Api-Key"] === "DEMO_KEY",
+        JSON.stringify({ url: call.url, redirect: call.init.redirect }));
+      ok("45D-a keylessMode:false (KEYED source), source names (DEMO_KEY), and the ~10 req/hr disclosure + signup URL note is present",
+        m.keylessMode === false && /\(DEMO_KEY\)/.test(m.source) && m.notes.some((n) => /DEMO_KEY/.test(n) && /api\.data\.gov\/signup/.test(n)),
+        JSON.stringify({ keyless: m.keylessMode, source: m.source, notes: m.notes }));
+    });
+
+    // ── (1) ★ TOTAL-HONESTY: totalAvailable = meta.totalElements 276910, NOT
+    // totalPages (40) / totalPages*pageSize (800) / returned (20). truncated:true.
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: docketListBody({ n: 20, total: 276910, totalPages: 40 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_dockets", { agencyId: "BLM" }, sam);
+      const m = buildMeta(r.meta);
+      ok("45D-1 dockets totalAvailable === meta.totalElements 276910 (NOT totalPages 40, NOT totalPages*pageSize 800, NOT returned 20); truncated:true, complete:false (mutate→totalPages-derived ⇒ RED)",
+        m.totalAvailable === 276910 && m.returned === 20 && m.truncated === true && m.complete === false, JSON.stringify({ ta: m.totalAvailable, r: m.returned, t: m.truncated }));
+    });
+
+    // ── (2) ★ min-5 client-slice (S3): limit:2 ⇒ wire page[size]=5, returned:2,
+    // pagination.limit:2 (the caller's window — NOT the wire floor 5), totalAvailable
+    // exact, nextOffset:null, and a min-5 note.
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: docketListBody({ n: 5, total: 100 }) }) : failClosed()()), async (calls) => {
+      const r = await runTool("regulations_search_dockets", { agencyId: "BLM", limit: 2 }, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((c) => isRegDocketsList(c.url));
+      const ps = new URL(call.url).searchParams.get("page[size]");
+      ok("45D-2 min-5 client-slice: limit:2 ⇒ wire page[size]=5 (floor), returned:2, _meta.pagination.limit:2 [S3] (NOT 5), totalAvailable:100 exact, nextOffset:null, min-5 note present (mutate page[size]→2 ⇒ upstream 400 = RED)",
+        ps === "5" && r.data.dockets.length === 2 && m.pagination.limit === 2 && m.totalAvailable === 100 && m.pagination.nextOffset === null && m.notes.some((n) => /floored to 5|limit<5/.test(n)),
+        JSON.stringify({ ps, len: r.data.dockets.length, lim: m.pagination.limit, ta: m.totalAvailable, no: m.pagination.nextOffset }));
+    });
+
+    // ── (b) B1 ceiling on dockets: page 40 + total > 10000 ⇒ hasMore:true,
+    // nextOffset:null, ceiling note. A non-ceiling page ⇒ numeric nextOffset.
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: docketListBody({ n: 250, total: 276910 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_dockets", { agencyId: "BLM", limit: 250, pageNumber: 40 }, sam);
+      const m = buildMeta(r.meta);
+      ok("45D-b B1 CEILING (dockets): page 40 + total 276910 ⇒ hasMore:true, nextOffset:null, truncated:true, ceiling note names 10000-record + narrow-filters guidance",
+        m.pagination.hasMore === true && m.pagination.nextOffset === null && m.truncated === true && m.notes.some((n) => /10000-record/.test(n) && /narrow filters|lastModifiedDate/.test(n)), JSON.stringify(m.pagination));
+    });
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: docketListBody({ n: 20, total: 1000 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_dockets", { agencyId: "BLM", pageNumber: 2 }, sam);
+      const m = buildMeta(r.meta);
+      ok("45D-b non-ceiling page 2 (offset 20) ⇒ hasMore:true, nextOffset:40 (numeric, re-derived), no ceiling note",
+        m.pagination.offset === 20 && m.pagination.hasMore === true && m.pagination.nextOffset === 40 && !m.notes.some((n) => /ceiling/.test(n)), JSON.stringify(m.pagination));
+    });
+
+    // ── (S6) pre-fetch window guard (RUNTIME, direct call bypassing Zod).
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const direct = await expectThrow(() => dgSearchDockets({ agencyId: "BLM", pageNumber: 41, limit: 250 }));
+      ok("45D-S6 pre-fetch window guard (RUNTIME direct call): pageNumber 41 ⇒ invalid_input, 0 fetch (mirror of regulationsSearch)",
+        direct.threw && toToolError(direct.error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(direct.error).kind, added: calls.length - before }));
+    });
+
+    // ── (3) ★ M1: 429 through the catch ladder ⇒ rate_limited (NOT schema_drift),
+    // retryable, Retry-After honored — never a fake-empty dockets[].
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 429, headers: { "Retry-After": "3600" } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_dockets", { agencyId: "BLM" }, sam));
+      const te = toToolError(error);
+      ok("45D-3 M1: dockets 429 through the catch ladder ⇒ rate_limited (NOT schema_drift), retryable, Retry-After:3600 — never a fake-empty (a broader catch that swallowed the carrier ⇒ RED)",
+        threw && te.kind === "rate_limited" && te.retryable === true && te.retryAfterSeconds === 3600, JSON.stringify({ kind: te.kind, ra: te.retryAfterSeconds }));
+    });
+
+    // ── (4) ★ M1: 404 (detail) ⇒ not_found through the wrap — never a fabricated docket.
+    await withFetch((u) => (isRegDocketDetail(u) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_get_docket", { docketId: "ZZZ-9999-0000" }, sam));
+      ok("45D-4 M1: get_docket 404 through the catch ladder ⇒ not_found (NOT schema_drift) — never a fabricated {docketId,...nulls}",
+        threw && toToolError(error).kind === "not_found", JSON.stringify(toToolError(error).kind));
+    });
+
+    // ── (4b) ★ S2: detail 200 with data absent/non-object ⇒ schema_drift (the
+    // mandatory fabrication guard — a bad id that yields a 200 error-envelope must
+    // NOT synthesize a docket).
+    for (const bad of [undefined, "not-object", 42, null]) {
+      const json = bad === undefined ? { errors: [{ status: "200" }] } : { data: bad };
+      await withFetch((u) => (isRegDocketDetail(u) ? mockResponse({ status: 200, json }) : failClosed()()), async () => {
+        const { threw, error } = await expectThrow(() => runTool("regulations_get_docket", { docketId: "BLM-2026-0001" }, sam));
+        ok(`45D-4b S2: detail 200 data=${JSON.stringify(bad)} (absent/non-object) ⇒ schema_drift (NOT a fabricated docket)`,
+          threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+      });
+    }
+
+    // ── (5) ★ schema_drift via the carrier (C132): list data non-array / meta
+    // absent / meta.totalElements non-number / 200 non-JSON (SyntaxError reclassify).
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: { data: "nope", meta: { totalElements: 5 } } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_dockets", { agencyId: "BLM" }, sam));
+      ok("45D-5a list data a STRING (non-array) ⇒ schema_drift (never []; mutate to read as empty ⇒ RED)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: { data: [] } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_dockets", { agencyId: "BLM" }, sam));
+      ok("45D-5b list meta ABSENT ⇒ schema_drift (container guard — NOT a TypeError/upstream_unavailable)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: { data: [], meta: { totalElements: "276910" } } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_dockets", { agencyId: "BLM" }, sam));
+      ok("45D-5c list meta.totalElements a STRING ⇒ schema_drift (typeof-guard before num; drop it ⇒ RED)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+    await withFetch((u) => (isRegDocketsList(u) ? nonJsonResponse() : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_dockets", { agencyId: "BLM" }, sam));
+      ok("45D-5d M1 branch-2: list 200 non-JSON body (.json() SyntaxError) ⇒ reclassified schema_drift (NOT unknown)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+    await withFetch((u) => (isRegDocketDetail(u) ? nonJsonResponse() : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("regulations_get_docket", { docketId: "BLM-2026-0001" }, sam));
+      ok("45D-5d' M1 branch-2 (detail): 200 non-JSON body ⇒ reclassified schema_drift (getDocket has the same ladder)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+    });
+
+    // ── (6) ★ S1: docketId charclass reject (incl. '..' and '.') ⇒ invalid_input,
+    // 0 fetch (the ONLY path-segment value; the SSRF guard).
+    await withFetch(failClosed(), async (calls) => {
+      for (const bad of ["../secrets", "a b", "EPA%2Fx", "", "..", "."]) {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool("regulations_get_docket", { docketId: bad }, sam));
+        ok(`45D-6 S1: docketId ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (charclass + alnum refine)`,
+          threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+      }
+    });
+
+    // ── (7) ★ rin null-when-absent + detail-only; list rows carry NO rin;
+    // highlightedContent only when a searchTerm is sent; dropped fields absent.
+    await withFetch((u) => (isRegDocketDetail(u) ? mockResponse({ status: 200, json: docketDetailBody({ rin: "1004-AE82" }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_get_docket", { docketId: "BLM-2026-0001" }, sam);
+      const d = r.data.docket;
+      ok("45D-7 detail rin PRESENT ⇒ docket.rin === '1004-AE82' (cross-source join key surfaced); keywords is a string[]; dropped fields (generic/field1/displayProperties/legacyId) absent",
+        d.rin === "1004-AE82" && Array.isArray(d.keywords) && d.keywords.length === 2 && !("generic" in d) && !("field1" in d) && !("displayProperties" in d) && !("legacyId" in d), JSON.stringify(d));
+    });
+    await withFetch((u) => (isRegDocketDetail(u) ? mockResponse({ status: 200, json: docketDetailBody({ omitRin: true }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_get_docket", { docketId: "BLM-2026-0002" }, sam);
+      const d = r.data.docket;
+      ok("45D-7 detail rin ABSENT ⇒ docket.rin === null (null-never-empty; NOT '', NOT dropped)",
+        d.rin === null && "rin" in d, JSON.stringify({ rin: d.rin }));
+    });
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: docketListBody({ n: 3, total: 3 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_dockets", { agencyId: "BLM", searchTerm: "grazing" }, sam);
+      ok("45D-7 list rows carry NO fabricated rin field (rin is null upstream in list — surfaced ONLY in detail); highlightedContent PRESENT since searchTerm sent",
+        r.data.dockets.length === 3 && r.data.dockets.every((x) => !("rin" in x)) && "highlightedContent" in r.data.dockets[0], JSON.stringify(r.data.dockets[0]));
+    });
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: docketListBody({ n: 2, total: 2 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_dockets", { agencyId: "BLM" }, sam);
+      ok("45D-7 list highlightedContent OMITTED when NO searchTerm sent (it is a search-snippet artifact)",
+        r.data.dockets.length === 2 && r.data.dockets.every((x) => !("highlightedContent" in x)), JSON.stringify(r.data.dockets[0]));
+    });
+
+    // ── (8) ★ empty-vs-outage: genuine no-match ⇒ complete:true/total:0 (NOT error).
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: docketListBody({ n: 0, total: 0, totalPages: 0 }) }) : failClosed()()), async () => {
+      const r = await runTool("regulations_search_dockets", { agencyId: "ZZZNOMATCH" }, sam);
+      const m = buildMeta(r.meta);
+      ok("45D-8 dockets genuine-empty (data:[], totalElements:0) ⇒ returned:0, totalAvailable:0, complete:true, truncated:false (a real no-match, NOT an outage)",
+        r.data.dockets.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false, JSON.stringify(m));
+    });
+
+    // ── (10) docketType enum reject ⇒ invalid_input, 0 fetch.
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("regulations_search_dockets", { agencyId: "BLM", docketType: "Bogus" }, sam));
+      ok("45D-10 docketType 'Bogus' ⇒ invalid_input (Zod enum), 0 fetch (an unknown docketType never reaches filter[docketType])",
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    });
+  });
+
+  // ── (9) ★ K-test + M2 keylessMode:false for BOTH tools (real key set).
+  await withEnvKey("SECRET-abc123", async () => {
+    await withFetch((u) => (isRegDocketsList(u) ? mockResponse({ status: 200, json: docketListBody({ n: 1, total: 1 }) }) : failClosed()()), async (calls) => {
+      const r = await runTool("regulations_search_dockets", { agencyId: "BLM" }, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((c) => isRegDocketsList(c.url));
+      const full = JSON.stringify({ data: r.data, meta: m });
+      ok("45D-9 K-test (list): SECRET-abc123 absent from serialized {data,_meta} AND the URL; source names (DATA_GOV_API_KEY) MODE; sent ONLY in the X-Api-Key header",
+        !full.includes("SECRET-abc123") && !call.url.includes("SECRET-abc123") && /\(DATA_GOV_API_KEY\)/.test(m.source) && call.init.headers["X-Api-Key"] === "SECRET-abc123", JSON.stringify(m.source));
+      ok("45D-9 M2 keylessMode===false on search_dockets (KEYED source; buildMeta defaults keylessMode:true — must be set false explicitly)",
+        m.keylessMode === false, JSON.stringify({ keyless: m.keylessMode }));
+    });
+    await withFetch((u) => (isRegDocketDetail(u) ? mockResponse({ status: 200, json: docketDetailBody({ rin: "1004-AE82" }) }) : failClosed()()), async (calls) => {
+      const r = await runTool("regulations_get_docket", { docketId: "BLM-2026-0001" }, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((c) => isRegDocketDetail(c.url));
+      const full = JSON.stringify({ data: r.data, meta: m });
+      ok("45D-9 K-test (detail): SECRET-abc123 absent from serialized {data,_meta} AND the URL; sent ONLY in the X-Api-Key header",
+        !full.includes("SECRET-abc123") && !call.url.includes("SECRET-abc123") && call.init.headers["X-Api-Key"] === "SECRET-abc123", JSON.stringify(m.source));
+      ok("45D-9 M2 keylessMode===false on get_docket (+ S4 totalAvailable:null, returned:1, complete:true)",
+        m.keylessMode === false && m.totalAvailable === null && m.returned === 1 && m.complete === true, JSON.stringify({ keyless: m.keylessMode, ta: m.totalAvailable, ret: m.returned, comp: m.complete }));
+    });
+  });
+}
+
 // §46: EPA ECHO REST source (ADR-0009) — the THIRD source on the R2 port. KEYLESS,
 // single fixed host (echodata.epa.gov) + three fixed service paths (the SSRF core).
 // Covers: SSRF (service-path allowlist + state enum + post-construction host
@@ -14393,6 +14670,7 @@ async function main() {
   await testFdicSummaryHonesty();
   await testFdicRatiosSodHonesty();
   await testDatagovHonesty();
+  await testDatagovDocketsHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
   await testFpdsHonesty();

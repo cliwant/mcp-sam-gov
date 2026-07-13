@@ -56,6 +56,10 @@ export declare const REGULATIONS_SORTS: readonly ["-postedDate", "postedDate", "
 export type RegulationsSort = (typeof REGULATIONS_SORTS)[number];
 export declare const REGULATIONS_DOCUMENT_TYPES: readonly ["Rule", "Proposed Rule", "Notice", "Supporting & Related Material", "Other"];
 export type RegulationsDocumentType = (typeof REGULATIONS_DOCUMENT_TYPES)[number];
+export declare const REGULATIONS_DOCKET_TYPES: readonly ["Rulemaking", "Nonrulemaking"];
+export type RegulationsDocketType = (typeof REGULATIONS_DOCKET_TYPES)[number];
+export declare const REGULATIONS_DOCKET_SORTS: readonly ["-lastModifiedDate", "lastModifiedDate", "title", "-title"];
+export type RegulationsDocketSort = (typeof REGULATIONS_DOCKET_SORTS)[number];
 export declare const CONGRESS_BILL_TYPES: readonly ["hr", "s", "hjres", "sjres", "hconres", "sconres", "hres", "sres"];
 export type CongressBillType = (typeof CONGRESS_BILL_TYPES)[number];
 type RegulationsSearchArgs = {
@@ -75,6 +79,37 @@ type RegulationsSearchArgs = {
 export declare function searchDocuments(args: RegulationsSearchArgs): Promise<MetaBundle>;
 /** Tool: regulations_search_comments. */
 export declare function searchComments(args: RegulationsSearchArgs): Promise<MetaBundle>;
+type RegulationsSearchDocketsArgs = {
+    searchTerm?: string;
+    query?: string;
+    agencyId?: string;
+    docketType?: RegulationsDocketType;
+    lastModifiedDateGe?: string;
+    lastModifiedDateLe?: string;
+    sort?: RegulationsDocketSort;
+    limit?: number;
+    pageNumber?: number;
+};
+type RegulationsGetDocketArgs = {
+    docketId: string;
+};
+/**
+ * Tool: regulations_search_dockets (`GET /v4/dockets`). Lists rulemaking/
+ * nonrulemaking docket CONTAINERS with the same 40-page/10,000-record ceiling and
+ * `totalElements`-exact total doctrine as regulationsSearch.
+ *
+ * ★ min-5 floor (ADR-0044): the API 400s on page[size]<5. The friendly `limit`
+ * exposes 1..250; the wire page[size] is `max(5, limit)` and a `limit<5` returns
+ * the first `limit` of the fetched rows client-side (disclosed) — `totalAvailable`
+ * stays the EXACT server total.
+ */
+export declare function searchDockets(args: RegulationsSearchDocketsArgs): Promise<MetaBundle>;
+/**
+ * Tool: regulations_get_docket (`GET /v4/dockets/{docketId}`). Single-docket
+ * detail — the ONLY view carrying `rin`. `docketId` is charclass-validated at the
+ * Zod layer (S1); it is the only caller value reaching a path segment.
+ */
+export declare function getDocket(args: RegulationsGetDocketArgs): Promise<MetaBundle>;
 type CongressSearchBillsArgs = {
     query?: string;
     congress?: number;
