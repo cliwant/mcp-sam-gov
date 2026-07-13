@@ -136,6 +136,13 @@ const CATALOG_URL = `https://${CATALOG_HOST}/api/catalog/v1`;
 // `.length === 9` (not just the regex) rejects a trailing `\n` (M2) that the
 // regex `$` alone would admit ("abcd-1234\n" passes /…$/ in JS).
 const DATASET_ID_RE = /^[a-z0-9]{4}-[a-z0-9]{4}$/;
+// D2 — an AGGREGATE $select projection. Matches a SoQL aggregate function
+// (count/sum/avg/min/max) applied via `fn(` — the `\b…\s*\(` shape avoids false
+// hits on column names like `max_temperature` (no paren) or `xmax(` (no word
+// boundary) — OR an explicit `group by`/`$group`. Case-insensitive. When the
+// caller's own $select is aggregate, the count(*) companion is skipped (its
+// raw-row total would be false for aggregate result rows). See `query`.
+const AGGREGATE_SELECT_RE = /\b(?:count|sum|avg|min|max)\s*\(|\bgroup\s+by\b|\$group\b/i;
 // ─── HONESTY-CRITICAL coercions (null, never 0, for absent) ───────
 // `num`/`str` are the shared, audited null-never-0 coercions in ./coerce.js
 // (imported above, `num` re-exported): null/undefined, the literal "null",
@@ -295,9 +302,24 @@ export async function query(args) {
     const rows = body;
     const returned = rows.length;
     // ── count(*) companion (best-effort; §m4). ──
+    // D2 — aggregate-projection guard. When the caller's OWN $select is an
+    // AGGREGATE projection (count/sum/avg/min/max, or a group-by), the result
+    // rows are AGGREGATES, not raw records — so a count(*) companion (which
+    // counts the RAW underlying rows) would report a FALSE total. E.g. a 1-row
+    // `$select=count(*)` result would get totalAvailable = raw-row-count,
+    // hasMore:true, nextOffset:1 → an agent pages forever over a 1-row result
+    // (a false-pagination livelock). When detected we SKIP the companion
+    // entirely, set totalAvailable:null (an aggregate has no meaningful raw-row
+    // total), and let hasMore fall out of PAGE-FULLNESS below (§B2), never a
+    // bogus total. A non-aggregate query keeps the exact-count behavior.
+    const isAggregateSelect = args.select !== undefined && AGGREGATE_SELECT_RE.test(args.select);
     let totalAvailable = null;
     let countNote;
-    if (withTotal) {
+    if (isAggregateSelect) {
+        countNote =
+            "The $select is an aggregate/group-by projection (count/sum/avg/min/max or group by), so its result rows are aggregates — an aggregate has no meaningful raw-row total. totalAvailable is null and pagination is page-fullness-based; the count(*) companion was NOT issued (it would count the RAW underlying rows and report a FALSE total).";
+    }
+    else if (withTotal) {
         const outcome = await fetchCount(args.domain, args.datasetId, args.where, args.q);
         if (outcome.reason === "ok") {
             totalAvailable = outcome.total;

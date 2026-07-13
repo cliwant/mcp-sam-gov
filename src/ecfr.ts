@@ -20,6 +20,12 @@ import { withMeta } from "./meta.js";
 
 const ECFR = "https://www.ecfr.gov/api";
 
+// eCFR's /search/v1/results `meta.total_count` is capped by Elasticsearch's
+// `index.max_result_window` (live-verified 10,000). A total AT OR ABOVE this
+// sentinel is a LOWER BOUND, not an exact count — see the totalIsLowerBound
+// wiring in `search` (D1). A genuine count below this stays exact.
+const ECFR_TOTAL_COUNT_CAP = 10000;
+
 async function fetchJson<T>(url: string): Promise<T> {
   const r = await fetchWithRetry(
     url,
@@ -154,31 +160,53 @@ export async function search(args: {
   };
 
   // Truthful `_meta` (spec §1.2 A6, §2.3). eCFR returns a hit count in
-  // `meta.total_count`, so `totalAvailable` is real (the AI can tell a
-  // top-N slice from the full match set). A6: echo the applied title scope
-  // so the AI can VERIFY it searched the intended corpus — Title 48 (FAR)
-  // vs every CFR title — rather than silently trusting a filter that could
-  // return cross-title results if the eCFR param contract ever changes.
+  // `meta.total_count`, BUT that count is capped by Elasticsearch's
+  // `index.max_result_window` at 10,000 (a real ceiling — unlike a genuine
+  // small count, a value at/above the cap is a LOWER BOUND, not an exact
+  // total). Below the cap `totalAvailable` is exact (the AI can tell a top-N
+  // slice from the full match set); at/above the cap we flag
+  // `totalIsLowerBound:true` + a note so a broad query that truly matches
+  // >10,000 sections is NOT reported as if exactly 10,000 (D1). A6: echo the
+  // applied title scope so the AI can VERIFY it searched the intended corpus —
+  // Title 48 (FAR) vs every CFR title — rather than silently trusting a filter
+  // that could return cross-title results if the eCFR param contract ever changes.
   const returned = data.results.length;
   const totalAvailable =
     typeof json.meta?.total_count === "number" ? json.meta.total_count : null;
+  // eCFR's search total_count saturates at the Elasticsearch max_result_window
+  // (live-verified 10,000). Use `>= cap` (not `=== cap`) so a total AT OR ABOVE
+  // the ceiling is treated as a lower bound — strictly safe if the window were
+  // ever configured higher. Mirrors federal-register.ts's FR_COUNT_CAP and
+  // edgar.ts's FTS_WINDOW.
+  const totalIsLowerBound =
+    totalAvailable !== null && totalAvailable >= ECFR_TOTAL_COUNT_CAP;
   const scopeNote =
     args.titleNumber !== undefined
       ? `searched CFR Title ${args.titleNumber}${
           args.titleNumber === 48 ? " (FAR — Federal Acquisition Regulation)" : ""
         } only`
       : "searched all CFR titles (no title filter applied)";
+  const notes = [scopeNote];
+  if (totalIsLowerBound) {
+    notes.push(
+      `eCFR caps total_count at ${ECFR_TOTAL_COUNT_CAP} (Elasticsearch index.max_result_window); totalAvailable is a LOWER BOUND — the true match count may be higher and is UNKNOWN. See totalIsLowerBound. Narrow by title/chapter/date for an exact count.`,
+    );
+  }
   return withMeta(data, {
     source: "ecfr.gov/api (search/v1)",
     keylessMode: true,
     returned,
     totalAvailable,
+    // Explicit boolean (not conditional): a below-cap count is DEFINITIVELY
+    // exact (totalIsLowerBound:false), an at/above-cap count is a lower bound
+    // (true). The AI can trust `false` as "this is the real total".
+    totalIsLowerBound,
     truncated:
       totalAvailable !== null ? returned < totalAvailable : undefined,
     filtersApplied: args.titleNumber !== undefined ? ["titleNumber"] : [],
     filtersDropped: [],
     fieldsUnavailable: [],
-    notes: [scopeNote],
+    notes,
   });
 }
 
