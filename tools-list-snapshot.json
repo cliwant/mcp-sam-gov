@@ -1829,6 +1829,30 @@
     }
   },
   {
+    "name": "hts_lookup",
+    "description": "Look up US import-tariff classification + duty rates from the USITC Harmonized Tariff Schedule (keyless; hts.usitc.gov/reststop/search) — the IMPORT-TARIFF / supply-chain PRICE lane a product-reseller / supply-chain bidder needs to price a hardware or commodity contract (extends the THIN Price lane with a NON-labor cost input, a sibling of gsa_benchmark_labor_rates). A single `query` serves BOTH modes: a KEYWORD (e.g. 'laptop', 'cotton shirt') OR an HTS number (e.g. '8471.30' / '8471.30.01.00') — both ride the `keyword=` search. Returns { query, lines:[{ htsno, statisticalSuffix, indent, description, units, columnOneGeneral, specialPreferential, columnTwo, additionalDuties, footnotes, quotaQuantity, effectivePeriod, status, isChapter99 }] } + honest _meta. ★DUTY-RATE HONESTY (the crux): columnOneGeneral (Column-1 General), specialPreferential (Special/preferential/FTA), and columnTwo (Column-2) are AUTHORITATIVE VERBATIM TEXT surfaced as strings — 'Free', a percentage ('35%'), a specific rate ('0.47¢/kg'), a compound/range, or null — NEVER coerced to a number (a coerced 0/NaN would fabricate a false 'duty-free'); an empty Special ('') → null = NO special-program rate published (NEVER read as Free). ★HIERARCHY (M1): a lookup returns rows across levels; the rate is stated ONCE at a shallower level (usually the 6/8-digit subheading) and inherits DOWNWARD to the blank statistical-suffix lines — to find a specific line's rate, read UP to the nearest ANCESTOR line (shallower indent, same htsno prefix) with a non-empty rate; a blank deepest line is NOT no/unknown duty. ★ADDITIONAL DUTIES (S1): the per-line `additionalDuties` is frequently null even when Section 301/232 duties apply — the real additional duty rides the Chapter-99 rows (isChapter99:true, htsno beginning '99') returned alongside the base line + the footnotes; they STACK on the base rate. ★COMPLETENESS (M2): the endpoint returns the FULL match array with NO server-side total and NO working pagination (offset is IGNORED) → totalAvailable is the EXACT served array length and paging is CLIENT-SIDE; there is no fixed cap (a single-char/common fragment can return 10,000–16,000+ rows / several MB), so `query` must be ≥3 non-whitespace chars (a 1–2 char query is rejected invalid_input before the fetch). `limit` (≤200, def 50), `offset`. A no-match ⇒ honest empty; a 404/5xx/timeout/non-array/HTML(→schema_drift) ⇒ THROWS (never a fake empty); a transient 400 on the validated query ⇒ upstream_unavailable (retryable). NOT a binding CBP classification ruling and NOT a landed-cost quote — the duty owed depends on country of origin + trade program + Section 301/232 / Chapter-99 additional duties + footnotes; confirm via CBP (CROSS / eRulings). The not-a-ruling caveat rides EVERY response.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "REQUIRED — a KEYWORD (e.g. 'laptop', 'cotton shirt') OR an HTS number (e.g. '8471.30' or '8471.30.01.00'); both ride the `keyword=` search. Must be ≥3 non-whitespace chars (a 1–2 char/single-char fragment can make USITC serve 10,000–16,000+ rows / several MB). Returns the matching classification rows across the HTS hierarchy with the Column-1 General / Special / Column-2 duty-rate TEXT + Chapter-99 additional-duty provisions."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page (CLIENT-SIDE slice over the served array), 1..200, default 50."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset for CLIENT-SIDE pagination over the served array (the endpoint has no server-side pagination), default 0."
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
     "name": "nih_reporter_search_projects",
     "description": "Search awarded NIH RePORTER research-GRANT projects (keyless; api.reporter.nih.gov v2, POST/JSON — the FIRST non-GET getJson-port consumer) — the NEW federal research-funding recipient-enrichment axis (who receives NIH research money, by organization / state, joinable to SAM/USAspending via primary_uei). Structured, LIVE-CONFIRMED-narrowing criteria ONLY, AND-combined in a module-built body (NO raw passthrough): orgStates (UPPERCASE 2-letter USPS enum — the SSRF + silent-zero guard; a lowercase/unknown code silently returns zeros), orgNames (≤512 each, ≤20), fiscalYears (int array 1985..currentYear+1, ≤20), limit (1..500, def 50), offset (0..14,999, def 0). Returns { projects:[{ projectNum, projectTitle, fiscalYear, awardAmount, organization:{ name, state, primaryUei, primaryDuns, ueis, duns }, principalInvestigators, contactPiName, fundingIc }] } + honest _meta. HONESTY: (M2) records are RESEARCH GRANTS, NOT procurement contracts — primary_uei joins to SAM/USAspending recipients but the award nature differs (disclosed in every _meta.notes); totalAvailable = the EXACT meta.total (NEVER the page size, NEVER a lower bound); NIH caps keyless retrieval at the first 15,000 records (offset 0..14,999) — offset ≥ 15,000 ⇒ invalid_input, and past the window the count stays exact while records are UNREACHABLE (disclosed in a note; nextOffset is never a dead-end). Disclose-not-refuse: an unscoped query still returns the first page + the exact total + a narrow-your-criteria note. agencyIcCodes is intentionally NOT a filter (NIH silently drops it — it would be a false 'applied'). Genuine-empty (total:0) ⇒ complete:true/total:0; an outage/5xx/timeout THROWS; a 400 (bad offset/limit/type) ⇒ invalid_input; a 200 body that isn't {meta,results} or a non-numeric meta.total ⇒ schema_drift (never a fake empty). awardAmount is number|null (a real $0 award is 0, an absent amount is null).",
     "inputSchema": {

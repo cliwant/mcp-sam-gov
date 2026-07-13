@@ -148,6 +148,18 @@ import {
   GENERAL_SELECT as FAC_GENERAL_SELECT,
   FINDINGS_SELECT as FAC_FINDINGS_SELECT,
 } from "./dist/fac.js";
+import {
+  htsLookup as usitcHtsLookup,
+  HTS_NOT_A_RULING_NOTE,
+  HTS_HIERARCHY_NOTE,
+  HTS_COMPLETENESS_NOTE,
+  HTS_ADDITIONAL_DUTY_NOTE,
+  HTS_EMPTY_SPECIAL_NOTE,
+  HTS_CHAPTER99_PRESENT_NOTE,
+  HTS_LARGE_RESULT_NOTE,
+  HTS_MAX_ROWS,
+  USITC_HOSTS,
+} from "./dist/usitc.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
@@ -13397,6 +13409,7 @@ async function main() {
   await testNppesHonesty();
   await testCmsHonesty();
   await testFacHonesty();
+  await testUsitcHonesty();
   await testNvdCveKev();
   await testClinicaltrialsHonesty();
   await testClinicaltrialsFacetHonesty();
@@ -14620,6 +14633,229 @@ async function testFacHonesty() {
       url.hostname === "api.fac.gov" && url.searchParams.get("report_id") === "eq.2024-06-GSAFAC-0000012345" && url.searchParams.get("select") === FAC_FINDINGS_SELECT && url.searchParams.get("order") === "report_id.asc,reference_number.asc",
       JSON.stringify(url.search));
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 68. hts_lookup (ADR-0039) — USITC Harmonized Tariff Schedule (a NEW keyless
+//     REST source src/usitc.ts). The import-tariff / supply-chain PRICE lane.
+//     Covers the ★duty-rate honesty crux (verbatim str, NEVER num — no false
+//     duty-free) + the binding fixes: ★M1 hierarchy rate inherits DOWNWARD, the
+//     disclosure points UP to the ancestor (blank child stays null); ★M2 no false
+//     ~900 ceiling + a ≥3-char query floor (fetch-spy 0) + a >5000 size bound;
+//     ★S1 additionalDuties-near-always-null note; ★S2 a transient 400 on a
+//     validated query ⇒ upstream_unavailable (retryable, NOT invalid_input); ★S3
+//     per-line empty rates NOT hoisted into top-level fieldsUnavailable. Plus P1
+//     served-length exact total + client-side paging (server offset ignored), P2
+//     empty-vs-outage (404/5xx/non-array/HTML→schema_drift THROW, never fake
+//     empty), the SSRF fixed-host+fixed-path+URLSearchParams-encoded keyword +
+//     redirect:"error", and the mandatory HTS_NOT_A_RULING_NOTE. All OFFLINE
+//     (fetch-mock), deterministic — NO live hts.usitc.gov calls.
+// ══════════════════════════════════════════════════════════════════════════
+const isUsitc = (u) => /hts\.usitc\.gov\/reststop\/search/.test(u);
+// hts.usitc.gov serves a BARE JSON ARRAY (no envelope, no total). usitcMock
+// returns that array (or an object/string for the drift cases) at `status`.
+const usitcMock = (body, status = 200) => (u) =>
+  isUsitc(u) ? mockResponse({ status, json: body }) : failClosed()();
+// A 200 non-JSON (HTML maintenance page) whose r.json() throws SyntaxError (→ schema_drift).
+const usitcHtmlResp = () => ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON"); }, text: async () => "<html>down</html>" });
+const usitcCall = (calls) => calls.find((x) => isUsitc(x.url));
+// A representative base HS row: general 'Free', other '35%', EMPTY special (''),
+// <il> markup in the description, a units array.
+const htsBaseRow = (over = {}) => ({
+  htsno: "8471.30.01.00", statisticalSuffix: "00", indent: "1",
+  description: "Portable automatic data processing machines, weighing not more than <il>10 kg</il>, consisting of a CPU, keyboard and display",
+  units: ["No."], footnotes: [], general: "Free", other: "35%", special: "",
+  additionalDuties: null, quotaQuantity: null, effectivePeriod: { begin: "2026-01-01", end: null }, status: "active",
+  ...over,
+});
+// The in-band Chapter-99 Section-301 additional-duty row (htsno begins '99').
+const hts9903Row = (over = {}) => ({
+  htsno: "9903.41.15", statisticalSuffix: null, indent: "1",
+  description: "Articles the product of China, as provided for in ...",
+  units: [], footnotes: [], general: "100%", other: "", special: "",
+  additionalDuties: null, quotaQuantity: null, effectivePeriod: null, status: "active",
+  ...over,
+});
+
+async function testUsitcHonesty() {
+  section("68. hts_lookup (ADR-0039) — USITC HTS tariff/duty-rate lookup (keyless src/usitc.ts): ★duty-rate verbatim str NEVER num + ★M1 hierarchy-inherits-DOWN/read-UP + ★M2 no-~900-ceiling + ≥3-char floor + >5000 size-bound + ★S1 additionalDuties-null note + ★S2 transient-400→upstream_unavailable + ★S3 no per-line fieldsUnavailable + P1 served-length/client-paging + P2 empty-vs-outage + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (1) happy: verbatim rates, empty special→null, isChapter99, <il> stripped,
+  //    the caveat + all mandatory notes, SSRF wire shape. (kills a, b, g) ──
+  await withFetch(usitcMock([htsBaseRow(), hts9903Row()]), async (calls) => {
+    const r = await runTool("hts_lookup", { query: "8471.30" }, sam);
+    const m = buildMeta(r.meta);
+    const base = r.data.lines[0];
+    const ch99 = r.data.lines[1];
+    ok("68-1 ★CRUX rates VERBATIM str: columnOneGeneral==='Free', columnTwo==='35%' (NOT 35/0.35), specialPreferential===null (''→null); NONE is a number/NaN (a num() would destroy the rate ⇒ RED)",
+      base.columnOneGeneral === "Free" && base.columnTwo === "35%" && base.specialPreferential === null &&
+      typeof base.columnOneGeneral === "string" && typeof base.columnTwo === "string",
+      JSON.stringify({ g: base.columnOneGeneral, o: base.columnTwo, s: base.specialPreferential }));
+    ok("68-1 no rate field on ANY line is typeof number / NaN (the never-num invariant, over all returned lines)",
+      r.data.lines.every((l) => [l.columnOneGeneral, l.specialPreferential, l.columnTwo].every((v) => v === null || (typeof v === "string" && v !== "NaN"))),
+      JSON.stringify(r.data.lines.map((l) => [l.columnOneGeneral, l.specialPreferential, l.columnTwo])));
+    ok("68-1 isChapter99 derived from htsno: false on 8471.30 base, TRUE on the 9903 row (a Chapter-99 additional-duty provision) — a derived boolean, NOT a duty coercion",
+      base.isChapter99 === false && ch99.isChapter99 === true && ch99.columnOneGeneral === "100%",
+      JSON.stringify({ base: base.isChapter99, ch99: ch99.isChapter99, g: ch99.columnOneGeneral }));
+    ok("68-1 description <il>…</il> stripped to inner text ('10 kg' preserved, no '<il>' tag left)",
+      typeof base.description === "string" && /10 kg/.test(base.description) && !/<\/?il>/i.test(base.description), JSON.stringify(base.description));
+    ok("68-1 ★g the HTS_NOT_A_RULING_NOTE rides the response (drop it ⇒ RED)", m.notes.includes(HTS_NOT_A_RULING_NOTE), JSON.stringify(m.notes.length));
+    ok("68-1 the mandatory M1 hierarchy + M2 completeness + S1 additional-duty notes all ride the response",
+      m.notes.includes(HTS_HIERARCHY_NOTE) && m.notes.includes(HTS_COMPLETENESS_NOTE) && m.notes.includes(HTS_ADDITIONAL_DUTY_NOTE), JSON.stringify(m.notes.length));
+    ok("68-1 ★g a 99.. row present ⇒ the Chapter-99 additional-duty disclosure present; the empty-special disclosure present",
+      m.notes.includes(HTS_CHAPTER99_PRESENT_NOTE) && m.notes.includes(HTS_EMPTY_SPECIAL_NOTE), JSON.stringify(m.notes));
+    ok("68-1 [P1] totalAvailable = served array length (2, EXACT), returned 2, complete:true, keylessMode:true, filtersApplied:['query'], filtersDropped:[]",
+      m.totalAvailable === 2 && m.returned === 2 && m.complete === true && m.keylessMode === true && m.filtersApplied.join(",") === "query" && m.filtersDropped.length === 0, JSON.stringify({ ta: m.totalAvailable, fa: m.filtersApplied }));
+    ok("68-1 ★S3 top-level fieldsUnavailable is EMPTY (a per-line null rate is NOT hoisted here — rate nullity is per-line-normal per M1)", m.fieldsUnavailable.length === 0, JSON.stringify(m.fieldsUnavailable));
+    const call = usitcCall(calls);
+    const url = new URL(call.url);
+    ok("68-1 ★SSRF wire: host hts.usitc.gov, https, FIXED path /reststop/search, keyword='8471.30' (the ONLY param), redirect:'error', NO headers (keyless)",
+      url.hostname === "hts.usitc.gov" && url.protocol === "https:" && url.pathname === "/reststop/search" && url.searchParams.get("keyword") === "8471.30" && [...url.searchParams.keys()].join(",") === "keyword" && call.init.redirect === "error" && !("headers" in call.init),
+      JSON.stringify({ path: url.pathname, kw: url.searchParams.get("keyword"), redirect: call.init.redirect }));
+  });
+
+  // ── (2) ★M1 hierarchy: the rate inherits DOWNWARD; a blank stat-suffix CHILD
+  //    stays null (never fabricated/inherited); the disclosure points UP to the
+  //    nearest ANCESTOR (SHALLOWER indent) — RED if it says "read the deepest line". ──
+  await withFetch(usitcMock([
+    { htsno: "8471.41.01", indent: "2", general: "16.5%", other: "35%", special: "", description: "Other automatic data processing machines", units: [], footnotes: [] },
+    { htsno: "8471.41.01.10", statisticalSuffix: "10", indent: "3", general: "", other: "", special: "", description: "Digital process control systems", units: ["No."], footnotes: [] },
+  ]), async () => {
+    const r = await runTool("hts_lookup", { query: "8471.41" }, sam);
+    const m = buildMeta(r.meta);
+    const parent = r.data.lines[0];
+    const child = r.data.lines[1];
+    ok("68-2 ★M1 the subheading (indent 2) carries columnOneGeneral '16.5%'; the DEEPER stat-suffix child (indent 3) has a BLANK rate ⇒ columnOneGeneral===null (NEVER fabricated/inherited onto the child)",
+      parent.columnOneGeneral === "16.5%" && child.columnOneGeneral === null && child.columnTwo === null,
+      JSON.stringify({ parent: parent.columnOneGeneral, child: child.columnOneGeneral }));
+    ok("68-2 ★M1 the hierarchy disclosure points UP to the nearest ANCESTOR (SHALLOWER indent) — 'read UP to the nearest ANCESTOR line (SHALLOWER indent'; RED if it reverts to 'read the deepest/most-specific line'",
+      m.notes.some((n) => /read UP to the nearest ANCESTOR line \(SHALLOWER indent/.test(n)) && !m.notes.some((n) => /read the (rate from the )?most specific \(deepest/i.test(n)),
+      JSON.stringify(m.notes.find((n) => /ANCESTOR/.test(n)) ?? "no-hierarchy-note"));
+  });
+
+  // ── (3) header/blank row: ALL three rates empty ('') ⇒ all null, never fabricated. ──
+  await withFetch(usitcMock([
+    { htsno: "8471", indent: "0", general: "", other: "", special: "", description: "Automatic data processing machines and units thereof", units: [], footnotes: [] },
+  ]), async () => {
+    const r = await runTool("hts_lookup", { query: "8471" }, sam);
+    const line = r.data.lines[0];
+    ok("68-3 a heading row (indent 0) with all-empty rate fields ⇒ columnOneGeneral/specialPreferential/columnTwo ALL null (never a fabricated number or 'Free')",
+      line.columnOneGeneral === null && line.specialPreferential === null && line.columnTwo === null, JSON.stringify(line));
+  });
+
+  // ── (4) ★M2 completeness: a 15,890-row array ⇒ totalAvailable EXACT, the
+  //    disclosure has NO '~900' ceiling, the >5000 size-bound note fires, and
+  //    paging is CLIENT-SIDE (server offset ignored). (kills d) ──
+  const bigArray = Array.from({ length: 15890 }, (_, i) => htsBaseRow({ htsno: "8471.30.01." + i, general: "Free", special: "", other: "35%", indent: "3", description: "row " + i }));
+  await withFetch(usitcMock(bigArray), async () => {
+    const r = await runTool("hts_lookup", { query: "cotton", limit: 5 }, sam);
+    const m = buildMeta(r.meta);
+    ok("68-4 ★M2 [P1] totalAvailable = the EXACT served length 15890 (NOT a fabricated grand total; NOT the returned page length)", m.totalAvailable === 15890 && m.returned === 5, JSON.stringify({ ta: m.totalAvailable, ret: m.returned }));
+    ok("68-4 ★M2 the completeness disclosure states 10,000–16,000+ rows / no fixed cap and NEVER '~900' (the debunked ceiling)",
+      m.notes.includes(HTS_COMPLETENESS_NOTE) && /10,000/.test(HTS_COMPLETENESS_NOTE) && !/~?900/.test(HTS_COMPLETENESS_NOTE) && !m.notes.some((n) => /~900|up to ~?900 rows/.test(n)),
+      JSON.stringify(HTS_COMPLETENESS_NOTE.slice(0, 60)));
+    ok("68-4 ★M2 belt: served 15890 > 5000 ⇒ the very-large-result note fires; hasMore:true, nextOffset:5",
+      m.notes.includes(HTS_LARGE_RESULT_NOTE) && m.pagination.hasMore === true && m.pagination.nextOffset === 5, JSON.stringify(m.pagination));
+  });
+  // (4b) client-side slicing: offset 100 ⇒ the page STARTS at array[100] (proves
+  //      the held-array slice, NOT a trusted server offset).
+  await withFetch(usitcMock(bigArray), async () => {
+    const r = await runTool("hts_lookup", { query: "cotton", limit: 3, offset: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("68-4b ★M2/P1 offset 100 ⇒ CLIENT-SIDE slice: lines[0].htsno === '8471.30.01.100' (the held array[100], never a trusted server offset), returned 3, hasMore:true",
+      r.data.lines[0].htsno === "8471.30.01.100" && r.data.lines.length === 3 && m.pagination.hasMore === true, JSON.stringify({ first: r.data.lines[0].htsno, n: r.data.lines.length }));
+  });
+  // (4c) ★M2 the ≥3-char floor: a 1–2 char query ⇒ invalid_input, 0 fetch (BEFORE any fetch).
+  for (const q of ["a", "84", "  x  "]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("hts_lookup", { query: q }, sam));
+      ok(`68-4c ★M2 query ${JSON.stringify(q)} (<3 non-ws chars) ⇒ invalid_input, 0 fetch (a 1-char fragment can serve 10k–16k rows — the floor closes it BEFORE the fetch)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // (4c-belt) the DIRECT function belt (behind Zod) also refuses a <3-char query, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => usitcHtsLookup({ query: "84" }));
+    ok("68-4c ★M2 the function belt (behind Zod) refuses query '84' ⇒ invalid_input, still 0 fetch",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify(toToolError(error).kind));
+  });
+
+  // ── (5) empty: HTTP 200 [] ⇒ honest empty (returned 0, total 0, complete:true) +
+  //    the caveat STILL present — distinct from every throw path. (kills e half) ──
+  await withFetch(usitcMock([]), async () => {
+    const r = await runTool("hts_lookup", { query: "zzzqxqx" }, sam);
+    const m = buildMeta(r.meta);
+    ok("68-5 [P2] a no-match [] (HTTP 200) ⇒ honest empty: lines:[], returned 0, totalAvailable 0, complete:true, hasMore:false + the caveat still present (NOT an error)",
+      r.data.lines.length === 0 && m.totalAvailable === 0 && m.returned === 0 && m.complete === true && m.pagination.hasMore === false && m.notes.includes(HTS_NOT_A_RULING_NOTE),
+      JSON.stringify({ ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // ── (6) error matrix (P2 + ★S2): each classified, NONE a fake empty. ──
+  await withFetch(usitcMock({ error: "not found" }, 404), async () => {
+    const { threw, error } = await expectThrow(() => runTool("hts_lookup", { query: "8471.30" }, sam));
+    ok("68-6 [P2] HTTP 404 ⇒ not_found THROW (never a fake empty)", threw && toToolError(error).kind === "not_found", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(usitcMock({}, 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("hts_lookup", { query: "8471.30" }, sam));
+    ok("68-6 [P2] HTTP 429 ⇒ rate_limited THROW", threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(usitcMock({}, 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("hts_lookup", { query: "8471.30" }, sam));
+    ok("68-6 [P2] HTTP 503 ⇒ upstream_unavailable THROW (a DOWN host is NEVER a returned:0)", threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch((u) => (isUsitc(u) ? usitcHtmlResp() : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("hts_lookup", { query: "8471.30" }, sam));
+    ok("68-6 [P2] a text/html 200 body (r.json() SyntaxError) ⇒ schema_drift THROW (the fdic.ts getFdic pattern), never a fake empty", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(usitcMock({ results: [] }, 200), async () => {
+    const { threw, error } = await expectThrow(() => runTool("hts_lookup", { query: "8471.30" }, sam));
+    ok("68-6 [P2] a NON-array 200 body ({results:[]}) ⇒ schema_drift THROW (the endpoint serves a BARE array; never read an object as empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ★S2 — a transient HTTP 400 on the ALREADY-VALIDATED query ⇒ upstream_unavailable
+  //   (retryable), NOT a caller-fault invalid_input (live USITC 400s transiently).
+  await withFetch(usitcMock([], 400), async (calls) => {
+    const { threw, error } = await expectThrow(() => runTool("hts_lookup", { query: "steel" }, sam));
+    ok("68-6 ★S2 HTTP 400 on the validated query ⇒ upstream_unavailable + retryable:true (a 400 on a pre-validated ≥3-char/control-stripped query is a TRANSIENT USITC-side error, NOT invalid_input) — mapping it to invalid_input = RED",
+      threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true && calls.filter((x) => isUsitc(x.url)).length === 1,
+      JSON.stringify(threw ? { k: toToolError(error).kind, retry: toToolError(error).retryable } : "no-throw"));
+  });
+
+  // ── (7) SSRF / injection: a crafted keyword rides `keyword=` SAFELY (URLSearchParams
+  //    percent-encodes it; host + FIXED path never change; no injected 2nd param), and a
+  //    control char is stripped so it never reaches the wire; overlong ⇒ invalid_input 0 fetch. ──
+  await withFetch(usitcMock([]), async (calls) => {
+    const r = await runTool("hts_lookup", { query: "x&format=JSON" }, sam);
+    const url = new URL(usitcCall(calls).url);
+    ok("68-7 ★SSRF 'x&format=JSON' rides keyword= ENCODED: keyword==='x&format=JSON' verbatim, NO injected `format` param, path still /reststop/search (URLSearchParams neutralizes the & = injection)",
+      url.searchParams.get("keyword") === "x&format=JSON" && url.searchParams.get("format") === null && [...url.searchParams.keys()].join(",") === "keyword" && url.pathname === "/reststop/search",
+      JSON.stringify({ kw: url.searchParams.get("keyword"), keys: [...url.searchParams.keys()] }));
+    ok("68-7 a returned MetaBundle (no throw) — the crafted value is a valid keyword, not a rejected path", r.data.lines.length === 0);
+  });
+  await withFetch(usitcMock([]), async (calls) => {
+    await runTool("hts_lookup", { query: "../exportList" }, sam);
+    const url = new URL(usitcCall(calls).url);
+    ok("68-7 ★SSRF '../exportList' rides keyword= (no path traversal): pathname stays '/reststop/search', keyword==='../exportList' (percent-encoded on the wire), single param",
+      url.pathname === "/reststop/search" && url.searchParams.get("keyword") === "../exportList" && [...url.searchParams.keys()].join(",") === "keyword", JSON.stringify({ path: url.pathname, kw: url.searchParams.get("keyword") }));
+  });
+  await withFetch(usitcMock([]), async (calls) => {
+    // A control char / newline mid/around the value is STRIPPED (never on the wire).
+    await runTool("hts_lookup", { query: "steel\n\tworks" }, sam);
+    const kw = new URL(usitcCall(calls).url).searchParams.get("keyword");
+    ok("68-7 ★SSRF a control char / newline is control-STRIPPED before the wire: keyword has NO \\n/\\t (value 'steelworks')", kw === "steelworks" && !/[\n\t]/.test(kw), JSON.stringify(kw));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => usitcHtsLookup({ query: "x".repeat(500) }));
+    ok("68-7 ★SSRF an overlong query (500 chars) ⇒ invalid_input, 0 fetch (the ≤100 length cap)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── (8) exports sanity. ──
+  ok("68-8 USITC_HOSTS is the single-entry allowlist (hts.usitc.gov); HTS_MAX_ROWS === 5000 (the size bound)",
+    Array.isArray(USITC_HOSTS) && USITC_HOSTS.length === 1 && USITC_HOSTS[0] === "hts.usitc.gov" && HTS_MAX_ROWS === 5000, JSON.stringify({ hosts: USITC_HOSTS, cap: HTS_MAX_ROWS }));
 }
 
 // ══════════════════════════════════════════════════════════════════════════

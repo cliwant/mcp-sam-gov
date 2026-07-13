@@ -61,6 +61,7 @@ import * as nvd from "./nvd.js";
 import * as nppes from "./nppes.js";
 import * as cms from "./cms.js";
 import * as fac from "./fac.js";
+import * as usitc from "./usitc.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
@@ -2796,6 +2797,40 @@ const ClinicaltrialsFacetCountsInput = z.object({
     ),
 });
 
+// ─── USITC Harmonized Tariff Schedule (hts.usitc.gov — keyless REST) ─── ADR-0039
+// The IMPORT-TARIFF / supply-chain PRICE lane: a good's HTS classification + its
+// Column-1 General / Special (preferential/FTA) / Column-2 duty-rate TEXT + the
+// Chapter-99 additional-duty provisions. Fixed host `hts.usitc.gov` + FIXED path
+// `/reststop/search` (the SSRF core — no free host/path); the single `query` rides
+// `keyword=` via URLSearchParams (percent-encoded). ★M2 — a MINIMUM query floor
+// (≥3 non-whitespace chars) is enforced at BOTH the Zod boundary (below) and a
+// handler belt, so a 1–2 char query is rejected before the fetch (a single char can
+// serve 10,000–16,000+ rows / several MB). The full array is fetched once and paged
+// CLIENT-SIDE (the endpoint serves no total and IGNORES offset).
+const HtsLookupInput = z.object({
+  query: z
+    .string()
+    .trim()
+    .min(3)
+    .max(100)
+    .describe(
+      "REQUIRED — a KEYWORD (e.g. 'laptop', 'cotton shirt') OR an HTS number (e.g. '8471.30' or '8471.30.01.00'); both ride the `keyword=` search. Must be ≥3 non-whitespace chars (a 1–2 char/single-char fragment can make USITC serve 10,000–16,000+ rows / several MB). Returns the matching classification rows across the HTS hierarchy with the Column-1 General / Special / Column-2 duty-rate TEXT + Chapter-99 additional-duty provisions.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(200)
+    .default(50)
+    .describe("Rows per page (CLIENT-SIDE slice over the served array), 1..200, default 50."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe("0-based row offset for CLIENT-SIDE pagination over the served array (the endpoint has no server-side pagination), default 0."),
+});
+
 // ─── BLS Public Data API v1/v2 (api.bls.gov — keyless POST/JSON) ─── ADR-0032
 // A NEW capability axis: the PRICING / ESCALATION layer (CPI-U & ECI drive EPA-
 // clause escalation; PPI benchmarks materials; CES gives labor-rate context). The
@@ -4083,6 +4118,14 @@ const TOOLS: ToolDef[] = [
       "FDIC industry & state banking-sector ANNUAL AGGREGATES — the FDIC's own roll-ups (keyless FDIC BankFind, api.fdic.gov/banks/summary). The FIRST aggregate/statistical FDIC tool (the other 4 are per-ENTITY, keyed on CERT): total assets, deposits, net income, equity & net interest income + structural counts (institutions, offices, branches, employees) for the whole US banking industry OR one state/territory in one year, split by charter class. Answers 'how big is the US (or a state's) banking industry this year, and how many institutions?' — a question the entity tools cannot express without summing thousands of rows. Exact-key filters (all optional, AND-combined): `year` (→ YEAR; e.g. 2023 → 121 rows), `state` (2-or-3-letter → STALP — NOTE the /summary state field is STALP, NOT PSTALP; accepts a jurisdiction code TX/CA/DC/GU/PR… OR a ROLL-UP code USA/US/OT/PI), `charterClass` (CB = commercial banks, SI = savings institutions; omit for both — there is NO combined row). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum YEAR/ASSET/DEP/NETINC/BANKS, def YEAR), `sortOrder` (def DESC → newest year / largest first). Returns { summary:[{ year, charterClass, charterClassCode, geography, stateCode, stateFips, scope, isRollup, institutionCount, officeCount, branchCount, employeeCount, totalAssetsUSD, totalDepositsUSD, netIncomeUSD, totalEquityUSD, netInterestIncomeUSD, id }] }. ★ROLL-UP HONESTY: each row crosses charter × geography; STALP ∈ {USA,US,OT,PI} are GEOGRAPHIC AGGREGATES (scope national_total/national_states_dc/territories_total/pacific_islands, isRollup:true), every other STALP is a jurisdiction (isRollup:false) — NEVER sum a roll-up row with jurisdiction rows or across scopes (national_total = national_states_dc + territories_total; a geography's total = its CB row + its SI row), read the national_total (USA) row directly for one national figure; a roll-up is NOT a state. ★NIM is net interest INCOME (a $ sum surfaced as netInterestIncomeUSD), NOT the margin ratio; this endpoint has NO ratio fields (ROA/ROE — derive from netIncomeUSD/totalAssetsUSD/totalEquityUSD). NO name/city filter — FDIC's /summary `search` param is ignored (returns the whole year); drill to institutions via fdic_search_institutions. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); money (ASSET/DEP/NETINC/EQ/NIM) is $thousands → whole USD ×1000 (null-never-0 — a genuine 0 like American Samoa's zero commercial banks stays 0, absent → null), counts (BANKS/OFFICES/BRANCHES/employees) pass through un-scaled (a count ×1000 is a fabrication); a non-int year is rejected pre-fetch (a malformed year is a live HTTP-200 total:0 false-empty); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
     inputSchema: FdicIndustrySummaryInput,
     handler: (input) => fdic.industrySummary(input),
+  }),
+  // ━━━ USITC Harmonized Tariff Schedule — keyless import-tariff / duty-rate lookup (1) ━━━ ADR-0039
+  defineTool({
+    name: "hts_lookup",
+    description:
+      "Look up US import-tariff classification + duty rates from the USITC Harmonized Tariff Schedule (keyless; hts.usitc.gov/reststop/search) — the IMPORT-TARIFF / supply-chain PRICE lane a product-reseller / supply-chain bidder needs to price a hardware or commodity contract (extends the THIN Price lane with a NON-labor cost input, a sibling of gsa_benchmark_labor_rates). A single `query` serves BOTH modes: a KEYWORD (e.g. 'laptop', 'cotton shirt') OR an HTS number (e.g. '8471.30' / '8471.30.01.00') — both ride the `keyword=` search. Returns { query, lines:[{ htsno, statisticalSuffix, indent, description, units, columnOneGeneral, specialPreferential, columnTwo, additionalDuties, footnotes, quotaQuantity, effectivePeriod, status, isChapter99 }] } + honest _meta. ★DUTY-RATE HONESTY (the crux): columnOneGeneral (Column-1 General), specialPreferential (Special/preferential/FTA), and columnTwo (Column-2) are AUTHORITATIVE VERBATIM TEXT surfaced as strings — 'Free', a percentage ('35%'), a specific rate ('0.47¢/kg'), a compound/range, or null — NEVER coerced to a number (a coerced 0/NaN would fabricate a false 'duty-free'); an empty Special ('') → null = NO special-program rate published (NEVER read as Free). ★HIERARCHY (M1): a lookup returns rows across levels; the rate is stated ONCE at a shallower level (usually the 6/8-digit subheading) and inherits DOWNWARD to the blank statistical-suffix lines — to find a specific line's rate, read UP to the nearest ANCESTOR line (shallower indent, same htsno prefix) with a non-empty rate; a blank deepest line is NOT no/unknown duty. ★ADDITIONAL DUTIES (S1): the per-line `additionalDuties` is frequently null even when Section 301/232 duties apply — the real additional duty rides the Chapter-99 rows (isChapter99:true, htsno beginning '99') returned alongside the base line + the footnotes; they STACK on the base rate. ★COMPLETENESS (M2): the endpoint returns the FULL match array with NO server-side total and NO working pagination (offset is IGNORED) → totalAvailable is the EXACT served array length and paging is CLIENT-SIDE; there is no fixed cap (a single-char/common fragment can return 10,000–16,000+ rows / several MB), so `query` must be ≥3 non-whitespace chars (a 1–2 char query is rejected invalid_input before the fetch). `limit` (≤200, def 50), `offset`. A no-match ⇒ honest empty; a 404/5xx/timeout/non-array/HTML(→schema_drift) ⇒ THROWS (never a fake empty); a transient 400 on the validated query ⇒ upstream_unavailable (retryable). NOT a binding CBP classification ruling and NOT a landed-cost quote — the duty owed depends on country of origin + trade program + Section 301/232 / Chapter-99 additional duties + footnotes; confirm via CBP (CROSS / eRulings). The not-a-ruling caveat rides EVERY response.",
+    inputSchema: HtsLookupInput,
+    handler: (input) => usitc.htsLookup(input),
   }),
   // ━━━ BLS Public Data API v1/v2 — keyless US labor/price time series (1) ━━━ ADR-0032
   // A NEW capability axis: the PRICING / ESCALATION layer (CPI-U & ECI EPA-clause
