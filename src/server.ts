@@ -56,6 +56,7 @@ import * as census from "./census.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
+import * as ofac from "./ofac.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import {
@@ -785,6 +786,45 @@ const TeamingPartnersInput = z.object({
     .max(10)
     .optional()
     .describe("Award-value-sorted pages (100 rows each) to scan before aggregating by recipient (default 4, max 10)."),
+});
+
+// OFAC denied-party sanctions screening (keyless bulk SDN + Consolidated lists)
+const OfacScreenInput = z.object({
+  name: z
+    .string()
+    .describe(
+      "REQUIRED. The entity / individual / vessel / aircraft name to screen against OFAC's published SDN + Consolidated lists. Trimmed; empty is rejected (invalid_input) — never a no-op empty screen.",
+    ),
+  type: z
+    .enum(["individual", "entity", "vessel", "aircraft"])
+    .optional()
+    .describe(
+      "Optional post-filter on the matched party's OFAC type. A blank OFAC type is inferred as 'entity' (disclosed). Omit to screen all types. Only trims the returned matches — it never turns a real name hit into no_name_match.",
+    ),
+  program: z
+    .string()
+    .optional()
+    .describe(
+      "Optional case-insensitive filter to one sanctions PROGRAM code (e.g. 'CUBA', 'IRAN', 'SDGT'). Applied LOCALLY to matched rows (never on the wire); only trims returned matches (a hit under another program still yields potential_matches).",
+    ),
+  list: z
+    .enum(["sdn", "consolidated", "all"])
+    .optional()
+    .describe(
+      "Which OFAC list(s) to screen: 'sdn' (SDN + its AKAs), 'consolidated' (non-SDN programs + AKAs), or 'all' (default — the correct default for a real screen). Every list required for the scope loads-or-throws (a partial set is never screened).",
+    ),
+  minMatchQuality: z
+    .enum(["exact", "strong", "weak"])
+    .optional()
+    .describe(
+      "Floor of match quality to RETURN (default 'weak'). This ONLY trims the returned matches[]; existence is computed at the lowest quality FIRST, so result is 'potential_matches' whenever ANY match exists regardless of this value (suppressed matches are disclosed).",
+    ),
+  limit: z
+    .number()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe("Max matches returned (default 50, max 200). Over-limit truncation is disclosed, never silent."),
 });
 
 // GAO bid-protest lookup (keyless RSS + decision-page parse)
@@ -3452,6 +3492,14 @@ const TOOLS: ToolDef[] = [
       "Small-business teaming-partner discovery by socioeconomic certification + NAICS + agency award history (keyless USAspending proxy), integrity-screened. Given a cert (enum-validated), optional naics/agency/subagency, and a lookback window, aggregates federal awardees by recipient and returns candidates ranked by agencyObligated with agencyAwardCount, mostRecentAwardDate, and sampleAwards; optionally screens the top candidates via sam_check_exclusions and drops active exclusions (excludeDebarred, default true). HONESTY: cert is AWARD-DERIVED (recorded on the firm's federal awards), NOT the SBA certification of record (which needs a keyed SAM Entity call) — verify active certification in SAM/SBS before teaming (stated in _meta). A bogus cert is rejected as invalid_input (the endpoint would silently return 0).",
     inputSchema: TeamingPartnersInput,
     handler: (input) => integrity.searchTeamingPartners(input),
+  }),
+  // ━━━ OFAC — Denied-Party Sanctions Screening (1) ━━━ ADR-0034
+  defineTool({
+    name: "ofac_screen_entity",
+    description:
+      "Keyless OFAC denied-party sanctions screening — the legally-required leg that SAM exclusions does NOT cover (31 CFR ch. V, strict-liability). Screens a `name` against OFAC's published SDN + Consolidated bulk lists (primary names AND AKAs from ALT.CSV joined by ent_num AND a.k.a./f.k.a./n.k.a. aliases mined from SDN/CONS Remarks — so an alias-only party like 'BNC' for BANCO NACIONAL DE CUBA is caught). Optional post-filters: type (individual|entity|vessel|aircraft), program (e.g. CUBA/IRAN/SDGT), list (sdn|consolidated|all, default all), minMatchQuality (exact|strong|weak, default weak), limit. Returns result ('potential_matches' | 'no_name_match' — NEVER 'clear'), matchCount, and per-match { name, matchedVia (primary|aka(alt)|aka(remarks)), akaType, matchQuality, list, programs, type, entNum, ofacSearchUrl }. ★SAFETY: this is a NAME SCREEN, NOT a legal determination — a no_name_match is NOT a clearance (transliterations/variants can miss a real hit) and a weak/strong hit is a REVIEW CANDIDATE requiring human adjudication against OFAC's Sanctions List Search. Every fetch failure / SSRF reject / parse drift / floor-fail THROWS (a download failure is NEVER read as a clear). minMatchQuality/type/program only trim returned matches — result reflects existence at any quality. Snapshot freshness (publish date + cache age) rides in _meta.",
+    inputSchema: OfacScreenInput,
+    handler: (input) => ofac.screenEntity(input),
   }),
   // ━━━ GAO — Bid Protests (1) ━━━
   defineTool({
