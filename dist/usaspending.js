@@ -458,7 +458,13 @@ export async function searchSubawards(args) {
     const data = {
         subawards: results.map((r) => ({
             subAwardId: r["Sub-Award ID"] ?? "",
-            subRecipient: r["Sub-Award Recipient"] ?? "(name redacted)",
+            // minor m2 (W3-1 honesty): an ABSENT Sub-Award Recipient → null, NOT a
+            // fabricated "(name redacted)". The old sentinel asserted a specific PRIVACY
+            // reason on ANY nullish value (schema gap / null echo / genuine redaction
+            // alike) — internally inconsistent with the null-never-fabricate discipline
+            // this same function applies to `amount` below. Honest null; the caller
+            // reads absence, not an invented redaction cause.
+            subRecipient: r["Sub-Award Recipient"] ?? null,
             // F2 (P3 null-never-0): an ABSENT Sub-Award Amount → null, NEVER a
             // fabricated $0. A genuine 0 still survives (`??` fires only on null).
             amount: r["Sub-Award Amount"] ?? null,
@@ -1408,6 +1414,18 @@ export async function searchSubAgencySpending(args) {
 // ─── Agency profile ───────────────────────────────────────────────
 export async function getAgencyProfile(toptierCode) {
     const json = await getUsas(`agency/${toptierCode}/`);
+    // minor m1 (W3-1 honesty) hollow-200 guard — mirror getRecipientProfile: a real
+    // agency/{code} 200 always echoes a toptier_code and/or name. A 200 with NEITHER
+    // is a degraded/hollow response (CDN/WAF interstitial, upstream hiccup) — do NOT
+    // map it into a fabricated { name:undefined } "complete" profile; throw schema_drift.
+    if (!json.toptier_code && !json.name) {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `usaspending agency/${toptierCode} returned a 200 with no toptier_code or name — a hollow/degraded response, not a real agency profile. Retry, or resolve the code via usas_lookup_agency.`,
+            retryable: true,
+            upstreamEndpoint: `agency/${toptierCode}`,
+        });
+    }
     return {
         fiscalYear: json.fiscal_year,
         toptierCode: json.toptier_code,
@@ -1422,11 +1440,27 @@ export async function getAgencyProfile(toptierCode) {
 export async function getAgencyAwardsSummary(args) {
     const fy = args.fiscalYear ?? new Date().getUTCFullYear();
     const json = await getUsas(`agency/${args.toptierCode}/awards/?fiscal_year=${fy}`);
+    // M3 (W3-1 honesty) hollow-200 guard — mirror getRecipientProfile: a real
+    // agency/{code}/awards 200 always carries transaction_count and/or obligations
+    // as numbers. A valid-JSON but degraded/renamed 200 with NEITHER as a number is
+    // a hollow response — do NOT map it into a confident false "$0 obligations, 0
+    // transactions". Surface it as retryable schema_drift (a typed carrier).
+    if (typeof json.transaction_count !== "number" &&
+        typeof json.obligations !== "number") {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `usaspending agency/${args.toptierCode}/awards returned a 200 with neither transaction_count nor obligations for FY${fy} — a hollow/degraded response, not a real summary. Do NOT read it as $0; retry, or verify the toptier code via usas_lookup_agency.`,
+            retryable: true,
+            upstreamEndpoint: `agency/${args.toptierCode}/awards`,
+        });
+    }
     const data = {
         fiscalYear: json.fiscal_year,
         toptierCode: json.toptier_code,
-        transactionCount: json.transaction_count ?? 0,
-        obligations: json.obligations ?? 0,
+        // null-never-0: an individually-absent field is null (unknown), NOT a
+        // fabricated 0. A genuine numeric 0 survives (`??` fires only on nullish).
+        transactionCount: json.transaction_count ?? null,
+        obligations: json.obligations ?? null,
         latestActionDate: json.latest_action_date,
     };
     // VQ-2 (C80 dogfooding): `obligations`/`transactionCount` from agency/{code}/awards
@@ -1451,6 +1485,18 @@ export async function getAgencyBudgetFunction(args) {
     const limit = args.limit ?? 10;
     const json = await getUsas(`agency/${args.toptierCode}/budget_function/?fiscal_year=${fy}&limit=${limit}`);
     const results = json.results ?? [];
+    // minor m1 (W3-1 honesty) hollow-200 guard — a real budget_function 200 echoes
+    // toptier_code + fiscal_year and carries results. A 200 with NONE of the three is
+    // a degraded/hollow response — do NOT map it into a fabricated empty budget
+    // (which reads as "this agency has no budget functions"); throw schema_drift.
+    if (!json.toptier_code && !json.fiscal_year && results.length === 0) {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `usaspending agency/${args.toptierCode}/budget_function returned a 200 with no toptier_code, fiscal_year, or results for FY${fy} — a hollow/degraded response, not a real budget. Retry.`,
+            retryable: true,
+            upstreamEndpoint: `agency/${args.toptierCode}/budget_function`,
+        });
+    }
     const total = json.page_metadata?.total ?? null;
     const data = {
         toptierCode: json.toptier_code,
@@ -1530,7 +1576,14 @@ export async function searchRecipients(args) {
         pagination: {
             offset: 0,
             limit,
-            nextOffset: hasMore ? results.length : null,
+            // M1 (W3-1 honesty): this tool has NO offset/page input — page is hardcoded
+            // to 1 (see body above) — so `nextOffset` is NOT consumable. Emitting
+            // `results.length` made an agent re-fetch the SAME top-N forever while
+            // ranked-below-`limit` recipients stayed unjoinable. Emit null
+            // unconditionally (mirror edgar.ts:656 / the FTS beyond-window pattern:
+            // hasMore stays true while nextOffset is null). The extra matches are
+            // reachable ONLY by raising `limit` (≤50) or narrowing the keyword.
+            nextOffset: null,
             hasMore,
         },
         filtersApplied: [],
@@ -1538,7 +1591,7 @@ export async function searchRecipients(args) {
         fieldsUnavailable: [],
         notes: hasMore
             ? [
-                `Showing the top ${limit} recipients by amount; ${total ?? "more"} match the keyword. Raise limit or page to see more.`,
+                `Showing the top ${limit} recipients by amount; ${total ?? "more"} match the keyword. These extra matches are NOT page-reachable — this tool has no offset input (nextOffset is null). Raise limit (up to 50) or narrow the keyword to see more.`,
             ]
             : [],
     });

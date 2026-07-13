@@ -106,7 +106,7 @@ export declare function searchSubawards(args: {
 }): Promise<MetaBundle<{
     subawards: {
         subAwardId: string;
-        subRecipient: string;
+        subRecipient: string | null;
         amount: number | null;
         actionDate: string;
         naicsCode: string | undefined;
@@ -307,7 +307,6 @@ export declare function searchRecompetes(args: {
 export declare function searchExpiringContracts(args: {
     agency?: string;
     naics?: string;
-    fiscalYear?: number;
     monthsUntilExpiry?: number;
     minAwardValue?: number;
     limit?: number;
@@ -433,8 +432,8 @@ export declare function getAgencyAwardsSummary(args: {
 }): Promise<MetaBundle<{
     fiscalYear: number | undefined;
     toptierCode: string | undefined;
-    transactionCount: number;
-    obligations: number;
+    transactionCount: number | null;
+    obligations: number | null;
     latestActionDate: string | undefined;
 }>>;
 export declare function getAgencyBudgetFunction(args: {
