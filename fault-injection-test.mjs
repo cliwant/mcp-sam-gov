@@ -126,6 +126,15 @@ import {
   NPPES_REACH_CAP_NOTE,
   NPPES_STATES,
 } from "./dist/nppes.js";
+import {
+  num as cmsNum,
+  queryDataset as cmsQueryDataset,
+  searchDatasets as cmsSearchDatasets,
+  CMS_OPEN_PAYMENTS_NOT_DETERMINATION_NOTE,
+  CMS_OPEN_PAYMENTS_REACH_CAP_NOTE,
+  CMS_HOSTS,
+  CMS_OPERATORS,
+} from "./dist/cms.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
@@ -13373,6 +13382,7 @@ async function main() {
   await testBlsOewsHonesty();
   await testOfacScreen();
   await testNppesHonesty();
+  await testCmsHonesty();
   await testNvdCveKev();
   await testClinicaltrialsHonesty();
   await testClinicaltrialsFacetHonesty();
@@ -14016,6 +14026,313 @@ async function testNppesHonesty() {
   eq("65-13 num('1280524286000') ⇒ 1280524286000 (ms epoch string parses)", nppesNum("1280524286000"), 1280524286000);
   ok("65-13 nppes.num === coerce.num (one shared audited impl — a num regression fails together; NO local num in nppes.ts)", nppesNum === coerceNum, "nppes.num diverged from coerce.num");
   ok("65-13 NPPES_STATES is the frozen USPS enum (56 entries) exported for the server Zod enum", Array.isArray(NPPES_STATES) && NPPES_STATES.length === 56 && NPPES_STATES.includes("CA"), JSON.stringify(NPPES_STATES.length));
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 66. cms_query_dataset + cms_search_datasets (ADR-0037) — the CMS Open Payments
+//     DKAN datastore adapter. Covers: ★M1 the results-mode-conditioned drift guard
+//     (results:false omits rows → rows:[] no-throw; results:true non-array → drift);
+//     ★M2 the metastore client-side pagination (74-item catalog, q/limit/offset all
+//     client-side, totalAvailable = exact post-q size, hasMore vs the KNOWN length);
+//     ★S1 results:false no-livelock (hasMore:false/nextOffset:null); ★S2 always
+//     count=true (no caller toggle) + the count-absent hedge; ★S3 offset ≤ 2000 reach
+//     cap; P1 EXACT count pagination; P2 400/404/HTML/5xx THROW vs honest empty;
+//     P3 money verbatim string + null-never-0; P4 conditions self-policing
+//     (filtersDropped always empty); SSRF PATH-interpolation grammar + the mandatory
+//     caveat on every response. All OFFLINE (fetch-mock), deterministic.
+// ══════════════════════════════════════════════════════════════════════════
+const CMS_DATASET_ID = "f0d1de67-6852-4093-a036-c9328c256a05";
+const CMS_DIST_ID = "19628007-c35b-54f7-8f50-21eefc1b6db2";
+const isCmsDatastore = (u) => /\/api\/1\/datastore\/query\//.test(u);
+const isCmsMetastore = (u) => /\/api\/1\/metastore\/schemas\/dataset\/items/.test(u);
+const cmsSchema = () => ({
+  [CMS_DIST_ID]: {
+    fields: {
+      covered_recipient_npi: { type: "text", mysql_type: "text", description: "Recipient NPI" },
+      total_amount_of_payment_usdollars: { type: "text", mysql_type: "text", description: "Payment amount (USD)" },
+      recipient_state: { type: "text", mysql_type: "text", description: "Recipient state" },
+    },
+  },
+});
+const cmsDatastoreMock = (body, status = 200) => (u) => (isCmsDatastore(u) ? mockResponse({ status, json: body }) : failClosed()());
+const cmsMetastoreMock = (arr, status = 200) => (u) => (isCmsMetastore(u) ? mockResponse({ status, json: arr }) : failClosed()());
+const cmsQ = (calls) => new URL(calls.find((x) => isCmsDatastore(x.url)).url).searchParams;
+const cmsMetaItem = (i, title, desc) => ({
+  identifier: `00000000-0000-0000-0000-${String(i).padStart(12, "0")}`,
+  title,
+  description: desc ?? `Description for ${title}`,
+  distribution: [
+    { identifier: `11111111-1111-1111-1111-${String(i).padStart(12, "0")}`, data: { title: `${title} CSV`, downloadURL: `https://openpaymentsdata.cms.gov/${i}.csv`, mediaType: "text/csv" } },
+  ],
+  keyword: ["open payments", "sunshine act"],
+  modified: "2026-06-01",
+});
+// 74-dataset catalog (M2 live fact) — items 0..4 carry "Research" in the title.
+const cmsCatalog74 = Array.from({ length: 74 }, (_, i) =>
+  cmsMetaItem(i, i < 5 ? `2025 Research Payment Data ${i}` : `General Payment Data ${i}`));
+
+async function testCmsHonesty() {
+  section("66. cms_query_dataset + cms_search_datasets (ADR-0037) — CMS Open Payments DKAN adapter: M1 results-mode drift + M2 metastore client-side pagination + S1/S2/S3 + count/money/SSRF honesty (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (1) Datastore happy (results:true): EXACT count, verbatim amounts, fields from
+  //    Object.values(schema)[0].fields, caveat present, count=true always on the wire. ──
+  await withFetch(cmsDatastoreMock({
+    count: 931959,
+    results: [{ covered_recipient_npi: "1234567893", total_amount_of_payment_usdollars: "1250.00", recipient_state: "CA" }],
+    schema: cmsSchema(),
+    query: { limit: 100, offset: 0 },
+  }), async (calls) => {
+    const r = await runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID }, sam);
+    const m = buildMeta(r.meta);
+    ok("66-1 results:true ⇒ rows verbatim (amount '1250.00' stays a STRING, never coerced/0), mode results:true",
+      r.data.results === true && r.data.rows.length === 1 && r.data.rows[0].total_amount_of_payment_usdollars === "1250.00",
+      JSON.stringify(r.data.rows));
+    ok("66-1 [P1] EXACT count 931959 ⇒ totalAvailable=931959 (NOT returned 1 — mutate to records.length ⇒ RED); returned 1 ⇒ hasMore:true, nextOffset:1, truncated, complete:false",
+      m.totalAvailable === 931959 && m.returned === 1 && m.pagination.hasMore === true && m.pagination.nextOffset === 1 && m.truncated === true && m.complete === false,
+      JSON.stringify({ ta: m.totalAvailable, pg: m.pagination }));
+    ok("66-1 fields read from Object.values(schema)[0].fields (the DIST-keyed schema anchor) ⇒ 3 typed columns",
+      r.data.fields.length === 3 && r.data.fields[0].name === "covered_recipient_npi" && r.data.fields[1].name === "total_amount_of_payment_usdollars" && r.data.fields[1].type === "text",
+      JSON.stringify(r.data.fields.map((f) => f.name)));
+    ok("66-1 ★S3 the not-a-determination caveat + reach-cap disclosure ride the response (drop either ⇒ RED)",
+      m.notes.includes(CMS_OPEN_PAYMENTS_NOT_DETERMINATION_NOTE) && m.notes.includes(CMS_OPEN_PAYMENTS_REACH_CAP_NOTE), JSON.stringify(m.notes.length));
+    ok("66-1 [P4] filtersDropped always empty (no silent-drop path)", m.filtersDropped.length === 0, JSON.stringify(m.filtersDropped));
+    const q = cmsQ(calls);
+    const call = calls.find((x) => isCmsDatastore(x.url));
+    const url = new URL(call.url);
+    ok("66-1 ★S2 count=true is ALWAYS on the wire (never a caller toggle); results=true, limit=100, offset=0",
+      q.get("count") === "true" && q.get("results") === "true" && q.get("limit") === "100" && q.get("offset") === "0", JSON.stringify([...q.keys()]));
+    ok("66-1 ★SSRF: datasetId + index interpolate into the PATH; host openpaymentsdata.cms.gov, https, redirect:'error', NO headers key (keyless)",
+      url.hostname === "openpaymentsdata.cms.gov" && url.protocol === "https:" && url.pathname === `/api/1/datastore/query/${CMS_DATASET_ID}/0` && call.init.redirect === "error" && !("headers" in call.init),
+      JSON.stringify({ path: url.pathname, redirect: call.init.redirect }));
+  });
+
+  // ── (2) conditions narrow the EXACT count + appear in filtersApplied (P4). ──
+  await withFetch(cmsDatastoreMock({
+    count: 92097,
+    results: [{ recipient_state: "CA" }],
+    schema: cmsSchema(),
+  }), async (calls) => {
+    const r = await runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID, conditions: [{ property: "recipient_state", value: "CA" }] }, sam);
+    const m = buildMeta(r.meta);
+    ok("66-2 [P4] conditions narrow the count ⇒ totalAvailable 92097; the condition is in filtersApplied; filtersDropped empty",
+      m.totalAvailable === 92097 && m.filtersApplied.includes("recipient_state = CA") && m.filtersDropped.length === 0, JSON.stringify(m.filtersApplied));
+    const q = cmsQ(calls);
+    ok("66-2 the condition rides conditions[0][property/value/operator] on the QUERY string (never the path)",
+      q.get("conditions[0][property]") === "recipient_state" && q.get("conditions[0][value]") === "CA" && q.get("conditions[0][operator]") === "=",
+      JSON.stringify([...q.keys()].filter((k) => k.startsWith("conditions"))));
+  });
+
+  // ── (3) Error matrix (P2): 400⇒invalid_input, 404⇒not_found, HTML⇒throw, 503⇒
+  //    upstream_unavailable, {count:0,results:[]}⇒honest empty — never conflated. ──
+  await withFetch(cmsDatastoreMock({ message: "Column not found.", status: 400 }, 400), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID, conditions: [{ property: "nonexistent_zzz", value: "x" }] }, sam));
+    ok("66-3 [P2/P4] HTTP 400 (bad column) ⇒ invalid_input THROW (never read as a fake {count:0,results:[]})",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cmsDatastoreMock({ message: "No resource found for dataset … at index 0" }, 404), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_query_dataset", { datasetId: "00000000-0000-0000-0000-000000000000" }, sam));
+    ok("66-3 [P2] HTTP 404 (bad datasetId/index) ⇒ not_found THROW (never a fake empty)",
+      threw && toToolError(error).kind === "not_found", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cmsDatastoreMock("<!DOCTYPE html><html>Access Denied</html>"), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID }, sam));
+    ok("66-3 [P2] an HTML 200 body (SPA/WAF wrong-route) ⇒ THROW schema_drift (no usable schema anchor), never a fake empty",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cmsDatastoreMock({}, 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID }, sam));
+    ok("66-3 [P2] HTTP 503 ⇒ upstream_unavailable THROW (a DOWN host is NEVER a returned:0)",
+      threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cmsDatastoreMock({ count: 0, results: [], schema: cmsSchema() }), async () => {
+    const r = await runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID, conditions: [{ property: "recipient_state", value: "ZZ" }] }, sam);
+    const m = buildMeta(r.meta);
+    ok("66-3 [P2] a GENUINE {count:0, results:[]} ⇒ honest empty: returned 0, totalAvailable 0, complete:true, hasMore:false + caveat still present (distinct from every throw path)",
+      r.data.rows.length === 0 && m.totalAvailable === 0 && m.complete === true && m.pagination.hasMore === false && m.notes.includes(CMS_OPEN_PAYMENTS_NOT_DETERMINATION_NOTE),
+      JSON.stringify({ ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // ── (4) [P3] money null-never-0: amounts pass through VERBATIM; num is null-never-0. ──
+  await withFetch(cmsDatastoreMock({
+    count: 3,
+    results: [
+      { total_amount_of_payment_usdollars: "" },
+      { total_amount_of_payment_usdollars: "null" },
+      { recipient_state: "TX" },
+    ],
+    schema: cmsSchema(),
+  }), async () => {
+    const r = await runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID }, sam);
+    ok("66-4 [P3] a blank/'null'/absent amount is surfaced VERBATIM (''/'null'/absent), NEVER fabricated to 0",
+      r.data.rows[0].total_amount_of_payment_usdollars === "" && r.data.rows[1].total_amount_of_payment_usdollars === "null" && !("total_amount_of_payment_usdollars" in r.data.rows[2]),
+      JSON.stringify(r.data.rows));
+  });
+  eq("66-4 [P3] cms.num('1250.00') ⇒ 1250 (numeric string parses)", cmsNum("1250.00"), 1250);
+  eq("66-4 [P3] cms.num('') ⇒ null (Number('') is 0 — must be caught)", cmsNum(""), null);
+  eq("66-4 [P3] cms.num('null') ⇒ null", cmsNum("null"), null);
+  eq("66-4 [P3] cms.num('-') ⇒ null (placeholder, never 0)", cmsNum("-"), null);
+  eq("66-4 [P3] cms.num(0) ⇒ 0 (genuine zero preserved)", cmsNum(0), 0);
+  ok("66-4 cms.num === coerce.num (one shared audited impl — a num regression fails together; NO local num in cms.ts)", cmsNum === coerceNum, "cms.num diverged from coerce.num");
+
+  // ── (5) ★M1 the results-mode-conditioned drift guard + ★S1 no-livelock + ★S2 hedge. ──
+  // (5a) results:false ⇒ body {count,schema,query} with NO results key ⇒ rows:[] NO throw,
+  //      totalAvailable=count, pagination DISABLED (hasMore:false, nextOffset:null — S1).
+  await withFetch(cmsDatastoreMock({ count: 931959, schema: cmsSchema(), query: { limit: 100, offset: 0, results: false } }), async (calls) => {
+    const r = await runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID, results: false }, sam);
+    const m = buildMeta(r.meta);
+    ok("66-5a ★M1 results:false ⇒ body has NO `results` key ⇒ rows:[] + NO throw (the naive Array.isArray(results) guard would THROW here ⇒ that mutation = RED); mode results:false",
+      r.data.results === false && Array.isArray(r.data.rows) && r.data.rows.length === 0, JSON.stringify({ mode: r.data.results, rows: r.data.rows.length }));
+    ok("66-5a ★S1 results:false disables pagination (NO exact-count livelock): totalAvailable=931959, returned:0, hasMore:false, nextOffset:null + a count/schema-mode note",
+      m.totalAvailable === 931959 && m.returned === 0 && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.notes.some((n) => /COUNT\/SCHEMA-discovery mode/i.test(n)),
+      JSON.stringify(m.pagination));
+    ok("66-5a fields still returned (the schema-discovery payoff) + count=true, results=false on the wire",
+      r.data.fields.length === 3 && cmsQ(calls).get("count") === "true" && cmsQ(calls).get("results") === "false", JSON.stringify(r.data.fields.length));
+  });
+  // (5b) results:true (default) with NO results key ⇒ driftError (the P2 guard held).
+  await withFetch(cmsDatastoreMock({ count: 5, schema: cmsSchema() }), async () => {
+    const { threw, error } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID }));
+    ok("66-5b ★M1 results:true with an ABSENT `results` ⇒ schema_drift (loosening the guard to treat absent as [] unconditionally ⇒ a dropped-results drift becomes a fake-empty = RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (5b2) results:true with a NON-ARRAY results ⇒ driftError.
+  await withFetch(cmsDatastoreMock({ count: 5, results: "not-an-array", schema: cmsSchema() }), async () => {
+    const { threw, error } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID }));
+    ok("66-5b ★M1 results:true with a non-array `results` ('not-an-array') ⇒ schema_drift, never []",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (5c) schema missing entirely ⇒ driftError (the schema anchor).
+  await withFetch(cmsDatastoreMock({ count: 5, results: [{ x: "1" }] }), async () => {
+    const { threw, error } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID }));
+    ok("66-5c schema missing entirely ⇒ schema_drift (the drift anchor; never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (5d) schema's sole distribution has NO fields ⇒ driftError.
+  await withFetch(cmsDatastoreMock({ count: 5, results: [{ x: "1" }], schema: { [CMS_DIST_ID]: { fields: null } } }), async () => {
+    const { threw, error } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID }));
+    ok("66-5d schema distribution with no `fields` object ⇒ schema_drift",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (5e) a PRESENT non-number count (results:true) ⇒ driftError (typeof BEFORE num()).
+  await withFetch(cmsDatastoreMock({ count: "931959", results: [{ x: "1" }], schema: cmsSchema() }), async () => {
+    const { threw, error } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID }));
+    ok("66-5e a PRESENT non-number count ('931959' string) in results-mode ⇒ schema_drift (drop the typeof check ⇒ num() misreads it as absent ⇒ RED)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (5f) ★S2 belt — count ABSENT (results:true) ⇒ hedge (totalAvailable:null + page-
+  //      fullness hasMore + a note), NEVER throw, NEVER a fabricated total.
+  await withFetch(cmsDatastoreMock({ results: [{ x: "1" }, { x: "2" }], schema: cmsSchema() }), async () => {
+    const r = await runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID, limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("66-5f ★S2 belt: count ABSENT in a results:true body ⇒ totalAvailable:null (NEVER fabricated) + hasMore by page-fullness (returned 2 >= limit 2 ⇒ true) + a disclosing note; NO throw",
+      m.totalAvailable === null && r.data.rows.length === 2 && m.pagination.hasMore === true && m.notes.some((n) => /did not report `count`/i.test(n)),
+      JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore }));
+  });
+
+  // ── (6) SSRF / limit / offset / grammar rejects ⇒ invalid_input, 0 fetch. ──
+  // (6a) limit > 500 (Zod .max(500) at the boundary AND the function belt).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID, limit: 501 }, sam));
+    ok("66-6a limit:501 via runTool ⇒ invalid_input, 0 fetch (the HARD 500 cap — never a silent clamp)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    const { threw: t2, error: e2 } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID, limit: 501 }));
+    ok("66-6a limit:501 direct (function belt) ⇒ invalid_input, still 0 fetch",
+      t2 && toToolError(e2).kind === "invalid_input" && calls.length === before, JSON.stringify(toToolError(e2).kind));
+  });
+  // (6b) ★S3 offset > 2000 reach cap.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID, offset: 2001 }, sam));
+    ok("66-6b ★S3 offset:2001 ⇒ invalid_input, 0 fetch (the ≤2000 PII reach cap — silently bypassing it = un-capped named-physician harvest ⇒ RED)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    const { threw: t2, error: e2 } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID, offset: 2001 }));
+    ok("66-6b ★S3 offset:2001 direct (function belt) ⇒ invalid_input, 0 fetch",
+      t2 && toToolError(e2).kind === "invalid_input" && /offset/.test(toToolError(e2).message) && calls.length === before, JSON.stringify(toToolError(e2).kind));
+  });
+  // (6c) ★SSRF PATH grammar: a crafted datasetId ⇒ invalid_input, 0 fetch, fetch NOT called.
+  await withFetch(failClosed(), async (calls) => {
+    for (const datasetId of [
+      "../../etc/passwd",
+      "F0D1DE67-6852-4093-A036-C9328C256A05", // uppercase
+      "f0d1de67-6852-4093-a036-c9328c256a05\n", // trailing newline
+      "f0d1de67-6852-4093-a036-c9328c256a0", // 35 chars
+      "f0d1de67%2f..%2f..%2fmetastore", // percent-encoded traversal
+    ]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => cmsQueryDataset({ datasetId }));
+      ok(`66-6c ★SSRF datasetId ${JSON.stringify(datasetId)} ⇒ invalid_input, 0 fetch (36-char lowercase UUID guard on the PATH-interpolated id)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    }
+  });
+  // (6d) a crafted condition property / bad operator ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID, conditions: [{ property: "http://evil", value: "x" }] }));
+    ok("66-6d a crafted condition property 'http://evil' ⇒ invalid_input, 0 fetch (^[a-z0-9_]+$ column grammar)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify(toToolError(error).kind));
+    const { threw: t2, error: e2 } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID, conditions: [{ property: "recipient_state", value: "CA", operator: "DROP" }] }));
+    ok("66-6d a bad operator 'DROP' ⇒ invalid_input, 0 fetch (operator enum)",
+      t2 && toToolError(e2).kind === "invalid_input" && calls.length === before, JSON.stringify(toToolError(e2).kind));
+    const { threw: t3, error: e3 } = await expectThrow(() => cmsQueryDataset({ datasetId: CMS_DATASET_ID, index: 51 }));
+    ok("66-6d index:51 (out of 0..50) ⇒ invalid_input, 0 fetch (the PATH-interpolated index guard)",
+      t3 && toToolError(e3).kind === "invalid_input" && calls.length === before, JSON.stringify(toToolError(e3).kind));
+  });
+
+  // ── (7) ★M2 metastore client-side pagination (the server IGNORES limit/offset). ──
+  // (7a) 74-item catalog, limit 20 offset 0 ⇒ page of 20, totalAvailable=74 EXACT,
+  //      hasMore vs the KNOWN length (0+20<74), nextOffset 20 — no false-more/dead-end.
+  await withFetch(cmsMetastoreMock(cmsCatalog74), async (calls) => {
+    const r = await runTool("cms_search_datasets", { limit: 20 }, sam);
+    const m = buildMeta(r.meta);
+    ok("66-7a ★M2 74-item catalog, limit 20 ⇒ returned 20, totalAvailable:74 EXACT (never null/false-more), hasMore:true, nextOffset:20 (client-side slice against the known length)",
+      r.data.results.length === 20 && m.totalAvailable === 74 && m.pagination.hasMore === true && m.pagination.nextOffset === 20, JSON.stringify({ n: r.data.results.length, ta: m.totalAvailable, pg: m.pagination }));
+    ok("66-7a ★D1 curated mapping: distributions[0].{distId,title,downloadURL,mediaType} are all NON-NULL from the ?show-reference-ids nested {identifier,data:{…}} shape (the FLAT default endpoint would null every one) + datasetId + index + keyword[] + modified",
+      r.data.results[0].datasetId === "00000000-0000-0000-0000-000000000000" && r.data.results[0].distributions[0].index === 0 && r.data.results[0].distributions[0].distId === "11111111-1111-1111-1111-000000000000" && r.data.results[0].distributions[0].title === "2025 Research Payment Data 0 CSV" && r.data.results[0].distributions[0].mediaType === "text/csv" && r.data.results[0].distributions[0].downloadURL === "https://openpaymentsdata.cms.gov/0.csv" && r.data.results[0].keyword.length === 2,
+      JSON.stringify(r.data.results[0]));
+    ok("66-7a the M2 catalog-note + the feed-datasetId note + the caveat ride the response",
+      m.notes.some((n) => /entire dataset catalog in one response/i.test(n)) && m.notes.some((n) => /Feed a result's datasetId/i.test(n)) && m.notes.includes(CMS_OPEN_PAYMENTS_NOT_DETERMINATION_NOTE), JSON.stringify(m.notes.length));
+    const call = calls.find((x) => isCmsMetastore(x.url));
+    ok("66-7a ★D1 the metastore WIRE URL carries `show-reference-ids` (the ONLY variant that populates distId+downloadURL; drop it ⇒ live nulls everything ⇒ RED) and STILL NO limit=/offset= (M2: q/limit/offset stay client-side); one call, redirect:'error', NO headers (keyless)",
+      calls.filter((x) => isCmsMetastore(x.url)).length === 1 && /[?&]show-reference-ids(?:&|=|$)/.test(call.url) && !/limit=|offset=/.test(call.url) && call.init.redirect === "error" && !("headers" in call.init),
+      JSON.stringify(call.url));
+  });
+  // (7b) last page: offset 60 limit 20 ⇒ returned 14, hasMore:false, nextOffset:null.
+  await withFetch(cmsMetastoreMock(cmsCatalog74), async () => {
+    const r = await runTool("cms_search_datasets", { limit: 20, offset: 60 }, sam);
+    const m = buildMeta(r.meta);
+    ok("66-7b ★M2 offset 60 limit 20 ⇒ returned 14 (74-60), totalAvailable:74, hasMore:false, nextOffset:null (never a dead-end offset past the known end)",
+      r.data.results.length === 14 && m.totalAvailable === 74 && m.pagination.hasMore === false && m.pagination.nextOffset === null, JSON.stringify({ n: r.data.results.length, pg: m.pagination }));
+  });
+  // (7c) q substring filter is CLIENT-SIDE ⇒ totalAvailable = post-q size (5), exact.
+  await withFetch(cmsMetastoreMock(cmsCatalog74), async () => {
+    const r = await runTool("cms_search_datasets", { q: "research" }, sam);
+    const m = buildMeta(r.meta);
+    ok("66-7c ★M2 q:'research' ⇒ 5 matches (client-side over title/description); totalAvailable:5 EXACT (post-q size, not 74, not null); filtersApplied:['q']; all titles contain 'Research'",
+      r.data.results.length === 5 && m.totalAvailable === 5 && m.filtersApplied.join(",") === "q" && r.data.results.every((d) => /Research/.test(d.title)), JSON.stringify({ n: r.data.results.length, ta: m.totalAvailable }));
+  });
+  // (7d) a small 2-element array ⇒ curated rows, exact total, hasMore:false.
+  await withFetch(cmsMetastoreMock([cmsMetaItem(0, "A"), cmsMetaItem(1, "B")]), async () => {
+    const r = await runTool("cms_search_datasets", {}, sam);
+    const m = buildMeta(r.meta);
+    ok("66-7d a 2-element catalog ⇒ returned 2, totalAvailable:2, hasMore:false, complete:true",
+      r.data.results.length === 2 && m.totalAvailable === 2 && m.pagination.hasMore === false && m.complete === true, JSON.stringify({ n: r.data.results.length, ta: m.totalAvailable }));
+  });
+  // (7e) a NON-array metastore body ⇒ driftError (never a fake empty).
+  await withFetch(cmsMetastoreMock({ results: [] }), async () => {
+    const { threw, error } = await expectThrow(() => cmsSearchDatasets({}));
+    ok("66-7e a non-array metastore body ⇒ schema_drift (the DKAN metastore is a bare ARRAY; never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cmsMetastoreMock({}, 503), async () => {
+    const { threw, error } = await expectThrow(() => cmsSearchDatasets({}));
+    ok("66-7e metastore 503 ⇒ upstream_unavailable THROW (a DOWN metastore is NEVER an empty catalog)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (8) exports sanity. ──
+  ok("66-8 CMS_HOSTS is the single-entry allowlist (openpaymentsdata.cms.gov)", Array.isArray(CMS_HOSTS) && CMS_HOSTS.length === 1 && CMS_HOSTS[0] === "openpaymentsdata.cms.gov", JSON.stringify(CMS_HOSTS));
+  ok("66-8 CMS_OPERATORS enum exported (8 ops incl. like/in)", Array.isArray(CMS_OPERATORS) && CMS_OPERATORS.includes("like") && CMS_OPERATORS.includes("in") && CMS_OPERATORS.length === 8, JSON.stringify(CMS_OPERATORS));
 }
 
 // ══════════════════════════════════════════════════════════════════════════
