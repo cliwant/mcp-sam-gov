@@ -173,4 +173,95 @@ export type BlsOewsRow = {
  * window internally and discloses the reference year from the returned A01 row).
  */
 export declare function oewsWages(args: BlsOewsArgs): Promise<MetaBundle>;
+/** The 42 PINNED column names, in exact order (ADR-0042 fact 2, live-verified). */
+export declare const QCEW_COLUMNS: readonly ["area_fips", "own_code", "industry_code", "agglvl_code", "size_code", "year", "qtr", "disclosure_code", "qtrly_estabs", "month1_emplvl", "month2_emplvl", "month3_emplvl", "total_qtrly_wages", "taxable_qtrly_wages", "qtrly_contributions", "avg_wkly_wage", "lq_disclosure_code", "lq_qtrly_estabs", "lq_month1_emplvl", "lq_month2_emplvl", "lq_month3_emplvl", "lq_total_qtrly_wages", "lq_taxable_qtrly_wages", "lq_qtrly_contributions", "lq_avg_wkly_wage", "oty_disclosure_code", "oty_qtrly_estabs_chg", "oty_qtrly_estabs_pct_chg", "oty_month1_emplvl_chg", "oty_month1_emplvl_pct_chg", "oty_month2_emplvl_chg", "oty_month2_emplvl_pct_chg", "oty_month3_emplvl_chg", "oty_month3_emplvl_pct_chg", "oty_total_qtrly_wages_chg", "oty_total_qtrly_wages_pct_chg", "oty_taxable_qtrly_wages_chg", "oty_taxable_qtrly_wages_pct_chg", "oty_qtrly_contributions_chg", "oty_qtrly_contributions_pct_chg", "oty_avg_wkly_wage_chg", "oty_avg_wkly_wage_pct_chg"];
+/**
+ * ★ Build + validate the QCEW slice URL. Each caller-influenced path segment is
+ * charclass-validated BEFORE interpolation; the host is a compile-time constant;
+ * a post-construction `new URL` host/protocol assert locks it (the per-segment
+ * charclass is the real guard — the hostname check alone does not stop a same-host
+ * `../`). The client-side filters (ownership/aggregationLevel/sizeCode/narrow)
+ * NEVER touch the URL — no SSRF surface. Pure fn (no fetch).
+ */
+export declare function buildQcewUrl(mode: string, year: number | string, quarter: string, code: string): string;
+export type QcewBaseBlock = {
+    disclosed: boolean;
+    disclosureCode: string | null;
+    qtrly_estabs: number | null;
+    month1_emplvl: number | null;
+    month2_emplvl: number | null;
+    month3_emplvl: number | null;
+    total_qtrly_wages: number | null;
+    taxable_qtrly_wages: number | null;
+    qtrly_contributions: number | null;
+    avg_wkly_wage: number | null;
+};
+export type QcewLqBlock = {
+    disclosed: boolean;
+    disclosureCode: string | null;
+    lq_qtrly_estabs: number | null;
+    lq_month1_emplvl: number | null;
+    lq_month2_emplvl: number | null;
+    lq_month3_emplvl: number | null;
+    lq_total_qtrly_wages: number | null;
+    lq_taxable_qtrly_wages: number | null;
+    lq_qtrly_contributions: number | null;
+    lq_avg_wkly_wage: number | null;
+};
+export type QcewOtyBlock = {
+    disclosed: boolean;
+    disclosureCode: string | null;
+    oty_qtrly_estabs_chg: number | null;
+    oty_qtrly_estabs_pct_chg: number | null;
+    oty_month1_emplvl_chg: number | null;
+    oty_month1_emplvl_pct_chg: number | null;
+    oty_month2_emplvl_chg: number | null;
+    oty_month2_emplvl_pct_chg: number | null;
+    oty_month3_emplvl_chg: number | null;
+    oty_month3_emplvl_pct_chg: number | null;
+    oty_total_qtrly_wages_chg: number | null;
+    oty_total_qtrly_wages_pct_chg: number | null;
+    oty_taxable_qtrly_wages_chg: number | null;
+    oty_taxable_qtrly_wages_pct_chg: number | null;
+    oty_qtrly_contributions_chg: number | null;
+    oty_qtrly_contributions_pct_chg: number | null;
+    oty_avg_wkly_wage_chg: number | null;
+    oty_avg_wkly_wage_pct_chg: number | null;
+};
+export type QcewRow = {
+    area_fips: string | null;
+    own_code: string | null;
+    industry_code: string | null;
+    agglvl_code: string | null;
+    size_code: string | null;
+    base: QcewBaseBlock;
+    locationQuotient: QcewLqBlock;
+    overTheYear: QcewOtyBlock;
+};
+/** Map ONE parsed 42-field record → a disclosure-aware output row. */
+export declare function mapQcewRow(rec: string[]): QcewRow;
+export type BlsQcewArgs = {
+    mode?: string;
+    area?: string;
+    industry?: string;
+    year?: number;
+    quarter?: string | number;
+    ownership?: string;
+    aggregationLevel?: string;
+    sizeCode?: string;
+    limit?: number;
+    offset?: number;
+};
+/**
+ * ★ `bls_qcew` — keyless QCEW county×NAICS market-size / wages / location-quotient,
+ * disclosure-aware. Fetches ONE slice CSV (fetch-once — QCEW does not paginate),
+ * parses ALL rows through the symmetric column-drift guard + the POST-parse header
+ * assertion, applies the CLIENT-SIDE filters (ownership/aggregationLevel/sizeCode +
+ * the narrow industry/area), windows with limit/offset, and maps each page row
+ * through the block/code/field-scoped disclosure mapper (suppressed → null NEVER 0;
+ * a genuine 0 survives). A per-tuple HTTP 404 → an honest empty (found:false), a
+ * 5xx/timeout → THROW, a 200 non-CSV / drifted header → schema_drift THROW. No
+ * BLS_API_KEY is read on this keyless path.
+ */
+export declare function qcew(args: BlsQcewArgs): Promise<MetaBundle>;
 //# sourceMappingURL=bls.d.ts.map
