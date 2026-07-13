@@ -247,7 +247,22 @@ async function regulationsSearch(endpoint, kind, args) {
     params.set("sort", sort);
     params.set("page[number]", String(pageNumber));
     params.set("page[size]", String(pageSize));
-    const body = await getDatagov(REGULATIONS_HOST, endpoint, label, params);
+    // M1 — the typed catch ladder (fema.ts:262-275 shape) — IDENTICAL to its
+    // searchDockets/getDocket siblings. Preserve the 429/404/5xx/400/timeout
+    // ToolErrorCarrier taxonomy FIRST (LOAD-BEARING: the DEMO_KEY-10/hr 429→rate_limited
+    // frontier would regress to schema_drift under a broader catch); reclassify a 200
+    // non-JSON `.json()` SyntaxError to schema_drift SECOND; bare-rethrow LAST.
+    let body;
+    try {
+        body = await getDatagov(REGULATIONS_HOST, endpoint, label, params);
+    }
+    catch (e) {
+        if (e instanceof ToolErrorCarrier)
+            throw e;
+        if (e instanceof SyntaxError)
+            throw driftError(label, "Regulations.gov returned a non-JSON body at HTTP 200 — schema drift.");
+        throw e;
+    }
     const b = (body ?? {});
     // M2 — `data` MUST be an array (a missing/string/null data is drift, never []).
     if (!Array.isArray(b.data)) {
