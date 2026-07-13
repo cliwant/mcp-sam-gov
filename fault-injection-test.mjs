@@ -15879,6 +15879,26 @@ async function testCmsHonesty() {
       JSON.stringify({ path: url.pathname, redirect: call.init.redirect }));
   });
 
+  // ── (W3-6 dogfood) next offset exceeds CMS_MAX_OFFSET (2000): the advertised
+  //    nextOffset would be HARD-REJECTED (invalid_input) on the follow-up call, so
+  //    it must be null (ceiling doctrine: hasMore stays true + a disclosing note),
+  //    NOT a false promise. offset 1950 + returned 100 ⇒ rawNextOffset 2050 > 2000. ──
+  await withFetch(cmsDatastoreMock({
+    count: 931959,
+    results: Array.from({ length: 100 }, () => ({ covered_recipient_npi: "1234567893", total_amount_of_payment_usdollars: "1.00" })),
+    schema: cmsSchema(),
+    query: { limit: 100, offset: 1950 },
+  }), async () => {
+    const r = await runTool("cms_query_dataset", { datasetId: CMS_DATASET_ID, offset: 1950 }, sam);
+    const m = buildMeta(r.meta);
+    ok("66-8 [W3-6] next offset (1950+100=2050) exceeds CMS_MAX_OFFSET 2000 ⇒ nextOffset:null (NOT 2050 — a follow-up there would be invalid_input) while hasMore stays true (more matches DO exist) — remove the cap clamp ⇒ nextOffset 2050 ⇒ RED",
+      m.pagination.hasMore === true && m.pagination.nextOffset === null && m.totalAvailable === 931959,
+      JSON.stringify({ hasMore: m.pagination.hasMore, nextOffset: m.pagination.nextOffset, ta: m.totalAvailable }));
+    ok("66-8 [W3-6] the unreachable-ceiling note discloses the cap + null nextOffset (drop the note ⇒ RED)",
+      m.notes.some((n) => /exceeds this vetting tool's offset/.test(n) && /not page-reachable/.test(n)),
+      JSON.stringify(m.notes.filter((n) => /offset/.test(n))));
+  });
+
   // ── (2) conditions narrow the EXACT count + appear in filtersApplied (P4). ──
   await withFetch(cmsDatastoreMock({
     count: 92097,
