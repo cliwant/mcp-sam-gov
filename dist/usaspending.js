@@ -331,20 +331,27 @@ export async function searchIndividualAwards(args) {
             generatedInternalId: r.generated_internal_id ?? "",
         })),
     };
+    const pagination = awardPagination(0, limit, results.length, total, json.page_metadata?.hasNext ?? false);
+    const notes = [
+        "Set-aside type is NOT available from the spending_by_award search endpoint (it can only be FILTERED, not returned) — call usas_get_award_detail (setAsideType/setAsideDescription) per award via generatedInternalId.",
+    ];
+    // W3-7: when more matches exist than this single ranked page holds, say so AND
+    // that they are not page-reachable (nextOffset is null — no offset input here).
+    if (pagination.hasMore) {
+        notes.push(`Showing ${limit} of ${total ?? "more"} matching awards. These extra matches are NOT page-reachable — this tool returns one ranked page with no offset input (nextOffset is null). Raise limit (up to 50) or narrow the filters to see more.`);
+    }
     return withMeta(data, {
         source: SPENDING_BY_AWARD_SOURCE,
         keylessMode: true,
         returned: results.length,
         totalAvailable: total,
-        pagination: awardPagination(0, limit, results.length, total, json.page_metadata?.hasNext ?? false),
+        pagination,
         filtersApplied: filtersAppliedFromFilters(filters),
         filtersDropped: [],
         // Set-aside is not a `spending_by_award` output field; PoP city is often a
         // numeric code (or null) rather than a name. Both live in detail.
         fieldsUnavailable: ["setAside", "setAsideDescription"],
-        notes: [
-            "Set-aside type is NOT available from the spending_by_award search endpoint (it can only be FILTERED, not returned) — call usas_get_award_detail (setAsideType/setAsideDescription) per award via generatedInternalId.",
-        ],
+        notes,
     });
 }
 /** hasMore for cursor-paginated award search: prefer the real total. */
@@ -353,7 +360,15 @@ function awardPagination(offset, limit, returned, total, upstreamHasNext) {
     return {
         offset,
         limit,
-        nextOffset: hasMore ? offset + returned : null,
+        // W3-7 (honesty; mirrors searchRecipients M1): ALL THREE callers
+        // (searchIndividualAwards / searchAwardsByRecipient / searchSubawards) request
+        // the upstream `page:1` with NO offset/page input in their tool schemas — so
+        // `nextOffset` is NOT consumable. Emitting `offset + returned` (the page length)
+        // made an agent re-fetch the SAME top-N forever while ranked-below-`limit` rows
+        // stayed unjoinable. Emit null unconditionally; `hasMore` stays honest (more
+        // matches DO exist) — the extras are reachable ONLY by raising `limit` (≤50) or
+        // narrowing the filters. (No offset-capable caller exists — verified: all 3 pass 0.)
+        nextOffset: null,
         hasMore,
     };
 }
@@ -411,18 +426,24 @@ export async function searchAwardsByRecipient(args) {
         // query failed — never the page length.
         totalRecords: total,
     };
+    const pagination = awardPagination(0, limit, results.length, total, json.page_metadata?.hasNext ?? false);
+    const notes = [
+        "Set-aside type is NOT available from the spending_by_award search endpoint (filter-only) — call usas_get_award_detail per award for setAsideType/setAsideDescription.",
+    ];
+    // W3-7: extra matches beyond this ranked page are not page-reachable (nextOffset null).
+    if (pagination.hasMore) {
+        notes.push(`Showing ${limit} of ${total ?? "more"} matching awards for this recipient. These extra matches are NOT page-reachable — this tool returns one ranked page with no offset input (nextOffset is null). Raise limit (up to 50) or narrow the filters to see more.`);
+    }
     return withMeta(data, {
         source: SPENDING_BY_AWARD_SOURCE,
         keylessMode: true,
         returned: results.length,
         totalAvailable: total,
-        pagination: awardPagination(0, limit, results.length, total, json.page_metadata?.hasNext ?? false),
+        pagination,
         filtersApplied: filtersAppliedFromFilters(filters),
         filtersDropped: [],
         fieldsUnavailable: ["setAside", "setAsideDescription"],
-        notes: [
-            "Set-aside type is NOT available from the spending_by_award search endpoint (filter-only) — call usas_get_award_detail per award for setAsideType/setAsideDescription.",
-        ],
+        notes,
     });
 }
 // ─── Subaward enumeration ─────────────────────────────────────────
@@ -476,18 +497,24 @@ export async function searchSubawards(args) {
             primeAwardId: r.prime_award_generated_internal_id ?? "",
         })),
     };
+    const pagination = awardPagination(0, limit, results.length, total, json.page_metadata?.hasNext ?? false);
+    const notes = [
+        "The `naicsCode`/`naicsDescription` on each subaward is the PRIME award's NAICS (USAspending does not expose a distinct sub-award NAICS on this endpoint). A subaward-specific NAICS is not available keyless.",
+    ];
+    // W3-7: extra subawards beyond this ranked page are not page-reachable (nextOffset null).
+    if (pagination.hasMore) {
+        notes.push(`Showing ${limit} of ${total ?? "more"} matching subawards. These extra matches are NOT page-reachable — this tool returns one ranked page with no offset input (nextOffset is null). Raise limit (up to 50) or narrow the filters to see more.`);
+    }
     return withMeta(data, {
         source: SPENDING_BY_AWARD_SOURCE,
         keylessMode: true,
         returned: results.length,
         totalAvailable: total,
-        pagination: awardPagination(0, limit, results.length, total, json.page_metadata?.hasNext ?? false),
+        pagination,
         filtersApplied: filtersAppliedFromFilters(filters),
         filtersDropped: [],
         fieldsUnavailable: [],
-        notes: [
-            "The `naicsCode`/`naicsDescription` on each subaward is the PRIME award's NAICS (USAspending does not expose a distinct sub-award NAICS on this endpoint). A subaward-specific NAICS is not available keyless.",
-        ],
+        notes,
     });
 }
 // ─── Per-award detail ─────────────────────────────────────────────
@@ -1521,7 +1548,11 @@ export async function getAgencyBudgetFunction(args) {
         pagination: {
             offset: 0,
             limit,
-            nextOffset: hasMore ? results.length : null,
+            // W3-7 (honesty; mirrors searchRecipients M1 / awardPagination): this tool has
+            // NO offset/page input (page hardcoded to the `limit` slice) — so `nextOffset`
+            // is NOT consumable. Emitting `results.length` made an agent re-fetch the SAME
+            // top-N forever. Emit null; `hasMore` stays honest (more functions DO exist).
+            nextOffset: null,
             hasMore,
         },
         filtersApplied: [],
@@ -1529,7 +1560,7 @@ export async function getAgencyBudgetFunction(args) {
         fieldsUnavailable: [],
         notes: hasMore
             ? [
-                `Showing the top ${limit} budget functions; ${total ?? "more"} exist for FY${fy}. Raise limit to see the rest.`,
+                `Showing the top ${limit} budget functions; ${total ?? "more"} exist for FY${fy}. These extra functions are NOT page-reachable — this tool has no offset input (nextOffset is null). Raise limit to see the rest.`,
             ]
             : [],
     });
