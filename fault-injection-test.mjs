@@ -2200,6 +2200,49 @@ async function testFarSearch() {
         JSON.stringify(r0 && { endsOn: r0.endsOn }));
       ok("ecfr.search(no chapter) ⇒ _meta.totalAvailable is the real upstream count (42, unchanged)",
         res.meta.totalAvailable === 42, JSON.stringify(res.meta.totalAvailable));
+      // D1 non-vacuity — a GENUINE small count is DEFINITIVELY exact, not a lower
+      // bound. Asserting `=== false` (not just "falsy") RED-flags a code that
+      // stops setting the field. Finalized through the REAL buildMeta (what the AI sees).
+      const m42 = buildMeta(res.meta);
+      ok("ecfr.search D1: below-cap total_count 42 ⇒ totalIsLowerBound === false (exact), totalAvailable === 42, NO cap note",
+        m42.totalIsLowerBound === false && m42.totalAvailable === 42 &&
+          !m42.notes.some((n) => /max_result_window|LOWER BOUND/i.test(n)),
+        JSON.stringify({ lb: m42.totalIsLowerBound, ta: m42.totalAvailable }));
+    },
+  );
+  // ── (g′) D1: eCFR's search meta.total_count is CAPPED by Elasticsearch's
+  // index.max_result_window at 10,000 (a real ceiling). A query that truly
+  // matches >10,000 sections gets total_count pinned at 10000 — which must NOT
+  // be reported as an EXACT total. ecfr.search must set totalIsLowerBound:true +
+  // a disclosing cap note (mirrors edgar FTS's hits.total.relation="gte"). RED
+  // if the code reports 10000 as exact (totalIsLowerBound never true / no note).
+  await withFetch(
+    (u) => (isEcfrSearchResults(u)
+      ? searchBody([row({ chapter: 1, part: 52, section: "52.219-14", ends_on: null })], 10000)
+      : failClosed()()),
+    async () => {
+      const res = await ecfrSearch({ query: "the", titleNumber: 48, perPage: 5 });
+      const m = buildMeta(res.meta);
+      ok("ecfr.search D1: saturated total_count 10000 ⇒ totalIsLowerBound === true (NOT reported as exact) + totalAvailable 10000 + truncated:true",
+        m.totalIsLowerBound === true && m.totalAvailable === 10000 && m.truncated === true && m.complete === false,
+        JSON.stringify({ lb: m.totalIsLowerBound, ta: m.totalAvailable, tr: m.truncated }));
+      ok("ecfr.search D1: saturated ⇒ a disclosing note names the 10,000 Elasticsearch cap + LOWER BOUND (so the AI can narrow for an exact count)",
+        m.notes.some((n) => /10000|10,000/.test(n) && /max_result_window/i.test(n) && /LOWER BOUND/i.test(n)),
+        JSON.stringify(m.notes));
+    },
+  );
+  // Boundary: total_count 9999 (one below the cap) stays EXACT (totalIsLowerBound
+  // false) — proves the sentinel is the cap, not an over-eager blanket flag.
+  await withFetch(
+    (u) => (isEcfrSearchResults(u)
+      ? searchBody([row({ section: "52.219-14", ends_on: null })], 9999)
+      : failClosed()()),
+    async () => {
+      const res = await ecfrSearch({ query: "subcontracting", titleNumber: 48, perPage: 5 });
+      const m = buildMeta(res.meta);
+      ok("ecfr.search D1: below-cap 9999 ⇒ totalIsLowerBound === false, totalAvailable 9999 (exact; sentinel is the 10k ceiling, not a blanket flag)",
+        m.totalIsLowerBound === false && m.totalAvailable === 9999,
+        JSON.stringify({ lb: m.totalIsLowerBound, ta: m.totalAvailable }));
     },
   );
   // ── (g) SECTION-LESS APPENDIX dedup (the review-caught BLOCK): eCFR returns
@@ -7970,6 +8013,63 @@ async function testSocrataHonesty() {
     ok("42g totalAvailable === count(*) 275763 (NOT rows.length 1 — mutate parseCount→rows.length ⇒ RED); returned 1 ⇒ truncated:true, complete:false",
       m.totalAvailable === 275763 && m.returned === 1 && m.truncated === true && m.complete === false,
       JSON.stringify({ ta: m.totalAvailable, r: m.returned, c: m.complete }));
+  });
+
+  // (g2) D2 — AGGREGATE $select conflated with its count(*) companion. When the
+  // caller's OWN $select is an aggregate (count/sum/avg/min/max), the result is
+  // aggregate ROWS (e.g. a 1-row count), and the count(*) companion counts RAW
+  // underlying rows — so a 1-row aggregate would get totalAvailable=raw-count,
+  // hasMore:true, nextOffset:1 → an INFINITE false-pagination livelock. The fix:
+  // detect the aggregate, SKIP the companion (fetch-spy: NO count fetch issued),
+  // totalAvailable:null, hasMore from PAGE-FULLNESS (false for a 1-row < limit),
+  // nextOffset:null, + a disclosing note. Revert D2 ⇒ every assertion goes RED.
+  //   (g2-a) $select=count(*): the 1-row aggregate. The row query itself carries
+  //   count(*) (matches isSocrataCount too), so the fetch-spy asserts EXACTLY ONE
+  //   fetch — the companion would have been a 2nd, count-only (no $limit) fetch.
+  await withFetch(
+    (u) => (isSocrataRow(u)
+      ? mockResponse({ status: 200, json: [{ count: "137" }] })       // the 1-row aggregate result
+      : isSocrataCount(u)
+        ? mockResponse({ status: 200, json: [{ count: "275763" }] })  // the companion (only fires if D2 reverted)
+        : failClosed()()),
+    async (calls) => {
+      const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", select: "count(*)", limit: 100 }, sam);
+      const m = buildMeta(r.meta);
+      ok("42-D2a $select=count(*) (1-row aggregate) ⇒ totalAvailable:null (NOT the raw 275763), hasMore:false, nextOffset:null, complete:true (page-fullness: 1 < 100)",
+        m.totalAvailable === null && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.complete === true,
+        JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
+      ok("42-D2a fetch-spy: the count(*) companion was NOT issued — EXACTLY ONE fetch (the row query); revert D2 ⇒ 2 fetches + false total ⇒ RED",
+        calls.length === 1 && calls.filter((c) => isSocrataCount(c.url) && !isSocrataRow(c.url)).length === 0,
+        JSON.stringify({ n: calls.length }));
+      ok("42-D2a a disclosing note flags the aggregate/no-raw-row-total (so the AI never trusts a fabricated aggregate total)",
+        m.notes.some((n) => /aggregate/i.test(n) && /count\(\*\) companion was NOT issued|no meaningful raw-row total/i.test(n)),
+        JSON.stringify(m.notes));
+    },
+  );
+  //   (g2-b) $select=sum(amount): a sum() aggregate (the row URL has sum(…), NOT
+  //   count(*), so the count-companion assertion is unambiguous: ZERO count fetches).
+  await withFetch(
+    (u) => (isSocrataRow(u)
+      ? mockResponse({ status: 200, json: [{ sum_amount: "98765.43" }] })
+      : isSocrataCount(u)
+        ? mockResponse({ status: 200, json: [{ count: "500000" }] })
+        : failClosed()()),
+    async (calls) => {
+      const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", select: "sum(amount)", limit: 50 }, sam);
+      const m = buildMeta(r.meta);
+      ok("42-D2b $select=sum(amount) ⇒ totalAvailable:null, complete:true, and ZERO count(*) companion fetches issued (aggregate detection covers sum/avg/min/max, not just count)",
+        m.totalAvailable === null && m.complete === true && calls.filter((c) => isSocrataCount(c.url)).length === 0,
+        JSON.stringify({ ta: m.totalAvailable, counts: calls.filter((c) => isSocrataCount(c.url)).length }));
+    },
+  );
+  //   (g2-c) CONTRAST: a NON-aggregate $select keeps the exact-count behavior —
+  //   the count(*) companion IS issued and totalAvailable is the real 275763.
+  await withFetch(socrataRowsAndCount([{ agency: "DoT" }], 275763), async (calls) => {
+    const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", select: "agency", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("42-D2c CONTRAST: NON-aggregate $select=agency ⇒ count(*) companion IS issued, totalAvailable === 275763 (exact-count path unchanged; aggregate guard does NOT over-trigger)",
+      m.totalAvailable === 275763 && calls.filter((c) => isSocrataCount(c.url) && !isSocrataRow(c.url)).length === 1,
+      JSON.stringify({ ta: m.totalAvailable, counts: calls.filter((c) => isSocrataCount(c.url) && !isSocrataRow(c.url)).length }));
   });
 
   // (h) B2/M5 test 7: count companion FAILS + returned===limit===100 ⇒ the full
