@@ -322,5 +322,56 @@ export declare function dailyFilingIndex(args: {
     limit?: number;
     offset?: number;
 }): Promise<MetaBundle>;
+/**
+ * The `taxonomy` path-segment enum — the SSRF guard for that segment (no free value
+ * reaches the host). us-gaap + dei live-confirmed on Apple; ifrs-full live-confirmed on
+ * Spotify (CIK0001639920 / ifrs-full / Assets → 200, unit EUR, frame CY2017Q4I). `srt`
+ * is DROPPED (S2 — it was NOT probed to a resolving 200; a valid-but-unreported tuple is
+ * an honest 404, so a slightly-broad enum can never fabricate — but ship only confirmed).
+ */
+export declare const CONCEPT_TAXONOMIES: readonly ["us-gaap", "dei", "ifrs-full"];
+/** One output row: unit-tagged, (start,end)-keyed, canonical = frame present. */
+export type ConceptRow = {
+    unit: string;
+    start: string | null;
+    end: string | null;
+    val: number | null;
+    accn: string | null;
+    fy: number | null;
+    fp: string | null;
+    form: string | null;
+    filed: string | null;
+    frame: string | null;
+    canonical: boolean;
+};
+/**
+ * One filer × one XBRL concept × the COMPLETE reported time-series. Reuses resolveCik
+ * (ticker→CIK path EXISTS) + buildConceptUrl (the frames path-segment SSRF doctrine,
+ * THREE segments) + getEdgar VERBATIM. `unit`/`form`/`fy` are CLIENT-SIDE filters;
+ * `canonicalOnly` (default false) dedups to one canonical row per (unit,start,end),
+ * FULLY DISCLOSED. limit/offset window the already-fully-fetched set.
+ *
+ * HONESTY (ADR-0041 v2):
+ *  - ★M1 — every row carries `start`; period identity is the (start,end) PAIR. A
+ *    same-`end` different-`start` pair is a different-duration fact, NOT a revision.
+ *  - ★M2 — canonicalOnly dedup key = (unit,start,end): partition by unit first, keep
+ *    one canonical row per distinct (start,end) — never dropping a whole unit's row.
+ *  - ★S1 — unitsAvailable[].count = the RAW units[key].length (pre-filter).
+ *  - val null-never-0 via num(); every row unit-tagged (no USD↔shares conflation).
+ *  - 404 (bad CIK/taxonomy/concept) → notFoundBundle (never a fabricated val:0);
+ *    5xx/timeout/non-JSON/units-shape-drift → THROW; a bad `unit` filter → honest empty
+ *    + the available-units note (unit is CLIENT-SIDE, never a path segment).
+ */
+export declare function companyConcept(args: {
+    cikOrTicker: string;
+    concept: string;
+    taxonomy?: string;
+    unit?: string;
+    form?: string;
+    fy?: number;
+    canonicalOnly?: boolean;
+    limit?: number;
+    offset?: number;
+}): Promise<MetaBundle>;
 export {};
 //# sourceMappingURL=edgar.d.ts.map

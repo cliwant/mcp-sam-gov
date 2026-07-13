@@ -1358,6 +1358,61 @@ const EdgarDailyFilingIndexInput = z.object({
         .default(0)
         .describe("0-based offset into the filtered matches (default 0)."),
 });
+// ADR-0041. Keyless WITHIN-SOURCE DEPTH on the existing edgar source: one filer ×
+// one XBRL concept × the COMPLETE reported time-series (data.sec.gov/api/xbrl/
+// companyconcept/CIK{cik10}/{taxonomy}/{Concept}.json). cik (via resolveCik→padCik) +
+// taxonomy (enum) + concept (alnum regex) are the THREE validated PATH SEGMENTS (the
+// SSRF guard, re-checked belt-and-suspenders pre-fetch in edgar's buildConceptUrl).
+// `unit` is a BODY key filtered CLIENT-SIDE (NOT a path segment — no unit regex);
+// unit/form/fy/canonicalOnly/limit/offset are all client-side over the fully-fetched set.
+const EdgarCompanyConceptInput = z.object({
+    cikOrTicker: z
+        .string()
+        .min(1)
+        .describe("A 10-digit (or unpadded) SEC CIK, or a ticker/company-name resolvable via company_tickers.json (e.g. '320193', 'CIK0000320193', 'AAPL')."),
+    concept: z
+        .string()
+        .regex(/^[A-Za-z0-9]+$/, "concept must be alphanumeric only — an EXACT XBRL tag (e.g. 'Assets', 'Revenues', 'NetIncomeLoss'). Slash/dot/space/percent/'..' are rejected (path-segment injection guard).")
+        .describe("XBRL concept tag — EXACT, alphanumeric CamelCase (e.g. 'Assets', 'Revenues', 'NetIncomeLoss', 'Liabilities'). A tag the filer never reported ⇒ upstream 404 ⇒ found:false (never a fabricated 0)."),
+    taxonomy: z
+        .enum(edgar.CONCEPT_TAXONOMIES)
+        .default("us-gaap")
+        .describe("XBRL taxonomy namespace (a fixed enum — the SSRF guard for this segment): 'us-gaap' (financial statements, default), 'dei' (entity/document info, e.g. EntityCommonStockSharesOutstanding), or 'ifrs-full' (IFRS filers, e.g. a foreign private issuer). Live-confirmed members only."),
+    unit: z
+        .string()
+        .min(1)
+        .max(40)
+        .optional()
+        .describe("Optional CLIENT-SIDE filter on the returned units{} keys (NOT a path segment — 'USD', 'shares', 'USD/shares', 'EUR', 'pure'). Restricts rows to that unit but STILL discloses the other units via unitsAvailable + a note. A unit not present ⇒ 0 rows + the available-units note (never a fabricated pick)."),
+    form: z
+        .string()
+        .min(1)
+        .max(30)
+        .optional()
+        .describe("Optional CLIENT-SIDE filter: case-insensitive EXACT match on a row's `form` (e.g. '10-K' for annual values only, '10-Q' for quarterly)."),
+    fy: z
+        .number()
+        .int()
+        .optional()
+        .describe("Optional CLIENT-SIDE filter: keep only rows whose fiscal year `fy` equals this integer (e.g. 2023)."),
+    canonicalOnly: z
+        .boolean()
+        .default(false)
+        .describe("When true, reduce to ONE row per distinct (unit,start,end) period — the frame-tagged canonical value, or (for a not-yet-consolidated period) the latest-filed row (marked canonical:false). SUPERSEDED/amendment rows are REMOVED (fully disclosed via a note). Default false ⇒ ALL rows incl. the amendment/restatement history. A same-`end` different-`start` pair is a DIFFERENT period (both kept), NOT a duplicate."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("CLIENT-SIDE page size over the already-fully-fetched, (unit,start,end)-keyed time-series (1..1000, default 100). Does NOT reduce the upstream fetch (SEC does not paginate companyconcept); page via _meta.pagination.nextOffset."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("0-based client-side offset into the filtered time-series (default 0)."),
+});
 // ─── Socrata / SODA (keyless SLED + E-rate) — input schemas ──────
 // ADR-0004. First SLED source. `domain` is a curated allowlist ENUM (the SSRF
 // core — no free host); `datasetId` is a strict 4x4 with .length(9) (M2 — blocks
@@ -3404,7 +3459,7 @@ const TOOLS = [
         inputSchema: TreasuryAvgInterestRatesInput,
         handler: (input) => treasury.avgInterestRates(input),
     }),
-    // ━━━ SEC EDGAR — filings / XBRL facts / CIK / full-text / frames / full-index / daily-index (keyless) (7) ━━━ ADR-0003 / ADR-0017 / ADR-0026 / ADR-0027
+    // ━━━ SEC EDGAR — filings / XBRL facts / CIK / full-text / frames / full-index / daily-index / companyconcept (keyless) (8) ━━━ ADR-0003 / ADR-0017 / ADR-0026 / ADR-0027 / ADR-0041
     defineTool({
         name: "edgar_lookup_cik",
         description: "Resolve a company ticker or name to its 10-digit SEC CIK (keyless, via SEC company_tickers.json). Input `query` (exact ticker or a title substring) ⇒ up to 50 { cik, ticker, title } matches; found:false on none. The CIK is the join key for edgar_company_filings/edgar_company_facts. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS — there is no authoritative CIK↔UEI join.",
@@ -3446,6 +3501,12 @@ const TOOLS = [
         description: "Per-DAY cross-filer SEC filing index (keyless, from the www.sec.gov EDGAR daily-index master.YYYYMMDD.idx). The per-day sibling of edgar_filing_index (~30× smaller): reads ONE calendar day's index (every filer's every filing that day — CIK|Company|Form|Date|File Name, ~8K rows), FULL-SCANS it, and returns offset-paginated filings matching CLIENT-SIDE filters with the EXACT total. Answers the monitoring/alerting question the quarterly tool cannot ('every 8-K filed on 2024-01-03', 'watch a CIK day-by-day'). Input `date` (required ISO YYYY-MM-DD, >=1994-01-01, not future); optional `formType` (exact form, e.g. '8-K'), `cik` (numeric, leading-zero-safe), `companyContains` (LITERAL case-insensitive substring), `limit` (<=1000, def 100), `offset`. Returns { found, date, year, quarter, indexFile, returned, totalAvailable, filings:[{ cik, cikPadded, companyName, formType, dateFiled, filename, filingUrl }] }. HONESTY: totalAvailable is the EXACT match count over the full day scan — never a page length, never a byte-capped subset (SEC ignores HTTP Range). The daily-index's pervasive-403 empty model is disambiguated via the quarter's index.json existence oracle, RECENCY-AWARE: a day NEWER than the newest published index (weekend/holiday/not-yet-disseminated recent trading day) ⇒ found:false, complete:FALSE, retryable not-yet-disseminated note (NEVER a confident empty); an unlisted day INSIDE the covered range (a real weekend/holiday) ⇒ found:false, complete:true genuine-absent; a LISTED day whose .idx 403s ⇒ honest rate_limited; the oracle itself inconclusive ⇒ ambiguous both-causes upstream_unavailable. A non-real/future date is rejected pre-fetch (invalid_input, 0 fetch); a non-index / all-malformed body is refused as schema_drift. dateFiled is normalized to ISO from the compact YYYYMMDD column. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS — there is no authoritative CIK↔UEI join.",
         inputSchema: EdgarDailyFilingIndexInput,
         handler: (input) => edgar.dailyFilingIndex(input),
+    }),
+    defineTool({
+        name: "edgar_company_concept",
+        description: "One filer × one XBRL concept × the COMPLETE reported time-series (keyless, from data.sec.gov companyconcept). The focused financial-TREND / entity-vetting primitive BETWEEN edgar_company_facts (many curated concepts for one filer) and edgar_xbrl_frames (one concept across ALL filers for one period) — 'track THIS filer's Assets/Revenues/NetIncomeLoss OVER TIME, and was it ever revised?'. Input `cikOrTicker` (CIK or resolvable ticker/name), `concept` (EXACT alnum XBRL tag, e.g. 'Assets'), optional `taxonomy` (us-gaap|dei|ifrs-full, def us-gaap), `unit` (CLIENT-SIDE key filter), `form`/`fy` (client-side), `canonicalOnly` (def false), `limit`/`offset`. Returns { found, cik, entityName, taxonomy, concept, label, description, unitsAvailable:[{unit,count}], rows:[{ unit, start, end, val, accn, fy, fp, form, filed, frame, canonical }] }. HONESTY: (M1) period identity is the (start,end) PAIR — every row carries `start` (null for INSTANT concepts, the ISO date for DURATION/flow concepts); the SAME `end` with a DIFFERENT `start` is a different-duration fact (a 3-month quarter vs the 12-month year), NOT a revision — a revision is only multiple rows sharing the same (start,end) with a differing accn/filed/val. DEFAULT returns ALL rows incl. the amendment/restatement history + a per-row `canonical` (frame-tagged = SEC's consolidated value); `canonicalOnly:true` dedups to one canonical row per (unit,start,end), fully disclosed, never a silent drop. Every row is unit-tagged (a USD amount is NEVER conflated with a share count); unitsAvailable discloses ALL units with their RAW counts even under a unit filter; val is null-never-0. A bad CIK/taxonomy/concept ⇒ upstream 404 ⇒ found:false (NEVER a fabricated val:0); a 5xx/timeout/non-JSON/units-shape-drift THROWS; a `unit` not present ⇒ honest empty + the available-units note (unit is CLIENT-SIDE, not a path segment). cik/taxonomy/concept are validated path segments (regex+enum, re-checked pre-fetch) — no injection surface. NOTE: EDGAR keys on CIK, NOT SAM UEI/DUNS — there is no authoritative CIK↔UEI join.",
+        inputSchema: EdgarCompanyConceptInput,
+        handler: (input) => edgar.companyConcept(input),
     }),
     // ━━━ Socrata / SODA — keyless SLED + E-rate open data (2) ━━━ ADR-0004
     defineTool({
