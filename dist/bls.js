@@ -46,8 +46,9 @@
  *   header, the label, the `source`, `_meta`, or a log). When keyless,
  *   `registrationkey` is ABSENT from the body. Only the MODE is ever disclosed.
  */
-import { ToolErrorCarrier } from "./errors.js";
-import { getJson, driftError, throughGate } from "./datasource.js";
+import { ToolErrorCarrier, errorFromResponse } from "./errors.js";
+import { getJson, driftError, throughGate, isRedirectError } from "./datasource.js";
+import { parseRecordFields } from "./gsa-csv.js";
 import { num, str } from "./coerce.js";
 import { withMeta } from "./meta.js";
 // Re-export the shared honesty coercion (single audited copy in ./coerce.js —
@@ -906,5 +907,643 @@ export async function oewsWages(args) {
         notes,
     };
     return withMeta({ results: rows }, metaOut);
+}
+// ═══════════════════════════════════════════════════════════════════════════
+// QCEW — Quarterly Census of Employment & Wages (the 3rd tool, ADR-0042)
+// ═══════════════════════════════════════════════════════════════════════════
+// A THIRD tool on the BLS provider — but a SECOND, DIFFERENT, keyless,
+// un-rate-limited BLS DOMAIN: the QCEW Open Data Access CSV files on
+// data.bls.gov/cew (NOT the rate-limited api.bls.gov/publicAPI timeseries API the
+// two tools above share). It answers the market-size / competition-density
+// question no existing tool can: for a county (area_fips) or a NAICS industry ×
+// quarter — establishment COUNT (market size / competitor density), county×NAICS
+// employment, average weekly wage (labor cost), and the LOCATION QUOTIENT
+// (concentration vs the national average = competition density).
+//
+// This path DELIBERATELY does NOT touch the api.bls.gov key seam
+// (resolvedBlsKey/apiPath/blsSource/BLS_GATE_KEY="bls"): QCEW is keyless, a NEW
+// host, and uses a NEW self-throttle gate key ("bls_qcew") so it never serializes
+// behind — or shares the ~25/day budget of — the timeseries tools. NO BLS_API_KEY
+// is read here.
+//
+// ★ THE DISCLOSURE-SUPPRESSION HONESTY CRUX (P3). Each row carries THREE
+// disclosure codes governing THREE blocks: `disclosure_code` (base),
+// `lq_disclosure_code` (lq), `oty_disclosure_code` (oty). QCEW encodes a
+// SUPPRESSED (confidential) employment/wage value as a literal `0`; because
+// num("0") === 0, a naive map would surface a withheld field as a real "$0 wage /
+// 0 employment" — the exact data-absence-as-zero masquerade the project forbids
+// (the FDIC-CBLR-sentinel lesson applied to a CSV). The fix is a BLOCK-scoped,
+// CODE-scoped, FIELD-specific mapper (NEVER a blanket 0→null): under 'N' the
+// confidential emplvl/wage/avg-wkly fields → null while the establishment COUNT
+// (qtrly_estabs / lq_qtrly_estabs) — AND the over-the-year establishment CHANGE
+// (oty_qtrly_estabs_chg / _pct_chg) — stay DISCLOSED (real, live-confirmed real in
+// 167/526 'N' rows); under '-' (or any other non-blank) the WHOLE block incl. the
+// estabs field(s) → null; under blank a genuine reported/negative `0` SURVIVES
+// (the disclosed federal taxable=0/contrib=0 and the oty_*_chg=0 "no change").
+// ─── Fixed endpoint + transport constants (SSRF core — compile-time CONSTANTS) ──
+const QCEW_HOST = "data.bls.gov";
+/** A NEW self-throttle gate key — DELIBERATELY NOT "bls" (a different, un-rate-
+ *  limited host; QCEW must not share the api.bls.gov ~25/day budget or serialize
+ *  behind the timeseries tools). */
+const QCEW_GATE_KEY = "bls_qcew";
+const QCEW_MIN_INTERVAL_MS = 250;
+/** Host-only error/endpoint label (never a token — QCEW is keyless anyway). */
+const QCEW_LABEL = "data.bls.gov/cew";
+/** Browser-ish UA — data.bls.gov/cew serves the keyless CSV to a normal client. */
+const QCEW_UA = "Mozilla/5.0 (compatible; @cliwant/mcp-sam-gov; +https://github.com/cliwant/mcp-sam-gov)";
+const QCEW_FETCH_TIMEOUT_MS = 30_000;
+/**
+ * Hard streamed read cap. The largest single slice observed is 3.84 MB
+ * (industry/10.csv, all industries × all ~3,800 areas); a detailed-NAICS slice is
+ * ~664 KB, an area slice ~100 KB–a few MB. 16 MB clears the max with ~4× headroom
+ * AND catches a drifted giant. Applied to BOTH the declared content-length
+ * (pre-check) AND the streamed read (abort past this bound) — never content-length
+ * alone (ADR-0042 §S3, the OFAC readCappedBody replication).
+ */
+const MAX_QCEW_BYTES = 16 * 1024 * 1024;
+/** QCEW Open Data coverage floor (a pre-coverage year is an honest per-tuple 404). */
+const QCEW_YEAR_MIN = 1990;
+/** The 42 PINNED column names, in exact order (ADR-0042 fact 2, live-verified). */
+export const QCEW_COLUMNS = [
+    "area_fips",
+    "own_code",
+    "industry_code",
+    "agglvl_code",
+    "size_code",
+    "year",
+    "qtr",
+    "disclosure_code",
+    "qtrly_estabs",
+    "month1_emplvl",
+    "month2_emplvl",
+    "month3_emplvl",
+    "total_qtrly_wages",
+    "taxable_qtrly_wages",
+    "qtrly_contributions",
+    "avg_wkly_wage",
+    "lq_disclosure_code",
+    "lq_qtrly_estabs",
+    "lq_month1_emplvl",
+    "lq_month2_emplvl",
+    "lq_month3_emplvl",
+    "lq_total_qtrly_wages",
+    "lq_taxable_qtrly_wages",
+    "lq_qtrly_contributions",
+    "lq_avg_wkly_wage",
+    "oty_disclosure_code",
+    "oty_qtrly_estabs_chg",
+    "oty_qtrly_estabs_pct_chg",
+    "oty_month1_emplvl_chg",
+    "oty_month1_emplvl_pct_chg",
+    "oty_month2_emplvl_chg",
+    "oty_month2_emplvl_pct_chg",
+    "oty_month3_emplvl_chg",
+    "oty_month3_emplvl_pct_chg",
+    "oty_total_qtrly_wages_chg",
+    "oty_total_qtrly_wages_pct_chg",
+    "oty_taxable_qtrly_wages_chg",
+    "oty_taxable_qtrly_wages_pct_chg",
+    "oty_qtrly_contributions_chg",
+    "oty_qtrly_contributions_pct_chg",
+    "oty_avg_wkly_wage_chg",
+    "oty_avg_wkly_wage_pct_chg",
+];
+/** The expected column count. Passed as `maxCol` to parseRecordFields so a
+ *  too-MANY-columns row materializes 43 fields and trips the drift check (the
+ *  OFAC `maxCol=cols` SYMMETRY — `cols-1` would silently cap a column ADDITION). */
+const QCEW_COLS = QCEW_COLUMNS.length; // 42
+// ─── SSRF path-segment charclasses (validate PRE-interpolation) ──────────────
+const QCEW_MODES = new Set(["area", "industry"]);
+/** area_fips: county 01005, statewide 01000, national US000, MSA C1018, CSA
+ *  CS122 — letter prefixes exist, so alphanumeric. Rejects `/` `.` `..` `%2F`
+ *  `%2E` `%00` `@host` whitespace newline. */
+const QCEW_AREA_RE = /^[0-9A-Za-z]{1,6}$/;
+/** industry NAICS: STRICTLY digit-only. A hyphenated NAICS supersector
+ *  (Manufacturing 31-33, Retail 44-45) 404s live (`industry/31-33.csv` → HTTP
+ *  404) — a hyphen never resolves AND widens the SSRF charclass with a
+ *  non-alphanumeric, so it is REJECTED (invalid_input pointing at the digit
+ *  aggregate code), never silently stripped. */
+const QCEW_INDUSTRY_RE = /^[0-9]{1,6}$/;
+const QCEW_YEAR_RE = /^\d{4}$/;
+/** quarter: ship 1-4 (all live-confirmed). The annual `a` is UNVERIFIED this
+ *  cycle — NOT enabled (a live `…/a/…` 200 HEAD + a <16 MB size check must land
+ *  first); the charclass would permit it safely via `^([1-4]|a)$` when enabled. */
+const QCEW_QUARTER_RE = /^[1-4]$/;
+/** Uniform invalid_input (host-only label, no token — QCEW is keyless). */
+function qcewInvalid(message) {
+    throw new ToolErrorCarrier({
+        kind: "invalid_input",
+        message,
+        retryable: false,
+        upstreamEndpoint: QCEW_LABEL,
+    });
+}
+/**
+ * ★ Build + validate the QCEW slice URL. Each caller-influenced path segment is
+ * charclass-validated BEFORE interpolation; the host is a compile-time constant;
+ * a post-construction `new URL` host/protocol assert locks it (the per-segment
+ * charclass is the real guard — the hostname check alone does not stop a same-host
+ * `../`). The client-side filters (ownership/aggregationLevel/sizeCode/narrow)
+ * NEVER touch the URL — no SSRF surface. Pure fn (no fetch).
+ */
+export function buildQcewUrl(mode, year, quarter, code) {
+    if (!QCEW_MODES.has(mode)) {
+        qcewInvalid(`Cannot build QCEW URL: mode ${JSON.stringify(mode)} must be one of area, industry.`);
+    }
+    const y = String(year);
+    if (!QCEW_YEAR_RE.test(y)) {
+        qcewInvalid(`Cannot build QCEW URL: year ${JSON.stringify(y)} must be exactly 4 digits (^\\d{4}$).`);
+    }
+    const yr = Number(y);
+    if (yr < QCEW_YEAR_MIN || yr > CURRENT_YEAR) {
+        qcewInvalid(`Cannot build QCEW URL: year ${yr} is out of range ${QCEW_YEAR_MIN}..${CURRENT_YEAR} (a pre-coverage or future year is an absent slice; QCEW Open Data begins ~${QCEW_YEAR_MIN}).`);
+    }
+    const q = String(quarter);
+    if (!QCEW_QUARTER_RE.test(q)) {
+        qcewInvalid(`Cannot build QCEW URL: quarter ${JSON.stringify(q)} must be one of 1, 2, 3, 4 (the annual 'a' is not enabled this build).`);
+    }
+    if (mode === "area") {
+        if (!QCEW_AREA_RE.test(code)) {
+            qcewInvalid(`Cannot build QCEW URL: area ${JSON.stringify(code)} must be 1..6 alphanumeric chars (^[0-9A-Za-z]{1,6}$) — an area_fips like 01005 (county), 01000 (statewide), US000 (national), C1018 (MSA). Slashes/dots/encoded traversal are rejected (SSRF).`);
+        }
+    }
+    else {
+        if (!QCEW_INDUSTRY_RE.test(code)) {
+            // Digit-only: a hyphenated NAICS supersector (e.g. 31-33, 44-45) 404s live
+            // (industry/31-33.csv → HTTP 404) — pass the digit aggregate code instead.
+            qcewInvalid(`Cannot build QCEW URL: industry ${JSON.stringify(code)} must be 1..6 DIGITS (^[0-9]{1,6}$) — a NAICS code like 5415 or the aggregate 10. A hyphenated NAICS supersector (31-33, 44-45) 404s on QCEW; use its digit aggregate code, not the hyphenated form.`);
+        }
+    }
+    const url = `https://${QCEW_HOST}/cew/data/api/${y}/${q}/${mode}/${code}.csv`;
+    const built = new URL(url);
+    if (built.hostname !== QCEW_HOST || built.protocol !== "https:") {
+        qcewInvalid(`Constructed QCEW URL host ${JSON.stringify(built.hostname)} (${built.protocol}) is not ${QCEW_HOST} over https — refusing to fetch (SSRF safety).`);
+    }
+    return built.toString();
+}
+// ─── Bounded streamed read (OFAC readCappedBody replication — ADR-0042 §S3) ──
+/** Concatenate streamed chunks into one Uint8Array. */
+function concatQcewChunks(chunks, total) {
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+        out.set(c, off);
+        off += c.byteLength;
+    }
+    return out;
+}
+/**
+ * Read the response body with a HARD byte cap — abort past `maxBytes` rather than
+ * trusting content-length alone. Streams via `res.body` when available (real
+ * data.bls.gov), else falls back to `arrayBuffer()` + a post-read cap (the offline
+ * fetch-mock, which exposes no stream). An over-cap read is a distinct honest
+ * THROW, never a truncated body handed to the parser. Byte-for-byte the OFAC
+ * idiom (replicated here — NO ofac.ts edit).
+ */
+async function readCappedQcewBody(res, maxBytes, label) {
+    const tooBig = () => new ToolErrorCarrier({
+        kind: "invalid_input",
+        message: `QCEW ${label} body exceeded the ${Math.round(maxBytes / 1048576)} MB read cap — refusing to buffer it (a drifted giant, not the ≤~3.84 MB slices). Narrow by area/agglvl or verify the pinned endpoint.`,
+        retryable: false,
+        upstreamEndpoint: label,
+    });
+    const body = res.body;
+    if (body && typeof body.getReader === "function") {
+        const reader = body.getReader();
+        const chunks = [];
+        let total = 0;
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done)
+                break;
+            if (value) {
+                total += value.byteLength;
+                if (total > maxBytes) {
+                    try {
+                        await reader.cancel();
+                    }
+                    catch {
+                        /* ignore */
+                    }
+                    throw tooBig();
+                }
+                chunks.push(value);
+            }
+        }
+        return concatQcewChunks(chunks, total);
+    }
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.byteLength > maxBytes)
+        throw tooBig();
+    return buf;
+}
+// ─── RFC-4180 record assembler (replicated from ofac.ts/gsa-csv.ts — no edit) ──
+/** Strip a trailing SUB (0x1A) + terminal newlines BEFORE record assembly. */
+function stripTrailingSubQcew(body) {
+    return body.replace(/[\r\n\x1a]+$/g, "");
+}
+/** Is a parsed record an empty (whitespace-only) non-content row? */
+function isEmptyQcewRecord(fields) {
+    return fields.every((f) => f.trim() === "");
+}
+/**
+ * Assemble physical lines into LOGICAL CSV records via `parseRecordFields`
+ * (gsa-csv), correctly re-joining a record whose quoted field contains a newline
+ * (defense-in-depth — QCEW rows carry no embedded newlines observed). `maxCol =
+ * QCEW_COLS` so a too-many-columns row materializes 43 fields and trips the drift
+ * check (the OFAC symmetry). Empty rows (the trailing newline) are skipped.
+ */
+function assembleQcewRecords(body) {
+    const text = stripTrailingSubQcew(body);
+    const lines = text.split("\n");
+    const records = [];
+    let pending = null;
+    for (const line of lines) {
+        const candidate = pending === null ? line : pending + "\n" + line;
+        const res = parseRecordFields(candidate, QCEW_COLS);
+        if (res.inQuotes) {
+            pending = candidate;
+            continue;
+        }
+        pending = null;
+        if (isEmptyQcewRecord(res.fields))
+            continue;
+        records.push(res.fields);
+    }
+    if (pending !== null) {
+        const res = parseRecordFields(pending, QCEW_COLS);
+        if (!isEmptyQcewRecord(res.fields))
+            records.push(res.fields);
+    }
+    return records;
+}
+/**
+ * ★ M2 — the header drift assertion runs POST-parse (on the quote-STRIPPED
+ * record). The live QCEW header is FULLY double-quoted (`"area_fips","own_code",…`);
+ * `parseRecordFields` strips the RFC-4180 quotes, so the parsed first record is the
+ * 42 UNQUOTED names — compared here against the pinned array, NEVER the raw
+ * pre-parse line / split(","). A missing / renamed / added / removed / reordered
+ * header → schema_drift (a shifted schema must NEVER be read positionally — that
+ * would map avg_wkly_wage values under total_qtrly_wages).
+ */
+function assertQcewHeader(headerFields, label) {
+    const drift = headerFields.length !== QCEW_COLS ||
+        QCEW_COLUMNS.some((name, i) => headerFields[i] !== name);
+    if (drift) {
+        throw driftError(label, `QCEW header drifted — expected the pinned ${QCEW_COLS} columns in order but got ${headerFields.length} column(s): [${headerFields.slice(0, 45).join(", ")}]. Refusing to read a renamed/added/removed/reordered schema positionally (a shifted header would map wage values under the wrong field).`);
+    }
+}
+/**
+ * BASE block (rec cols 7–15), governed by `disclosure_code` (rec[7]).
+ *  - blank (disclosed) → EVERY field via num (a genuine reported 0 SURVIVES).
+ *  - 'N' → qtrly_estabs REAL (via num); the 6 emplvl/wage/avg-wkly fields → null.
+ *  - '-' or any OTHER non-blank → the WHOLE base block incl qtrly_estabs → null.
+ */
+function mapBaseBlock(rec) {
+    const disc = str(rec[7]);
+    const disclosed = disc === null;
+    // The establishment COUNT is non-confidential: disclosed under blank OR 'N',
+    // but withheld under '-'/other (the whole block goes null).
+    const estabsDisclosed = disclosed || disc === "N";
+    return {
+        disclosed,
+        disclosureCode: disc,
+        qtrly_estabs: estabsDisclosed ? num(rec[8]) : null,
+        month1_emplvl: disclosed ? num(rec[9]) : null,
+        month2_emplvl: disclosed ? num(rec[10]) : null,
+        month3_emplvl: disclosed ? num(rec[11]) : null,
+        total_qtrly_wages: disclosed ? num(rec[12]) : null,
+        taxable_qtrly_wages: disclosed ? num(rec[13]) : null,
+        qtrly_contributions: disclosed ? num(rec[14]) : null,
+        avg_wkly_wage: disclosed ? num(rec[15]) : null,
+    };
+}
+/**
+ * LQ block (rec cols 16–24, ratios), governed by `lq_disclosure_code` (rec[16]).
+ * IDENTICAL field-specific rule as the base block: under 'N' lq_qtrly_estabs is
+ * DISCLOSED (a real ratio) and the rest → null; under '-'/other → whole block
+ * null; under blank → all via num.
+ */
+function mapLqBlock(rec) {
+    const disc = str(rec[16]);
+    const disclosed = disc === null;
+    const estabsDisclosed = disclosed || disc === "N";
+    return {
+        disclosed,
+        disclosureCode: disc,
+        lq_qtrly_estabs: estabsDisclosed ? num(rec[17]) : null,
+        lq_month1_emplvl: disclosed ? num(rec[18]) : null,
+        lq_month2_emplvl: disclosed ? num(rec[19]) : null,
+        lq_month3_emplvl: disclosed ? num(rec[20]) : null,
+        lq_total_qtrly_wages: disclosed ? num(rec[21]) : null,
+        lq_taxable_qtrly_wages: disclosed ? num(rec[22]) : null,
+        lq_qtrly_contributions: disclosed ? num(rec[23]) : null,
+        lq_avg_wkly_wage: disclosed ? num(rec[24]) : null,
+    };
+}
+/**
+ * ★ M1 — OTY block (rec cols 25–41, over-the-year changes/pct-changes), governed
+ * by `oty_disclosure_code` (rec[25]). The OTY block has the SAME establishment
+ * exception as base/lq: under 'N', BOTH oty_qtrly_estabs_chg AND
+ * oty_qtrly_estabs_pct_chg are DISCLOSED via num (a real value / a negative / a
+ * genuine-0 "no change" SURVIVES — live-confirmed real in 167/526 'N' rows), while
+ * the 14 employment/wage oty fields → null. Under '-' or any OTHER non-blank → the
+ * WHOLE oty block INCLUDING the estabs-change pair → null (conservative; OTY '-'
+ * was not observed — the exception is NOT extended to '-'). Under blank → all via
+ * num so a genuine 0/negative survives.
+ */
+function mapOtyBlock(rec) {
+    const disc = str(rec[25]);
+    const disclosed = disc === null;
+    const estabsChgDisclosed = disclosed || disc === "N";
+    return {
+        disclosed,
+        disclosureCode: disc,
+        oty_qtrly_estabs_chg: estabsChgDisclosed ? num(rec[26]) : null,
+        oty_qtrly_estabs_pct_chg: estabsChgDisclosed ? num(rec[27]) : null,
+        oty_month1_emplvl_chg: disclosed ? num(rec[28]) : null,
+        oty_month1_emplvl_pct_chg: disclosed ? num(rec[29]) : null,
+        oty_month2_emplvl_chg: disclosed ? num(rec[30]) : null,
+        oty_month2_emplvl_pct_chg: disclosed ? num(rec[31]) : null,
+        oty_month3_emplvl_chg: disclosed ? num(rec[32]) : null,
+        oty_month3_emplvl_pct_chg: disclosed ? num(rec[33]) : null,
+        oty_total_qtrly_wages_chg: disclosed ? num(rec[34]) : null,
+        oty_total_qtrly_wages_pct_chg: disclosed ? num(rec[35]) : null,
+        oty_taxable_qtrly_wages_chg: disclosed ? num(rec[36]) : null,
+        oty_taxable_qtrly_wages_pct_chg: disclosed ? num(rec[37]) : null,
+        oty_qtrly_contributions_chg: disclosed ? num(rec[38]) : null,
+        oty_qtrly_contributions_pct_chg: disclosed ? num(rec[39]) : null,
+        oty_avg_wkly_wage_chg: disclosed ? num(rec[40]) : null,
+        oty_avg_wkly_wage_pct_chg: disclosed ? num(rec[41]) : null,
+    };
+}
+/** Map ONE parsed 42-field record → a disclosure-aware output row. */
+export function mapQcewRow(rec) {
+    return {
+        area_fips: str(rec[0]),
+        own_code: str(rec[1]),
+        industry_code: str(rec[2]),
+        agglvl_code: str(rec[3]),
+        size_code: str(rec[4]),
+        base: mapBaseBlock(rec),
+        locationQuotient: mapLqBlock(rec),
+        overTheYear: mapOtyBlock(rec),
+    };
+}
+// ─── QCEW honesty note constants ─────────────────────────────────────────────
+const QCEW_SUPPRESSION_NOTE = "BLS QCEW WITHHOLDS employment/wage values for confidentiality when too few establishments would be identifiable. A suppressed field is null with disclosed:false and its disclosureCode ('N' = not disclosable / confidential; '-' = not available) — it is WITHHELD, NOT zero. qtrly_estabs / lq_qtrly_estabs and oty_qtrly_estabs_chg / oty_qtrly_estabs_pct_chg remain DISCLOSED under 'N' (establishment counts and their change are non-confidential) but are withheld under '-'. Do NOT read a null as 0, and do NOT sum/average across rows treating suppressed cells as zero.";
+const QCEW_MIXED_AGGLVL_NOTE = "This slice MIXES aggregation levels (agglvl_code, e.g. 70=total-all-industries down to 78=6-digit-NAICS-by-ownership) and ownerships (own_code, incl. 0=Total, 1=Federal, 2=State, 3=Local, 5=Private). Do NOT sum qtrly_estabs/employment/wages across different agglvl_code, or across own_code=0 plus its parts — that double-counts. Filter to ONE agglvl_code (and one ownership) for a coherent total.";
+const QCEW_LQ_RATIO_NOTE = "Location-quotient (lq_*) fields are a RATIO vs the national average (1.00 = same concentration as the nation; >1.00 = MORE concentrated here = higher specialization / competition density; <1.00 = less), each governed by its own lq_disclosure_code.";
+/** Uniform base for a client-side filter descriptor. */
+function qcewTrimEq(cell, want) {
+    return (cell ?? "").trim() === want.trim();
+}
+/**
+ * ★ `bls_qcew` — keyless QCEW county×NAICS market-size / wages / location-quotient,
+ * disclosure-aware. Fetches ONE slice CSV (fetch-once — QCEW does not paginate),
+ * parses ALL rows through the symmetric column-drift guard + the POST-parse header
+ * assertion, applies the CLIENT-SIDE filters (ownership/aggregationLevel/sizeCode +
+ * the narrow industry/area), windows with limit/offset, and maps each page row
+ * through the block/code/field-scoped disclosure mapper (suppressed → null NEVER 0;
+ * a genuine 0 survives). A per-tuple HTTP 404 → an honest empty (found:false), a
+ * 5xx/timeout → THROW, a 200 non-CSV / drifted header → schema_drift THROW. No
+ * BLS_API_KEY is read on this keyless path.
+ */
+export async function qcew(args) {
+    const label = QCEW_LABEL;
+    const mode = String(args.mode ?? "");
+    if (!QCEW_MODES.has(mode)) {
+        qcewInvalid(`mode ${JSON.stringify(args.mode)} must be one of area, industry.`);
+    }
+    // The path code + the OPTIONAL client-side narrow (the OTHER field). In area
+    // mode: `area` is the required path segment, `industry` is an optional narrow
+    // filter; in industry mode the roles swap.
+    let pathCode;
+    let narrowField = null;
+    let narrowValue = null;
+    if (mode === "area") {
+        pathCode = String(args.area ?? "");
+        if (!QCEW_AREA_RE.test(pathCode)) {
+            qcewInvalid(`area ${JSON.stringify(args.area)} is required for mode=area and must be 1..6 alphanumeric chars (^[0-9A-Za-z]{1,6}$) — an area_fips like 01005.`);
+        }
+        if (args.industry !== undefined && args.industry !== null && String(args.industry) !== "") {
+            const narrow = String(args.industry);
+            if (!QCEW_INDUSTRY_RE.test(narrow)) {
+                qcewInvalid(`industry (client-side narrow) ${JSON.stringify(args.industry)} must be 1..6 DIGITS (^[0-9]{1,6}$) — a NAICS code like 5415. A hyphenated NAICS is rejected.`);
+            }
+            narrowField = "industry_code";
+            narrowValue = narrow;
+        }
+    }
+    else {
+        pathCode = String(args.industry ?? "");
+        if (!QCEW_INDUSTRY_RE.test(pathCode)) {
+            qcewInvalid(`industry ${JSON.stringify(args.industry)} is required for mode=industry and must be 1..6 DIGITS (^[0-9]{1,6}$) — a NAICS code like 5415 or the aggregate 10. A hyphenated NAICS supersector (31-33) 404s; use its digit aggregate code.`);
+        }
+        if (args.area !== undefined && args.area !== null && String(args.area) !== "") {
+            const narrow = String(args.area);
+            if (!QCEW_AREA_RE.test(narrow)) {
+                qcewInvalid(`area (client-side narrow) ${JSON.stringify(args.area)} must be 1..6 alphanumeric chars (^[0-9A-Za-z]{1,6}$) — an area_fips like 01005.`);
+            }
+            narrowField = "area_fips";
+            narrowValue = narrow;
+        }
+    }
+    const year = args.year;
+    if (typeof year !== "number" || !Number.isFinite(year)) {
+        qcewInvalid("year is required and must be a 4-digit integer (e.g. 2023).");
+    }
+    const quarter = String(args.quarter ?? "");
+    // buildQcewUrl re-validates every path segment (year range / quarter / code /
+    // mode) + the fixed-host assert (belt-and-suspenders behind the checks above).
+    const url = buildQcewUrl(mode, year, quarter, pathCode);
+    const ownership = str(args.ownership);
+    const aggregationLevel = str(args.aggregationLevel);
+    const sizeCode = str(args.sizeCode);
+    const limit = Math.min(1000, Math.max(1, Math.floor(args.limit ?? 50)));
+    const offset = Math.max(0, Math.floor(args.offset ?? 0));
+    // filtersApplied — mode/year/quarter always; + client-side filters when set.
+    const filtersApplied = [
+        `mode:${mode}`,
+        `${mode}:${pathCode}`,
+        `year:${year}`,
+        `quarter:${quarter}`,
+    ];
+    if (ownership !== null)
+        filtersApplied.push(`ownership:${ownership}`);
+    if (aggregationLevel !== null)
+        filtersApplied.push(`aggregationLevel:${aggregationLevel}`);
+    if (sizeCode !== null)
+        filtersApplied.push(`sizeCode:${sizeCode}`);
+    if (narrowField && narrowValue !== null)
+        filtersApplied.push(`narrow ${narrowField}:${narrowValue}`);
+    // ── Fetch the slice through the NEW self-throttle gate (keyless; NO
+    //    BLS_API_KEY). A per-tuple 404 (not_found) → honest empty; every other
+    //    failure THROWS (never a fake empty). ──
+    let body;
+    try {
+        body = await throughGate(QCEW_GATE_KEY, QCEW_MIN_INTERVAL_MS, () => fetchQcewCsv(url, label));
+    }
+    catch (e) {
+        if (e instanceof ToolErrorCarrier && e.toolError.kind === "not_found") {
+            // The slice file does not exist (nonexistent area/naics, an unpublished /
+            // pre-coverage quarter) — an ABSENT slice, NOT zero establishments. The HTML
+            // 404 body was NEVER parsed (classified on status before any read).
+            return withMeta({ found: false, mode, code: pathCode, [mode]: pathCode, year, quarter, rows: [] }, {
+                source: qcewSource(),
+                keylessMode: true,
+                complete: true,
+                returned: 0,
+                totalAvailable: 0,
+                filtersApplied,
+                filtersDropped: [],
+                fieldsUnavailable: [],
+                notes: [
+                    `No QCEW slice exists for ${mode} ${pathCode}, ${year} Q${quarter} (HTTP 404). The ${mode === "area" ? "area_fips" : "NAICS"} code may not exist, or the quarter may be unpublished / before coverage — this is an ABSENT slice, NOT zero establishments. Verify the code and that the quarter is published.`,
+                ],
+            });
+        }
+        throw e;
+    }
+    // ── Parse: assemble records → assert the header (POST-parse, quote-stripped) →
+    //    symmetric per-row field-count guard. ──
+    const records = assembleQcewRecords(body);
+    if (records.length === 0) {
+        throw driftError(label, "QCEW returned a 200 text/csv body with no parseable records (no header) — treating as schema drift (never a fake empty).");
+    }
+    assertQcewHeader(records[0] ?? [], label);
+    const contentRecords = records.slice(1);
+    let rowNo = 0;
+    for (const rec of contentRecords) {
+        rowNo++;
+        if (rec.length !== QCEW_COLS) {
+            throw driftError(label, `QCEW content row ${rowNo} has ${rec.length} column(s), expected exactly ${QCEW_COLS} — the download was truncated (too few) or the file schema drifted (a column added/removed, too many). Refusing to read a truncated OR column-shifted slice.`);
+        }
+    }
+    // ── Client-side filters (fetch-once → filter → EXACT filtered total). ──
+    const rawCount = contentRecords.length;
+    const filtered = contentRecords.filter((rec) => {
+        if (ownership !== null && !qcewTrimEq(rec[1], ownership))
+            return false;
+        if (aggregationLevel !== null && !qcewTrimEq(rec[3], aggregationLevel))
+            return false;
+        if (sizeCode !== null && !qcewTrimEq(rec[4], sizeCode))
+            return false;
+        if (narrowField === "industry_code" && narrowValue !== null && !qcewTrimEq(rec[2], narrowValue))
+            return false;
+        if (narrowField === "area_fips" && narrowValue !== null && !qcewTrimEq(rec[0], narrowValue))
+            return false;
+        return true;
+    });
+    const totalAvailable = filtered.length;
+    // ── Client-side window (preserve upstream order) → the page rows. ──
+    const pageRecords = filtered.slice(offset, offset + limit);
+    const rows = pageRecords.map(mapQcewRow);
+    const returned = rows.length;
+    const hasMore = offset + returned < totalAvailable;
+    const nextOffset = hasMore ? offset + returned : null;
+    // ── Honesty surface: suppressed field names + the conditional notes. ──
+    const suppressedFields = new Set();
+    let anySuppressed = false;
+    const distinctAgglvl = new Set();
+    const distinctOwn = new Set();
+    for (const r of rows) {
+        if (r.agglvl_code !== null)
+            distinctAgglvl.add(r.agglvl_code);
+        if (r.own_code !== null)
+            distinctOwn.add(r.own_code);
+        for (const [block, keys] of [
+            [r.base, ["qtrly_estabs", "month1_emplvl", "month2_emplvl", "month3_emplvl", "total_qtrly_wages", "taxable_qtrly_wages", "qtrly_contributions", "avg_wkly_wage"]],
+            [r.locationQuotient, ["lq_qtrly_estabs", "lq_month1_emplvl", "lq_month2_emplvl", "lq_month3_emplvl", "lq_total_qtrly_wages", "lq_taxable_qtrly_wages", "lq_qtrly_contributions", "lq_avg_wkly_wage"]],
+            [r.overTheYear, ["oty_qtrly_estabs_chg", "oty_qtrly_estabs_pct_chg", "oty_month1_emplvl_chg", "oty_month1_emplvl_pct_chg", "oty_month2_emplvl_chg", "oty_month2_emplvl_pct_chg", "oty_month3_emplvl_chg", "oty_month3_emplvl_pct_chg", "oty_total_qtrly_wages_chg", "oty_total_qtrly_wages_pct_chg", "oty_taxable_qtrly_wages_chg", "oty_taxable_qtrly_wages_pct_chg", "oty_qtrly_contributions_chg", "oty_qtrly_contributions_pct_chg", "oty_avg_wkly_wage_chg", "oty_avg_wkly_wage_pct_chg"]],
+        ]) {
+            if (block.disclosed === false) {
+                anySuppressed = true;
+                for (const k of keys)
+                    if (block[k] === null)
+                        suppressedFields.add(k);
+            }
+        }
+    }
+    const notes = [];
+    if (anySuppressed)
+        notes.push(QCEW_SUPPRESSION_NOTE);
+    if (distinctAgglvl.size >= 2 || distinctOwn.size >= 2)
+        notes.push(QCEW_MIXED_AGGLVL_NOTE);
+    notes.push(QCEW_LQ_RATIO_NOTE);
+    notes.push(`Parsed ${rawCount} content row(s) for this ${mode} slice; after filters → ${totalAvailable} pageable; totalAvailable reflects the FILTERED set (not the page length). The full slice was fetched in ONE request (QCEW does not paginate); limit/offset is a client-side window.`);
+    const metaOut = {
+        source: qcewSource(),
+        keylessMode: true,
+        returned,
+        totalAvailable,
+        filtersApplied,
+        filtersDropped: [],
+        fieldsUnavailable: [...suppressedFields],
+        pagination: { offset, limit, nextOffset, hasMore },
+        notes,
+    };
+    return withMeta({ found: true, mode, code: pathCode, [mode]: pathCode, year, quarter, rows }, metaOut);
+}
+/** The QCEW source label (mirrors blsSource(); keyless CSV domain). */
+function qcewSource() {
+    return "data.bls.gov/cew QCEW Open Data Access (keyless CSV)";
+}
+/**
+ * Fetch ONE QCEW slice CSV. Order: fetch(redirect:"error") → check status
+ * (404 → not_found kind, caught by the caller for an honest empty; 5xx/429 →
+ * throw; off-host redirect → schema_drift) → assert text/csv → content-length
+ * pre-check → readCappedBody → decode. Every failure THROWS a classified error
+ * (never a fake empty); the HTML 404 body is NEVER read (classified on status).
+ */
+async function fetchQcewCsv(url, label) {
+    let res;
+    try {
+        res = await fetch(url, {
+            headers: { "User-Agent": QCEW_UA, Accept: "text/csv, */*" },
+            redirect: "error",
+            signal: AbortSignal.timeout(QCEW_FETCH_TIMEOUT_MS),
+        });
+    }
+    catch (e) {
+        if (isRedirectError(e)) {
+            // Fail closed — never follow an off-host redirect, never read its body.
+            throw driftError(label, `QCEW ${label} refused an off-host redirect (redirect:"error") — the fixed host ${QCEW_HOST} must serve the CSV directly (SSRF safety).`);
+        }
+        // timeout / abort / network — retryable OUTAGE (THROW — never a fake empty).
+        throw new ToolErrorCarrier({
+            kind: "upstream_unavailable",
+            message: `Network error fetching QCEW ${label}: ${e.message}. The service is unavailable, NOT an empty slice — retry.`,
+            retryable: true,
+            retryAfterSeconds: 30,
+            upstreamEndpoint: label,
+        });
+    }
+    if (!res.ok) {
+        // 404 → not_found (the caller renders an honest empty); 429 → rate_limited;
+        // 5xx → upstream_unavailable; 4xx → invalid_input. A DOWN endpoint NEVER
+        // reads empty; the HTML 404 body is never read (classified on status here).
+        throw new ToolErrorCarrier(errorFromResponse(res, label));
+    }
+    // ★ M2 — the ONLY pre-parse content check is the text/csv Content-Type metadata
+    // guard; the header-name assertion runs POST-parse (assertQcewHeader). A 200
+    // whose Content-Type is not text/csv (an HTML interstitial slipping through at
+    // 200) → schema_drift (never read as data).
+    const ct = res.headers.get("content-type") ?? "";
+    if (!/text\/csv/i.test(ct)) {
+        throw driftError(label, `QCEW ${label} returned HTTP 200 with Content-Type ${JSON.stringify(ct)} (not text/csv) — refusing to read a non-CSV 200 body as data (schema drift).`);
+    }
+    // Size guard (content-length) BEFORE buffering — belt to the streamed cap.
+    const declaredLen = Number(res.headers.get("content-length") ?? "");
+    if (Number.isFinite(declaredLen) && declaredLen > MAX_QCEW_BYTES) {
+        throw new ToolErrorCarrier({
+            kind: "invalid_input",
+            message: `QCEW ${label} declares ${Math.round(declaredLen / 1048576)} MB, over this tool's ${Math.round(MAX_QCEW_BYTES / 1048576)} MB per-slice cap — refusing (a drifted giant, not the ≤~3.84 MB slices). Narrow by area/agglvl.`,
+            retryable: false,
+            upstreamEndpoint: label,
+        });
+    }
+    const bytes = await readCappedQcewBody(res, MAX_QCEW_BYTES, label);
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }
 //# sourceMappingURL=bls.js.map
