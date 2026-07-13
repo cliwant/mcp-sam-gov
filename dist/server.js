@@ -48,6 +48,7 @@ import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
 import * as ofac from "./ofac.js";
 import * as nvd from "./nvd.js";
+import * as nppes from "./nppes.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
@@ -739,6 +740,82 @@ const CisaKevLookupInput = z.object({
         .optional()
         .describe("Max matches returned (default 100, max 1000)."),
     offset: z.number().min(0).optional().describe("Zero-based page offset (default 0)."),
+});
+// ━━━ NPPES NPI Registry — the healthcare-provider identity/credentialing lane (1) ━━━ ADR-0036
+// nppes_lookup_provider: exact NPI detail OR search over CMS/HHS's keyless public
+// registry of every US healthcare provider (npiregistry.cms.hhs.gov/api, version=2.1
+// REQUIRED). Mode is inferred from `number` (no mode flag). ★M1: an exact NPI is
+// looked up by number ALONE on the wire (a co-supplied filter AND-combines and would
+// falsely zero a real active provider → found:false); co-filters are checked
+// client-side and disclosed via data.filterMatch. ★S2: the required-one gate is
+// {number, first_name, last_name, organization_name, taxonomy_description, city,
+// postal_code}; state + enumeration_type are REFINERS ONLY (rejected alone). The
+// grammars (10-digit NPI + CMS Luhn, USPS state enum, NPI-1/NPI-2 enum, trailing-`*`
+// wildcard ≥2 leading chars) are the SSRF + silent-foot-gun guards.
+const NppesLookupInput = z.object({
+    number: z
+        .string()
+        .regex(/^\d{10}$/)
+        .optional()
+        .describe("Exact NPI — 10 digits (^\\d{10}$). Triggers EXACT-NPI mode: the wire query carries number (+version) ALONE (any co-supplied filter is DROPPED from the wire and checked client-side, disclosed in data.filterMatch — NPPES AND-combines a number with filters, so a mismatched filter would falsely zero a real active provider). Also client-side CMS-Luhn-validated (Luhn over 80840+first-9): a typo'd NPI ⇒ invalid_input, NEVER a fake 'does not exist'. e.g. '1104130236'."),
+    enumeration_type: z
+        .enum(["NPI-1", "NPI-2"])
+        .optional()
+        .describe("REFINER only (NPI-1 = individual, NPI-2 = organization). Never sufficient alone (⇒ invalid_input) — must accompany a required criterion."),
+    first_name: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Individual provider first name (a required-one criterion). A trailing '*' wildcard needs ≥2 leading literal chars. e.g. 'John'."),
+    last_name: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Individual provider last name (a required-one criterion). Trailing '*' wildcard: ≥2 leading chars. e.g. 'Smith'."),
+    organization_name: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Organization (NPI-2) name (a required-one criterion). Trailing '*' wildcard: ≥2 leading chars. e.g. 'Mayo Clinic'."),
+    taxonomy_description: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Provider taxonomy/specialty description (a required-one criterion). e.g. 'Internal Medicine'."),
+    city: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Address city (a required-one criterion). e.g. 'Baltimore'."),
+    postal_code: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Address postal/ZIP code (a required-one criterion; a prefix like '212' is allowed). e.g. '21218'."),
+    state: z
+        .enum(nppes.NPPES_STATES)
+        .optional()
+        .describe("US state/territory 2-letter USPS code — a REFINER only (never sufficient alone ⇒ invalid_input; NPPES rejects 'state' as the sole criterion). e.g. 'MD'."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Providers per page, 1..200, default 10. NPPES silently clamps >200; this tool rejects it loudly. Search mode only."),
+    skip: z
+        .number()
+        .int()
+        .min(0)
+        .max(1000)
+        .optional()
+        .describe("0-based pagination offset, 0..1000 (default 0). ★POLICY cap: this vetting tool reaches at most the first ~1,200 matches/query (a deliberate targeted-lookup boundary — NPPES itself no longer enforces a skip ceiling); skip > 1000 ⇒ invalid_input. Search mode only."),
 });
 // GAO bid-protest lookup (keyless RSS + decision-page parse)
 const GaoProtestInput = z.object({
@@ -2971,6 +3048,13 @@ const TOOLS = [
         description: "Filter the CISA Known Exploited Vulnerabilities (KEV) catalog standalone (keyless; www.cisa.gov feed, cached) — the mandatory-remediation list carrying BINDING due-dates under BOD 22-01 / its 2026 successor BOD 26-04. Works even when NVD is rate-limited (a separate host, no key). Filters (all optional, AND-combined, client-side): `cveId` (exact KEV membership check), `vendorProject`/`product` (case-insensitive substring), `ransomwareOnly` (knownRansomwareCampaignUse === 'Known'), `addedSince`/`dueBefore` (ISO YYYY-MM-DD); `limit` (≤1000, def 100), `offset`. Returns { catalogVersion, dateReleased, count, found?, matches:[{ cveID, vendorProject, product, vulnerabilityName, dateAdded, dueDate, knownRansomwareCampaignUse, shortDescription, requiredAction, cwes, nvdUrl }] } + honest _meta. ★HONESTY: knownRansomwareCampaignUse and requiredAction are surfaced VERBATIM (never defaulted); dueDate is the CISA-mandated remediation deadline. A cveId NOT in the catalog ⇒ found:false — but the not-in-KEV≠safe caveat rides on EVERY response: KEV is a CURATED SUBSET of confirmed in-the-wild exploitation, so absence means CISA has not catalogued it, NOT that the component is unexploited/safe. A catalog download failure / floor-fail / count-drift THROWS (a truncated/near-empty catalog must never read as 'nothing is exploited') — never a fake-empty. The snapshot freshness (catalogVersion + release date + cache age) is disclosed.",
         inputSchema: CisaKevLookupInput,
         handler: (input) => nvd.cisaKevLookup(input),
+    }),
+    // ━━━ NPPES NPI Registry — Healthcare-Provider Vetting (1) ━━━ ADR-0036
+    defineTool({
+        name: "nppes_lookup_provider",
+        description: "Keyless CMS/HHS NPPES NPI Registry lookup — the authoritative PUBLIC registry of every US healthcare provider (individual NPI-1 + organization NPI-2), for VA/HHS/CMS subcontractor/provider/teaming due-diligence (validate an NPI, confirm taxonomy/specialty, enumeration status, practice state, org/name match). Host npiregistry.cms.hhs.gov/api (version=2.1). Mode is inferred from `number` (no mode flag). EXACT-NPI mode (`number` given): the NPI is CMS-Luhn-validated client-side (Luhn over 80840+first-9) ⇒ a typo'd NPI is invalid_input, NEVER a fake 'does not exist'; ★the wire query carries `number` (+version) ALONE — any co-supplied filter (last_name/state/…) is DROPPED from the wire and checked CLIENT-SIDE (disclosed in data.filterMatch:{field:bool} + data.filtersDropped), because NPPES AND-combines a number with filters and a mismatch would falsely zero a real active provider into found:false. SEARCH mode: required-one of { first_name, last_name, organization_name, taxonomy_description, city, postal_code } (state + enumeration_type are REFINERS ONLY — rejected alone); a trailing '*' wildcard on a name/org field needs ≥2 leading literal chars. Returns EXACT-mode { found, provider:{ number, enumerationType, active, status, basic{…individual OR org fields, null-never-fabricated…}, taxonomies[{code,desc,primary,state,license,taxonomyGroup}], addresses[{purpose,address1,city,state,postalCode,telephone,fax,countryCode}], practiceLocations[…same, SEPARATE from addresses], identifiers[], otherNames[], endpoints[], createdEpoch, lastUpdatedEpoch }, filterMatch? } OR SEARCH-mode { providers:[…] } + honest _meta. HONESTY: active = basic.status==='A' (a deactivated/absent NPI is NOT active); epochs are ms numeric STRINGS → number|null (null-never-0); addresses[] and practiceLocations[] are kept SEPARATE (a provider can practice in a state that appears ONLY in practiceLocations); NPPES exposes NO match total, so a full page ⇒ totalAvailable is a disclosed LOWER BOUND (totalIsLowerBound) + a ~1,200-row-per-query reach cap (limit ≤ 200, skip ≤ 1,000 — OUR policy, a PER-QUERY cap only; cross-query enumeration is not architecturally prevented). A genuine {result_count:0} ⇒ honest found:false/empty; a {Errors:[…]} 200 body (no results key) ⇒ THROWS invalid_input (never a fake empty); any 4xx/5xx/timeout/off-host-redirect ⇒ THROWS; result_count !== results.length ⇒ schema_drift. ★NOT a fitness/exclusion/licensure/sanctions determination — cross-check SAM exclusions + OFAC; individual (NPI-1) records may surface personal/home addresses + phone/fax verbatim with NO enrichment. The caveat + reach-cap disclosure ride EVERY response.",
+        inputSchema: NppesLookupInput,
+        handler: (input) => nppes.lookupProvider(input),
     }),
     // ━━━ GAO — Bid Protests (1) ━━━
     defineTool({
