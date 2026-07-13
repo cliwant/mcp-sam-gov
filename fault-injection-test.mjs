@@ -4326,6 +4326,44 @@ async function testFederalRegisterHonesty() {
     },
   );
 
+  // 3c. FEDREG-D4 (W3-4 no-silent-filter): filtersApplied must reflect the filters
+  //     ACTUALLY FORWARDED to the API (query/agencySlugs/type/publicationDate*/
+  //     effectiveDate*), never the hard-coded [] the OLD code emitted even when
+  //     agency+type WERE sent — a metadata lie about which facets constrained the
+  //     result. NON-VACUITY: reverting to filtersApplied:[] turns these RED.
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { count: 3, total_pages: 1, results: [
+      { document_number: "2024-1", title: "Set-Aside Rule", type: "Rule", publication_date: "2024-02-01", agencies: [{ name: "Department of Defense", slug: "defense-department" }] },
+    ] } }) : failClosed()()),
+    async (calls) => {
+      const res = await fedRegSearch({ query: "set-aside", agencySlugs: ["defense-department"], type: "RULE", publicationDateFrom: "2024-01-01" });
+      const fa = res.meta.filtersApplied;
+      ok("fedreg [D4] filtersApplied names EVERY forwarded filter (query, agencySlugs, type, publicationDateFrom) + filtersDropped:[] — mutate back to the hard-coded [] ⇒ RED",
+        Array.isArray(fa) && fa.includes("query") && fa.includes("agencySlugs") && fa.includes("type") && fa.includes("publicationDateFrom") && res.meta.filtersDropped.length === 0, JSON.stringify(fa));
+      const url = new URL(calls.find((c) => isSearch(c.url)).url).searchParams;
+      ok("fedreg [D4] POSITIVE: the named filters were TRULY forwarded (conditions[term]=set-aside, conditions[agencies][]=defense-department, conditions[type][]=RULE) — never a filtersApplied claim without a wire filter",
+        url.get("conditions[term]") === "set-aside" && url.get("conditions[agencies][]") === "defense-department" && url.get("conditions[type][]") === "RULE", JSON.stringify([...url.entries()]));
+    },
+  );
+  // A no-filter search ⇒ filtersApplied:[] (an HONEST empty — nothing was forwarded).
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { count: 0, total_pages: 0, results: [] } }) : failClosed()()),
+    async () => {
+      const res = await fedRegSearch({});
+      ok("fedreg [D4] no-filter search ⇒ filtersApplied:[] (honest empty — nothing forwarded, NOT a phantom claim) + filtersDropped:[]",
+        Array.isArray(res.meta.filtersApplied) && res.meta.filtersApplied.length === 0 && res.meta.filtersDropped.length === 0, JSON.stringify(res.meta.filtersApplied));
+    },
+  );
+  // agencySlugs:[] (empty array) forwards NO slug ⇒ 'agencySlugs' NOT claimed applied.
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { count: 0, total_pages: 0, results: [] } }) : failClosed()()),
+    async () => {
+      const res = await fedRegSearch({ agencySlugs: [] });
+      ok("fedreg [D4] agencySlugs:[] (empty) forwards no slug ⇒ 'agencySlugs' NOT in filtersApplied (claim only a filter truly sent — never a phantom)",
+        !res.meta.filtersApplied.includes("agencySlugs") && res.meta.filtersApplied.length === 0, JSON.stringify(res.meta.filtersApplied));
+    },
+  );
+
   // 4. getDocument 503 ⇒ throws upstream_unavailable (outage, not a hollow record)
   await withFetch(
     (u) => (isDoc(u) ? mockResponse({ status: 503 }) : failClosed()()),
@@ -10521,6 +10559,34 @@ async function testDatagovHonesty() {
         threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify(toToolError(error).kind));
     });
 
+    // ── (D3 — W3-4 no-silent-filter) documentType/withinCommentPeriod are
+    //    documents-ONLY facets, but RegulationsSearchInput is SHARED by documents +
+    //    comments, so a caller CAN supply them to regulations_search_comments. On
+    //    /v4/comments the OLD code silently IGNORED them (results returned as if the
+    //    facet applied). The fix DISCLOSES them in filtersDropped + a note (never
+    //    sent to the wire). On /v4/documents the SAME facets genuinely APPLY. ──
+    await withFetch((u) => (isRegComments(u) ? mockResponse({ status: 200, json: regBody({ n: 2, total: 2 }) }) : failClosed()()), async (calls) => {
+      const r = await runTool("regulations_search_comments", { searchTerm: "ai", documentType: "Rule", withinCommentPeriod: true }, sam);
+      const m = buildMeta(r.meta);
+      const q = new URL(calls.find((c) => isRegComments(c.url)).url).searchParams;
+      ok("45D3 /v4/comments + documentType/withinCommentPeriod ⇒ filtersDropped names BOTH (documents-only facets); searchTerm still APPLIED — mutate to silently ignore ⇒ RED",
+        m.filtersDropped.includes("documentType") && m.filtersDropped.includes("withinCommentPeriod") && m.filtersApplied.includes("searchTerm") && !m.filtersApplied.includes("documentType"), JSON.stringify({ fa: m.filtersApplied, fd: m.filtersDropped }));
+      ok("45D3 /v4/comments dropped-filter ⇒ a disclosing note names them as documents-only + routes to regulations_search_documents (drop the note ⇒ RED via the filtersDropped⇒note invariant anyway, but the specific text must be present)",
+        m.notes.some((n) => /documentType/.test(n) && /withinCommentPeriod/.test(n) && /documents-only/.test(n) && /regulations_search_documents/.test(n)), JSON.stringify(m.notes));
+      ok("45D3 /v4/comments: the dropped facets are NEVER sent to the wire (filter[documentType]/filter[withinCommentPeriod] ABSENT from the request URL — never silently applied)",
+        q.get("filter[documentType]") === null && q.get("filter[withinCommentPeriod]") === null, JSON.stringify([...q.keys()]));
+    });
+    // On /v4/documents the identical facets APPLY (filtersApplied), filtersDropped EMPTY.
+    await withFetch((u) => (isRegDocs(u) ? mockResponse({ status: 200, json: regBody({ n: 2, total: 2 }) }) : failClosed()()), async (calls) => {
+      const r = await runTool("regulations_search_documents", { searchTerm: "ai", documentType: "Rule", withinCommentPeriod: true }, sam);
+      const m = buildMeta(r.meta);
+      const q = new URL(calls.find((c) => isRegDocs(c.url)).url).searchParams;
+      ok("45D3 /v4/documents + documentType/withinCommentPeriod ⇒ BOTH in filtersApplied, filtersDropped EMPTY (endpoint-specific split — they genuinely apply here; a blanket drop ⇒ RED)",
+        m.filtersApplied.includes("documentType") && m.filtersApplied.includes("withinCommentPeriod") && m.filtersDropped.length === 0, JSON.stringify({ fa: m.filtersApplied, fd: m.filtersDropped }));
+      ok("45D3 /v4/documents forwards the facets to the wire (filter[documentType]=Rule, filter[withinCommentPeriod]=true) — the POSITIVE that they truly apply here",
+        q.get("filter[documentType]") === "Rule" && q.get("filter[withinCommentPeriod]") === "true", JSON.stringify([...q.entries()]));
+    });
+
     // ── (h) error taxonomy: 404⇒not_found, 400⇒invalid_input, 401/403⇒invalid_input,
     // 429⇒rate_limited (errorFromResponse, status-only).
     await withFetch((u) => (isCongressBill(u) ? mockResponse({ status: 404 }) : failClosed()()), async () => {
@@ -11817,6 +11883,49 @@ async function testFpdsHonesty() {
     const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", {}, sam));
     ok("49k no-filter ⇒ invalid_input, 0 fetch (a bare unbounded FPDS scan is refused BEFORE any network call)",
       threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+  });
+
+  // ── (D1 — W3-4 no-silent-filter) a caller-SUPPLIED filter that SANITIZES TO EMPTY
+  //    (whitespace/quote-only phrase, or a keyword that is nothing but a stripped
+  //    FIELD: operator) as the SOLE filter passes the server's Zod .refine (the field
+  //    IS present) but yields q="" — the OLD code then ran a BARE unfiltered scan and
+  //    returned the newest UNRELATED awards as if they matched. The fix REFUSES it
+  //    (invalid_input, 0 fetch). NON-VACUITY: reverting the fpds.ts guard ⇒ a real
+  //    fetch fires + unrelated awards return ⇒ these turn RED. ──
+  // Unit-level: buildQuery detects the sanitize-to-empty (q empty + the label in suppliedEmpty).
+  {
+    const be = fpdsBuildQuery({ keyword: "PIID:" });
+    ok("49D1 buildQuery({keyword:'PIID:'}) ⇒ q === '' AND suppliedEmpty === ['keyword'] (the FIELD-operator strip leaves NO token — the sanitize-to-empty signal that drives the refusal)",
+      be.q === "" && JSON.stringify(be.suppliedEmpty) === JSON.stringify(["keyword"]) && be.filters.length === 0, JSON.stringify(be));
+    const bv = fpdsBuildQuery({ vendorName: "   " });
+    ok("49D1 buildQuery({vendorName:'   '}) ⇒ q === '' AND suppliedEmpty === ['vendorName'] (a whitespace-only phrase sanitizes to empty)",
+      bv.q === "" && JSON.stringify(bv.suppliedEmpty) === JSON.stringify(["vendorName"]), JSON.stringify(bv));
+  }
+  for (const sole of [{ keyword: "PIID:" }, { vendorName: "   " }, { naics: '""' }]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", sole, sam));
+      ok(`49D1 SOLE sanitize-to-empty filter ${JSON.stringify(sole)} ⇒ invalid_input, 0 fetch (NOT a bare scan of newest unrelated awards) — revert the guard ⇒ a fetch fires ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && /sanitized to an EMPTY query/.test(toToolError(error).message) && calls.length === before,
+        JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // Non-vacuity: a REAL keyword (content survives sanitization) still RUNS a fetch —
+  // proving the refusal is specific to the sanitize-to-empty case, not keyword-always.
+  await withFetch(fpdsMock(SINGLE), async (calls) => {
+    const r = await runTool("fpds_search_awards", { keyword: "laptop" }, sam);
+    ok("49D1 a REAL keyword 'laptop' (survives cleanKeyword) still fetches + returns (the guard fires ONLY on sanitize-to-empty, never on a genuine filter) — 1 fpds fetch, awards returned",
+      calls.some((c) => isFpds(c.url)) && Array.isArray(r.data.awards) && r.data.awards.length >= 1, JSON.stringify({ fetched: calls.some((c) => isFpds(c.url)), n: r.data.awards.length }));
+  });
+  // Partial case: a value filter sanitized to empty ALONGSIDE a valid filter ⇒ the
+  // valid filter RUNS, and the empty one is DISCLOSED in filtersDropped + a note
+  // (never silently discarded) — the honest half of the same fix.
+  await withFetch(fpdsMock(FPDS_EMPTY_FEED), async (calls) => {
+    const r = await runTool("fpds_search_awards", { naics: "541511", vendorName: "   " }, sam);
+    const m = buildMeta(r.meta);
+    ok("49D1 partial: {naics:'541511', vendorName:'   '} ⇒ naics APPLIED (fetch runs), vendorName DISCLOSED in filtersDropped + a 'sanitized to an EMPTY value' note (never a silent drop) — mutate to silently drop ⇒ RED",
+      calls.some((c) => isFpds(c.url)) && m.filtersApplied.includes("naics") && !m.filtersApplied.includes("vendorName") && m.filtersDropped.some((x) => /vendorName/.test(x)) && m.notes.some((n) => /sanitized to an EMPTY value/.test(n)),
+      JSON.stringify({ fa: m.filtersApplied, fd: m.filtersDropped }));
   });
 
   // ── (l) redirect:"error" TypeError ⇒ NON-retryable schema_drift, SINGLE attempt. ──
@@ -13708,6 +13817,33 @@ async function testClinicaltrialsHonesty() {
     const m = buildMeta(r.meta);
     ok("53and PERIOD 'sanofi.aventis' (a NON-splitting delimiter on query.spons — CT keeps it ONE token, live-verified →0 literal) ⇒ NO AND-note (the detector uses the PRECISE confirmed-splitter class, NOT a non-alnum superset, so it never over-discloses a split CT did not make)",
       !m.notes.some((n) => /must co-occur/.test(n)), JSON.stringify(m.notes.filter((n) => /co-occur/.test(n))));
+  });
+  // (and8) D2 — W3-4: LOCATION (→ query.locn) is AND-tokenized IDENTICALLY to
+  //        term/sponsor/condition, yet the OLD code passed andField=null for it → a
+  //        multi-word location was SILENTLY narrowed with NO AND-note (the caller
+  //        never learns 'New York' became 'New' AND 'York'). The fix routes location
+  //        through the SAME andTokenNote. RED under the old exemption (note SKIPPED).
+  await withFetch(ctMock(ctBody(3, ctRows(3), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { location: "New York" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and [D2] multi-word location 'New York' ⇒ the MANDATORY AND-note FIRES listing [New, York] (query.locn AND-splits exactly like term/spons/cond — 'New' AND 'York') — the old andField=null EXEMPTED location ⇒ the note was SKIPPED ⇒ RED (the silent-narrowing gap this fix closes)",
+      m.notes.some((n) => /tokenizes a multi-word location on whitespace AND punctuation/.test(n) && /New, York/.test(n) && /must co-occur/.test(n)), JSON.stringify(m.notes));
+  });
+  // (and9) HYPHEN-compound location — same AND-split (mirrors the sponsor and2 case).
+  await withFetch(ctMock(ctBody(3, ctRows(3), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { location: "New-York" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and [D2] HYPHEN-compound location 'New-York' ⇒ the AND-note FIRES listing [New, York] (CT AND-splits the hyphen — a whitespace-only detector would SKIP it) ⇒ mutate the splitter to whitespace-only ⇒ RED",
+      m.notes.some((n) => /tokenizes a multi-word location on whitespace AND punctuation/.test(n) && /New, York/.test(n)), JSON.stringify(m.notes));
+  });
+  // (and10) genuine SINGLE-token location ⇒ NO AND-note (fires ONLY on 2+ tokens —
+  //         the fix does not OVER-fire; 53g already asserts single-token location is
+  //         in filtersApplied, this pins the no-note side).
+  await withFetch(ctMock(ctBody(3, ctRows(3), "T")), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { location: "Germany" }, sam);
+    const m = buildMeta(r.meta);
+    ok("53and [D2] single-token location 'Germany' ⇒ NO AND-note (the disclosure fires ONLY on a genuine multi-token value — over-firing on one token ⇒ RED)",
+      !m.notes.some((n) => /multi-word location/.test(n) && /must co-occur/.test(n)), JSON.stringify(m.notes.filter((n) => /location|co-occur/.test(n))));
   });
 
   // ── (caveat) trial≠federal-award caveat in EVERY response (search + empty + get). ──
