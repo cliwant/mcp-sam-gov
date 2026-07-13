@@ -135,6 +135,19 @@ import {
   CMS_HOSTS,
   CMS_OPERATORS,
 } from "./dist/cms.js";
+import {
+  num as facNum,
+  searchAudits as facSearchAudits,
+  getFindings as facGetFindings,
+  parseTotal as facParseTotal,
+  flagTri as facFlagTri,
+  FAC_NOT_DETERMINATION_NOTE,
+  FAC_VALUE_TYPING_NOTE,
+  FAC_EMPTY_FINDINGS_NOTE,
+  FAC_HOSTS,
+  GENERAL_SELECT as FAC_GENERAL_SELECT,
+  FINDINGS_SELECT as FAC_FINDINGS_SELECT,
+} from "./dist/fac.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
@@ -13383,6 +13396,7 @@ async function main() {
   await testOfacScreen();
   await testNppesHonesty();
   await testCmsHonesty();
+  await testFacHonesty();
   await testNvdCveKev();
   await testClinicaltrialsHonesty();
   await testClinicaltrialsFacetHonesty();
@@ -14333,6 +14347,279 @@ async function testCmsHonesty() {
   // ── (8) exports sanity. ──
   ok("66-8 CMS_HOSTS is the single-entry allowlist (openpaymentsdata.cms.gov)", Array.isArray(CMS_HOSTS) && CMS_HOSTS.length === 1 && CMS_HOSTS[0] === "openpaymentsdata.cms.gov", JSON.stringify(CMS_HOSTS));
   ok("66-8 CMS_OPERATORS enum exported (8 ops incl. like/in)", Array.isArray(CMS_OPERATORS) && CMS_OPERATORS.includes("like") && CMS_OPERATORS.includes("in") && CMS_OPERATORS.length === 8, JSON.stringify(CMS_OPERATORS));
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 67. fac_search_audits + fac_get_findings (ADR-0038) — the Federal Audit
+//     Clearinghouse Single Audit adapter (a NEW keyless PostgREST source via the
+//     DEMO_KEY doctrine). Covers: ★M1 the Content-Range EXACT total via the NEW
+//     getJsonWithHeaders port primitive (a 206 with Content-Range:0-0/37144 ⇒
+//     totalAvailable:37144, not null); ★M2 the empty-findings ≠ clean-audit note;
+//     ★S1 an HTML 200 (r.json() SyntaxError) ⇒ schema_drift; the ★PII crux (a
+//     hardcoded select-allowlist EXCLUDES every personal-contact column + the
+//     mapper picks only allowlist keys, so a drifted email cannot leak); P1
+//     num-guarded header parse (*/absent/non-number ⇒ null+hedge, never 0); P3
+//     money null-never-0 + risk-flag tri-state null-is-UNKNOWN; P4 filters
+//     self-policing (filtersDropped always empty); the ADR-0007 KEY-NEVER-LEAKS
+//     test (3rd consumer); SSRF/injection rejects (0 fetch); the mandatory
+//     FAC_NOT_DETERMINATION_NOTE + VALUE_TYPING_NOTE. All OFFLINE (fetch-mock),
+//     deterministic — NO live api.fac.gov calls.
+// ══════════════════════════════════════════════════════════════════════════
+const isFac = (u) => /api\.fac\.gov\//.test(u);
+const isFacGeneral = (u) => /api\.fac\.gov\/general\?/.test(u);
+const isFacFindings = (u) => /api\.fac\.gov\/findings\?/.test(u);
+// The PostgREST body is a BARE JSON ARRAY; the EXACT total is the Content-Range
+// RESPONSE HEADER. facMock returns a 206 (subset) with that header set.
+const facMock = ({ body = [], contentRange = null, status = 206 }) => (u) =>
+  isFac(u)
+    ? mockResponse({ status, json: body, headers: contentRange !== null ? { "Content-Range": contentRange } : {} })
+    : failClosed()();
+// A 200 non-JSON (HTML maintenance page) whose r.json() throws SyntaxError (S1).
+const facHtmlResp = () => ({ ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON"); }, text: async () => "<html>down</html>" });
+const facCall = (calls, pred) => calls.find((x) => pred(x.url));
+const facUrl = (calls, pred) => { const c = facCall(calls, pred); return c ? new URL(c.url) : null; };
+// A representative general row incl. the 6 personal-contact columns a drifted
+// server COULD return (the PII-leak red fixture asserts they never reach output).
+const facAuditRow = (extra = {}) => ({
+  report_id: "2024-06-GSAFAC-0000012345",
+  auditee_uei: "ABC123DEF456",
+  audit_year: "2026",
+  auditee_name: "Acme Health Center",
+  auditee_ein: "911767139",
+  auditee_state: "CA",
+  auditee_city: "Los Angeles",
+  total_amount_expended: 2919749,
+  fac_accepted_date: "2026-07-10",
+  ...extra,
+});
+
+async function testFacHonesty() {
+  section("67. fac_search_audits + fac_get_findings (ADR-0038) — FAC Single Audit (keyless PostgREST via DEMO_KEY): ★M1 Content-Range EXACT total via getJsonWithHeaders + ★M2 empty≠clean note + ★S1 HTML→schema_drift + ★PII select-allowlist + P1 num-guarded header + P3 money/flag tri-state + P4 self-policing + K-test + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── (0) num-parity + the pure Content-Range / tri-state helpers. ──
+  ok("67-0 num parity: fac.num === coerce.num (single audited copy — a num regression fails here too)", facNum === coerceNum, `${facNum === coerceNum}`);
+  eq("67-0 [P1] parseTotal('0-0/37144') ⇒ 37144 (EXACT — the M1 fixture: the denominator after the LAST /)", facParseTotal("0-0/37144"), 37144);
+  eq("67-0 [P1] parseTotal('0-24/23204') ⇒ 23204", facParseTotal("0-24/23204"), 23204);
+  eq("67-0 [P1] parseTotal('*/0') ⇒ 0 (a genuine ZERO total, not null)", facParseTotal("*/0"), 0);
+  eq("67-0 [P1] parseTotal('0-0/0') ⇒ 0", facParseTotal("0-0/0"), 0);
+  eq("67-0 [P1] parseTotal('0-24/*') ⇒ null (PostgREST '*' = count-not-computed, NEVER 0)", facParseTotal("0-24/*"), null);
+  eq("67-0 [P1] parseTotal(null) ⇒ null (header absent — never 0)", facParseTotal(null), null);
+  eq("67-0 [P1] parseTotal('0-0/abc') ⇒ null (non-numeric denominator — never 0)", facParseTotal("0-0/abc"), null);
+  eq("67-0 [P1] parseTotal('garbage-no-slash') ⇒ null", facParseTotal("garbage-no-slash"), null);
+  eq("67-0 [P3] flagTri('Y') ⇒ true", facFlagTri("Y"), true);
+  eq("67-0 [P3] flagTri('N') ⇒ false", facFlagTri("N"), false);
+  eq("67-0 [P3] flagTri(null) ⇒ null (UNKNOWN — NEVER false; a null material-weakness must not read as 'no finding')", facFlagTri(null), null);
+  eq("67-0 [P3] flagTri('') ⇒ null", facFlagTri(""), null);
+  eq("67-0 [P3] flagTri('X') ⇒ null (any other value is UNKNOWN)", facFlagTri("X"), null);
+  eq("67-0 [P3] flagTri(undefined) ⇒ null (absent flag is UNKNOWN, never false)", facFlagTri(undefined), null);
+  ok("67-0 FAC_HOSTS is the single-entry SSRF allowlist (api.fac.gov)", Array.isArray(FAC_HOSTS) && FAC_HOSTS.length === 1 && FAC_HOSTS[0] === "api.fac.gov", JSON.stringify(FAC_HOSTS));
+  ok("67-0 ★PII the select-allowlists NAME NO personal-contact column (email/phone/certify/contact)",
+    !/auditee_email|auditee_phone|auditee_certify|auditee_contact/.test(FAC_GENERAL_SELECT) && !/auditee_email|auditee_phone|auditee_certify|auditee_contact/.test(FAC_FINDINGS_SELECT),
+    JSON.stringify({ g: FAC_GENERAL_SELECT, f: FAC_FINDINGS_SELECT }));
+
+  // ── (1) ★M1 general happy: 206 + Content-Range 0-0/37144 ⇒ totalAvailable
+  //    37144 EXACT (NOT null, NOT the page length), money verbatim, output keys
+  //    ⊆ allowlist, the wire carries select=allowlist + Prefer:count=exact. ──
+  await withEnvKey(undefined, async () => {
+    await withFetch(facMock({ body: [facAuditRow()], contentRange: "0-0/37144", status: 206 }), async (calls) => {
+      const r = await runTool("fac_search_audits", { auditeeState: "CA", limit: 25 }, sam);
+      const m = buildMeta(r.meta);
+      ok("67-1 ★M1 206 + Content-Range 0-0/37144 ⇒ totalAvailable:37144 EXACT (forget to wire getJsonWithHeaders' contentRange ⇒ null ⇒ RED); returned 1; offset 0 + 1 < 37144 ⇒ hasMore:true, nextOffset:1",
+        m.totalAvailable === 37144 && m.returned === 1 && m.pagination.hasMore === true && m.pagination.nextOffset === 1,
+        JSON.stringify({ ta: m.totalAvailable, pg: m.pagination }));
+      ok("67-1 [P3] total_amount_expended surfaced VERBATIM as the JSON number 2919749 (a missing amount would be null via num — never 0)",
+        r.data.audits[0].total_amount_expended === 2919749, JSON.stringify(r.data.audits[0]));
+      ok("67-1 ★PII output keys ⊆ the 9-col allowlist (no personal-contact key surfaced)",
+        Object.keys(r.data.audits[0]).every((k) => FAC_GENERAL_SELECT.split(",").includes(k)) && Object.keys(r.data.audits[0]).length === 9,
+        JSON.stringify(Object.keys(r.data.audits[0])));
+      ok("67-1 keylessMode:false (it genuinely sends a key), filtersApplied:[auditeeState], filtersDropped:[] (P4)",
+        m.keylessMode === false && m.filtersApplied.includes("auditeeState") && m.filtersDropped.length === 0, JSON.stringify({ km: m.keylessMode, fa: m.filtersApplied, fd: m.filtersDropped }));
+      const url = facUrl(calls, isFacGeneral);
+      const call = facCall(calls, isFacGeneral);
+      ok("67-1 ★ the wire carries select=<hardcoded allowlist> (never a caller param), order=fac_accepted_date.desc, auditee_state=eq.CA, limit/offset; host api.fac.gov, https",
+        url.searchParams.get("select") === FAC_GENERAL_SELECT && url.searchParams.get("order") === "fac_accepted_date.desc" && url.searchParams.get("auditee_state") === "eq.CA" && url.searchParams.get("limit") === "25" && url.searchParams.get("offset") === "0" && url.hostname === "api.fac.gov" && url.protocol === "https:",
+        JSON.stringify(url.search));
+      ok("67-1 ★ Prefer:count=exact + X-Api-Key:DEMO_KEY (env unset) on the wire; redirect:'error'; the key is NOT in the URL",
+        call.init.headers["Prefer"] === "count=exact" && call.init.headers["X-Api-Key"] === "DEMO_KEY" && call.init.redirect === "error" && !call.url.includes("DEMO_KEY"),
+        JSON.stringify({ prefer: call.init.headers["Prefer"], redirect: call.init.redirect }));
+      ok("67-1 the DEMO_KEY disclosure + the FAC_NOT_DETERMINATION_NOTE ride the response (drop either ⇒ RED)",
+        m.notes.some((n) => /DEMO_KEY/.test(n)) && m.notes.includes(FAC_NOT_DETERMINATION_NOTE), JSON.stringify(m.notes.length));
+    });
+  });
+
+  // ── (2) ★PII-leak red fixture: a drifted server ALSO returns the 6 personal-
+  //    contact columns ⇒ they are ABSENT from output AND never on the wire. ──
+  await withFetch(facMock({ body: [facAuditRow({ auditee_email: "mgarcia@example.org", auditee_phone: "5105551234", auditee_certify_name: "Maria Garcia", auditee_certify_title: "CFO", auditee_contact_name: "J. Doe", auditee_contact_title: "Auditor" })], contentRange: "0-0/1" }), async (calls) => {
+    const r = await runTool("fac_search_audits", { auditeeUei: "ABC123DEF456" }, sam);
+    const keys = Object.keys(r.data.audits[0]);
+    ok("67-2 ★PII CRUX: a drifted email/phone/certify/contact in the ROW is FILTERED by the allowlist mapper — ABSENT from output (the mapper picks only allowlist keys; surface any one ⇒ RED)",
+      !keys.some((k) => /auditee_email|auditee_phone|auditee_certify|auditee_contact/.test(k)) && r.data.audits[0].auditee_name === "Acme Health Center",
+      JSON.stringify(keys));
+    const url = facUrl(calls, isFacGeneral);
+    ok("67-2 ★PII the constructed select= NEVER names a personal-contact column (there is NO caller select/column param)",
+      !/auditee_email|auditee_phone|auditee_certify|auditee_contact/.test(url.searchParams.get("select")),
+      JSON.stringify(url.searchParams.get("select")));
+  });
+
+  // ── (3) [P1] Content-Range matrix through the tool (kills the b-mutations). ──
+  // (3a) genuine empty */0 + [] ⇒ totalAvailable:0, complete:true (NOT an error).
+  await withFetch(facMock({ body: [], contentRange: "*/0" }), async () => {
+    const r = await runTool("fac_search_audits", { auditeeState: "CA" }, sam);
+    const m = buildMeta(r.meta);
+    ok("67-3a [P1] '*/0' + [] ⇒ totalAvailable:0, returned:0, complete:true, hasMore:false (a genuine empty is honest, NOT an error, NOT null)",
+      m.totalAvailable === 0 && r.data.audits.length === 0 && m.complete === true && m.pagination.hasMore === false, JSON.stringify({ ta: m.totalAvailable, c: m.complete }));
+  });
+  // (3b) '*' denominator on a FULL page ⇒ totalAvailable:null + page-fullness
+  //      hasMore + the hedge note (NEVER 0).
+  await withFetch(facMock({ body: Array.from({ length: 25 }, () => facAuditRow()), contentRange: "0-24/*" }), async () => {
+    const r = await runTool("fac_search_audits", { auditeeState: "CA", limit: 25 }, sam);
+    const m = buildMeta(r.meta);
+    ok("67-3b [P1] a '*' denominator (count-not-computed) on a FULL page ⇒ totalAvailable:null (coerce to 0 ⇒ RED = the '0 results' lie) + page-fullness hasMore (25>=25 ⇒ true) + a hedge note",
+      m.totalAvailable === null && m.pagination.hasMore === true && m.notes.some((n) => /page-fullness|Content-Range total/i.test(n)), JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore }));
+  });
+  // (3c) Content-Range header ABSENT on a FULL page ⇒ same null + hedge.
+  await withFetch(facMock({ body: Array.from({ length: 25 }, () => facAuditRow()), contentRange: null }), async () => {
+    const r = await runTool("fac_search_audits", { auditeeState: "CA", limit: 25 }, sam);
+    const m = buildMeta(r.meta);
+    ok("67-3c [P1] an ABSENT Content-Range header ⇒ totalAvailable:null + hedge (never 0/error)", m.totalAvailable === null && m.pagination.hasMore === true, JSON.stringify(m.totalAvailable));
+  });
+  // (3d) a numeric denominator on a SHORT page ⇒ EXACT total, hasMore:false.
+  await withFetch(facMock({ body: [facAuditRow()], contentRange: "0-0/1" }), async () => {
+    const r = await runTool("fac_search_audits", { auditeeUei: "ABC123DEF456", limit: 25 }, sam);
+    const m = buildMeta(r.meta);
+    ok("67-3d [P1] Content-Range 0-0/1 (short page) ⇒ totalAvailable:1 EXACT, hasMore:false, nextOffset:null, complete:true",
+      m.totalAvailable === 1 && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.complete === true, JSON.stringify(m.pagination));
+  });
+
+  // ── (4) ★findings flag/type: flags "Y"/"N" verbatim; a null/absent flag ⇒
+  //    null (UNKNOWN, never "N"/false); the tri-state map; the M2 empty note NOT
+  //    fired on a non-empty result. ──
+  await withFetch(facMock({
+    body: [{ report_id: "R1", auditee_uei: "ABC123DEF456", audit_year: "2026", reference_number: "2024-001", award_reference: "AWARD-1", type_requirement: "I", prior_finding_ref_numbers: "N/A", is_significant_deficiency: "Y", is_material_weakness: "N", is_questioned_costs: "Y", is_modified_opinion: "" /* blank ⇒ UNKNOWN */ }],
+    contentRange: "0-0/670216",
+  }), async () => {
+    const r = await runTool("fac_get_findings", { auditeeUei: "ABC123DEF456" }, sam);
+    const m = buildMeta(r.meta);
+    const f = r.data.findings[0];
+    ok("67-4 flags surfaced VERBATIM: is_significant_deficiency 'Y', is_material_weakness 'N'; a BLANK is_modified_opinion ⇒ null (UNKNOWN — str nulls '', never 'N')",
+      f.is_significant_deficiency === "Y" && f.is_material_weakness === "N" && f.is_modified_opinion === null, JSON.stringify(f));
+    ok("67-4 [P3] riskFlags tri-state: significantDeficiency:true, materialWeakness:false, questionedCosts:true, modifiedOpinion:null (blank ⇒ UNKNOWN, NEVER false — render a null flag as false ⇒ RED)",
+      f.riskFlags.significantDeficiency === true && f.riskFlags.materialWeakness === false && f.riskFlags.questionedCosts === true && f.riskFlags.modifiedOpinion === null && f.riskFlags.otherFindings === null, JSON.stringify(f.riskFlags));
+    ok("67-4 totalAvailable:670216 EXACT; the FAC_VALUE_TYPING_NOTE + FAC_NOT_DETERMINATION_NOTE ride every findings response; M2 empty-note ABSENT (result is non-empty)",
+      m.totalAvailable === 670216 && m.notes.includes(FAC_VALUE_TYPING_NOTE) && m.notes.includes(FAC_NOT_DETERMINATION_NOTE) && !m.notes.includes(FAC_EMPTY_FINDINGS_NOTE), JSON.stringify(m.notes.length));
+    ok("67-4 ★PII findings output keys ⊆ the findings allowlist + the riskFlags convenience object (no personal-contact key)",
+      Object.keys(f).filter((k) => k !== "riskFlags").every((k) => FAC_FINDINGS_SELECT.split(",").includes(k)) && !Object.keys(f).some((k) => /auditee_email|auditee_phone|auditee_certify|auditee_contact/.test(k)),
+      JSON.stringify(Object.keys(f)));
+  });
+
+  // ── (5) ★M2 empty findings ≠ clean audit: any empty result ⇒ the disclosure
+  //    note fires (BOTH totalAvailable:0 and a genuine empty page). ──
+  await withFetch(facMock({ body: [], contentRange: "*/0" }), async () => {
+    const r = await runTool("fac_get_findings", { auditeeUei: "ABC123DEF456" }, sam);
+    const m = buildMeta(r.meta);
+    ok("67-5 ★M2 fac_get_findings totalAvailable:0 / empty ⇒ the empty≠clean-audit note FIRES + honest empty (returned 0, complete:true) + caveats still present (drop the M2 note ⇒ RED = the false-CLEAR the empty result set otherwise reads as)",
+      r.data.findings.length === 0 && m.totalAvailable === 0 && m.complete === true && m.notes.includes(FAC_EMPTY_FINDINGS_NOTE) && m.notes.includes(FAC_NOT_DETERMINATION_NOTE), JSON.stringify({ n: r.data.findings.length, hasM2: m.notes.includes(FAC_EMPTY_FINDINGS_NOTE) }));
+  });
+
+  // ── (6) Error matrix (P2): 400⇒invalid_input, 403⇒invalid_input, 429⇒
+  //    rate_limited, HTML⇒schema_drift, 503⇒upstream_unavailable, non-array⇒drift
+  //    — a 206/genuine-empty is NEVER conflated with any of these. ──
+  await withFetch(facMock({ body: { message: "column x does not exist", code: "42703" }, status: 400 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fac_search_audits", { auditeeState: "CA" }, sam));
+    ok("67-6 [P2] HTTP 400 (PostgREST bad column) ⇒ invalid_input THROW (never a fake {audits:[]})", threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(facMock({ body: { message: "API_KEY_INVALID", status: 403 }, status: 403 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fac_search_audits", { auditeeState: "CA" }, sam));
+    ok("67-6 [P2] HTTP 403 (bad configured key) ⇒ invalid_input THROW (never a fake empty)", threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(facMock({ body: { message: "OVER_RATE_LIMIT" }, status: 429 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fac_search_audits", { auditeeState: "CA" }, sam));
+    ok("67-6 [P2] HTTP 429 (DEMO_KEY ceiling) ⇒ rate_limited THROW, retryable (never a fake empty)", threw && toToolError(error).kind === "rate_limited" && toToolError(error).retryable === true, JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch((u) => (isFac(u) ? facHtmlResp() : failClosed()()), async () => {
+    const r = await expectThrow(() => runTool("fac_search_audits", { auditeeState: "CA" }, sam));
+    ok("67-6 ★S1 an HTML 200 body (r.json() SyntaxError) ⇒ schema_drift (remove the SyntaxError catch ⇒ kind:unknown ⇒ RED; never a fake empty)", r.threw && toToolError(r.error).kind === "schema_drift", JSON.stringify(r.threw ? toToolError(r.error).kind : "no-throw"));
+  });
+  await withFetch(facMock({ body: {}, status: 503 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("fac_search_audits", { auditeeState: "CA" }, sam));
+    ok("67-6 [P2] HTTP 503 ⇒ upstream_unavailable THROW retryable (a DOWN host is NEVER a returned:0)", threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(facMock({ body: { audits: [] }, contentRange: "0-0/5", status: 200 }), async () => {
+    const { threw, error } = await expectThrow(() => facSearchAudits({ auditeeState: "CA" }));
+    ok("67-6 [P2] a NON-array 200 body ({…}, not a bare array) ⇒ schema_drift (PostgREST returns a bare array; never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── (7) [P4] filters self-policing: a valid filter narrows the total + appears
+  //    in filtersApplied; filtersDropped is ALWAYS empty; the value rides the
+  //    query as col=eq.VALUE (never a second injected filter or a PII column). ──
+  await withFetch(facMock({ body: [facAuditRow()], contentRange: "0-0/3" }), async (calls) => {
+    const r = await runTool("fac_search_audits", { auditeeUei: "ABC123DEF456", auditYear: 2024, totalExpendedMin: 750000 }, sam);
+    const m = buildMeta(r.meta);
+    const url = facUrl(calls, isFacGeneral);
+    ok("67-7 [P4] auditeeUei+auditYear+totalExpendedMin narrow the total (3) and ALL appear in filtersApplied; filtersDropped:[]",
+      m.totalAvailable === 3 && m.filtersApplied.includes("auditeeUei") && m.filtersApplied.includes("auditYear") && m.filtersApplied.includes("totalExpendedMin") && m.filtersDropped.length === 0, JSON.stringify(m.filtersApplied));
+    ok("67-7 the filters ride the query as col=eq.VALUE / total_amount_expended=gte. (structured template; never a caller-crafted second filter)",
+      url.searchParams.get("auditee_uei") === "eq.ABC123DEF456" && url.searchParams.get("audit_year") === "eq.2024" && url.searchParams.getAll("total_amount_expended").includes("gte.750000"),
+      JSON.stringify([...url.searchParams.entries()]));
+  });
+
+  // ── (8) ★ ADR-0007 KEY-NEVER-LEAKS (3rd consumer): a sentinel DATA_GOV_API_KEY
+  //    appears in NONE of ToolError.message/upstreamEndpoint/serialized-error/URL
+  //    across an error AND a success path; positive: X-Api-Key === sentinel. ──
+  await withEnvKey(SENTINEL, async () => {
+    await withFetch(facMock({ body: {}, status: 500 }), async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("fac_get_findings", { auditeeUei: "ABC123DEF456" }, sam));
+      const te = toToolError(error);
+      const call = facCall(calls, isFacFindings);
+      const leaks = [te.message, te.upstreamEndpoint, JSON.stringify(te), call?.url].some((s) => typeof s === "string" && s.includes(SENTINEL));
+      ok("67-8 KEY-NEVER-LEAKS (error path): sentinel absent from ToolError.message/upstreamEndpoint/serialized-error AND the fetch URL (put the key in the URL/label ⇒ RED)", threw && !leaks, JSON.stringify({ ep: te.upstreamEndpoint, url: call?.url }));
+      ok("67-8 POSITIVE: X-Api-Key WAS sent with the sentinel (auth applied — not passing because auth was silently dropped)", call?.init?.headers?.["X-Api-Key"] === SENTINEL, JSON.stringify({ hdr: !!call }));
+      ok("67-8 the key is NOT in the URL query (header-only; no ?api_key=)", typeof call?.url === "string" && !call.url.includes(SENTINEL) && !/api_key=/i.test(call.url), JSON.stringify(call?.url));
+    });
+    await withFetch(facMock({ body: [facAuditRow()], contentRange: "0-0/1" }), async (calls) => {
+      const r = await runTool("fac_search_audits", { auditeeState: "CA" }, sam);
+      const m = buildMeta(r.meta);
+      const call = facCall(calls, isFacGeneral);
+      ok("67-8 KEY-NEVER-LEAKS (success path): sentinel absent from the serialized _meta (source is host + key-MODE only); source names DATA_GOV_API_KEY mode",
+        !JSON.stringify(m).includes(SENTINEL) && /DATA_GOV_API_KEY/.test(m.source), JSON.stringify(m.source));
+      ok("67-8 success path still sends the sentinel in X-Api-Key (never the URL)", call?.init?.headers?.["X-Api-Key"] === SENTINEL && !call.url.includes(SENTINEL), JSON.stringify(call?.url));
+    });
+  });
+
+  // ── (9) SSRF/injection rejects ⇒ invalid_input, 0 fetch (the fetch spy stays
+  //    at 0). Crafted values fail the char-class BEFORE any fetch. ──
+  await withFetch(failClosed(), async (calls) => {
+    for (const [args, why] of [
+      [{ auditeeUei: "../general?select=auditee_email" }, "auditeeUei path-traversal / PII-column injection"],
+      [{ auditeeUei: "ct3pj2bbpfa9" }, "auditeeUei lowercase (fails ^[A-Z0-9]{12}$)"],
+      [{ auditeeState: "CA&auditee_email=eq.x" }, "auditeeState second-filter injection"],
+      [{ auditeeState: "california" }, "auditeeState non-2-letter"],
+      [{ totalExpendedMin: "1e9);drop" }, "money bound a non-finite string"],
+    ]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => facSearchAudits(args));
+      ok(`67-9 ★SSRF fac_search_audits ${why} ⇒ invalid_input, 0 fetch`, threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    }
+    for (const [args, why] of [
+      [{ reportId: "x\n" }, "reportId trailing newline (fails ^[0-9A-Za-z-]+$)"],
+      [{ auditeeUei: "abc" }, "auditeeUei too short"],
+      [{}, "neither auditeeUei nor reportId (an empty findings scan is refused)"],
+    ]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => facGetFindings(args));
+      ok(`67-9 ★SSRF/required fac_get_findings ${why} ⇒ invalid_input, 0 fetch`, threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    }
+  });
+  // (9b) a crafted-but-valid-charclass value stays percent-encoded INSIDE its
+  //      param — the host never breaks out (belt-and-suspenders on the wire).
+  await withFetch(facMock({ body: [], contentRange: "*/0" }), async (calls) => {
+    await runTool("fac_get_findings", { reportId: "2024-06-GSAFAC-0000012345" }, sam);
+    const url = facUrl(calls, isFacFindings);
+    ok("67-9b a valid reportId rides report_id=eq.VALUE on api.fac.gov (host unchanged); select=<findings allowlist>; order fixed",
+      url.hostname === "api.fac.gov" && url.searchParams.get("report_id") === "eq.2024-06-GSAFAC-0000012345" && url.searchParams.get("select") === FAC_FINDINGS_SELECT && url.searchParams.get("order") === "report_id.asc,reference_number.asc",
+      JSON.stringify(url.search));
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════
