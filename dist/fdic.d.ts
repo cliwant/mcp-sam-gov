@@ -473,4 +473,127 @@ export declare function industrySummary(args: {
     sortBy?: string;
     sortOrder?: string;
 }): Promise<MetaBundle>;
+type RatioUnit = "percent" | "usd-thousands";
+type RatioNotReported = "null" | "zero-sentinel-when-CBLR";
+type RatioEntry = {
+    code: string;
+    outputKey: string;
+    label: string;
+    unit: RatioUnit;
+    notReported: RatioNotReported;
+};
+declare const RATIO_CATALOG: readonly RatioEntry[];
+export { RATIO_CATALOG };
+declare const RATIO_FILTER_FIELDS: ReadonlySet<string>;
+export { RATIO_FILTER_FIELDS };
+/**
+ * Build the risk-ratio `filters` string — `cert`→`CERT:<int>` (REQUIRED, numeric →
+ * bare) + optional `reportDate`→`REPDTE:<int>` (numeric → bare, a YYYYMMDD quarter-end).
+ * Both fields are on RATIO_FILTER_FIELDS (NOT FIN_FILTER_FIELDS, which is {CERT} and
+ * would throw on REPDTE — S1). Terms joined with ` AND `. Exported for the fault fixtures.
+ */
+export declare function buildRatioFilters(inp: {
+    cert: number;
+    reportDate?: number;
+}): string;
+/**
+ * ★M1 — detect the Community Bank Leverage Ratio framework via FDIC's OWN `CBLRIND`
+ * flag (CBLRIND===1). A CBLR filer does NOT report risk-based capital ratios: FDIC
+ * returns RBCRWAJ as a LITERAL 0 sentinel (not null) and RBC1RWAJ as null. Detection is
+ * strictly the flag — NO derived/recomputed ratio, NO blanket 0→null. Exported for the
+ * fault fixture. (num maps a string/number/null CBLRIND consistently; an absent CBLRIND
+ * → null → not CBLR → the ratios pass through verbatim.)
+ */
+export declare function isCblrFramework(rec: Record<string, unknown>): boolean;
+export type FdicRiskRatios = {
+    cert: number | null;
+    reportDate: number | null;
+    cblrFramework: boolean;
+    returnOnAssetsPct: number | null;
+    preTaxReturnOnAssetsPct: number | null;
+    returnOnEquityPct: number | null;
+    netInterestMarginPct: number | null;
+    efficiencyRatioPct: number | null;
+    netChargeOffsToLoansPct: number | null;
+    leverageRatioPct: number | null;
+    tier1RiskBasedCapitalRatioPct: number | null;
+    totalRiskBasedCapitalRatioPct: number | null;
+    tier1CapitalUSD: number | null;
+    id: string | null;
+};
+/**
+ * FDIC counterparty RISK RATIOS for ONE institution by `cert` (`/banks/financials` —
+ * the ALREADY-wired endpoint; NO new endpoint constant). Structured inputs: `cert`
+ * (REQUIRED → CERT), optional `reportDate` (→ REPDTE, a YYYYMMDD quarter-end), plus
+ * `limit`/`offset`/`sortBy` (allowlist {REPDTE,ROA,ROE,RBCRWAJ,EEFFR}, default REPDTE)/
+ * `sortOrder` (default DESC → newest quarter first). Consumes the IDENTICAL fetch →
+ * 3-envelope guard → pagination machinery as tools 1–5.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1); the 3-envelope
+ * drift-guard makes the ONLY honest empty `200 + total:0 + data:[]`, everything else
+ * THROWS (P2); ★P3 percent ratios surfaced VERBATIM via num (null-never-0, NO scale, NO
+ * recompute), the ONE $-amount (RBCT1J) via thousandsToUsd → tier1CapitalUSD; ★M1 the
+ * CBLR risk-based capital ratios map to null (never the 0 sentinel) with a per-row
+ * cblrFramework flag; a projected field absent from all records → fieldsUnavailable (B);
+ * the snapshot build time is disclosed.
+ */
+export declare function riskRatios(args: {
+    cert: number;
+    reportDate?: number;
+    limit?: number;
+    offset?: number;
+    sortBy?: string;
+    sortOrder?: string;
+}): Promise<MetaBundle>;
+declare const SOD_FILTER_FIELDS: ReadonlySet<string>;
+export { SOD_FILTER_FIELDS };
+/**
+ * Build the /sod `filters` string — `cert`→`CERT:<int>` (numeric → bare), `state`→
+ * `STALPBR:"<code>"` (★C118 non-numeric → DOUBLE-QUOTED; Oregon `STALPBR:"OR"` is
+ * operator-safe), `year`→`YEAR:<int>` (numeric → bare). All fields on SOD_FILTER_FIELDS
+ * (★S1). Terms joined with ` AND `. Returns "" when there is no structured filter clause.
+ * Exported for the fault fixtures.
+ */
+export declare function buildSodFilters(inp: {
+    cert?: number;
+    state?: string;
+    year?: number;
+}): string;
+export type FdicBranchDeposit = {
+    cert: number | null;
+    institutionName: string | null;
+    branchNumber: number | null;
+    branchName: string | null;
+    city: string | null;
+    state: string | null;
+    zip: string | null;
+    address: string | null;
+    depositsUSD: number | null;
+    year: number | null;
+    id: string | null;
+};
+/**
+ * FDIC branch-deposit footprint (`/banks/sod`, Summary of Deposits). Structured inputs
+ * (all optional, AND-combined; ≥1 recommended): `cert` (→ CERT), `state` (→ STALPBR,
+ * ★C118-quoted), `year` (→ YEAR), plus `limit`/`offset`/`sortBy` (allowlist
+ * {YEAR,DEPSUMBR}, default YEAR)/`sortOrder` (default DESC → newest snapshot first).
+ * Consumes the IDENTICAL fetch → 3-envelope guard → pagination machinery as tools 1–6.
+ *
+ * HONESTY: EXACT `meta.total` → exact totalAvailable + hasMore (P1; live: CERT 10004 →
+ * 74, STALPBR:"OR" → 31093); the 3-envelope drift-guard makes the ONLY honest empty
+ * `200 + total:0 + data:[]`, everything else THROWS (P2); ★the /sod false-empty landmine
+ * (a bad filter field → silent total:0) is neutralized by the S1 allowlist-by-
+ * construction; DEPSUMBR is $thousands → whole USD ×1000 null-never-0 (P3; a genuine 0
+ * stays 0, absent → null); a projected field absent from all records → fieldsUnavailable
+ * (B); the DISTINCT annual snapshot build time is disclosed.
+ */
+export declare function branchDeposits(args: {
+    cert?: number;
+    state?: string;
+    year?: number;
+    limit?: number;
+    offset?: number;
+    sortBy?: string;
+    sortOrder?: string;
+}): Promise<MetaBundle>;
 //# sourceMappingURL=fdic.d.ts.map

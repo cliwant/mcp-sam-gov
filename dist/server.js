@@ -1727,6 +1727,92 @@ const FdicIndustrySummaryInput = z.object({
         .default("DESC")
         .describe("Sort direction, default DESC (newest year / largest first)."),
 });
+// ADR-0040 — the 6th & 7th FDIC tools (source 30 unchanged; snapshot 103→105) —
+// WITHIN-SOURCE DEPTH on the already-wired src/fdic.ts adapter. (6) fdic_risk_ratios
+// projects the curated counterparty RISK-RATIO catalog on the ALREADY-wired
+// /banks/financials endpoint (per-field units in the output key; percent ratios
+// verbatim via num, tier-1 capital ×1000; ★M1 the CBLR RBCRWAJ=0 sentinel → null via
+// FDIC's CBLRIND flag + a per-row cblrFramework, never a false 0% capital). (7)
+// fdic_branch_deposits reads /banks/sod (Summary of Deposits) — ONE new fixed endpoint
+// constant. Both keyed on the numeric CERT; C118-quoted state; NO name/city search.
+const FdicRiskRatiosInput = z.object({
+    cert: z
+        .number()
+        .int()
+        .min(1)
+        .describe("REQUIRED FDIC certificate number of the institution (→ CERT filter). From fdic_search_institutions."),
+    reportDate: z
+        .number()
+        .int()
+        .min(19000101)
+        .max(29991231)
+        .optional()
+        .describe("Optional report date (→ REPDTE filter), a quarter-end as a YYYYMMDD integer (e.g. 20240630). Omit for the full quarterly ratio time-series."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page, 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(100000)
+        .default(0)
+        .describe("0-based row offset for pagination, 0..100000, default 0."),
+    sortBy: z
+        .enum(["REPDTE", "ROA", "ROE", "RBCRWAJ", "EEFFR"])
+        .default("REPDTE")
+        .describe("Sort field (allowlisted enum; default REPDTE = report date). An unknown field is rejected before fetch."),
+    sortOrder: z
+        .enum(["ASC", "DESC"])
+        .default("DESC")
+        .describe("Sort direction, default DESC (newest quarter first)."),
+});
+const FdicBranchDepositsInput = z.object({
+    cert: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Filter by FDIC certificate number (the STABLE entity key; → CERT filter). Resolve a bank's CERT via fdic_search_institutions."),
+    state: z
+        .string()
+        .regex(/^[A-Z]{2}$/)
+        .optional()
+        .describe("Filter by 2-letter branch state code (uppercase; → STALPBR filter — the SOD branch-state field). e.g. 'OR'. C118-quoted so Oregon is Lucene-operator-safe."),
+    year: z
+        .number()
+        .int()
+        .min(1934)
+        .max(new Date().getUTCFullYear())
+        .optional()
+        .describe("Filter by Summary-of-Deposits survey YEAR (→ YEAR filter), the annual June-30 snapshot year. 1934..current UTC year."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .default(100)
+        .describe("Rows per page, 1..1000, default 100."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(100000)
+        .default(0)
+        .describe("0-based row offset for pagination, 0..100000, default 0."),
+    sortBy: z
+        .enum(["YEAR", "DEPSUMBR"])
+        .default("YEAR")
+        .describe("Sort field (allowlisted enum; default YEAR = snapshot year). An unknown field is rejected before fetch."),
+    sortOrder: z
+        .enum(["ASC", "DESC"])
+        .default("DESC")
+        .describe("Sort direction, default DESC (newest snapshot / largest deposits first)."),
+});
 // ─── OpenFEMA (keyless disaster declarations + emergency-assistance spend) ──────
 // ADR-0016. KEYLESS, fixed host www.fema.gov + a PINNED dataset registry
 // {entityName, version} (the SSRF core — no free host/path/version). Filters are
@@ -3417,6 +3503,19 @@ const TOOLS = [
         description: "FDIC industry & state banking-sector ANNUAL AGGREGATES — the FDIC's own roll-ups (keyless FDIC BankFind, api.fdic.gov/banks/summary). The FIRST aggregate/statistical FDIC tool (the other 4 are per-ENTITY, keyed on CERT): total assets, deposits, net income, equity & net interest income + structural counts (institutions, offices, branches, employees) for the whole US banking industry OR one state/territory in one year, split by charter class. Answers 'how big is the US (or a state's) banking industry this year, and how many institutions?' — a question the entity tools cannot express without summing thousands of rows. Exact-key filters (all optional, AND-combined): `year` (→ YEAR; e.g. 2023 → 121 rows), `state` (2-or-3-letter → STALP — NOTE the /summary state field is STALP, NOT PSTALP; accepts a jurisdiction code TX/CA/DC/GU/PR… OR a ROLL-UP code USA/US/OT/PI), `charterClass` (CB = commercial banks, SI = savings institutions; omit for both — there is NO combined row). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum YEAR/ASSET/DEP/NETINC/BANKS, def YEAR), `sortOrder` (def DESC → newest year / largest first). Returns { summary:[{ year, charterClass, charterClassCode, geography, stateCode, stateFips, scope, isRollup, institutionCount, officeCount, branchCount, employeeCount, totalAssetsUSD, totalDepositsUSD, netIncomeUSD, totalEquityUSD, netInterestIncomeUSD, id }] }. ★ROLL-UP HONESTY: each row crosses charter × geography; STALP ∈ {USA,US,OT,PI} are GEOGRAPHIC AGGREGATES (scope national_total/national_states_dc/territories_total/pacific_islands, isRollup:true), every other STALP is a jurisdiction (isRollup:false) — NEVER sum a roll-up row with jurisdiction rows or across scopes (national_total = national_states_dc + territories_total; a geography's total = its CB row + its SI row), read the national_total (USA) row directly for one national figure; a roll-up is NOT a state. ★NIM is net interest INCOME (a $ sum surfaced as netInterestIncomeUSD), NOT the margin ratio; this endpoint has NO ratio fields (ROA/ROE — derive from netIncomeUSD/totalAssetsUSD/totalEquityUSD). NO name/city filter — FDIC's /summary `search` param is ignored (returns the whole year); drill to institutions via fdic_search_institutions. HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); money (ASSET/DEP/NETINC/EQ/NIM) is $thousands → whole USD ×1000 (null-never-0 — a genuine 0 like American Samoa's zero commercial banks stays 0, absent → null), counts (BANKS/OFFICES/BRANCHES/employees) pass through un-scaled (a count ×1000 is a fabrication); a non-int year is rejected pre-fetch (a malformed year is a live HTTP-200 total:0 false-empty); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the point-in-time snapshot build time is disclosed. NOTE: FDIC keys on CERT, not SAM UEI/DUNS.",
         inputSchema: FdicIndustrySummaryInput,
         handler: (input) => fdic.industrySummary(input),
+    }),
+    // ━━━ FDIC BankFind Suite — WITHIN-SOURCE DEPTH: counterparty risk ratios + branch deposits (2) ━━━ ADR-0040
+    defineTool({
+        name: "fdic_risk_ratios",
+        description: "FDIC counterparty RISK RATIOS for ONE institution by certificate number (keyless FDIC BankFind, api.fdic.gov/banks/financials) — the SOUNDNESS lane the balance-sheet tools cannot express: profitability (ROA/pretax ROA/ROE), net interest margin, efficiency ratio, asset quality (net charge-offs to loans), capital adequacy (leverage, tier-1 risk-based, total risk-based ratios) + the tier-1 capital LEVEL. Input `cert` (REQUIRED FDIC certificate number, from fdic_search_institutions), `reportDate` (optional YYYYMMDD quarter-end → REPDTE; omit for the full quarterly time-series), `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum REPDTE/ROA/ROE/RBCRWAJ/EEFFR, def REPDTE), `sortOrder` (def DESC → newest quarter first). Returns { cert, ratios:[{ cert, reportDate, cblrFramework, returnOnAssetsPct, preTaxReturnOnAssetsPct, returnOnEquityPct, netInterestMarginPct, efficiencyRatioPct, netChargeOffsToLoansPct, leverageRatioPct, tier1RiskBasedCapitalRatioPct, totalRiskBasedCapitalRatioPct, tier1CapitalUSD, id }] }. ★UNITS-IN-THE-KEY: every *Pct field is an FDIC-published PERCENTAGE surfaced VERBATIM (no scaling, no recompute) — do NOT read it as a dollar amount or ×1000-scale it; tier1CapitalUSD is a DOLLAR amount (FDIC publishes it in $thousands, normalized ×1000). ★NULL-NEVER-0: a not-reported ratio is null (never 0% — a false 'no return / no capital'). ★CBLR (community-bank-leverage) banks (cblrFramework:true) do NOT report the risk-based capital ratios — FDIC returns a literal 0 for the total risk-based ratio, which this tool maps to null for BOTH tier1RiskBasedCapitalRatioPct and totalRiskBasedCapitalRatioPct (a null there is a normal framework artifact, read alongside leverageRatioPct — NOT a 0% capital red flag). No ratio is recomputed; each is exactly FDIC's published Call-Report figure. HONESTY: totalAvailable is the EXACT meta.total (stable across offset); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the snapshot build time is disclosed. NOTE: reported regulatory metrics, NOT a soundness rating or failure prediction; FDIC keys on CERT, not SAM UEI/DUNS.",
+        inputSchema: FdicRiskRatiosInput,
+        handler: (input) => fdic.riskRatios(input),
+    }),
+    defineTool({
+        name: "fdic_branch_deposits",
+        description: "FDIC branch-deposit footprint — the Summary of Deposits (keyless FDIC BankFind, api.fdic.gov/banks/sod): the annual June-30 branch-office deposit distribution ('where does this bank hold deposits, and how concentrated?'). Exact-key filters (all optional, AND-combined; ≥1 recommended): `cert` (→ CERT, the STABLE entity key), `state` (2-letter → STALPBR, the branch-state field, C118-quoted so Oregon is operator-safe), `year` (→ YEAR, the June-30 snapshot year). `limit` (≤1000, def 100), `offset` (≤100000), `sortBy` (allowlisted enum YEAR/DEPSUMBR, def YEAR), `sortOrder` (def DESC → newest snapshot / largest deposits first). Returns { branches:[{ cert, institutionName, branchNumber, branchName, city, state, zip, address, depositsUSD, year, id }] } (e.g. CERT 10004 → 74 branch-year rows). HONESTY: totalAvailable is the EXACT meta.total (stable across offset — never the page length); depositsUSD is DEPSUMBR published in $thousands, normalized to whole USD ×1000 (null-never-0 — a real 0 stays 0, absent → null); a bad/mistyped filter field can never reach the wire (server-side allowlist by construction — FDIC would otherwise return a silent total:0 false-empty, not an error); the ONLY honest empty is meta.total:0/data:[] ⇒ complete:true/total:0, every other envelope (400 errors[]/404/non-JSON/missing meta or data) THROWS (never a fake empty); the DISTINCT annual snapshot build time is disclosed. Branch facility data only (name/address/city/state/zip/deposits) — no personal/officer PII. NOTE: SOD is an annual June-30 snapshot; FDIC keys on CERT, not SAM UEI/DUNS.",
+        inputSchema: FdicBranchDepositsInput,
+        handler: (input) => fdic.branchDeposits(input),
     }),
     // ━━━ USITC Harmonized Tariff Schedule — keyless import-tariff / duty-rate lookup (1) ━━━ ADR-0039
     defineTool({
