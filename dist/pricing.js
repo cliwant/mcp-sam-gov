@@ -16,8 +16,14 @@
  * The defining constraint of the CALC tool: it returns a DISTRIBUTION of
  * awarded CEILING (catalog) rates that are FULLY BURDENED — never a single
  * "the rate". Its total count SATURATES at 10000 (relation:"gte") for broad
- * queries and its page size is CAPPED at 20 rows server-side, so all
- * distribution stats are computed over the fetched sample and disclosed as such.
+ * queries. It honors page_size up to at least 200 (we request 100 rows/page),
+ * and its rows are GLOBALLY sorted ASCENDING by current_price. So when the exact
+ * total is KNOWN we read the true min/median/max at the quantile RANKS of that
+ * sorted index (exact stats over all matches, from a few targeted pages — NOT a
+ * leading subsample); only when the count is SATURATED (true total unknown) do we
+ * fall back to a leading-rows sample and DISCLOSE median/max as a downward-biased
+ * lower bound. A drifted CALC envelope (no hits{} / hits.hits not an array / no
+ * numeric total) THROWS schema_drift rather than fabricating an empty distribution.
  */
 import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
 import { withMeta } from "./meta.js";
@@ -542,6 +548,45 @@ function median(sorted) {
     }
     return hi;
 }
+/**
+ * Shape-drift guard for the CALC v3 envelope. A valid 200 MUST carry
+ * `hits:{ total:{ value:<number> }, hits:[…] }`. A drifted shape — `hits`
+ * null/absent/non-object, `hits.hits` not an array, or `hits.total.value` not a
+ * number — would otherwise be SILENTLY mapped to an empty/degraded distribution
+ * (a fabricated-empty). So we THROW schema_drift instead (mirrors the getWageRates
+ * empty-document discipline in this file). A GENUINE zero-results response — a
+ * well-formed envelope with `hits.hits:[]` and `total.value:0` — PASSES the guard
+ * and stays an honest empty; ONLY a shape drift throws.
+ */
+function assertCalcEnvelope(resp, label) {
+    const hits = resp.hits;
+    if (hits === null || typeof hits !== "object" || Array.isArray(hits)) {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `GSA CALC v3 (${label}) returned an HTTP 200 without a hits{} object — the ceilingrates envelope changed. Refusing to fabricate an empty rate distribution.`,
+            retryable: false,
+            upstreamEndpoint: CALC_BASE,
+        });
+    }
+    const h = hits;
+    if (!Array.isArray(h.hits)) {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `GSA CALC v3 (${label}) returned an HTTP 200 whose hits.hits is not an array — the ceilingrates envelope changed. Refusing to fabricate an empty rate distribution.`,
+            retryable: false,
+            upstreamEndpoint: CALC_BASE,
+        });
+    }
+    const total = h.total;
+    if (total === null || typeof total !== "object" || typeof total.value !== "number") {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `GSA CALC v3 (${label}) returned an HTTP 200 without a numeric hits.total.value — the ceilingrates total envelope changed. Refusing to fabricate a match count.`,
+            retryable: false,
+            upstreamEndpoint: CALC_BASE,
+        });
+    }
+}
 export async function benchmarkLaborRates(args) {
     const laborCategory = args.laborCategory.trim();
     // Page in bounded chunks to build a representative distribution sample
@@ -601,11 +646,15 @@ export async function benchmarkLaborRates(args) {
     // Primary: exact field match. Fall back to loose `q` ONLY if exact returns 0.
     let matcher = "search";
     let first = await getJson(buildUrl("search", 1), { Accept: "application/json" }, "gsa:calc:search");
+    // Shape-drift guard BEFORE reading the total (a drifted `hits:null` would read as
+    // totalValue 0, silently trigger the `q` fallback, and end as a fabricated-empty).
+    assertCalcEnvelope(first, "search");
     let totalValue = first.hits?.total?.value ?? 0;
     let totalRelation = first.hits?.total?.relation ?? "eq";
     let fuzzy = false;
     if (totalValue === 0) {
         const q = await getJson(buildUrl("q", 1), { Accept: "application/json" }, "gsa:calc:q");
+        assertCalcEnvelope(q, "q");
         if ((q.hits?.total?.value ?? 0) > 0) {
             matcher = "q";
             fuzzy = true;
@@ -635,6 +684,7 @@ export async function benchmarkLaborRates(args) {
         if (cached)
             return cached;
         const r = await getJson(buildUrl(matcher, pg), { Accept: "application/json" }, "gsa:calc:page");
+        assertCalcEnvelope(r, `page ${pg}`);
         const pr = (r.hits?.hits ?? []).map((h) => h._source ?? {});
         pageCache.set(pg, pr);
         return pr;
