@@ -216,6 +216,12 @@ async function regulationsSearch(endpoint, kind, args) {
     const searchTerm = args.searchTerm ?? args.query;
     const params = new URLSearchParams();
     const filtersApplied = [];
+    // D3 (no-silent-filter): documentType/withinCommentPeriod are documents-ONLY
+    // facets. RegulationsSearchInput is SHARED by documents + comments, so a caller
+    // can supply them to regulations_search_comments — where /v4/comments does not
+    // accept them. Rather than silently ignore them (returning comments as if the
+    // facet applied), DISCLOSE them in filtersDropped + a note.
+    const filtersDropped = [];
     if (searchTerm) {
         params.set("filter[searchTerm]", searchTerm);
         filtersApplied.push("searchTerm");
@@ -232,9 +238,19 @@ async function regulationsSearch(endpoint, kind, args) {
         params.set("filter[documentType]", args.documentType);
         filtersApplied.push("documentType");
     }
+    else if (kind === "comments" && args.documentType !== undefined) {
+        // Comments are themselves "Public Submission" documents; /v4/comments exposes
+        // NO filter[documentType]. Not applied → disclosed, never silently dropped.
+        filtersDropped.push("documentType");
+    }
     if (kind === "documents" && args.withinCommentPeriod !== undefined) {
         params.set("filter[withinCommentPeriod]", String(args.withinCommentPeriod));
         filtersApplied.push("withinCommentPeriod");
+    }
+    else if (kind === "comments" && args.withinCommentPeriod !== undefined) {
+        // withinCommentPeriod = whether a DOCUMENT is currently open for comment — a
+        // documents-only concept; /v4/comments does not accept it.
+        filtersDropped.push("withinCommentPeriod");
     }
     if (args.postedDateGe) {
         params.set("filter[postedDate][ge]", args.postedDateGe);
@@ -293,6 +309,9 @@ async function regulationsSearch(endpoint, kind, args) {
     const nextOffset = moreExist && nextPageReachable ? pageNumber * pageSize : null;
     const notes = [];
     pushKeyNote(notes);
+    if (filtersDropped.length > 0) {
+        notes.push(`${filtersDropped.join("/")} do not apply to the ${endpoint} (comments) endpoint and were ignored (they are documents-only facets) — results are UNFILTERED on those facets. Use regulations_search_documents to filter by documentType / withinCommentPeriod.`);
+    }
     if (moreExist && !nextPageReachable) {
         notes.push(`Reached the API's ${REG_MAX_RECORDS}-record / ${REG_MAX_PAGE}-page pagination ceiling (totalElements=${totalAvailable} total). ~${totalAvailable - REG_MAX_RECORDS} more records exist but are UNREACHABLE via page[number] — narrow filters (agencyId/docketId/postedDate) or seek by lastModifiedDate to reach the rest.`);
     }
@@ -303,7 +322,7 @@ async function regulationsSearch(endpoint, kind, args) {
         returned,
         totalAvailable,
         filtersApplied,
-        filtersDropped: [],
+        filtersDropped,
         fieldsUnavailable: [],
         pagination: { offset, limit: pageSize, hasMore, nextOffset },
         notes,

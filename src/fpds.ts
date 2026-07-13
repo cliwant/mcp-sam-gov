@@ -141,14 +141,28 @@ export type FpdsSearchArgs = {
 };
 
 /** Build the fielded `q` string from structured filters (AND-combined by space). */
-export function buildQuery(args: FpdsSearchArgs): { q: string; filters: string[]; dropped: string[] } {
+export function buildQuery(args: FpdsSearchArgs): {
+  q: string;
+  filters: string[];
+  dropped: string[];
+  suppliedEmpty: string[];
+} {
   const tokens: string[] = [];
   const filters: string[] = [];
   const dropped: string[] = [];
+  // D1 (no-silent-filter): a caller-SUPPLIED value that sanitizes to empty (a
+  // whitespace/quote-only phrase, or a keyword that is nothing but a stripped
+  // FIELD: operator) contributes NO token. Record its label so the handler can
+  // DISCLOSE it (partial case) or REFUSE (when it is the SOLE filter) — never
+  // silently drop it and run a bare unfiltered scan.
+  const suppliedEmpty: string[] = [];
   const phrase = (field: string, val: string | undefined, label: string) => {
     if (val === undefined) return;
     const c = cleanPhrase(val);
-    if (c.length === 0) return;
+    if (c.length === 0) {
+      suppliedEmpty.push(label);
+      return;
+    }
     tokens.push(`${field}:"${c}"`);
     filters.push(label);
   };
@@ -184,9 +198,11 @@ export function buildQuery(args: FpdsSearchArgs): { q: string; filters: string[]
     if (k.length > 0) {
       tokens.push(k);
       filters.push("keyword");
+    } else {
+      suppliedEmpty.push("keyword");
     }
   }
-  return { q: tokens.join(" "), filters, dropped };
+  return { q: tokens.join(" "), filters, dropped, suppliedEmpty };
 }
 
 /**
@@ -472,7 +488,24 @@ function looksLikeAtomFeed(xml: string): boolean {
 
 export async function searchAwards(args: FpdsSearchArgs): Promise<MetaBundle> {
   const start = args.offset ?? 0;
-  const { q, filters, dropped } = buildQuery(args);
+  const { q, filters, dropped, suppliedEmpty } = buildQuery(args);
+
+  // D1 (no-silent-filter): the caller supplied filter(s) that ALL sanitized to an
+  // EMPTY query (a whitespace/quote-only value, or a keyword that is nothing but a
+  // stripped FIELD: operator), leaving no effective filter. Refuse (invalid_input, 0
+  // fetch) — do NOT run a bare unfiltered FPDS scan that would return the newest
+  // UNRELATED awards AS IF they matched the caller's filter. (A genuine NO-filter call
+  // is refused earlier at the server's Zod .refine boundary; this closes the
+  // sanitize-to-empty BYPASS that slips a present-but-empty filter past that check —
+  // the specific bare-scan masquerade this fix targets.)
+  if (q === "" && suppliedEmpty.length > 0) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `The supplied FPDS filter(s) [${suppliedEmpty.join(", ")}] sanitized to an EMPTY query (a whitespace/quote-only value, or a keyword that is only a stripped FIELD: operator), leaving no effective filter. Refusing to run a bare unfiltered FPDS scan (it would return the newest UNRELATED awards as if they matched). Provide a filter value with real content: naics, vendorName, piid, departmentId, contractingAgencyName, a signedDate/lastModified range, or a distinctive keyword.`,
+      retryable: false,
+      upstreamEndpoint: FPDS_LABEL,
+    });
+  }
 
   const url = buildSearchUrl(q, start);
   const xml = await getText(url, {
@@ -553,13 +586,29 @@ export async function searchAwards(args: FpdsSearchArgs): Promise<MetaBundle> {
     );
   }
 
+  // D1 (no-silent-filter), partial case: a value filter that sanitized to empty
+  // ALONGSIDE a still-valid filter (so q is non-empty and the all-empty refusal
+  // above did NOT fire). Disclose it in filtersDropped + a note — results are
+  // UNFILTERED on that facet — rather than silently discarding it.
+  const filtersDropped = [...dropped];
+  if (suppliedEmpty.length > 0) {
+    for (const label of suppliedEmpty) {
+      filtersDropped.push(
+        `${label}(supplied but sanitized to empty — no effective filter contributed)`,
+      );
+    }
+    notes.push(
+      `One or more supplied filters sanitized to an EMPTY value (whitespace/quote-only, or a stripped FIELD: operator) and were NOT applied: [${suppliedEmpty.join(", ")}] — results are UNFILTERED on those facets. Supply real content for those filters.`,
+    );
+  }
+
   const meta: Partial<ResponseMeta> = {
     source: "www.fpds.gov ezSearch ATOM (FPDS-NG, keyless)",
     keylessMode: true,
     returned,
     totalAvailable,
     filtersApplied: filters,
-    filtersDropped: dropped,
+    filtersDropped,
     fieldsUnavailable: FIELDS_UNAVAILABLE,
     pagination,
     notes,
