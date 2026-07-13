@@ -43,7 +43,7 @@ import zlib from "node:zlib";
 // when argv[1] === dist/server.js (a direct `node dist/server.js` / the bin /
 // smoke's spawn), never on an import like this one. §9/§12/§13 call this real
 // runTool over a mocked fetch so a regression in the real wrapper turns RED.
-import { runTool } from "./dist/server.js";
+import { runTool, TOOLS } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier, fetchWithRetry } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
@@ -5967,13 +5967,25 @@ async function testAgencyDetailTools() {
       (res.meta.notes || []).some((n) => /ALL award types/i.test(n) && /(NOT|not)\b/.test(n) && /procurement|contracts only/i.test(n) && /contractObligations/.test(n)),
       JSON.stringify(res.meta.notes));
   });
-  // 35e-2: sparse response + default fiscalYear ⇒ absent count/obligations default
-  // to 0 (never undefined/NaN), and the scope disclosure still fires.
+  // 35e-2 (M3 W3-1 honesty — FLIPPED from a FALSE-GREEN fixture that enshrined the
+  // `?? 0` bug): a valid-JSON but HOLLOW/degraded 200 (NEITHER transaction_count nor
+  // obligations present as a number) must NOT be mapped into a confident false "$0
+  // obligations, 0 transactions" — it must throw schema_drift (mirrors
+  // getRecipientProfile). NON-VACUITY: reverting the guard (so both-absent coalesces
+  // to 0) makes the throw assertion RED.
   await withFetch((u) => (isAwards(u) ? mockResponse({ status: 200, json: { toptier_code: "036" } }) : failClosed()()), async () => {
-    const res = await getAgencyAwardsSummary({ toptierCode: "036" });
-    ok("35e-2 sparse response + no fiscalYear ⇒ transactionCount/obligations default to 0 (not undefined) + scope note still present",
-      res.data.transactionCount === 0 && res.data.obligations === 0 && (res.meta.notes || []).some((n) => /ALL award types/i.test(n)),
-      JSON.stringify({ tc: res.data.transactionCount, o: res.data.obligations, notes: (res.meta.notes || []).length }));
+    const { threw, error } = await expectThrow(() => getAgencyAwardsSummary({ toptierCode: "036" }));
+    ok("35e-2 hollow 200 (NEITHER transaction_count nor obligations) ⇒ schema_drift throw, NOT a fabricated $0/0 (M3: revert guard ⇒ RED)",
+      threw && error?.toolError?.kind === "schema_drift", JSON.stringify(threw ? error?.toolError?.kind : "no-throw"));
+  });
+  // 35e-3 (M3 null-never-0): exactly ONE field absent ⇒ the PRESENT field maps and
+  // the ABSENT field is null (unknown), NEVER a fabricated 0 — and the scope note
+  // still fires. NON-VACUITY: `?? null`→`?? 0` makes the absent obligations read 0 ⇒ RED.
+  await withFetch((u) => (isAwards(u) ? mockResponse({ status: 200, json: { toptier_code: "036", fiscal_year: 2024, transaction_count: 12 } }) : failClosed()()), async () => {
+    const res = await getAgencyAwardsSummary({ toptierCode: "036", fiscalYear: 2024 });
+    ok("35e-3 one field absent (transaction_count present, obligations absent) ⇒ transactionCount maps + obligations null (not 0) + scope note fires",
+      res.data.transactionCount === 12 && res.data.obligations === null && (res.meta.notes || []).some((n) => /ALL award types/i.test(n)),
+      JSON.stringify({ tc: res.data.transactionCount, o: res.data.obligations }));
   });
 }
 
@@ -14600,6 +14612,98 @@ async function testHonestyAuditRemediation() {
   });
 }
 
+// §W3-1: USAspending honesty cluster (dogfood cycle W3-1) — the adversarially-
+// confirmed defects M1/M2/M4 + minor m1/m2. Each fixture names the exact mutation
+// it guards and goes RED if the fix regresses. (M3 is the FLIP of §35e-2/§35e-3.)
+async function testW31UsasHonesty() {
+  section("W3-1. USAspending honesty cluster — recipients nextOffset, expiring fiscalYear drop, search_awards description, budget/profile hollow guards, subaward redacted→null");
+
+  // ── M1: usas_search_recipients — nextOffset is NULL (not consumable). The tool
+  // has no offset/page input (page hardcoded=1); emitting results.length made an
+  // agent re-fetch the SAME top-N forever. MORE matches than the limit ⇒ hasMore
+  // stays true while nextOffset is null. NON-VACUITY: `null`→`results.length` ⇒ RED.
+  const isRecipientList = (u) => /\/api\/v2\/recipient\/?($|\?)/.test(u);
+  await withFetch((u) => (isRecipientList(u) ? mockResponse({ status: 200, json: { page_metadata: { total: 512 }, results: [{ id: "R1-P", name: "BOOZ ALLEN HAMILTON", recipient_level: "P", amount: 1000 }] } }) : failClosed()()), async () => {
+    const res = await searchRecipients({ keyword: "booz", limit: 10 });
+    const p = res.meta.pagination;
+    ok("W3-1 M1 usas_search_recipients: MORE matches than limit ⇒ pagination.nextOffset === null (NOT consumable — no offset input) while hasMore/truncated stay true (mutate `null`→`results.length` ⇒ RED)",
+      p.nextOffset === null && p.hasMore === true && res.meta.truncated === true, JSON.stringify(p));
+    ok("W3-1 M1: note says the extra matches are NOT page-reachable + raise limit/narrow keyword (and drops any 'or page' language)",
+      (res.meta.notes || []).some((n) => /NOT page-reachable/i.test(n) && /raise limit/i.test(n)) && !(res.meta.notes || []).some((n) => /or page/i.test(n)),
+      JSON.stringify(res.meta.notes));
+  });
+
+  // ── M2: usas_search_expiring_contracts — `fiscalYear` was REMOVED from the
+  // advertised inputSchema (the recompete radar windows on the current PoP end date
+  // around today, not an obligation FY, so it was validated-then-silently-discarded
+  // with empty filtersDropped). NON-VACUITY: re-adding fiscalYear to UsasExpiringInput
+  // (restoring the validated-then-discarded arg) ⇒ RED; also asserts the real window
+  // args survive so the guard can't pass on an empty schema.
+  const expiring = TOOLS.find((t) => t.name === "usas_search_expiring_contracts");
+  const expiringShape = expiring?.inputSchema?.shape ?? {};
+  ok("W3-1 M2 usas_search_expiring_contracts: inputSchema has NO `fiscalYear` (removed — re-adding a validated-then-discarded arg ⇒ RED) while monthsUntilExpiry + naics remain",
+    !("fiscalYear" in expiringShape) && "monthsUntilExpiry" in expiringShape && "naics" in expiringShape,
+    JSON.stringify(Object.keys(expiringShape)));
+
+  // ── M4: usas_search_awards — description no longer over-promises "+ count". The
+  // spending_by_category/recipient endpoint returns amount ONLY (the code already
+  // hard-nulls the counts + notes it); only the description lied. NON-VACUITY:
+  // re-adding "+ count" ⇒ RED; also asserts it points to the real-count tools.
+  const searchAwardsTool = TOOLS.find((t) => t.name === "usas_search_awards");
+  const desc = searchAwardsTool?.description ?? "";
+  ok("W3-1 M4 usas_search_awards: description drops '+ count', states obligated $ ONLY, and points to usas_search_awards_by_recipient / usas_get_recipient_profile for real counts (re-adding '+ count' ⇒ RED)",
+    !/\+\s*count/i.test(desc) && /obligated \$/i.test(desc) && /usas_search_awards_by_recipient/.test(desc) && /usas_get_recipient_profile/.test(desc),
+    desc);
+
+  // ── minor m1: getAgencyProfile hollow-200 guard — a real agency/{code} 200 always
+  // echoes a toptier_code and/or name; a 200 with NEITHER is degraded and must throw
+  // schema_drift, not map to a fabricated { name:undefined } "complete" profile.
+  // NON-VACUITY: removing the guard ⇒ no throw ⇒ RED.
+  const isProfileOnly = (u) => /\/agency\/[^/]+\/?(\?|$)/.test(u) && !/budget_function|\/awards/.test(u);
+  await withFetch((u) => (isProfileOnly(u) ? mockResponse({ status: 200, json: { mission: "…", website: "https://x" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => getAgencyProfile("097"));
+    ok("W3-1 m1 getAgencyProfile hollow 200 (no toptier_code, no name) ⇒ schema_drift throw, NOT a fabricated profile (remove guard ⇒ RED)",
+      threw && error?.toolError?.kind === "schema_drift", JSON.stringify(threw ? error?.toolError?.kind : "no-throw"));
+  });
+  // Sanity: a REAL profile 200 (toptier_code present) still maps — the guard is not over-broad.
+  await withFetch((u) => (isProfileOnly(u) ? mockResponse({ status: 200, json: { toptier_code: "097", name: "Department of Defense", abbreviation: "DOD" } }) : failClosed()()), async () => {
+    const res = await getAgencyProfile("097");
+    ok("W3-1 m1 getAgencyProfile REAL 200 (toptier_code present) ⇒ still maps (guard not over-broad)",
+      res.toptierCode === "097" && res.name === "Department of Defense", JSON.stringify(res));
+  });
+
+  // ── minor m1: getAgencyBudgetFunction hollow-200 guard — a real budget_function
+  // 200 echoes toptier_code + fiscal_year and carries results; a 200 with NONE of the
+  // three must throw schema_drift, not map to a fabricated empty budget. NON-VACUITY:
+  // removing the guard ⇒ no throw ⇒ RED.
+  const isBudgetOnly = (u) => /\/agency\/[^/]+\/budget_function\//.test(u);
+  await withFetch((u) => (isBudgetOnly(u) ? mockResponse({ status: 200, json: { page_metadata: { page: 1 } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => getAgencyBudgetFunction({ toptierCode: "097", fiscalYear: 2026 }));
+    ok("W3-1 m1 getAgencyBudgetFunction hollow 200 (no toptier_code/fiscal_year/results) ⇒ schema_drift throw, NOT a fabricated empty budget (remove guard ⇒ RED)",
+      threw && error?.toolError?.kind === "schema_drift", JSON.stringify(threw ? error?.toolError?.kind : "no-throw"));
+  });
+
+  // ── minor m2: usas_search_subawards — an ABSENT Sub-Award Recipient ⇒ subRecipient
+  // is null (honest absence), NEVER a fabricated "(name redacted)" privacy assertion
+  // (which asserted a specific reason on any nullish value). NON-VACUITY: reverting
+  // `?? null`→`?? "(name redacted)"` makes the absent row read "(name redacted)" ⇒ RED.
+  const isSubCount = (u) => /spending_by_award_count/.test(u);
+  const isSubPage = (u) => /spending_by_award(?!_count)/.test(u);
+  await withFetch((u) => {
+    if (isSubCount(u)) return mockResponse({ status: 200, json: { results: { subcontracts: 2 } } });
+    if (isSubPage(u)) return mockResponse({ status: 200, json: { results: [
+      { "Sub-Award ID": "S-NORECIP", "Sub-Award Amount": 5000 }, // NO Sub-Award Recipient
+      { "Sub-Award ID": "S-NAMED", "Sub-Award Recipient": "ACME SUB LLC", "Sub-Award Amount": 7000 },
+    ], page_metadata: { hasNext: false } } });
+    return failClosed()();
+  }, async () => {
+    const res = await searchSubawards({ agency: "Department of Defense", limit: 2 });
+    ok("W3-1 m2 usas_search_subawards: ABSENT Sub-Award Recipient ⇒ subRecipient === null (honest), NEVER a fabricated '(name redacted)' (mutate `?? null`→`?? '(name redacted)'` ⇒ RED); a named row survives",
+      res.data.subawards[0].subRecipient === null && res.data.subawards[1].subRecipient === "ACME SUB LLC",
+      JSON.stringify(res.data.subawards.map((s) => s.subRecipient)));
+  });
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -14692,6 +14796,7 @@ async function main() {
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
   await testHonestyAuditRemediation();
+  await testW31UsasHonesty();
 
   // Prove the harness bites.
   await selfCheck();

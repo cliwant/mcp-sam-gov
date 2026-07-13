@@ -16,6 +16,17 @@
  * var to unlock higher SAM.gov rate limits + archives older than
  * ~12 months — optional).
  */
+import { z } from "zod";
 import { SamGovClient } from "./sam-gov/index.js";
+type ToolDef = {
+    name: string;
+    description: string;
+    inputSchema: z.ZodTypeAny;
+    handler?: (input: any, ctx: {
+        sam: SamGovClient;
+    }) => Promise<unknown>;
+};
+export declare const TOOLS: ToolDef[];
 export declare function runTool(name: string, args: Record<string, unknown>, sam: SamGovClient): Promise<unknown>;
+export {};
 //# sourceMappingURL=server.d.ts.map

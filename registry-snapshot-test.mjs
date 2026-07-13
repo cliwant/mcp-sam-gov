@@ -19,6 +19,7 @@
 import { spawn } from "node:child_process";
 import { setTimeout as wait } from "node:timers/promises";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 
 const SNAPSHOT_PATH = "tools-list-snapshot.json";
 const TIMEOUT_MS = 20_000;
@@ -33,9 +34,15 @@ child.stderr.on("data", (chunk) => {
 
 let buf = "";
 const responses = new Map();
+// UTF-8-safe decode: a multi-byte char (e.g. the ★/× in a tool description) can
+// SPLIT across two stdout chunks, and a naive per-chunk `chunk.toString()` mangles
+// the split bytes into replacement chars — a non-deterministic false MISMATCH that
+// surfaces only when the total output length shifts a boundary onto a multi-byte
+// char. StringDecoder carries the partial trailing bytes across chunk boundaries.
+const stdoutDecoder = new StringDecoder("utf8");
 
 child.stdout.on("data", (chunk) => {
-  buf += chunk.toString();
+  buf += stdoutDecoder.write(chunk);
   let nl;
   while ((nl = buf.indexOf("\n")) >= 0) {
     const line = buf.slice(0, nl);
