@@ -708,6 +708,10 @@ export async function companyFacts(args) {
     const concepts = [];
     const absent = [];
     const wrongUnit = [];
+    // Concepts where ≥2 points share an `end` with DIFFERING `start` (a quarter AND a
+    // YTD/annual figure coexist under one `end`) — surfaced in a note so a consumer
+    // never conflates a Q4 figure with a full-year one.
+    const sameEndMultiDuration = [];
     for (const concept of requested) {
         const node = usGaap[concept] ?? dei[concept];
         if (!node) {
@@ -721,6 +725,7 @@ export async function companyFacts(args) {
             continue;
         }
         let points = series.map((p) => ({
+            start: str(p.start), // null for INSTANT concepts; ISO period-start for DURATION (M1)
             end: str(p.end),
             val: num(p.val),
             accn: str(p.accn),
@@ -729,6 +734,22 @@ export async function companyFacts(args) {
             form: str(p.form),
             filed: str(p.filed),
         }));
+        // Detect same-`end` different-`start` coexistence on the FULL series (before any
+        // `latest` reduction): group by `end`, flag when one `end` carries ≥2 distinct
+        // `start` values (a shorter period AND a longer one under the same end date).
+        const startsByEnd = new Map();
+        for (const p of points) {
+            const endKey = p.end ?? "";
+            let set = startsByEnd.get(endKey);
+            if (!set) {
+                set = new Set();
+                startsByEnd.set(endKey, set);
+            }
+            set.add(p.start ?? "");
+        }
+        if ([...startsByEnd.values()].some((set) => set.size >= 2)) {
+            sameEndMultiDuration.push(concept);
+        }
         if (latest && points.length > 0) {
             // Most-recent by period end (fallback: filed date), keep a single point.
             points = [
@@ -749,8 +770,12 @@ export async function companyFacts(args) {
             notes.push(`Concept "${w.concept}" exists but not in unit "${unit}" (available: ${w.availableUnits.join(", ") || "none"}). Re-request with the correct unit — NOT reported as 0.`);
         }
     }
+    notes.push("Each point carries `start`: null for INSTANT (balance-sheet) concepts and the ISO period-start for DURATION (flow) concepts. Period identity is the (start,end) PAIR — a same-`end` different-`start` pair is a different-duration fact (a 3-month quarter vs the 12-month year), NOT a revision.");
+    if (sameEndMultiDuration.length) {
+        notes.push(`Concept(s) with MULTIPLE durations sharing the same period-end (a shorter quarter AND a longer YTD/annual figure coexist under one \`end\`): ${sameEndMultiDuration.join(", ")}. Each point's \`start\` distinguishes them — do NOT compare or sum values across differing \`start\` (e.g. never read a Q4 figure as the full year) without checking \`start\`.`);
+    }
     notes.push(latest
-        ? "latest=true: each concept reduced to its single most-recent data point (by period end)."
+        ? "latest=true: each concept reduced to its single most-recent data point (by period end). The selected point retains its `start`, so a duration value is never presented unqualified — a same-`end` shorter/longer period may have been dropped (see the (start,end) note)."
         : "Full reported time series per concept (curated to the requested concepts only; companyfacts holds ~hundreds of concepts).");
     // A definitive curated extraction of the requested concepts (no upstream
     // pagination) — complete for the concepts that ARE present in this unit.
