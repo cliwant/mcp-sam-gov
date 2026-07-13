@@ -394,7 +394,10 @@ export async function searchStudies(args) {
     // (= Sanofi AND Aventis) fires the mandatory AND-note instead of leaking as one
     // token through a hyphen/comma/slash. Returns true iff the value split into 2+
     // tokens (so the caller can suppress the contradictory sponsor-broadening note).
-    // andField=null for fields with no AND-note obligation (location).
+    // andField=null ONLY for a field with no AND-note obligation. term/sponsor/
+    // condition AND location all ride the SAME Essie AND-tokenizer (query.locn is
+    // AND-split exactly like query.term/spons/cond — a multi-word location like
+    // "New York" is 'New' AND 'York'), so each passes its own andField label.
     const pushText = (value, upstreamKey, filterLabel, andField) => {
         if (value === undefined)
             return false;
@@ -412,7 +415,10 @@ export async function searchStudies(args) {
     pushText(args["query.term"], "query.term", "query.term", "term");
     const sponsorMultiToken = pushText(args.sponsor, "query.spons", "sponsor", "sponsor");
     pushText(args.condition, "query.cond", "condition", "condition");
-    pushText(args.location, "query.locn", "location", null);
+    // D2 (no-silent-filter): location (→ query.locn) is AND-tokenized identically to
+    // term/sponsor/condition — so a multi-word location must emit the SAME mandatory
+    // AND-note (was silently exempted with andField=null, hiding the narrowing).
+    pushText(args.location, "query.locn", "location", "location");
     if (args.overallStatus !== undefined) {
         params.set("filter.overallStatus", args.overallStatus);
         filtersApplied.push("overallStatus");

@@ -104,6 +104,25 @@ export async function searchDocuments(args) {
     if ((args.agencySlugs?.length ?? 0) > 0) {
         notes.push(`Filtered by agency slug(s): ${args.agencySlugs.join(", ")}. An unknown or misspelled slug is silently ignored by the API and yields zero results indistinguishable from "no matching documents" — verify slugs via fed_register_list_agencies if the result is unexpectedly empty.`);
     }
+    // D4 (no-silent-filter): populate filtersApplied from the filters actually
+    // FORWARDED to the API (each was appended to the request above) — never a
+    // hard-coded [] that lies about which facets constrained the result. Only a
+    // filter that was truly sent is listed (an empty agencySlugs[] forwards nothing);
+    // no filter here is dropped (all supplied filters are forwarded), so
+    // filtersDropped stays [].
+    const filtersApplied = [];
+    if (args.query)
+        filtersApplied.push("query");
+    if ((args.agencySlugs?.length ?? 0) > 0)
+        filtersApplied.push("agencySlugs");
+    if (args.type)
+        filtersApplied.push("type");
+    if (args.publicationDateFrom)
+        filtersApplied.push("publicationDateFrom");
+    if (args.publicationDateTo)
+        filtersApplied.push("publicationDateTo");
+    if (args.effectiveDateFrom)
+        filtersApplied.push("effectiveDateFrom");
     return withMeta(data, {
         source: "federalregister.gov/api/v1",
         keylessMode: true,
@@ -112,7 +131,7 @@ export async function searchDocuments(args) {
         // the FR cap — never a capped number presented as the real total.
         totalAvailable: countSaturated ? null : rawCount,
         truncated: countSaturated ? true : returned < rawCount,
-        filtersApplied: [],
+        filtersApplied,
         filtersDropped: [],
         fieldsUnavailable: [],
         notes,
