@@ -58,7 +58,7 @@ import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
-import { padCik as edgarPadCik, xbrlFrames, filingIndex, parseFullIndex, MAX_INDEX_ROWS, _resetFullIndexCache, dailyFilingIndex, parseDailyIndex, _resetDailyIndexCache } from "./dist/edgar.js";
+import { padCik as edgarPadCik, xbrlFrames, filingIndex, parseFullIndex, MAX_INDEX_ROWS, _resetFullIndexCache, dailyFilingIndex, parseDailyIndex, _resetDailyIndexCache, companyConcept, CONCEPT_TAXONOMIES } from "./dist/edgar.js";
 import { num as socrataNum } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
 import {
@@ -6096,6 +6096,7 @@ const isEdgarTickers = (u) => /www\.sec\.gov\/files\/company_tickers\.json/.test
 const isEdgarSubmissions = (u) => /data\.sec\.gov\/submissions\/CIK\d{10}\.json/.test(u);
 const isEdgarFacts = (u) => /data\.sec\.gov\/api\/xbrl\/companyfacts\/CIK\d{10}\.json/.test(u);
 const isEdgarFts = (u) => /efts\.sec\.gov\/LATEST\/search-index/.test(u);
+const isEdgarConcept = (u) => /data\.sec\.gov\/api\/xbrl\/companyconcept\/CIK\d{10}\/[^/]+\/[^/]+\.json/.test(u);
 
 async function testEdgarHonesty() {
   section("41. SEC EDGAR — 403/404/5xx honesty, columnar zip, absent-concept, FTS total/gte/window (F1–F8, OFFLINE, deterministic)");
@@ -6470,6 +6471,263 @@ async function testEdgarFramesHonesty() {
     const parsed = url ? new URL(url) : null;
     ok("41b builder: https://data.sec.gov/api/xbrl/frames/dei/EntityPublicFloat/USD/CY2023Q4I.json (host+scheme+segment order; a mutation ⇒ RED)",
       !!parsed && parsed.protocol === "https:" && parsed.hostname === "data.sec.gov" && parsed.pathname === "/api/xbrl/frames/dei/EntityPublicFloat/USD/CY2023Q4I.json", JSON.stringify(url));
+  });
+}
+
+// §41b2: SEC EDGAR edgar_company_concept (ADR-0041) — ONE filer × ONE XBRL concept ×
+// the COMPLETE time-series. Locks the AUTHORITATIVE v2 fixes RED, all OFFLINE (mock
+// fetch), deterministic, non-vacuous. Load-bearing mutations turned RED:
+//   ★M1 — period identity is the (start,end) PAIR (not `end` alone): every row carries
+//     `start`; a DURATION same-`end` different-`start` pair is a different-duration fact
+//     (BOTH survive canonicalOnly, NEITHER trips the revision note); a genuine same-
+//     (start,end) restatement (Apple Assets 39.57B→36.17B) IS flagged a revision.
+//   ★M2 — canonicalOnly dedup key = (unit,start,end): a 2-unit case keeps BOTH units'
+//     end=E canonical rows (a 1-row dedup ⇒ RED).
+//   ★S1 — unitsAvailable[].count = the RAW units[key].length (pre-filter; a filtered
+//     count ⇒ RED). (a) no USD↔shares conflation; (b) val null-never-0; (c) amendment
+//     rows surfaced verbatim; (d) 404→found:false (never fake val:0); (e) path-segment
+//     SSRF (concept/taxonomy/cik) invalid_input 0 fetch; (f) canonical = frame!=null;
+//     (g) totalAvailable = filtered set, never page length; (h) unit filter never hides
+//     other units; (i) mandatory notes present.
+async function testEdgarCompanyConceptHonesty() {
+  section("41b2. SEC EDGAR edgar_company_concept — ★M1 (start,end) period identity + duration-not-revision + ★M2 (unit,start,end) canonicalOnly key + ★S1 raw unitsAvailable + multi-unit no-conflation + null-never-0 + 404-not-fake-empty + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  _clearCache();
+
+  const conceptEnv = ({ cik = 320193, entityName = "Apple Inc.", taxonomy = "us-gaap", tag = "Assets", label = "Assets", description = "Total assets", units }) =>
+    ({ cik, taxonomy, tag, label, description, entityName, units });
+
+  // ── Fixture 1: the LIVE-pinned INSTANT restatement (Apple us-gaap/Assets end=2008-09-27,
+  //    4 rows, val revised 39.57B→36.17B; all instant ⇒ no `start`). ──
+  const assets4 = {
+    USD: [
+      { end: "2008-09-27", val: 39572000000, accn: "0001193125-09-153165", fy: 2009, fp: "Q3", form: "10-Q", filed: "2009-07-22" },
+      { end: "2008-09-27", val: 39572000000, accn: "0001193125-09-214859", fy: 2009, fp: "FY", form: "10-K", filed: "2009-10-27" },
+      { end: "2008-09-27", val: 36171000000, accn: "0001193125-10-012091", fy: 2009, fp: "FY", form: "10-K/A", filed: "2010-01-25" },
+      { end: "2008-09-27", val: 36171000000, accn: "0001193125-10-238044", fy: 2010, fp: "FY", form: "10-K", filed: "2010-10-27", frame: "CY2008Q3I" },
+    ],
+  };
+
+  // (a) DEFAULT returns ALL 4 rows verbatim; each carries start:null (instant); the 3
+  //     frameless ⇒ canonical:false, the frame row ⇒ canonical:true; totalAvailable 4;
+  //     AMENDMENT note + revision-detected note + CIK↔UEI caveat present.
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: assets4 }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b2(a/c) DEFAULT returns ALL 4 rows (amendment history NOT dropped); totalAvailable 4 (drop-superseded ⇒ RED)",
+      r.data.found === true && r.data.rows.length === 4 && m.totalAvailable === 4, JSON.stringify({ rows: r.data.rows.length, ta: m.totalAvailable }));
+    ok("41b2(M1) every INSTANT row carries start:null (start OMITTED ⇒ RED)",
+      r.data.rows.every((x) => x.start === null && "start" in x), JSON.stringify(r.data.rows.map((x) => x.start)));
+    ok("41b2(f) canonical = frame!=null: the 3 frameless ⇒ canonical:false, the CY2008Q3I row ⇒ canonical:true + frame verbatim",
+      r.data.rows[0].canonical === false && r.data.rows[1].canonical === false && r.data.rows[2].canonical === false && r.data.rows[3].canonical === true && r.data.rows[3].frame === "CY2008Q3I", JSON.stringify(r.data.rows.map((x) => [x.frame, x.canonical])));
+    ok("41b2(a) distinct accn/filed/val across the amendment rows are all surfaced verbatim (39.57B originals + 36.17B revised)",
+      r.data.rows[0].val === 39572000000 && r.data.rows[2].val === 36171000000 && r.data.rows[3].val === 36171000000 && r.data.rows.map((x) => x.accn).join(",").includes("10-012091"), JSON.stringify(r.data.rows.map((x) => x.val)));
+    ok("41b2(M1) genuine same-(start,end) restatement ⇒ 'Restatement/revision detected' note (39.57B→36.17B is a revision)",
+      m.notes.some((n) => /Restatement\/revision detected/.test(n)), JSON.stringify(m.notes));
+    ok("41b2(i) AMENDMENT note present (with the M1 duration-vs-revision wording) + CIK↔UEI caveat",
+      m.notes.some((n) => /different-duration fact/.test(n) && /same \(start,end\)/.test(n)) && m.notes.some((n) => /CIK/.test(n) && /UEI/.test(n)), JSON.stringify(m.notes));
+    ok("41b2 unitsAvailable = [{unit:USD,count:4}] (raw); rows unit-tagged USD; entityName/label surfaced once",
+      JSON.stringify(r.data.unitsAvailable) === JSON.stringify([{ unit: "USD", count: 4 }]) && r.data.rows.every((x) => x.unit === "USD") && r.data.entityName === "Apple Inc." && r.data.label === "Assets", JSON.stringify(r.data.unitsAvailable));
+  });
+
+  // (c/canonicalOnly) the 4-row set with canonicalOnly ⇒ ONE row (CY2008Q3I, 36.17B),
+  //   filtersApplied includes canonicalOnly, the dedup note present.
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: assets4 }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets", canonicalOnly: true }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b2(canonicalOnly) instant 4-row set ⇒ 1 canonical row (frame CY2008Q3I, val 36.17B, canonical:true)",
+      r.data.rows.length === 1 && r.data.rows[0].frame === "CY2008Q3I" && r.data.rows[0].val === 36171000000 && r.data.rows[0].canonical === true && m.totalAvailable === 1, JSON.stringify(r.data.rows));
+    ok("41b2(canonicalOnly) filtersApplied includes 'canonicalOnly' + a dedup-disclosure note",
+      m.filtersApplied.includes("canonicalOnly") && m.notes.some((n) => /canonicalOnly=true/.test(n) && /SUPERSEDED\/amendment rows/.test(n)), JSON.stringify({ fa: m.filtersApplied }));
+  });
+
+  // ── Fixture 2 (★M1 DURATION): NetIncomeLoss end=2009-09-26 with TWO frame-tagged rows,
+  //    same end, DIFFERENT start (CY2009 annual 8.235B, CY2009Q3 quarter 2.532B). ──
+  const nil2 = {
+    USD: [
+      { start: "2008-09-28", end: "2009-09-26", val: 8235000000, accn: "acc-annual", fy: 2009, fp: "FY", form: "10-K", filed: "2009-10-27", frame: "CY2009" },
+      { start: "2009-06-28", end: "2009-09-26", val: 2532000000, accn: "acc-q3", fy: 2009, fp: "Q3", form: "10-Q", filed: "2009-07-22", frame: "CY2009Q3" },
+    ],
+  };
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ tag: "NetIncomeLoss", label: "Net Income (Loss)", units: nil2 }) }) : failClosed()()), async () => {
+    // Default — both carry distinct `start`; NEITHER trips the revision note (different-duration, not a revision).
+    const rd = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "NetIncomeLoss" }, sam);
+    const md = buildMeta(rd.meta);
+    ok("41b2(M1) DURATION: both rows carry distinct start (2008-09-28 annual, 2009-06-28 quarter) at the SAME end 2009-09-26",
+      rd.data.rows.length === 2 && rd.data.rows[0].start === "2008-09-28" && rd.data.rows[1].start === "2009-06-28" && rd.data.rows[0].end === "2009-09-26" && rd.data.rows[1].end === "2009-09-26", JSON.stringify(rd.data.rows.map((x) => [x.start, x.end, x.val])));
+    ok("41b2(M1) DURATION same-end different-start ⇒ NO 'Restatement/revision detected' note (a fabricated-restatement mutation ⇒ RED)",
+      !md.notes.some((n) => /Restatement\/revision detected/.test(n)), JSON.stringify(md.notes));
+    // canonicalOnly — BOTH frame-tagged canonical rows SURVIVE (grouped by (start,end), not `end` alone).
+    const rc = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "NetIncomeLoss", canonicalOnly: true }, sam);
+    ok("41b2(M1) canonicalOnly keeps BOTH CY2009 + CY2009Q3 at end=2009-09-26 (key on `end` alone ⇒ drops one ⇒ RED)",
+      rc.data.rows.length === 2 && rc.data.rows.every((x) => x.canonical === true) && rc.data.rows.map((x) => x.frame).sort().join(",") === "CY2009,CY2009Q3", JSON.stringify(rc.data.rows.map((x) => x.frame)));
+  });
+
+  // (b) null-val: real 0 survives; null/""/"null" ⇒ null; a real negative survives.
+  const nullVals = {
+    USD: [
+      { end: "2023-12-31", val: 0, accn: "z", fy: 2023, fp: "FY", form: "10-K", filed: "2024-02-01" },
+      { end: "2022-12-31", val: null, accn: "n", fy: 2022, fp: "FY", form: "10-K", filed: "2023-02-01" },
+      { end: "2021-12-31", val: "", accn: "e", fy: 2021, fp: "FY", form: "10-K", filed: "2022-02-01" },
+      { end: "2020-12-31", val: "null", accn: "s", fy: 2020, fp: "FY", form: "10-K", filed: "2021-02-01" },
+      { end: "2019-12-31", val: -42, accn: "g", fy: 2019, fp: "FY", form: "10-K", filed: "2020-02-01" },
+    ],
+  };
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: nullVals }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets" }, sam);
+    const v = r.data.rows.map((x) => x.val);
+    ok("41b2(b) val null-never-0: real 0 survives, null/''/'null' ⇒ null, -42 survives (num→0-for-absent ⇒ RED)",
+      v[0] === 0 && v[1] === null && v[2] === null && v[3] === null && v[4] === -42, JSON.stringify(v));
+  });
+
+  // ── Fixture 3 (★M2 + a + h + S1): MULTI-UNIT {USD:[2], shares:[1]}. ──
+  const multiUnit = {
+    USD: [
+      { end: "2023-12-31", val: 1000, accn: "u1", fy: 2023, fp: "FY", form: "10-K", filed: "2024-02-01", frame: "CY2023Q4I" },
+      { end: "2022-12-31", val: 900, accn: "u2", fy: 2022, fp: "FY", form: "10-K", filed: "2023-02-01", frame: "CY2022Q4I" },
+    ],
+    shares: [
+      { end: "2023-12-31", val: 500, accn: "s1", fy: 2023, fp: "FY", form: "10-K", filed: "2024-02-01", frame: "CY2023Q4I" },
+    ],
+  };
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: multiUnit }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets" }, sam);
+    ok("41b2(a) NO conflation: every row unit-tagged; the USD 1000 val is NEVER labeled shares, the shares 500 NEVER USD",
+      r.data.rows.every((x) => (x.unit === "USD" || x.unit === "shares")) && r.data.rows.find((x) => x.val === 1000).unit === "USD" && r.data.rows.find((x) => x.val === 500).unit === "shares", JSON.stringify(r.data.rows.map((x) => [x.unit, x.val])));
+    ok("41b2(S1) unitsAvailable lists BOTH units with RAW counts [{USD,2},{shares,1}]",
+      JSON.stringify(r.data.unitsAvailable) === JSON.stringify([{ unit: "USD", count: 2 }, { unit: "shares", count: 1 }]), JSON.stringify(r.data.unitsAvailable));
+    // ★M2 canonicalOnly across 2 units: BOTH units' end=2023-12-31 canonical rows survive.
+    const rc = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets", canonicalOnly: true }, sam);
+    const endE = rc.data.rows.filter((x) => x.end === "2023-12-31").map((x) => x.unit).sort();
+    ok("41b2(M2) canonicalOnly (unit,start,end) key: BOTH units retain their end=2023-12-31 canonical row (unit-blind dedup ⇒ 1 row ⇒ RED)",
+      rc.data.rows.length === 3 && JSON.stringify(endE) === JSON.stringify(["USD", "shares"]), JSON.stringify(rc.data.rows.map((x) => [x.unit, x.end])));
+  });
+
+  // (h/S1) unit filter narrows rows to USD but STILL discloses shares (raw count) + a note.
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: multiUnit }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets", unit: "USD" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b2(h) unit=USD ⇒ rows only USD (2), but unitsAvailable STILL lists BOTH raw {USD:2,shares:1} (S1 filtered-count ⇒ RED)",
+      r.data.rows.length === 2 && r.data.rows.every((x) => x.unit === "USD") && JSON.stringify(r.data.unitsAvailable) === JSON.stringify([{ unit: "USD", count: 2 }, { unit: "shares", count: 1 }]), JSON.stringify({ rows: r.data.rows.length, ua: r.data.unitsAvailable }));
+    ok("41b2(h) unit filter fires the ALSO-reported-in disclosure note (never silently hides shares)",
+      m.notes.some((n) => /unit filter 'USD' applied/.test(n) && /ALSO reported in unit\(s\) shares/.test(n)), JSON.stringify(m.notes));
+  });
+
+  // A unit NOT present ⇒ honest 0 rows + the available-units note (never a fabricated pick).
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: multiUnit }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets", unit: "EUR" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b2(h) unit=EUR (absent) ⇒ 0 rows + a note listing available units (USD, shares); unitsAvailable still raw (no fabricated pick)",
+      r.data.rows.length === 0 && m.notes.some((n) => /unit filter 'EUR' matched NONE/.test(n) && /USD/.test(n) && /shares/.test(n)) && r.data.unitsAvailable.length === 2, JSON.stringify(m.notes));
+  });
+
+  // (g) totalAvailable = the FILTERED (unit,start,end)-keyed set, never the page length.
+  const six = { USD: Array.from({ length: 6 }, (_, i) => ({ end: `20${20 + i}-12-31`, val: (i + 1) * 100, accn: `p${i}`, fy: 2020 + i, fp: "FY", form: "10-K", filed: `20${21 + i}-02-01`, frame: `CY20${20 + i}Q4I` })) };
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: six }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b2(g) 6 rows, limit 2 ⇒ totalAvailable 6 (NOT page length 2), returned 2, hasMore:true, nextOffset:2, complete:false",
+      m.totalAvailable === 6 && m.returned === 2 && r.data.rows.length === 2 && m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.complete === false, JSON.stringify(m.pagination));
+    // With a form filter that matches NONE ⇒ totalAvailable reflects the FILTERED (0) set.
+    const r0 = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets", form: "8-K" }, sam);
+    const m0 = buildMeta(r0.meta);
+    ok("41b2(g) form=8-K matches none of the 10-K rows ⇒ totalAvailable 0 (filtered set), + the raw-vs-filtered note (served 6 → 0 pageable)",
+      m0.totalAvailable === 0 && r0.data.rows.length === 0 && m0.notes.some((n) => /served 6 row\(s\)/.test(n)), JSON.stringify({ ta: m0.totalAvailable }));
+  });
+
+  // canonicalOnly latest-filed FALLBACK: a period with NO frame row ⇒ keep latest-filed, canonical:false.
+  const noFrame = {
+    USD: [
+      { end: "2024-06-30", val: 100, accn: "a", fy: 2024, fp: "Q2", form: "10-Q", filed: "2024-07-15" },
+      { end: "2024-06-30", val: 110, accn: "b", fy: 2024, fp: "Q2", form: "10-Q/A", filed: "2024-08-20" },
+    ],
+  };
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: noFrame }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets", canonicalOnly: true }, sam);
+    ok("41b2(canonicalOnly fallback) a period with NO frame row ⇒ latest-filed row kept (val 110, filed 2024-08-20), canonical:false (disclosed)",
+      r.data.rows.length === 1 && r.data.rows[0].val === 110 && r.data.rows[0].filed === "2024-08-20" && r.data.rows[0].canonical === false, JSON.stringify(r.data.rows));
+  });
+
+  // (d) ERROR MATRIX — 404 → found:false; 5xx → throw; 200 non-JSON → drift; units missing/array → drift; units:{} → honest empty.
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 404, json: "<?xml version='1.0'?><Error><Code>NoSuchKey</Code></Error>" }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "NotARealConceptXYZ" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b2(d) 404 (XML NoSuchKey body) ⇒ found:false, returned:0 — NEVER a fake-empty with val:0 (map-404→fake-empty ⇒ RED)",
+      r.data.found === false && m.returned === 0 && !JSON.stringify(r.data).includes('"val":0'), JSON.stringify(r.data));
+    ok("41b2(d) 404 ⇒ semantic note (NOT a value of 0; CamelCase tag; us-gaap vs dei vs ifrs-full) + CIK↔UEI caveat",
+      m.notes.some((n) => /NOT a value of 0/.test(n) && /ifrs-full/.test(n)) && m.notes.some((n) => /CIK/.test(n) && /UEI/.test(n)), JSON.stringify(m.notes));
+  });
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw } = await expectThrow(() => runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets" }, sam));
+    ok("41b2(d) 5xx ⇒ THROW (retryable via fetchWithRetry) — never a fake empty", threw, "did not throw");
+  });
+  // 200 body whose .json() throws (an HTML/XML outage masquerading as 200) ⇒ schema_drift THROW.
+  await withFetch((u) => (isEdgarConcept(u) ? ({ ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token <"); }, text: async () => "<html>err</html>" }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets" }, sam));
+    ok("41b2(d) 200 non-JSON body ⇒ schema_drift THROW (never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: { cik: 320193, taxonomy: "us-gaap", tag: "Assets" } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets" }, sam));
+    ok("41b2(d) units MISSING ⇒ schema_drift THROW (envelope changed, never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: [] }) }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets" }, sam));
+    ok("41b2(d) units is an ARRAY (not an object) ⇒ schema_drift THROW", threw && toToolError(error).kind === "schema_drift", JSON.stringify(toToolError(error).kind));
+  });
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: {} }) }) : failClosed()()), async () => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41b2(d) units:{} (empty) ⇒ HONEST empty (found:false, complete:true, 0 rows) — NOT a crash, NOT a drift, NOT a fabricated row",
+      r.data.found === false && r.data.rows.length === 0 && m.complete === true && m.notes.some((n) => /NOT a value of 0/.test(n)), JSON.stringify(r.data));
+  });
+
+  // (e) PATH-SEGMENT SSRF — direct handler calls (bypassing Zod) exercise buildConceptUrl's
+  //     belt-and-suspenders re-check (NOT hostname-only): bad concept/taxonomy/cik ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const bads = [
+      { why: "concept traversal '../x'", args: { cikOrTicker: "320193", concept: "../x" } },
+      { why: "concept slash 'a/b'", args: { cikOrTicker: "320193", concept: "a/b" } },
+      { why: "concept %2F 'a%2Fb'", args: { cikOrTicker: "320193", concept: "a%2Fb" } },
+      { why: "concept %00 'Assets%00'", args: { cikOrTicker: "320193", concept: "Assets%00" } },
+      { why: "concept dot 'Assets.json'", args: { cikOrTicker: "320193", concept: "Assets.json" } },
+      { why: "taxonomy off-enum 'evil'", args: { cikOrTicker: "320193", concept: "Assets", taxonomy: "evil" } },
+      { why: "11-digit cik overflow", args: { cikOrTicker: "12345678901", concept: "Assets" } },
+    ];
+    for (const b of bads) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => companyConcept(b.args));
+      ok(`41b2(e) SSRF ${b.why} ⇒ invalid_input, 0 fetch (buildConceptUrl re-check, NOT hostname-only)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+
+  // (e) Zod path also rejects a bad taxonomy/concept ⇒ invalid_input, 0 fetch (belt in front of the builder).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "../etc" }, sam));
+    ok("41b2(e) Zod rejects concept '../etc' ⇒ invalid_input, 0 fetch",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify(toToolError(error).kind));
+  });
+
+  // Positive control: a VALID request builds the fixed-host URL with the 3 segments in order.
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ units: assets4 }) }) : failClosed()()), async (calls) => {
+    await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Assets", limit: 1 }, sam);
+    const url = calls.find((c) => isEdgarConcept(c.url))?.url;
+    const parsed = url ? new URL(url) : null;
+    ok("41b2 builder: https://data.sec.gov/api/xbrl/companyconcept/CIK0000320193/us-gaap/Assets.json (host+scheme+segment order; a mutation ⇒ RED)",
+      !!parsed && parsed.protocol === "https:" && parsed.hostname === "data.sec.gov" && parsed.pathname === "/api/xbrl/companyconcept/CIK0000320193/us-gaap/Assets.json", JSON.stringify(url));
+  });
+
+  // S2 — the shipped taxonomy enum is exactly {us-gaap, dei, ifrs-full} (srt DROPPED).
+  ok("41b2(S2) CONCEPT_TAXONOMIES === {us-gaap, dei, ifrs-full} (srt dropped — unvalidated)",
+    JSON.stringify([...CONCEPT_TAXONOMIES].sort()) === JSON.stringify(["dei", "ifrs-full", "us-gaap"]), JSON.stringify(CONCEPT_TAXONOMIES));
+
+  // ifrs-full is a live-confirmed member ⇒ builds a valid ifrs-full URL (Spotify tuple shape).
+  await withFetch((u) => (isEdgarConcept(u) ? mockResponse({ status: 200, json: conceptEnv({ taxonomy: "ifrs-full", tag: "Assets", units: { EUR: [{ end: "2017-12-31", val: 5000, accn: "sp1", fy: 2017, fp: "FY", form: "20-F", filed: "2018-02-01", frame: "CY2017Q4I" }] } }) }) : failClosed()()), async (calls) => {
+    const r = await runTool("edgar_company_concept", { cikOrTicker: "1639920", concept: "Assets", taxonomy: "ifrs-full" }, sam);
+    const url = calls.find((c) => isEdgarConcept(c.url))?.url;
+    ok("41b2(S2) ifrs-full resolves + builds .../CIK0001639920/ifrs-full/Assets.json; EUR row unit-tagged EUR",
+      r.data.found === true && r.data.rows[0].unit === "EUR" && new URL(url).pathname === "/api/xbrl/companyconcept/CIK0001639920/ifrs-full/Assets.json", JSON.stringify(url));
   });
 }
 
@@ -13633,6 +13891,7 @@ async function main() {
   await testTreasuryHonesty();
   await testEdgarHonesty();
   await testEdgarFramesHonesty();
+  await testEdgarCompanyConceptHonesty();
   await testEdgarFtsFilters();
   await testEdgarShardsHonesty();
   await testEdgarFilingIndexHonesty();
