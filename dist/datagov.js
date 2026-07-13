@@ -90,6 +90,21 @@ export const REGULATIONS_DOCUMENT_TYPES = [
     "Supporting & Related Material",
     "Other",
 ];
+// Regulations.gov docket-type facet (ADR-0044 §4 rule 5 — Zod enum; a bad value
+// fails LOCALLY as invalid_input before any fetch). Dockets are the rulemaking/
+// nonrulemaking CONTAINER that groups documents + comments under one action.
+export const REGULATIONS_DOCKET_TYPES = ["Rulemaking", "Nonrulemaking"];
+// Docket sort fields (ADR-0044 S5). `-lastModifiedDate` and `title` are
+// DEMO_KEY-verified; `lastModifiedDate` (asc) and `-title` are assumed by JSON:API
+// asc/desc symmetry — LIVE-VERIFY when a non-throttled key is available. An
+// unattested value the API rejects yields an honest invalid_input THROW, so
+// keeping them is safe (mirrors the REGULATIONS_SORTS non-exhaustive note above).
+export const REGULATIONS_DOCKET_SORTS = [
+    "-lastModifiedDate",
+    "lastModifiedDate",
+    "title",
+    "-title",
+];
 // Congress.gov bill-type path enum (§4 — constrains the /v3/bill/{congress}/{type}
 // path segment; a bad value fails locally before any fetch).
 export const CONGRESS_BILL_TYPES = [
@@ -286,6 +301,224 @@ export async function searchDocuments(args) {
 /** Tool: regulations_search_comments. */
 export async function searchComments(args) {
     return regulationsSearch("/v4/comments", "comments", args);
+}
+/**
+ * Map one JSON:API `/v4/dockets` LIST row into a flat, honesty-coerced record
+ * (all scalars via `str`, null-never-empty). `highlightedContent` (a search-
+ * snippet artifact) is surfaced ONLY when a searchTerm was sent. There is NO
+ * `rin` field: the list envelope never carries it (captured fact 4) — surfacing a
+ * null `rin` here would read as "no RIN"; `rin` lives ONLY in mapDocketDetail.
+ */
+function mapDocketListRow(item, withSearchTerm) {
+    const it = (item ?? {});
+    const a = (it.attributes ?? {});
+    const row = {
+        docketId: str(a.docketId),
+        title: str(a.title),
+        agencyId: str(a.agencyId),
+        docketType: str(a.docketType),
+        lastModifiedDate: str(a.lastModifiedDate),
+        objectId: str(a.objectId),
+        id: str(it.id),
+    };
+    if (withSearchTerm)
+        row.highlightedContent = str(a.highlightedContent);
+    return row;
+}
+/**
+ * Map the `/v4/dockets/{docketId}` DETAIL object into the compliance-relevant
+ * subset (captured fact 5). `rin` is null-when-absent (never "") — the cross-
+ * source join key to the Federal Register / Unified Agenda. `keywords` → string[]
+ * (via `str`+filter; [] only when genuinely absent). DROPS internal/rarely-
+ * populated fields (displayProperties/generic/field1/field2/subType/subType2/
+ * category/petitionNbr/organization/legacyId) to keep the row focused.
+ */
+function mapDocketDetail(data) {
+    const it = (data ?? {});
+    const a = (it.attributes ?? {});
+    const keywords = Array.isArray(a.keywords)
+        ? a.keywords
+            .map((k) => str(k))
+            .filter((k) => k !== null)
+        : [];
+    return {
+        docketId: str(a.docketId),
+        title: str(a.title),
+        agencyId: str(a.agencyId),
+        docketType: str(a.docketType),
+        // rin — the cross-source join key; null-when-absent, NEVER "".
+        rin: str(a.rin),
+        dkAbstract: str(a.dkAbstract),
+        keywords,
+        program: str(a.program),
+        shortTitle: str(a.shortTitle),
+        effectiveDate: str(a.effectiveDate),
+        modifyDate: str(a.modifyDate),
+        objectId: str(a.objectId),
+        id: str(it.id),
+    };
+}
+/**
+ * Tool: regulations_search_dockets (`GET /v4/dockets`). Lists rulemaking/
+ * nonrulemaking docket CONTAINERS with the same 40-page/10,000-record ceiling and
+ * `totalElements`-exact total doctrine as regulationsSearch.
+ *
+ * ★ min-5 floor (ADR-0044): the API 400s on page[size]<5. The friendly `limit`
+ * exposes 1..250; the wire page[size] is `max(5, limit)` and a `limit<5` returns
+ * the first `limit` of the fetched rows client-side (disclosed) — `totalAvailable`
+ * stays the EXACT server total.
+ */
+export async function searchDockets(args) {
+    const label = "regulations:/v4/dockets";
+    const limit = args.limit ?? 20;
+    const pageNumber = args.pageNumber ?? 1;
+    const sort = args.sort ?? "-lastModifiedDate";
+    const fetchSize = Math.max(5, limit); // the wire page[size] — NEVER < 5
+    const clientSlice = limit < 5;
+    // S6 — pre-fetch window guard (mirror regulationsSearch): reject a beyond-ceiling
+    // page BEFORE any fetch, so a DIRECT call bypassing the Zod caps gets a clean
+    // LOCAL invalid_input rather than burning a scarce DEMO_KEY call on an upstream
+    // 400. (Zod also caps pageNumber≤40 / limit≤250 at the tool boundary.)
+    if (pageNumber > REG_MAX_PAGE || pageNumber * fetchSize > REG_MAX_RECORDS) {
+        throw new ToolErrorCarrier({
+            kind: "invalid_input",
+            message: `Regulations.gov page[number] (${pageNumber}) × page[size] (${fetchSize}) exceeds the API's hard ${REG_MAX_RECORDS}-record / ${REG_MAX_PAGE}-page pagination ceiling. Narrow filters (agencyId/docketType/lastModifiedDate) or seek by lastModifiedDate instead of paging past ${REG_MAX_RECORDS} results.`,
+            retryable: false,
+            upstreamEndpoint: label,
+        });
+    }
+    const searchTerm = args.searchTerm ?? args.query;
+    const params = new URLSearchParams();
+    const filtersApplied = [];
+    if (searchTerm) {
+        params.set("filter[searchTerm]", searchTerm);
+        filtersApplied.push("searchTerm");
+    }
+    if (args.agencyId) {
+        params.set("filter[agencyId]", args.agencyId);
+        filtersApplied.push("agencyId");
+    }
+    if (args.docketType) {
+        params.set("filter[docketType]", args.docketType);
+        filtersApplied.push("docketType");
+    }
+    if (args.lastModifiedDateGe) {
+        params.set("filter[lastModifiedDate][ge]", args.lastModifiedDateGe);
+        filtersApplied.push("lastModifiedDateGe");
+    }
+    if (args.lastModifiedDateLe) {
+        params.set("filter[lastModifiedDate][le]", args.lastModifiedDateLe);
+        filtersApplied.push("lastModifiedDateLe");
+    }
+    params.set("sort", sort);
+    params.set("page[number]", String(pageNumber));
+    params.set("page[size]", String(fetchSize));
+    // M1 — the typed catch ladder (fema.ts:262-275 shape). Preserve the 429/404/5xx/
+    // 400/timeout ToolErrorCarrier taxonomy FIRST (LOAD-BEARING: a broader catch
+    // would regress the DEMO_KEY-10/hr 429→rate_limited frontier to schema_drift);
+    // reclassify a 200 non-JSON `.json()` SyntaxError to schema_drift SECOND; bare-
+    // rethrow LAST.
+    let body;
+    try {
+        body = await getDatagov(REGULATIONS_HOST, "/v4/dockets", label, params);
+    }
+    catch (e) {
+        if (e instanceof ToolErrorCarrier)
+            throw e;
+        if (e instanceof SyntaxError)
+            throw driftError(label, "Regulations.gov returned a non-JSON body at HTTP 200 — schema drift.");
+        throw e;
+    }
+    const b = (body ?? {});
+    // data[] guard + meta.totalElements container guard (datagov.ts:288-302 idiom).
+    if (!Array.isArray(b.data)) {
+        throw driftError(label, "regulations shape drift — /v4/dockets response.data must be an array.");
+    }
+    if (!b.meta || typeof b.meta.totalElements !== "number") {
+        throw driftError(label, "regulations shape drift — /v4/dockets meta.totalElements missing/non-number.");
+    }
+    const rawRows = b.data.map((row) => mapDocketListRow(row, Boolean(searchTerm)));
+    const rows = clientSlice ? rawRows.slice(0, limit) : rawRows;
+    const returned = rows.length;
+    // EXACT real total — NEVER meta.totalPages (a capped-40 sentinel). Typeof-guarded
+    // above. UNAFFECTED by the client-slice.
+    const totalAvailable = num(b.meta.totalElements);
+    const offset = (pageNumber - 1) * fetchSize;
+    const moreExist = totalAvailable !== null && offset + returned < totalAvailable;
+    const nextPageNumber = pageNumber + 1;
+    const nextPageReachable = nextPageNumber <= REG_MAX_PAGE &&
+        nextPageNumber * fetchSize <= REG_MAX_RECORDS;
+    const hasMore = moreExist;
+    // nextOffset is null in the client-slice case (paging by pageNumber would skip
+    // the unshown rows — an honest "increase limit to page reliably") and at the
+    // ceiling (no reachable continuation) — both surface hasMore:true/nextOffset:null.
+    const nextOffset = moreExist && nextPageReachable && !clientSlice ? pageNumber * fetchSize : null;
+    const notes = [];
+    pushKeyNote(notes);
+    if (moreExist && !nextPageReachable) {
+        notes.push(`Reached the API's ${REG_MAX_RECORDS}-record / ${REG_MAX_PAGE}-page pagination ceiling (totalElements=${totalAvailable} total). ~${totalAvailable - REG_MAX_RECORDS} more records exist but are UNREACHABLE via page[number] — narrow filters (agencyId/docketType/lastModifiedDate) or seek by lastModifiedDate to reach the rest.`);
+    }
+    if (clientSlice) {
+        notes.push(`limit<5 requested; page[size] was floored to 5 upstream (the API rejects page[size]<5) and the first ${limit} of the ${rawRows.length} fetched rows are returned — totalAvailable is still the EXACT server total. For reliable pagination use limit>=5.`);
+    }
+    return withMeta({ dockets: rows }, {
+        source: REG_DOC_SOURCE(keyModeLabel()),
+        keylessMode: false, // M2 — genuinely keyed
+        returned,
+        totalAvailable,
+        filtersApplied,
+        filtersDropped: [],
+        fieldsUnavailable: [],
+        // S3 — pagination.limit is the CALLER's requested count (the honest effective
+        // window; the wire floor of 5 is disclosed only in the min-5 note). offset
+        // uses fetchSize.
+        pagination: { offset, limit, hasMore, nextOffset },
+        notes,
+    });
+}
+/**
+ * Tool: regulations_get_docket (`GET /v4/dockets/{docketId}`). Single-docket
+ * detail — the ONLY view carrying `rin`. `docketId` is charclass-validated at the
+ * Zod layer (S1); it is the only caller value reaching a path segment.
+ */
+export async function getDocket(args) {
+    const label = "regulations:/v4/dockets/{id}";
+    const path = `/v4/dockets/${args.docketId}`;
+    const params = new URLSearchParams();
+    // M1 — the IDENTICAL typed catch ladder as searchDockets (fema.ts:262-275). A
+    // nonexistent id is EXPECTED to 404 → not_found; the missing-`data` driftError
+    // guard below is the mandatory fallback if a bad id instead yields a 200 error-
+    // envelope (S2).
+    let body;
+    try {
+        body = await getDatagov(REGULATIONS_HOST, path, label, params);
+    }
+    catch (e) {
+        if (e instanceof ToolErrorCarrier)
+            throw e;
+        if (e instanceof SyntaxError)
+            throw driftError(label, "Regulations.gov returned a non-JSON body at HTTP 200 — schema drift.");
+        throw e;
+    }
+    const b = (body ?? {});
+    // S2 — MANDATORY fabrication guard: a missing/non-object `data` → schema_drift,
+    // NEVER a fabricated {docketId, ...nulls} (mirror getBill's bill guard).
+    if (!b.data || typeof b.data !== "object") {
+        throw driftError(label, "regulations shape drift — /v4/dockets/{docketId} response.data missing/not-an-object.");
+    }
+    const notes = [];
+    pushKeyNote(notes);
+    notes.push("rin (Regulatory Identifier Number) is the join key to the Federal Register (fed_register_search_documents) and the Unified Agenda; null when this docket has no assigned RIN (e.g. many Nonrulemaking dockets).");
+    return withMeta({ docket: mapDocketDetail(b.data) }, {
+        source: REG_DOC_SOURCE(keyModeLabel()),
+        keylessMode: false, // M2 — genuinely keyed
+        returned: 1,
+        totalAvailable: null, // S4 — single-record detail convention (rely on complete:true)
+        filtersApplied: [],
+        filtersDropped: [],
+        fieldsUnavailable: [],
+        notes,
+    });
 }
 // ═══════════════════ Congress.gov ═════════════════════════════════
 const CONGRESS_SOURCE = (mode) => `${CONGRESS_HOST} via Congress.gov API (${mode})`;
