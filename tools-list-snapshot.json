@@ -3546,7 +3546,7 @@
   },
   {
     "name": "usas_search_awards",
-    "description": "Aggregate share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns top recipients by total $ + count. Use for competitive landscape ('who wins at VA in 541512?').",
+    "description": "Aggregate share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns top recipients by total obligated $ ONLY — per-recipient award COUNTS are NOT returned by this endpoint (`awards`/`totalAwards` are null, not 0); for real per-recipient contract counts use usas_search_awards_by_recipient (its _meta.totalAvailable) or usas_get_recipient_profile. Use for competitive landscape ('who wins at VA in 541512?').",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3632,9 +3632,6 @@
         },
         "naics": {
           "type": "string"
-        },
-        "fiscalYear": {
-          "type": "number"
         },
         "monthsUntilExpiry": {
           "type": "number"

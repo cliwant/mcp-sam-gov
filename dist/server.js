@@ -181,7 +181,11 @@ const UsasSubawardsInput = z.object({
 const UsasExpiringInput = z.object({
     agency: z.string().optional(),
     naics: z.string().optional(),
-    fiscalYear: z.number().int().min(2007).optional(),
+    // M2 (W3-1 honesty): `fiscalYear` removed. The recompete radar windows on the
+    // current PoP end date around TODAY, not an obligation FY, so it was
+    // inapplicable — advertised here, then validated and silently discarded by
+    // searchExpiringContracts (never forwarded) with empty filtersDropped. Dropping
+    // it from the schema stops the validated-then-discarded arg at the door.
     monthsUntilExpiry: z.number().min(1).max(36).optional(),
     minAwardValue: z.number().optional(),
     limit: z.number().min(1).max(20).optional(),
@@ -2757,7 +2761,12 @@ const CensusGeographiesByCoordinatesInput = z
 function defineTool(d) {
     return d;
 }
-const TOOLS = [
+// Exported for the offline registry-introspection fault fixtures (W3-1): the
+// harness asserts a tool's advertised inputSchema/description directly (e.g.
+// usas_search_expiring_contracts no longer carries `fiscalYear`; usas_search_awards
+// no longer promises "+ count"). Export-only — does NOT change tools/list output
+// or any dispatch behavior (main() stays entry-point-gated).
+export const TOOLS = [
     // ━━━ SAM.gov (8) ━━━
     defineTool({
         name: "sam_search_opportunities",
@@ -3251,7 +3260,7 @@ const TOOLS = [
     // ━━━ USAspending — Awards & Recipients (10) ━━━
     defineTool({
         name: "usas_search_awards",
-        description: "Aggregate share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns top recipients by total $ + count. Use for competitive landscape ('who wins at VA in 541512?').",
+        description: "Aggregate share-of-wallet on USAspending. Given an agency × NAICS × fiscal year, returns top recipients by total obligated $ ONLY — per-recipient award COUNTS are NOT returned by this endpoint (`awards`/`totalAwards` are null, not 0); for real per-recipient contract counts use usas_search_awards_by_recipient (its _meta.totalAvailable) or usas_get_recipient_profile. Use for competitive landscape ('who wins at VA in 541512?').",
         inputSchema: UsasFiltersBase,
         handler: (input) => usas.searchAwards(input),
     }),
