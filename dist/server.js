@@ -49,6 +49,7 @@ import * as bls from "./bls.js";
 import * as ofac from "./ofac.js";
 import * as nvd from "./nvd.js";
 import * as nppes from "./nppes.js";
+import * as cms from "./cms.js";
 import { fetchAttachmentText } from "./attachments.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
@@ -816,6 +817,90 @@ const NppesLookupInput = z.object({
         .max(1000)
         .optional()
         .describe("0-based pagination offset, 0..1000 (default 0). ★POLICY cap: this vetting tool reaches at most the first ~1,200 matches/query (a deliberate targeted-lookup boundary — NPPES itself no longer enforces a skip ceiling); skip > 1000 ⇒ invalid_input. Search mode only."),
+});
+// ━━━ CMS Open Payments — the healthcare spend/transparency lane (2) ━━━ ADR-0037
+// A NEW keyless DKAN 2.x datastore adapter (a sibling of ckan/socrata) over
+// openpaymentsdata.cms.gov. ★M2: the DCAT metastore ignores limit/offset — the
+// whole catalog is sliced CLIENT-SIDE (totalAvailable is the exact post-q size).
+// ★M1: the results-array drift guard is conditioned on the effective `results` mode
+// (results:false omits rows). ★S2: `count` is NOT a caller toggle (always count=true
+// on the wire). ★S3: offset ≤ 2000 reach cap (PII boundary, mirrors NPPES).
+// SSRF (load-bearing): datasetId (36-char lowercase UUID) + index interpolate into
+// the URL PATH — the Zod grammars are the primary path-injection guard.
+const CmsSearchDatasetsInput = z.object({
+    q: z
+        .string()
+        .max(200)
+        .optional()
+        .describe("Client-side case-insensitive substring filter over each dataset's title + description (the DKAN metastore returns the ENTIRE catalog in one response; q is applied client-side and totalAvailable is the exact post-filter catalog size). e.g. 'research payment'."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Datasets per page, 1..100, default 20 (client-side slice of the full catalog)."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("0-based pagination offset (default 0), applied client-side against the known catalog length (never a server offset)."),
+});
+const CmsQueryDatasetInput = z.object({
+    datasetId: z
+        .string()
+        .length(36)
+        .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+        .describe("REQUIRED — the DKAN datasetId, a 36-char LOWERCASE UUID. ★SSRF: it interpolates into the URL PATH, so this strict grammar (no uppercase, no %2F/../, no trailing newline) is the load-bearing path-injection guard. e.g. 'f0d1de67-6852-4093-a036-c9328c256a05' (2025 Research Payment Data)."),
+    index: z
+        .number()
+        .int()
+        .min(0)
+        .max(50)
+        .optional()
+        .describe("Distribution index (default 0 = the primary CSV). Also interpolates into the URL path (int 0..50)."),
+    conditions: z
+        .array(z.object({
+        property: z
+            .string()
+            .min(1)
+            .max(128)
+            .regex(/^[a-z0-9_]+$/)
+            .describe("Column name (snake_case lowercase alnum). A bad column ⇒ HTTP 400 ⇒ invalid_input (never a silent drop). e.g. 'recipient_state'."),
+        value: z
+            .union([z.string().max(200), z.number()])
+            .describe("Filter value. e.g. 'CA'."),
+        operator: z
+            .enum(["=", "<>", "<", ">", "<=", ">=", "like", "in"])
+            .optional()
+            .describe("Comparison operator (default '='). AND-combined across conditions."),
+    }))
+        .max(10)
+        .optional()
+        .describe("Server-side filters (≤10, AND-combined) that provably narrow the EXACT count. Each either applies or the call errors — filtersDropped is always empty."),
+    properties: z
+        .array(z.string().min(1).max(128).regex(/^[a-z0-9_]+$/))
+        .optional()
+        .describe("Optional column projection (snake_case column names). Omit for all columns."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .optional()
+        .describe("Rows per page, 1..500, default 100. 500 is the HARD DKAN cap (the API 400s over it; this tool rejects >500 loudly)."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .max(2000)
+        .optional()
+        .describe("0-based row offset (default 0). ★POLICY reach cap ≤ 2000 (a deliberate targeted-lookup boundary — Open Payments names physicians + amounts); offset > 2000 ⇒ invalid_input."),
+    results: z
+        .boolean()
+        .optional()
+        .describe("Default true (return rows). Set false for COUNT/SCHEMA-discovery mode: no rows, pagination disabled, but the EXACT count + every column's schema are returned. (`count` is NOT a toggle — count=true is always on the wire.)"),
 });
 // GAO bid-protest lookup (keyless RSS + decision-page parse)
 const GaoProtestInput = z.object({
@@ -3055,6 +3140,19 @@ const TOOLS = [
         description: "Keyless CMS/HHS NPPES NPI Registry lookup — the authoritative PUBLIC registry of every US healthcare provider (individual NPI-1 + organization NPI-2), for VA/HHS/CMS subcontractor/provider/teaming due-diligence (validate an NPI, confirm taxonomy/specialty, enumeration status, practice state, org/name match). Host npiregistry.cms.hhs.gov/api (version=2.1). Mode is inferred from `number` (no mode flag). EXACT-NPI mode (`number` given): the NPI is CMS-Luhn-validated client-side (Luhn over 80840+first-9) ⇒ a typo'd NPI is invalid_input, NEVER a fake 'does not exist'; ★the wire query carries `number` (+version) ALONE — any co-supplied filter (last_name/state/…) is DROPPED from the wire and checked CLIENT-SIDE (disclosed in data.filterMatch:{field:bool} + data.filtersDropped), because NPPES AND-combines a number with filters and a mismatch would falsely zero a real active provider into found:false. SEARCH mode: required-one of { first_name, last_name, organization_name, taxonomy_description, city, postal_code } (state + enumeration_type are REFINERS ONLY — rejected alone); a trailing '*' wildcard on a name/org field needs ≥2 leading literal chars. Returns EXACT-mode { found, provider:{ number, enumerationType, active, status, basic{…individual OR org fields, null-never-fabricated…}, taxonomies[{code,desc,primary,state,license,taxonomyGroup}], addresses[{purpose,address1,city,state,postalCode,telephone,fax,countryCode}], practiceLocations[…same, SEPARATE from addresses], identifiers[], otherNames[], endpoints[], createdEpoch, lastUpdatedEpoch }, filterMatch? } OR SEARCH-mode { providers:[…] } + honest _meta. HONESTY: active = basic.status==='A' (a deactivated/absent NPI is NOT active); epochs are ms numeric STRINGS → number|null (null-never-0); addresses[] and practiceLocations[] are kept SEPARATE (a provider can practice in a state that appears ONLY in practiceLocations); NPPES exposes NO match total, so a full page ⇒ totalAvailable is a disclosed LOWER BOUND (totalIsLowerBound) + a ~1,200-row-per-query reach cap (limit ≤ 200, skip ≤ 1,000 — OUR policy, a PER-QUERY cap only; cross-query enumeration is not architecturally prevented). A genuine {result_count:0} ⇒ honest found:false/empty; a {Errors:[…]} 200 body (no results key) ⇒ THROWS invalid_input (never a fake empty); any 4xx/5xx/timeout/off-host-redirect ⇒ THROWS; result_count !== results.length ⇒ schema_drift. ★NOT a fitness/exclusion/licensure/sanctions determination — cross-check SAM exclusions + OFAC; individual (NPI-1) records may surface personal/home addresses + phone/fax verbatim with NO enrichment. The caveat + reach-cap disclosure ride EVERY response.",
         inputSchema: NppesLookupInput,
         handler: (input) => nppes.lookupProvider(input),
+    }),
+    // ━━━ CMS Open Payments — Healthcare Spend/Transparency (DKAN, keyless) (2) ━━━ ADR-0037
+    defineTool({
+        name: "cms_search_datasets",
+        description: "Discover CMS Open Payments datasets on the keyless DKAN DCAT metastore (openpaymentsdata.cms.gov) — the Physician Payments Sunshine Act transparency catalog (industry→physician/teaching-hospital payments, other transfers of value, ownership interests). Returns { query, results:[{ datasetId, title, description, distributions:[{index, distId, title, mediaType, downloadURL}], keyword, modified }] } + honest _meta. Feed a result's datasetId + a distribution index to cms_query_dataset (use results:false there to enumerate the column schema before pulling rows). Optional `q` (case-insensitive title/description substring), `limit` (≤100, def 20), `offset`. ★HONESTY: the DKAN metastore IGNORES limit/offset/page and returns the ENTIRE catalog in one response, so q/limit/offset are applied CLIENT-SIDE against the in-memory array and totalAvailable is the EXACT post-q catalog size (never fabricated, never null) — hasMore is computed against the KNOWN catalog length (no false-more, no dead-end offset). The flagship targets are '2025 Research Payment Data', the General-Payment, and Ownership datasets. A non-array metastore body / HTML / 5xx / timeout THROWS (never a fake empty). NOT a determination — see cms_query_dataset's caveat.",
+        inputSchema: CmsSearchDatasetsInput,
+        handler: (input) => cms.searchDatasets(input),
+    }),
+    defineTool({
+        name: "cms_query_dataset",
+        description: "Query a CMS Open Payments DKAN datastore distribution by datasetId + index (keyless; openpaymentsdata.cms.gov) — the healthcare industry-financial-relationship / COI-vetting + market-intelligence lane NPPES (provider identity) cannot answer. GET /api/1/datastore/query/{datasetId}/{index} with server-side `conditions` filters, an EXACT `count`, offset/limit pagination, and a `properties` projection. Returns { datasetId, index, results (mode), fields:[{name,type,mysqlType,description}] (from the DKAN schema), rows:[…verbatim…] } + honest _meta. A confirmed target: 2025 Research Payment Data 'f0d1de67-6852-4093-a036-c9328c256a05' index 0 (count 931959; + a recipient_state='CA' condition → 92097). ★HONESTY: `count` is the EXACT grand total (P1) → totalAvailable=count + real offset pagination (NOT a page-length lower bound); `conditions` are server-side and self-policing — a valid column narrows the count, a BAD column ⇒ HTTP 400 ⇒ invalid_input, so filtersDropped is ALWAYS empty (no silent-drop path, P4); limit ≤ 500 is the HARD API cap (a higher limit ⇒ invalid_input, no silent clamp); every column is text, so amounts (total_amount_of_payment_usdollars, …) arrive as STRINGS surfaced verbatim (a missing amount is null-never-0, P3). ★results:false = a COUNT/SCHEMA-discovery mode: no rows, pagination disabled (no livelock), but the EXACT count + every column's schema returned (count=true is ALWAYS on the wire — not a caller toggle). A genuine {count:0} ⇒ honest empty; a 400 (bad column/limit) / 404 (bad datasetId/index) / HTML (SPA/WAF) / 5xx / timeout / a missing schema anchor or non-array results (in results:true) ⇒ THROW (never a fake empty). ★SSRF: datasetId (36-char lowercase UUID) + index interpolate into the URL PATH (validated before interpolation). ★PII: Open Payments is PUBLIC transparency-BY-LAW data (in-scope per the NPPES precedent) naming physicians + amounts verbatim — bounded to targeted vetting (offset ≤ 2000 reach cap), NO enrichment, NO covered_recipient_npi→NPPES auto-join. NOT a conflict-of-interest finding / fitness / exclusion determination — cross-check SAM exclusions + OFAC + the OIG-LEIE. The caveat + reach-cap disclosure ride EVERY response.",
+        inputSchema: CmsQueryDatasetInput,
+        handler: (input) => cms.queryDataset(input),
     }),
     // ━━━ GAO — Bid Protests (1) ━━━
     defineTool({
