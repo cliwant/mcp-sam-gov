@@ -47,12 +47,12 @@ import { runTool, TOOLS } from "./dist/server.js";
 import { toToolError, ToolErrorCarrier, fetchWithRetry } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
-import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards, searchRecipients, glossary, autocompleteRecipient } from "./dist/usaspending.js";
+import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards, searchRecipients, glossary, autocompleteRecipient, autocompleteNaics } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
 import { search as ecfrSearch } from "./dist/ecfr.js";
 import { searchGrants, getGrant } from "./dist/grants.js";
-import { searchDocuments as fedRegSearch, getDocument as fedRegGet, publicInspection as fedRegPI, computeLeadDays as fedRegLeadDays, buildPublicInspectionUrl as fedRegBuildPIUrl, assertFedRegHost, PRE_PUBLICATION_CAVEAT, LEADDAYS_METHOD_NOTE, SPECIAL_REGULAR_NOTE } from "./dist/federal-register.js";
+import { searchDocuments as fedRegSearch, getDocument as fedRegGet, listAgencies as fedRegListAgencies, publicInspection as fedRegPI, computeLeadDays as fedRegLeadDays, buildPublicInspectionUrl as fedRegBuildPIUrl, assertFedRegHost, PRE_PUBLICATION_CAVEAT, LEADDAYS_METHOD_NOTE, SPECIAL_REGULAR_NOTE } from "./dist/federal-register.js";
 import { searchWageDeterminations, getWageRates, benchmarkLaborRates } from "./dist/pricing.js";
 import { gaoProtestLookup } from "./dist/gao.js";
 import { _clearCache } from "./dist/cache.js";
@@ -4288,6 +4288,35 @@ async function testFederalRegisterHonesty() {
     },
   );
 
+  // 2b. COUNT-DRIFT GUARD (W3-9 hardening, federal-register.ts:searchDocuments) — a
+  // 200 body that LACKS `count` (schema drift) must THROW schema_drift, NOT coerce
+  // to a fabricated totalAvailable:0 honest-empty. The OLD code `json.count ?? 0`
+  // masked drift as a genuine no-match (a latent P2 violation). NON-VACUITY:
+  // reverting the guard to `?? 0` makes this THROW assertion RED (it would instead
+  // return a fake empty with totalAvailable:0/truncated:false).
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { total_pages: 3, results: [
+      { document_number: "2026-9", title: "Some Rule", type: "Rule", publication_date: "2026-01-01", agencies: [] },
+    ] } }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => fedRegSearch({ query: "acquisition" }));
+      ok("fedreg [W3-9] 200 body LACKING `count` ⇒ throws schema_drift retryable:false (NOT a fabricated totalAvailable:0 on a drift body; revert to `?? 0` ⇒ RED)",
+        threw && error?.toolError?.kind === "schema_drift" && error?.toolError?.retryable === false, JSON.stringify(error?.toolError));
+    },
+  );
+  // 2c. A GENUINE count:0 (a real, finite NUMBER) is NOT drift ⇒ STILL an honest
+  // empty (returned:0, totalAvailable:0, complete:true) — the guard fires ONLY on an
+  // absent/non-number count. A guard that also threw on a real 0 turns this RED.
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { count: 0, total_pages: 0, results: [] } }) : failClosed()()),
+    async () => {
+      const res = await fedRegSearch({ query: "zzznotarealrule" });
+      const m = buildMeta(res.meta);
+      ok("fedreg [W3-9] genuine count:0 (real number) ⇒ honest empty (returned:0 + totalAvailable:0 + complete:true, NOT a throw) — guard fires only on absent/non-number count",
+        res.data.documents.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.truncated === false, JSON.stringify(m));
+    },
+  );
+
   // 3. results ⇒ maps + TYPE_MAP + totalAvailable = count, truncated when returned<count
   await withFetch(
     (u) => (isSearch(u) ? mockResponse({ status: 200, json: { count: 57, total_pages: 6, results: [
@@ -4381,6 +4410,40 @@ async function testFederalRegisterHonesty() {
       const { threw, error } = await expectThrow(() => fedRegGet("0000-00000"));
       ok("fedreg getDocument 404 ⇒ throws not_found (genuine miss, distinct from an outage)",
         threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError));
+    },
+  );
+
+  // 6. fed_register_list_agencies (W3-9 golden fixtures — pins the correct-but-
+  //    unpinned reference tool). listAgencies memoizes by perPage, so _clearCache()
+  //    + a distinct perPage isolate each case.
+  const isAgencies = (u) => /federalregister\.gov\/api\/v1\/agencies\.json/.test(u);
+  // (a) 503 ⇒ THROWS upstream_unavailable — NEVER a fake empty {agencies:[]}.
+  _clearCache();
+  await withFetch(
+    (u) => (isAgencies(u) ? mockResponse({ status: 503 }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => fedRegListAgencies({ perPage: 91 }));
+      ok("fedreg [W3-9] list_agencies 503 ⇒ throws upstream_unavailable (NEVER a fake empty {agencies:[]})",
+        threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+    },
+  );
+  // (b) a 200 ARRAY ⇒ maps id/name/slug + a null parent_id PRESERVED as parentId:null
+  //     (a top-level agency), NOT coerced to 0; a real parent_id surfaced verbatim.
+  //     NON-VACUITY: mapping parentId via `a.parent_id ?? 0` ⇒ parentId 0 ⇒ RED.
+  _clearCache();
+  await withFetch(
+    (u) => (isAgencies(u) ? mockResponse({ status: 200, json: [
+      { id: 145, name: "Environmental Protection Agency", short_name: "EPA", slug: "environmental-protection-agency", description: "…", parent_id: null },
+      { id: 143, name: "Energy Department", short_name: "DOE", slug: "energy-department", description: "…", parent_id: 731 },
+    ] }) : failClosed()()),
+    async () => {
+      const r = await fedRegListAgencies({ perPage: 92 });
+      const a0 = r.agencies[0];
+      const a1 = r.agencies[1];
+      ok("fedreg [W3-9] list_agencies 200 ⇒ maps id/name/slug/shortName (index 0 = EPA/145/environmental-protection-agency)",
+        r.agencies.length === 2 && a0.id === 145 && a0.name === "Environmental Protection Agency" && a0.slug === "environmental-protection-agency" && a0.shortName === "EPA", JSON.stringify(a0));
+      ok("fedreg [W3-9] list_agencies ⇒ null parent_id PRESERVED as parentId:null (top-level, NOT coerced to 0); real parent_id 731 verbatim (map via `?? 0` ⇒ RED)",
+        a0.parentId === null && a1.parentId === 731, JSON.stringify([a0.parentId, a1.parentId]));
     },
   );
 }
@@ -5206,6 +5269,55 @@ async function testUsasPaginationTruthfulness() {
     ok("W3-8 referenceMeta (usas_autocomplete_recipient) ⇒ FULL page (returned 3 === limit 3, no upstream total) ⇒ truncated + hasMore TRUE BUT pagination.offset===null AND nextOffset===null (not offset-pageable; revert :230 ⇒ nextOffset 3 ⇒ RED)",
       rc.pagination.offset === null && rc.pagination.nextOffset === null && rc.pagination.hasMore === true && rc.truncated === true,
       JSON.stringify(rc.pagination));
+  });
+
+  // ── W3-9 golden fixtures: autocomplete OUTAGE + the P1 count-is-row-count pin
+  //    (both correct-but-previously-unpinned). Each autocomplete posts only
+  //    searchText+limit via postUsas (fetchWithRetry), so a DOWN service MUST THROW
+  //    upstream_unavailable — never a fake empty {recipients:[]}/{naics:[]}.
+
+  // usas_autocomplete_recipient (a) 503 ⇒ THROWS upstream_unavailable (never {recipients:[]}).
+  _clearCache();
+  await withFetch((u) => (/autocomplete\/recipient/.test(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => autocompleteRecipient({ searchText: "w3-9-recip-outage-uniqkey", limit: 5 }));
+    ok("W3-9 usas_autocomplete_recipient 503 ⇒ throws upstream_unavailable (NEVER a fake empty {recipients:[]})",
+      threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+  // (b) a 200 WITH results ⇒ _meta.totalAvailable === null: the endpoint's top-level
+  //     `count` equals the RETURNED row count (5 asked→count:5), NOT a grand total, so
+  //     it is NOT a usable total (P1 — never substitute page size for an unknown total);
+  //     AND pagination.nextOffset === null (W3-8 — reference lookups not offset-pageable).
+  //     NON-VACUITY: sourcing totalAvailable from `count` ⇒ 3 ⇒ RED; reverting
+  //     referenceMeta nextOffset ⇒ 3 ⇒ RED.
+  _clearCache();
+  await withFetch((u) => (/autocomplete\/recipient/.test(u)
+    ? mockResponse({ status: 200, json: { count: 3, results: [{ recipient_name: "ACME A", uei: "A1" }, { recipient_name: "ACME B", uei: "B2" }, { recipient_name: "ACME C", uei: "C3" }] } })
+    : failClosed()()), async () => {
+    const m = finalize(await autocompleteRecipient({ searchText: "w3-9-recip-count-uniqkey", limit: 5 }));
+    ok("W3-9 usas_autocomplete_recipient 200 ⇒ totalAvailable===null (upstream `count` is the returned-row count, NOT a grand total — P1; source it from `count` ⇒ totalAvailable 3 ⇒ RED)",
+      m.totalAvailable === null && m.returned === 3, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    ok("W3-9 usas_autocomplete_recipient 200 ⇒ pagination.nextOffset===null AND offset===null (W3-8; not offset-pageable — revert referenceMeta ⇒ nextOffset 3 ⇒ RED)",
+      m.pagination.nextOffset === null && m.pagination.offset === null, JSON.stringify(m.pagination));
+  });
+
+  // usas_autocomplete_naics (a) 503 ⇒ THROWS upstream_unavailable (it had a happy-path
+  //   test but NO outage test) — never a fake empty {naics:[]}.
+  _clearCache();
+  await withFetch((u) => (/autocomplete\/naics/.test(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => autocompleteNaics({ searchText: "w3-9-naics-outage-uniqkey", limit: 5 }));
+    ok("W3-9 usas_autocomplete_naics 503 ⇒ throws upstream_unavailable (NEVER a fake empty {naics:[]})",
+      threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+  // (b) a FULL page ⇒ nextOffset===null (W3-8) + totalAvailable null (naics returns only
+  //   {results}, no total). NON-VACUITY: revert referenceMeta nextOffset ⇒ nextOffset 3 ⇒ RED.
+  _clearCache();
+  await withFetch((u) => (/autocomplete\/naics/.test(u)
+    ? mockResponse({ status: 200, json: { results: [{ naics: "541511", naics_description: "Custom Computer Programming Services" }, { naics: "541512", naics_description: "Computer Systems Design Services" }, { naics: "541513", naics_description: "Computer Facilities Management Services" }] } })
+    : failClosed()()), async () => {
+    const res = await autocompleteNaics({ searchText: "w3-9-naics-full-uniqkey", limit: 3 });
+    const m = buildMeta(res.meta);
+    ok("W3-9 usas_autocomplete_naics FULL page (returned 3===limit 3) ⇒ nextOffset===null AND offset===null (W3-8, not offset-pageable; revert ⇒ nextOffset 3 ⇒ RED) + totalAvailable null + 3 codes mapped",
+      m.pagination.nextOffset === null && m.pagination.offset === null && m.totalAvailable === null && res.data.naics.length === 3 && res.data.naics[0].code === "541511", JSON.stringify({ pg: m.pagination, ta: m.totalAvailable }));
   });
 
   // S2. total known, page reaches total ⇒ complete.
@@ -6502,6 +6614,65 @@ async function testTreasuryHonesty() {
     ok("40g total-count as STRING (drift) ⇒ throws schema_drift (F1 number-typing guard, not a silent mis-parse)",
       threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
   });
+
+  // ── (h) treasury_avg_interest_rates golden fixtures (W3-9 hardening) — pins the
+  //    null-never-0 amt→Percent mapping, the EXACT total-count total, and the outage
+  //    THROW (all currently CORRECT but previously UNPINNED). OFFLINE, non-vacuous.
+  const isAvgInterest = (u) => /avg_interest_rates/.test(u);
+  // Latest mode makes TWO fetches: the latestRecordDate probe (fields=record_date ONLY)
+  // then the breakdown query (fields include avg_interest_rate_amt) — distinguish on that.
+  const isAvgMainQuery = (u) => isAvgInterest(u) && decodeURIComponent(u).includes("avg_interest_rate_amt");
+  const avgRow = (d, type, desc, amt) => ({ record_date: d, security_type_desc: type, security_desc: desc, avg_interest_rate_amt: amt });
+  const avgEnv = (rows, totalCount) => ({ data: rows, meta: { count: rows.length, "total-count": totalCount, "total-pages": Math.max(1, Math.ceil(totalCount / Math.max(1, rows.length || 1))) } });
+
+  // (a) 503 ⇒ THROWS upstream_unavailable — NEVER a fake empty {records:[]}. Range
+  //     mode (latest:false) is a single fetch; swallowing the outage into an empty
+  //     records[] turns this RED.
+  _clearCache();
+  await withFetch(() => mockResponse({ status: 503 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("treasury_avg_interest_rates", { latest: false, startDate: "2026-01-01", endDate: "2026-12-31" }, sam));
+    ok("40h avg_interest_rates 503 ⇒ throws upstream_unavailable (NOT a fake empty records[])",
+      threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
+  });
+
+  // (b) a row with avg_interest_rate_amt:"null" ⇒ avgInterestRatePercent === null
+  //     (NEVER 0 — the amt→Percent mapping through num() null-never-0); a sibling real
+  //     numeric-string row maps to the number (non-vacuity: mapper doesn't null all).
+  _clearCache();
+  await withFetch((u) => (isAvgInterest(u) ? mockResponse({ status: 200, json: avgEnv([
+    avgRow("2026-05-31", "Marketable", "Treasury Notes", "null"),
+    avgRow("2026-05-31", "Marketable", "Treasury Bills", "4.123"),
+  ], 2) }) : failClosed()()), async () => {
+    const r = await runTool("treasury_avg_interest_rates", { latest: false, startDate: "2026-05-01", endDate: "2026-05-31" }, sam);
+    const nullRow = r.data.records[0];
+    const realRow = r.data.records[1];
+    ok("40h avg_interest_rate_amt:'null' ⇒ avgInterestRatePercent === null (NEVER 0 — num() null-never-0 amt→Percent; map→0-for-absent ⇒ RED) + record_date/securityType/securityDescription mapped",
+      nullRow.avgInterestRatePercent === null && nullRow.recordDate === "2026-05-31" && nullRow.securityType === "Marketable" && nullRow.securityDescription === "Treasury Notes", JSON.stringify(nullRow));
+    ok("40h a real numeric amt '4.123' ⇒ avgInterestRatePercent 4.123 (non-vacuity: the mapper does not null every row)",
+      realRow.avgInterestRatePercent === 4.123, JSON.stringify(realRow));
+  });
+
+  // (c) happy latest-mode ⇒ maps record_date/securityType/avgInterestRatePercent +
+  //     totalAvailable === meta['total-count'] EXACT (14, the grand total), NOT the
+  //     2-row page length. The handler serves the latestRecordDate probe (max date)
+  //     then the breakdown query.
+  _clearCache();
+  await withFetch((u) => {
+    if (!isAvgInterest(u)) return failClosed()();
+    if (!isAvgMainQuery(u)) return mockResponse({ status: 200, json: avgEnv([{ record_date: "2026-06-30" }], 4200) }); // probe → most-recent record_date
+    return mockResponse({ status: 200, json: avgEnv([
+      avgRow("2026-06-30", "Marketable", "Treasury Notes", "3.21"),
+      avgRow("2026-06-30", "Non-marketable", "United States Savings Securities", "2.875"),
+    ], 14) });
+  }, async () => {
+    const r = await runTool("treasury_avg_interest_rates", { latest: true }, sam);
+    const m = buildMeta(r.meta);
+    const r0 = r.data.records[0];
+    ok("40h latest-mode maps record_date/securityType/avgInterestRatePercent of the pinned-latest breakdown (2026-06-30 Marketable 3.21 + Non-marketable 2.875)",
+      r0.recordDate === "2026-06-30" && r0.securityType === "Marketable" && r0.avgInterestRatePercent === 3.21 && r.data.records[1].avgInterestRatePercent === 2.875, JSON.stringify(r.data.records));
+    ok("40h latest-mode totalAvailable === meta['total-count'] 14 (EXACT grand total, NOT the 2-row page length — reading data.length ⇒ RED)",
+      m.totalAvailable === 14 && m.returned === 2, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+  });
 }
 
 // §41: SEC EDGAR source (ADR-0003) — TRUTHFULNESS under fault + the F1–F8 review
@@ -7200,6 +7371,70 @@ async function testEdgarCompanyConceptHonesty() {
     const url = calls.find((c) => isEdgarConcept(c.url))?.url;
     ok("41b2(S2) ifrs-full resolves + builds .../CIK0001639920/ifrs-full/Assets.json; EUR row unit-tagged EUR",
       r.data.found === true && r.data.rows[0].unit === "EUR" && new URL(url).pathname === "/api/xbrl/companyconcept/CIK0001639920/ifrs-full/Assets.json", JSON.stringify(url));
+  });
+}
+
+// §41b3: SEC EDGAR TRI-TOOL CROSS-CONSISTENCY (W3-9 hardening) — the SAME Revenues USD
+// (start,end,val) triple, served to all three XBRL tools (the companyfacts doc, the
+// companyconcept units.USD body, a frames CY row for one CIK), MUST map to the SAME
+// {start,end,val} in each. This is the cross-join anchor that pins the W3-5 companyFacts
+// `start` fix: the three mappers each read str(start)/str(end)/num(val), so a divergence
+// can only come from ONE mapper drifting. NON-VACUITY: mutating any single mapper's
+// str/num (companyFacts `start:str(p.start)`→null, frames `val:num(d.val)`→0, or
+// companyconcept `val:num(raw.val)`) desyncs the triple ⇒ RED. All OFFLINE, deterministic,
+// driven through the REAL runTool dispatch for all three tools.
+async function testEdgarTriToolCrossConsistency() {
+  section("41b3. SEC EDGAR tri-tool cross-consistency — companyfacts × companyconcept × xbrl_frames AGREE on the SAME Revenues USD {start,end,val} (W3-5 start-fix cross-join anchor, OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  // The three tools share CIK 320193; companyFacts memoizes the facts doc BY CIK and
+  // the prior §41f/§41f2 blocks populated that cache for 320193 — clear it so
+  // companyFacts fetches THIS fixture's doc, not a stale one (the 41f2 _clearCache doctrine).
+  _clearCache();
+
+  // The ONE canonical Revenues (duration) triple every tool must reproduce.
+  const TRIPLE = { start: "2022-10-01", end: "2023-09-30", val: 383285000000 };
+  const REV_ROW = { start: TRIPLE.start, end: TRIPLE.end, val: TRIPLE.val, accn: "0000320193-23-000106", fy: 2023, fp: "FY", form: "10-K", filed: "2023-11-03", frame: "CY2023" };
+
+  // companyfacts: facts.us-gaap.Revenues.units.USD = [the row].
+  const factsDoc = { cik: 320193, entityName: "Apple Inc.", facts: { "us-gaap": { Revenues: { label: "Revenues", units: { USD: [REV_ROW] } } } } };
+  // companyconcept: units.USD = [the row].
+  const conceptBody = { cik: 320193, taxonomy: "us-gaap", tag: "Revenues", label: "Revenues", description: "Revenues", entityName: "Apple Inc.", units: { USD: [REV_ROW] } };
+  // frames CY row: data = [the row + the frame's per-filer envelope fields]; pts===1.
+  const framesBody = { taxonomy: "us-gaap", tag: "Revenues", ccp: "CY2023", uom: "USD", label: "Revenues", description: "Revenues", pts: 1, data: [
+    { accn: REV_ROW.accn, cik: 320193, entityName: "Apple Inc.", loc: "US-CA", start: TRIPLE.start, end: TRIPLE.end, val: TRIPLE.val },
+  ] };
+
+  await withFetch((u) => {
+    if (isEdgarFacts(u)) return mockResponse({ status: 200, json: factsDoc });
+    if (isEdgarConcept(u)) return mockResponse({ status: 200, json: conceptBody });
+    if (isEdgarFrames(u)) return mockResponse({ status: 200, json: framesBody });
+    return failClosed()();
+  }, async () => {
+    // 1) companyfacts point.
+    const rFacts = await runTool("edgar_company_facts", { cikOrTicker: "320193", concepts: ["Revenues"], unit: "USD" }, sam);
+    const factsPoint = rFacts.data.concepts[0].points[0];
+    // 2) companyconcept canonical row (frame CY2023 ⇒ canonical:true).
+    const rConcept = await runTool("edgar_company_concept", { cikOrTicker: "320193", concept: "Revenues", unit: "USD", canonicalOnly: true }, sam);
+    const conceptRow = rConcept.data.rows[0];
+    // 3) frames row.
+    const rFrames = await runTool("edgar_xbrl_frames", { tag: "Revenues", period: "CY2023", unit: "USD" }, sam);
+    const frameRow = rFrames.data.rows[0];
+
+    const triple = (o) => ({ start: o.start, end: o.end, val: o.val });
+    // Per-tool sanity: each returned EXACTLY the one Revenues row (concept canonical).
+    ok("41b3 each tool returns the one Revenues row (facts 1 point, concept 1 canonical row, frames 1 row)",
+      rFacts.data.concepts[0].points.length === 1 && rConcept.data.rows.length === 1 && conceptRow.canonical === true && rFrames.data.rows.length === 1,
+      JSON.stringify({ facts: rFacts.data.concepts[0].points.length, concept: rConcept.data.rows.length, canon: conceptRow.canonical, frames: rFrames.data.rows.length }));
+    // The load-bearing cross-consistency: all three AGREE on {start,end,val}.
+    ok("41b3 CROSS-CONSISTENCY: companyfacts point === companyconcept canonical row === frames row on {start,end,val} (2022-10-01 / 2023-09-30 / 383285000000) — mutate ANY one mapper's str/num ⇒ the triple desyncs ⇒ RED",
+      JSON.stringify(triple(factsPoint)) === JSON.stringify(TRIPLE) &&
+      JSON.stringify(triple(conceptRow)) === JSON.stringify(TRIPLE) &&
+      JSON.stringify(triple(frameRow)) === JSON.stringify(TRIPLE),
+      JSON.stringify({ facts: triple(factsPoint), concept: triple(conceptRow), frame: triple(frameRow) }));
+    // Pin the W3-5 anchor explicitly: the DURATION `start` is a non-null ISO string in
+    // all three (never null/dropped) — the exact fact the W3-5 companyFacts fix restored.
+    ok("41b3 W3-5 anchor: the DURATION `start` (2022-10-01) is a non-null ISO string in ALL THREE mappers (companyFacts start-drop ⇒ facts start null ⇒ RED)",
+      factsPoint.start === "2022-10-01" && conceptRow.start === "2022-10-01" && frameRow.start === "2022-10-01", JSON.stringify([factsPoint.start, conceptRow.start, frameRow.start]));
   });
 }
 
@@ -15201,6 +15436,7 @@ async function main() {
   await testEdgarHonesty();
   await testEdgarFramesHonesty();
   await testEdgarCompanyConceptHonesty();
+  await testEdgarTriToolCrossConsistency();
   await testEdgarFtsFilters();
   await testEdgarShardsHonesty();
   await testEdgarFilingIndexHonesty();

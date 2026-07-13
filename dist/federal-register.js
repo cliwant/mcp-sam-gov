@@ -63,7 +63,23 @@ export async function searchDocuments(args) {
     // a SATURATION FLOOR ("≥10,000"), NOT an exact total — reporting it as exact
     // overstates precision and understates the true count.
     const FR_COUNT_CAP = 10000;
-    const rawCount = json.count ?? 0;
+    // COUNT-DRIFT GUARD (defense-in-depth). The FR API's `count` is the match total
+    // (a JSON NUMBER). A 200 body that LACKS `count` (or carries a non-number) is
+    // SCHEMA DRIFT — the old `?? 0` coerced it to 0, fabricating an honest-empty
+    // (totalAvailable:0, truncated:false) on a drift body (a latent P2 violation).
+    // THROW schema_drift instead — mirrors this file's assertInspectionEnvelope
+    // (C132) and the W3-2 cms/nppes/regulations siblings (which THROW on a non-number
+    // count). A GENUINE `count:0` (a real, finite number) is NOT drift — it flows
+    // through untouched as an honest empty below.
+    if (typeof json.count !== "number" || !Number.isFinite(json.count)) {
+        throw new ToolErrorCarrier({
+            kind: "schema_drift",
+            message: `Federal Register documents.json returned HTTP 200 without a numeric \`count\` (got ${JSON.stringify(json.count)}) — the match-total field is missing/malformed; refusing rather than fabricating totalAvailable:0 on a drift body.`,
+            retryable: false,
+            upstreamEndpoint: "federal-register:documents.json",
+        });
+    }
+    const rawCount = json.count;
     const countSaturated = rawCount >= FR_COUNT_CAP;
     const data = {
         totalRecords: rawCount,
