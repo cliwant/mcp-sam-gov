@@ -2131,6 +2131,64 @@ const RegulationsSearchInput = z.object({
         .default(25)
         .describe("Records per page (page[size]), 5..250, default 25."),
 });
+// ADR-0044 — Regulations.gov DOCKETS (the rulemaking/nonrulemaking CONTAINER +
+// its cross-source `rin` join key). Within-source depth on the SAME api.data.gov
+// keyed adapter. The docketType enum + ISO date formats fail LOCALLY as
+// invalid_input BEFORE any fetch; `limit` exposes a friendly count while the wire
+// page[size] floor of 5 is handled by the handler (a limit<5 is client-sliced).
+const RegulationsSearchDocketsInput = z.object({
+    searchTerm: z
+        .string()
+        .optional()
+        .describe("Full-text search term (filter[searchTerm]) over docket title/abstract, e.g. 'endangered species'."),
+    query: z
+        .string()
+        .optional()
+        .describe("Alias for `searchTerm` (either is accepted; both feed filter[searchTerm])."),
+    agencyId: z
+        .string()
+        .optional()
+        .describe("Filter by owning agency acronym (filter[agencyId]), e.g. 'EPA', 'BLM', 'TREAS-FINCEN'."),
+    docketType: z
+        .enum(datagov.REGULATIONS_DOCKET_TYPES)
+        .optional()
+        .describe("Filter by docket type: Rulemaking / Nonrulemaking (filter[docketType])."),
+    lastModifiedDateGe: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe("Docket last modified on/after this date, YYYY-MM-DD (filter[lastModifiedDate][ge])."),
+    lastModifiedDateLe: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe("Docket last modified on/before this date, YYYY-MM-DD (filter[lastModifiedDate][le])."),
+    sort: z
+        .enum(datagov.REGULATIONS_DOCKET_SORTS)
+        .optional()
+        .describe("Sort order (default '-lastModifiedDate'). Set: -lastModifiedDate/lastModifiedDate/title/-title (first two DEMO_KEY-verified)."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(250)
+        .default(20)
+        .describe("Requested rows, 1..250, default 20. NOTE: the API's page[size] floor is 5 — a limit<5 fetches page[size]=5 upstream and returns the first `limit` rows client-side (disclosed in _meta.notes); totalAvailable stays the EXACT server total."),
+    pageNumber: z
+        .number()
+        .int()
+        .min(1)
+        .max(40)
+        .default(1)
+        .describe("1-based page number, 1..40 (HARD cap — page[number] max is 40; the reachable window is 40×page[size] ≤ 10,000 records)."),
+});
+const RegulationsGetDocketInput = z.object({
+    docketId: z
+        .string()
+        .regex(/^[A-Za-z0-9_.-]+$/, "docketId may contain only letters, digits, '_', '.', '-' (no slashes/spaces/%).")
+        .refine((v) => /[A-Za-z0-9]/.test(v), "docketId must contain an alphanumeric")
+        .describe("The docket id — the ONLY path-segment value, charclass-validated (rejects '../', '%2F', spaces, pure-dot) — e.g. 'BLM-2026-0001', 'TREAS-FINCEN-2008-0008'. A bad id ⇒ invalid_input (0 fetch); a nonexistent id ⇒ not_found (never a fabricated docket)."),
+});
 const CongressSearchBillsInput = z.object({
     query: z
         .string()
@@ -3844,11 +3902,12 @@ const TOOLS = [
         inputSchema: EchoFacilityReportInput,
         handler: (input) => echo.facilityReport(input),
     }),
-    // ━━━ api.data.gov keyed trio — Regulations.gov + Congress.gov (4) ━━━ ADR-0007
+    // ━━━ api.data.gov keyed trio — Regulations.gov + Congress.gov (6) ━━━ ADR-0007/0044
     // The project's FIRST KEYED source. The key (DATA_GOV_API_KEY, else the public
     // DEMO_KEY) travels ONLY in the X-Api-Key header — never the URL/label/_meta.
     // keylessMode:false (genuinely keyed); a DEMO_KEY note discloses the shared
-    // ~10 req/hr ceiling + the free-key upgrade path.
+    // ~10 req/hr ceiling + the free-key upgrade path. ADR-0044 adds the two docket
+    // tools (the rulemaking CONTAINER + its `rin` cross-source join key).
     defineTool({
         name: "regulations_search_documents",
         description: "Search Regulations.gov rulemaking DOCUMENTS (rules, proposed rules, notices) — the flagship of the api.data.gov keyed source (JSON:API; DATA_GOV_API_KEY or the shared DEMO_KEY). Input `searchTerm`/`query`, filters (agencyId, docketId, documentType, withinCommentPeriod, postedDateGe/Le YYYY-MM-DD), `sort` (def -postedDate), `pageNumber` (1..40 HARD cap), `pageSize` (5..250, def 25). Returns { documents:[{ id, documentType, title, agencyId, docketId, postedDate, commentEndDate, openForComment, withinCommentPeriod, frDocNum, objectId }] } + honest _meta. HONESTY: totalAvailable = meta.totalElements (the EXACT real total, ~millions), NOT the capped totalPages; page[number] is hard-capped at 40 (10,000-record ceiling) — at the ceiling hasMore stays true but nextOffset is null + a note says how to reach the rest (narrow filters / seek by lastModifiedDate). Genuine-empty ⇒ complete:true/total:0; an outage/4xx THROWS (never a fake empty).",
@@ -3872,6 +3931,18 @@ const TOOLS = [
         description: "Fetch ONE Congress.gov bill by id via /v3/bill/{congress}/{billType}/{billNumber} (api.data.gov keyed; DATA_GOV_API_KEY or DEMO_KEY). Input `congress` (int), `billType` (enum), `billNumber` (int). Returns { bill:{…} } + single-record _meta. A nonexistent bill ⇒ not_found (never fabricated).",
         inputSchema: CongressGetBillInput,
         handler: (input) => datagov.getBill(input),
+    }),
+    defineTool({
+        name: "regulations_search_dockets",
+        description: "Search Regulations.gov DOCKETS — the rulemaking/nonrulemaking CONTAINER that groups every document + comment under one regulatory action (api.data.gov keyed; DATA_GOV_API_KEY or the shared DEMO_KEY). Input `searchTerm`/`query`, filters (agencyId, docketType Rulemaking/Nonrulemaking, lastModifiedDateGe/Le YYYY-MM-DD), `sort` (def -lastModifiedDate), `limit` (1..250, def 20), `pageNumber` (1..40 HARD cap). Returns { dockets:[{ docketId, title, agencyId, docketType, lastModifiedDate, objectId, id }] } + honest _meta. HONESTY: totalAvailable = meta.totalElements (the EXACT real total, ~277k), NOT the capped totalPages (a 40 sentinel — deriving a total from totalPages lies); page[number] is hard-capped at 40 (10,000-record ceiling) — at the ceiling hasMore stays true but nextOffset is null + a note on how to reach the rest (narrow filters). The API's page[size] floor is 5, so a limit<5 fetches 5 and returns the first `limit` rows client-side (disclosed; totalAvailable stays exact). NOTE: `rin` is NULL in list rows — call regulations_get_docket for a docket's rin. DEMO_KEY ~10 req/hr (every call, incl. errors, decrements) — set DATA_GOV_API_KEY for 1000/hr. Genuine-empty ⇒ complete:true/total:0; outage/4xx/429 THROWS (never a fake empty).",
+        inputSchema: RegulationsSearchDocketsInput,
+        handler: (input) => datagov.searchDockets(input),
+    }),
+    defineTool({
+        name: "regulations_get_docket",
+        description: "Fetch ONE Regulations.gov docket by id via /v4/dockets/{docketId} (api.data.gov keyed; DATA_GOV_API_KEY or DEMO_KEY) — the detail view where `rin` lives. Input `docketId` (e.g. 'BLM-2026-0001'; the ONLY path-segment value, charclass-validated — a bad id ⇒ invalid_input, 0 fetch). Returns { docket:{ docketId, title, agencyId, docketType, rin, dkAbstract, keywords, program, shortTitle, effectiveDate, modifyDate, objectId, id } } + single-record _meta (returned:1, totalAvailable:null, complete:true). HONESTY: `rin` (Regulatory Identifier Number) is the cross-source JOIN KEY to the Federal Register (fed_register_search_documents) and the Unified Agenda — null-when-absent (never '', e.g. many Nonrulemaking dockets have no assigned RIN), which is NOT a join failure. A nonexistent id ⇒ not_found (or schema_drift if the API returns a 200 error-envelope) — never a fabricated docket. DEMO_KEY ~10 req/hr; set DATA_GOV_API_KEY for 1000/hr.",
+        inputSchema: RegulationsGetDocketInput,
+        handler: (input) => datagov.getDocket(input),
     }),
     // ━━━ GovInfo (api.govinfo.gov) — the api.data.gov keyed trio's 3rd API (3) ━━━ ADR-0010
     // GPO-authoritative bulk publications (BILLS/PLAW/USCODE/CREC/CFR-FR editions/
