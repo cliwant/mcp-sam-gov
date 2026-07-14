@@ -170,6 +170,7 @@ import {
   USITC_HOSTS,
 } from "./dist/usitc.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
+import { searchDatasets as dgSearchDatasets, DATAGOV_CATALOG_HOST } from "./dist/datagov-catalog.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
@@ -11588,6 +11589,216 @@ async function testDatagovDocketsHonesty() {
   });
 }
 
+// §45C: data.gov v4 Catalog API (api.gsa.gov/technology/datagov/v4/search, ADR-0046,
+// resilience Phase 3 — the CKAN package_search retirement replacement, restoring
+// federal dataset DISCOVERY). NON-VACUOUS, OFFLINE, deterministic. Each assertion
+// pins a value + names the mutation that turns it RED (the ADR §Fault-fixture pillars):
+//   P1 (no total): after-cursor ⇒ nextCursor + totalAvailable:null (RED if =results.length);
+//                  no-after ⇒ nextCursor:null/hasMore:false/complete:true; offset/nextOffset null.
+//   P2: 429 ⇒ rate_limited THROW (never fake-empty); a genuine no-match (results:[], no after) ⇒ honest empty.
+//   P4: results non-array ⇒ schema_drift; a 200 non-JSON body ⇒ schema_drift via the ladder;
+//       a 429 THROUGH the ladder STAYS rate_limited (ToolErrorCarrier-first rung, not schema_drift).
+//   accessLevel surfaced VERBATIM (public/restricted public/non-public) + null-when-absent; scalars null-never-''.
+//   SSRF: cursor charclass reject (0 fetch); key-mode & source disclosure.
+//   K-test: DATA_GOV_API_KEY=SECRET rides ONLY the X-Api-Key header, NEVER the URL/_meta/output.
+const isDg = (u) => /api\.gsa\.gov\/technology\/datagov\/v4\/search/.test(u);
+// A realistic results[] row (verbatim shape from the captured 2026-07-14 v4 facts).
+const DG_ROW = {
+  slug: "epa-air-quality-system",
+  title: "EPA Air Quality System (AQS)",
+  organization: "epa-gov",
+  description: "Row-level description of the dataset.",
+  last_harvested_date: "2026-07-01T00:00:00Z",
+  keyword: ["air quality", "emissions", "", "null"],
+  theme: ["Environment"],
+  dcat: {
+    accessLevel: "public",
+    license: "https://creativecommons.org/publicdomain/zero/1.0/",
+    landingPage: "https://www.epa.gov/aqs",
+    modified: "2026-06-15",
+    identifier: "https://data.epa.gov/aqs",
+    description: "DCAT-US description (fallback).",
+    distribution: [
+      { title: "AQS CSV download", format: "CSV" },
+      { mediaType: "application/json" },
+      { title: "", format: "" }, // dropped (no title, no format)
+    ],
+  },
+};
+const dgRows = (n, row = DG_ROW) => Array.from({ length: n }, () => row);
+// v4 search body: { after?, results, sort } — NO total field (the P1 crux). after set ONLY when provided.
+const dgBody = (results, after) => {
+  const b = { results, sort: [] };
+  if (after !== undefined) b.after = after;
+  return b;
+};
+const dgMock = (body, status = 200) => (u) => (isDg(u) ? mockResponse({ status, json: body }) : failClosed()());
+const dgQuery = (calls) => new URL(calls.find((x) => isDg(x.url)).url).searchParams;
+const dgCall = (calls) => calls.find((x) => isDg(x.url));
+
+async function testDatagovCatalogHonesty() {
+  section("45C. data.gov v4 Catalog API (api.gsa.gov, ADR-0046 resilience Phase 3 — the CKAN package_search retirement replacement) — P1 no-total (totalAvailable:null, opaque `after` cursor) + P2 429/no-match honesty + P4 schema_drift ladder (ToolErrorCarrier-first) + accessLevel verbatim + SSRF cursor charclass + X-Api-Key K-test (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── P1 (a): after present ⇒ nextCursor = the token VERBATIM, hasMore:true,
+  //    totalAvailable:null (NEVER results.length), offset/nextOffset null, complete:false.
+  //    The load-bearing NON-VACUITY: mutate totalAvailable → results.length ⇒ 2 ≠ null ⇒ RED. ──
+  await withFetch(dgMock(dgBody(dgRows(2), "QUER+abc/123=")), async (calls) => {
+    const r = await runTool("datagov_search_datasets", { query: "air quality", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45C-P1a totalAvailable = NULL (the v4 API reports NO match count) with returned:2 — mutate the module to use results.length for the total ⇒ 2 ≠ null ⇒ RED (the forbidden total===page-size / fabricated-total class)",
+      m.totalAvailable === null && m.returned === 2, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    ok("45C-P1a opaque `after` cursor ⇒ nextCursor = the token VERBATIM ('QUER+abc/123='), hasMore:true, offset/nextOffset null (a numeric offset is meaningless for a cursor), complete:false — fabricate/derive/mutate the token, or compute hasMore from anything but after-presence ⇒ RED",
+      m.nextCursor === "QUER+abc/123=" && m.pagination.hasMore === true && m.pagination.offset === null && m.pagination.nextOffset === null && m.complete === false, JSON.stringify({ nc: m.nextCursor, pg: m.pagination, c: m.complete }));
+    const q = dgQuery(calls);
+    ok("45C-P1a query is MODULE-BUILT: _q, _size, _format=json (countTotal-free) — _q carries the query, _size the limit",
+      q.get("_q") === "air quality" && q.get("_size") === "2" && q.get("_format") === "json", JSON.stringify([...q.keys()]));
+    const d = r.data.datasets[0];
+    ok("45C-P1a dataset map: id=slug, organization, description (row-level), keywords/themes arrays (''/'null' dropped), distributions ({title,format}; mediaType→format; empty dropped), identifier",
+      d.id === "epa-air-quality-system" && d.organization === "epa-gov" && d.description === "Row-level description of the dataset." && JSON.stringify(d.keywords) === '["air quality","emissions"]' && JSON.stringify(d.themes) === '["Environment"]' && d.distributions.length === 2 && d.distributions[0].format === "CSV" && d.distributions[1].format === "application/json" && d.identifier === "https://data.epa.gov/aqs",
+      JSON.stringify({ id: d.id, kw: d.keywords, dist: d.distributions }));
+  });
+
+  // ── P1 (b): NO after ⇒ nextCursor:null, hasMore:false. ──
+  await withFetch(dgMock(dgBody(dgRows(3))), async () => {
+    const r = await runTool("datagov_search_datasets", { query: "wildfire" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45C-P1b terminal page (NO `after` field) ⇒ nextCursor:null, hasMore:false (after-absent IS the terminal — report after-absent as hasMore:true ⇒ RED); totalAvailable still null; the no-total note is present",
+      m.nextCursor === null && m.pagination.hasMore === false && m.totalAvailable === null && m.notes.some((n) => /does not report a total match count/.test(n)), JSON.stringify({ nc: m.nextCursor, pg: m.pagination }));
+  });
+
+  // ── P1 (b'): empty string after ⇒ treated as terminal (hasMore:false, nextCursor:null). ──
+  await withFetch(dgMock(dgBody(dgRows(1), "")), async () => {
+    const r = await runTool("datagov_search_datasets", { query: "x" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45C-P1b' an EMPTY-STRING `after` ⇒ terminal (hasMore:false, nextCursor:null) — the guard is after.length>0, so '' is NOT advertised as a continuation cursor",
+      m.nextCursor === null && m.pagination.hasMore === false, JSON.stringify({ nc: m.nextCursor, pg: m.pagination }));
+  });
+
+  // ── P2: a genuine no-match (results:[], no after) ⇒ honest empty (NOT thrown). ──
+  await withFetch(dgMock(dgBody([])), async () => {
+    const r = await runTool("datagov_search_datasets", { query: "zzzxqywvunobtainium99999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45C-P2 genuine no-match (results:[], NO after) ⇒ returned:0, datasets:[], nextCursor:null, hasMore:false, complete:true, totalAvailable:null (an honest empty, DISTINCT from a loud-fail — NOT thrown)",
+      r.data.datasets.length === 0 && m.returned === 0 && m.nextCursor === null && m.pagination.hasMore === false && m.complete === true && m.totalAvailable === null, JSON.stringify(m));
+  });
+  // ── P2: a 429 (DEMO_KEY ~10/hr — VERY likely) ⇒ rate_limited THROW, never fake-empty. ──
+  await withFetch(dgMock("Rate limit exceeded", 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("datagov_search_datasets", { query: "cancer" }, sam));
+    ok("45C-P2 HTTP 429 ⇒ rate_limited THROWS (the DEMO_KEY ~10/hr frontier — read as an empty result ⇒ RED, the forbidden swallowed-429 class)",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P2: a 5xx ⇒ upstream_unavailable THROW. ──
+  await withFetch(dgMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("datagov_search_datasets", { query: "cancer" }, sam));
+    ok("45C-P2 HTTP 503 ⇒ upstream_unavailable THROWS (a DOWN api.gsa.gov is NEVER a returned:0)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── P4: results non-array ⇒ schema_drift (never a fake empty, never a TypeError). ──
+  await withFetch(dgMock({ results: {}, sort: [] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("datagov_search_datasets", { query: "cancer" }, sam));
+    ok("45C-P4 results non-array ({}) ⇒ schema_drift (container-guarded — a TypeError must never mask drift as upstream_unavailable, never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(dgMock({ sort: [] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("datagov_search_datasets", { query: "cancer" }, sam));
+    ok("45C-P4 results ABSENT ⇒ schema_drift (never read as an empty result set)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4: a 200 non-JSON body ⇒ schema_drift VIA the catch-ladder (SyntaxError rung). ──
+  await withFetch((u) => (isDg(u) ? { ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>maintenance</html>" } : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("datagov_search_datasets", { query: "cancer" }, sam));
+    ok("45C-P4 a 200 NON-JSON body (HTML masquerade) ⇒ schema_drift via the catch-ladder (SyntaxError→driftError rung) — never a fake empty, never a bare unknown",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4 NON-VACUITY of the ladder ordering: a 429 THROUGH the ladder STAYS rate_limited
+  //    (the ToolErrorCarrier-first rung — a broader `catch ⇒ driftError` would REGRESS a
+  //    429 to schema_drift; this pins that the rate-limited taxonomy survives the ladder). ──
+  await withFetch(dgMock("Rate limit exceeded", 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("datagov_search_datasets", { query: "cancer", limit: 5 }, sam));
+    ok("45C-P4 ladder ordering: a 429 propagating THROUGH the catch-ladder STAYS rate_limited (ToolErrorCarrier rethrow FIRST) — reorder the ladder to catch-all→schema_drift ⇒ the 429 would regress to schema_drift ⇒ RED",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── accessLevel surfaced VERBATIM + null-when-absent + scalars null-never-''. ──
+  await withFetch(dgMock(dgBody([
+    { slug: "s1", title: "Restricted set", organization: "dod-gov", dcat: { accessLevel: "restricted public" } },
+    { slug: "s2", title: "Non-public set", organization: "", dcat: { accessLevel: "non-public", license: "" } },
+    { slug: "s3", title: "No-accessLevel set", dcat: {} },
+  ])), async () => {
+    const r = await runTool("datagov_search_datasets", { query: "x" }, sam);
+    const [a, b, c] = r.data.datasets;
+    ok("45C-access accessLevel surfaced VERBATIM ('restricted public'/'non-public') — the openness signal — and NULL when absent (a missing accessLevel is null, never '' / never a fabricated 'public') — coerce/normalize it ⇒ RED",
+      a.accessLevel === "restricted public" && b.accessLevel === "non-public" && c.accessLevel === null, JSON.stringify({ a: a.accessLevel, b: b.accessLevel, c: c.accessLevel }));
+    ok("45C-access scalars null-never-empty-string: organization '' ⇒ null, license '' ⇒ null, absent landingPage ⇒ null (a blank masquerading as a real (blank) value is the forbidden data-absence-as-value class)",
+      b.organization === null && b.license === null && c.landingPage === null && c.license === null, JSON.stringify({ org: b.organization, lic: b.license, lp: c.landingPage }));
+  });
+
+  // ── SSRF: the opaque cursor is charclass-validated BEFORE it rides `after=`
+  //    (a `../`/space/`%` ⇒ invalid_input, 0 fetch). Both Zod-path + direct-handler. ──
+  for (const bad of ["../etc/passwd", "has space", "tok%2e", "a/../b", "a b c"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("datagov_search_datasets", { query: "x", cursor: bad }, sam));
+      ok(`45C-ssrf cursor ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (charclass-validated ^[A-Za-z0-9+/=_-]$ BEFORE it rides after= — a ../ / space / % can never reach the query) — skip the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // Direct-handler re-guard (bypassing Zod): the in-handler charclass check still fires.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => dgSearchDatasets({ cursor: "bad token" }));
+    ok("45C-ssrf DIRECT handler call cursor:'bad token' (a Zod-BYPASSING call) ⇒ invalid_input, 0 fetch (the in-handler charclass re-guard closes it even when Zod is bypassed) — remove the handler re-guard ⇒ it reaches api.gsa.gov ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // A VALID base64/url-safe cursor round-trips (rides `after=` verbatim; host fixed).
+  await withFetch(dgMock(dgBody(dgRows(1), "NEXT2")), async (calls) => {
+    await runTool("datagov_search_datasets", { query: "x", cursor: "QUER+abc/123=" }, sam);
+    const q = dgQuery(calls);
+    const url = new URL(dgCall(calls).url);
+    ok("45C-ssrf a VALID base64/url-safe cursor rides `after=` VERBATIM to the FIXED host api.gsa.gov over https; redirect:'error' (fail-closed off-host 3xx); cursor also listed in filtersApplied",
+      q.get("after") === "QUER+abc/123=" && url.hostname === DATAGOV_CATALOG_HOST && url.protocol === "https:" && dgCall(calls).init.redirect === "error", JSON.stringify({ after: q.get("after"), host: url.hostname }));
+  });
+  // organization filter + an embedded &/= stays INSIDE the value (URLSearchParams contains the breakout).
+  await withFetch(dgMock(dgBody([])), async (calls) => {
+    await runTool("datagov_search_datasets", { query: "a&_size=9999&organization=dod", organization: "epa-gov", limit: 7 }, sam);
+    const q = dgQuery(calls);
+    ok("45C-ssrf an embedded &/= in `query` stays INSIDE _q (URLSearchParams contains the breakout) ⇒ _size stays 7, organization stays 'epa-gov' (no injected override)",
+      q.get("_q") === "a&_size=9999&organization=dod" && q.get("_size") === "7" && q.get("organization") === "epa-gov", JSON.stringify({ q: q.get("_q"), size: q.get("_size"), org: q.get("organization") }));
+  });
+
+  // ── K-test: the key rides ONLY the X-Api-Key header, NEVER the URL/_meta/output;
+  //    keylessMode:false; source names the MODE (DATA_GOV_API_KEY / DEMO_KEY), not the value. ──
+  await withEnvKey("SECRET-catalog-999", async () => {
+    await withFetch(dgMock(dgBody(dgRows(1), "T")), async (calls) => {
+      const r = await runTool("datagov_search_datasets", { query: "x" }, sam);
+      const m = buildMeta(r.meta);
+      const call = dgCall(calls);
+      const full = JSON.stringify({ data: r.data, meta: m });
+      ok("45C-K K-test: SECRET-catalog-999 is ABSENT from the serialized {data,_meta} AND the URL; sent ONLY in the X-Api-Key header; source names the (DATA_GOV_API_KEY) MODE; keylessMode:false — leak the value anywhere but the header ⇒ RED",
+        !full.includes("SECRET-catalog-999") && !call.url.includes("SECRET-catalog-999") && call.init.headers["X-Api-Key"] === "SECRET-catalog-999" && !/api_key=/i.test(call.url) && /\(DATA_GOV_API_KEY\)/.test(m.source) && m.keylessMode === false, JSON.stringify({ src: m.source, keyless: m.keylessMode }));
+    });
+  });
+  // DEMO_KEY mode (env unset): X-Api-Key: DEMO_KEY, keylessMode:false, the ~10/hr disclosure note.
+  await withEnvKey(undefined, async () => {
+    await withFetch(dgMock(dgBody(dgRows(1))), async (calls) => {
+      const r = await runTool("datagov_search_datasets", { query: "x" }, sam);
+      const m = buildMeta(r.meta);
+      ok("45C-K DEMO_KEY mode (env unset): X-Api-Key: DEMO_KEY sent, source names (DEMO_KEY), keylessMode:false, the ~10 requests/hour DEMO_KEY disclosure note present (set DATA_GOV_API_KEY upgrade path)",
+        dgCall(calls).init.headers["X-Api-Key"] === "DEMO_KEY" && /\(DEMO_KEY\)/.test(m.source) && m.keylessMode === false && m.notes.some((n) => /10 requests\/hour|DEMO_KEY/.test(n) && /DATA_GOV_API_KEY/.test(n)), JSON.stringify({ src: m.source, hdr: dgCall(calls).init.headers["X-Api-Key"] }));
+    });
+  });
+
+  // ── disclose-not-refuse: an unscoped call is NOT refused (returns page + narrow note). ──
+  await withFetch(dgMock(dgBody(dgRows(20), "T")), async () => {
+    const r = await runTool("datagov_search_datasets", {}, sam);
+    const m = buildMeta(r.meta);
+    ok("45C-scope disclose-not-refuse: an UNSCOPED call returns the first page (20) + empty filtersApplied + a narrow-your-criteria note (invalid_input is reserved for the cursor guard, not for scope)",
+      r.data.datasets.length === 20 && m.filtersApplied.length === 0 && m.notes.some((n) => /unscoped scan/.test(n)), JSON.stringify({ n: r.data.datasets.length, fa: m.filtersApplied }));
+  });
+}
+
 // §46: EPA ECHO REST source (ADR-0009) — the THIRD source on the R2 port. KEYLESS,
 // single fixed host (echodata.epa.gov) + three fixed service paths (the SSRF core).
 // Covers: SSRF (service-path allowlist + state enum + post-construction host
@@ -15675,6 +15886,7 @@ async function main() {
   await testFdicRatiosSodHonesty();
   await testDatagovHonesty();
   await testDatagovDocketsHonesty();
+  await testDatagovCatalogHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
   await testFpdsHonesty();
