@@ -1,28 +1,31 @@
 # @cliwant/mcp-sam-gov
 
 > **最も包括的なキーレス連邦データ MCP サーバー。**
-> SAM.gov + USAspending + Federal Register + eCFR + Grants.gov の 36 ツール。
+> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FEMA ほか **31 のキーレス連邦データソース、111 ツール。**
 > API キー不要、登録不要、サインアップ不要。Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI、すべての MCP ホスト対応。
 
 [English README](./README.md) · [한국어 README](./README.ko.md)
+
+> 本書は [英語 README](./README.md) のミラーです。最新・詳細(ホスト別設定、全ツールカタログの原文)は英語版を正とします。
 
 ---
 
 ## Claude (および他の AI エージェント) ができること
 
-| 領域 | 質問例 | ツール数 |
+| 領域 | 質問例 | ソース |
 |---|---|---|
-| 🔍 **アクティブな案件** | "今月締切の NAICS 541512 SAM.gov 案件を探して" | SAM.gov 5 |
-| 💰 **受注 + 受注者** | "VA における Booz Allen の昨年度受注" | USAspending 8 |
-| 📊 **集計分析** | "DoD の FY26 PSC カテゴリ Top 10" | USAspending 6 |
-| 🏛 **機関プロフィール** | "VA のミッション? FY25 予算内訳?" | USAspending 3 |
-| 🏢 **受注者プロフィール** | "Booz Allen の完全プロフィール + 別名" | USAspending 2 |
-| 🧠 **幻覚防止** | NAICS / 受注者 / 機関 autocomplete + 用語集 | USAspending 5 |
-| 📜 **Federal Register** | "今四半期の VA サイバーセキュリティ新規則?" | 3 |
-| ⚖️ **規制 (FAR/CFR)** | "SDVOSB 優先発注の FAR 条項" | eCFR 2 |
-| 🎓 **連邦助成金** | "過去 30 日のサイバーセキュリティ grant" | Grants.gov 2 |
+| 🔍 **案件 + ソリシテーション** | "今月締切の NAICS 541512 SAM.gov 案件 — SOW・担当者・添付まで" | SAM.gov, Grants.gov |
+| 💰 **spending・受注・競合** | "VA の Booz Allen 昨年度受注、DoD PSC カテゴリ Top 10" | USAspending, FPDS, GAO |
+| 🕵️ **パートナー・企業の検証** | "この企業をスクリーニング: OFAC 制裁・SAM 除外・単一監査指摘・銀行健全性・EPA 遵守" | OFAC, SAM, FAC, FDIC, EPA ECHO |
+| 📈 **財務開示 (SEC)** | "この上場企業の売上推移 + 最新 10-K" | SEC EDGAR |
+| ⚖️ **規制・立法** | "今四半期の VA サイバーセキュリティ規則? 進行中の Regulations.gov docket?" | Federal Register, Regulations.gov, eCFR, FAR/DFARS, Congress.gov, GovInfo |
+| 💲 **価格・労務・財政** | "GSA CALC 労務単価バンド、この郡の SCA 賃金決定、CPI エスカレーション" | GSA CALC, SAM WD, BLS, US Treasury |
+| 🏥 **医療・研究資金** | "このテーマの NIH/NSF grant、募集中の臨床試験、この医師への業界支払" | NIH RePORTER, NSF, ClinicalTrials, CMS, NPPES |
+| 🛡 **サイバー遵守** | "この CVE は CISA KEV 必須パッチ一覧にあるか?" | NVD, CISA KEV |
+| 🌐 **貿易・地理・災害** | "この品目の HTS 関税、この住所の Census tract、この州の FEMA 宣言" | USITC HTS, Census, FEMA, Socrata, CKAN |
+| 🎓 **grant・データセット** | "過去 30 日のサイバーセキュリティ grant、連邦オープンデータセット発見" | Grants.gov, data.gov |
 
-**合計 36 ツール。API キー 0。p50 257ms, p95 766ms** (実際の federal API ベンチマーク)。
+**31 のキーレス連邦データソース、合計 111 ツール。API キー 0。** (初期の 52 ツール版でおおよそ p50 ~0.25s / p95 ~0.8s を計測 — ソースや上流負荷で変動する近似値であり保証値ではありません。)
 
 ---
 
@@ -49,7 +52,7 @@ Claude Code (CLI) を既に使用している場合：
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP サーバー + Claude が 36 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
+MCP サーバー + Claude が 111 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
 
 ### 🔵 パス 3 — Codex / Cursor / Continue / Gemini 等の手動インストール
 
@@ -155,11 +158,40 @@ npm install --omit=dev
 
 無料キー: [sam.gov/SAM/pages/public/searchKeyData.jsf](https://sam.gov/SAM/pages/public/searchKeyData.jsf)。AI は知る必要なし — 自動切り替え。
 
+### `DATA_GOV_API_KEY` — api.data.gov / api.gsa.gov ファミリー
+
+一部のソース(Congress.gov, GovInfo, Regulations.gov, FAC, NPPES, data.gov v4 カタログ)は共有 **api.data.gov** ゲートウェイを利用します。既定では公開 `DEMO_KEY` で **キーレス**動作(低い共有時間あたりクォータ)。`DATA_GOV_API_KEY` を設定すると上限が大幅に緩和されます。[api.data.gov/signup](https://api.data.gov/signup) で即時無料発行(待ちなし)。1 つのキーがすべての api.data.gov / api.gsa.gov ソースで通用します。BLS ソースも任意の無料 `BLS_API_KEY` で日次クォータを引き上げられます。
+
 ---
 
-## 36 ツールカタログ
+## ツールカタログ (111)
 
-全ツール一覧 + 入力 schema は英語 README の collapsible セクション参照：https://github.com/cliwant/mcp-sam-gov#tool-catalog-36-tools
+ワークフロー別グループ。全ツールは既定でキーレス。全 per-tool 一覧と入力 schema・誠実性 caveat の原文は [英語 README のカタログセクション](./README.md#tool-catalog-111-tools) を正とします。
+
+- **案件 + ソリシテーション — SAM.gov + Grants.gov (10)**: `sam_search_opportunities` `sam_search_shaping` `sam_get_opportunity` `sam_fetch_description` `sam_fetch_attachment_text` `sam_attachment_url` `sam_lookup_organization` `sam_lookup_notice_fields` `grants_search` `grants_get_opportunity`
+- **spending・受注・競合 — USAspending + FPDS + GAO (29)**: `usas_search_awards` `usas_search_individual_awards` `usas_get_award_detail` `usas_search_awards_by_recipient` `usas_search_subawards` `usas_search_recompetes` `usas_search_expiring_contracts`(deprecated) `usas_analyze_incumbent` `usas_search_teaming_partners` `usas_spending_over_time` `usas_search_agency_spending` `usas_search_subagency_spending` `usas_search_psc_spending` `usas_search_cfda_spending` `usas_search_state_spending` `usas_search_federal_account_spending` `usas_search_recipients` `usas_get_recipient_profile` `usas_get_agency_profile` `usas_get_agency_awards_summary` `usas_get_agency_budget_function` `usas_list_toptier_agencies` `usas_lookup_agency` `usas_autocomplete_naics` `usas_autocomplete_recipient` `usas_naics_hierarchy` `usas_glossary` `fpds_search_awards` `gao_protest_lookup`
+- **パートナー・企業の検証 — OFAC · SAM · FAC · FDIC · EPA (14)**: `ofac_screen_entity` `sam_check_exclusions` `sam_integrity_lookup` `fac_search_audits` `fac_get_findings` `fdic_search_institutions` `fdic_institution_financials` `fdic_risk_ratios` `fdic_institution_history` `fdic_branch_deposits` `fdic_bank_failures` `fdic_industry_summary` `echo_search_facilities` `echo_facility_report`
+- **財務開示 — SEC EDGAR (8)**: `edgar_lookup_cik` `edgar_company_filings` `edgar_company_facts` `edgar_company_concept` `edgar_xbrl_frames` `edgar_full_text_search` `edgar_filing_index` `edgar_daily_filing_index`
+- **規制・立法 — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (18)**: `fed_register_search_documents` `fed_register_get_document` `fed_register_public_inspection` `fed_register_list_agencies` `regulations_search_dockets` `regulations_search_documents` `regulations_search_comments` `regulations_get_docket` `ecfr_search` `ecfr_list_titles` `far_clause_lookup` `far_search` `far_compliance_matrix` `congress_search_bills` `congress_get_bill` `govinfo_search_packages` `govinfo_get_package` `govinfo_list_collections`
+- **価格・労務・財政 — GSA CALC · SAM WD · BLS · Treasury (10)**: `gsa_benchmark_labor_rates` `sam_search_wage_determinations` `sam_get_wage_rates` `bls_timeseries` `bls_oews_wages` `bls_qcew` `treasury_debt_to_penny` `treasury_avg_interest_rates` `treasury_monthly_statement` `treasury_query_dataset`
+- **医療・研究資金 — NIH · NSF · ClinicalTrials · CMS · NPPES (9)**: `nih_reporter_search_projects` `nsf_search_awards` `nsf_get_award` `clinicaltrials_search_studies` `clinicaltrials_get_study` `clinicaltrials_facet_counts` `cms_search_datasets` `cms_query_dataset` `nppes_lookup_provider`
+- **サイバー遵守 — NVD + CISA KEV (2)**: `cve_lookup` `cisa_kev_lookup`
+- **貿易・関税 — USITC (1)**: `hts_lookup`
+- **地理・災害・州/市オープンデータ — Census · FEMA · Socrata · CKAN (8)**: `census_geocode_address` `census_geographies_by_coordinates` `fema_disaster_declarations` `fema_search_public_assistance` `socrata_discover_datasets` `socrata_query` `ckan_discover_datasets` `ckan_query`
+- **データセット発見 — data.gov (1)**: `datagov_search_datasets`
+- **中小企業 — SBA (1)**: `sba_size_standard`
+
+---
+
+## 信頼性 & オフラインスナップショット
+
+本サーバーの原則は一つ: **もっともらしい捏造より誠実な失敗。** 以下はすべて公開データの*可用性*に関するものであり、いかなるアクセス制御も回避しません。
+
+- **キーレス優先、ダウンしたソースは例外を*投げる*。** すべてのソースが API キーなしで動作します。ソースが rate-limit・ブロック・ダウンした場合、ツールは**型付きエラー**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)を返し、行を捏造したりダウンしたサービスを「結果 0」/「見つからない」と報告しません。本物の空結果と障害は常に区別できます。
+- **任意のオフラインスナップショット (既定 off)。** ゆっくり変わる参照データ(toptier 機関一覧、上位 NAICS ツリー、USAspending 用語集、SBA 規模基準、最新 Treasury「Debt to the Penny」)に限り、**スナップショットミラー**を自前でホストできます。ライブソースが自身の egress から到達不能なときだけ読む静的な公開データキャッシュです。スナップショットが提供されるとき**決してライブとして表示しません** — 応答に `_meta.dataPath: "snapshot"` + `asOf` タイムスタンプが付き、`complete` は強制的に off。未設定なら純ライブ(今日と byte-identical)。
+- **有効化:** `SAMGOV_SNAPSHOT_BASE_URL` をスナップショットのホスティング base URL に設定。未設定(既定) = ライブ専用。
+- **スナップショットのビルド:** ブロックされていないクリーンな egress(ノート PC / 自宅 / クリーンな CI)から `node scripts/build-snapshots.mjs` を実行。**ソース別到達性を自己診断**し、reachability 表 + `manifest.json` を出力します。部分カバレッジでは到達できるソースのみ更新し、残りは **last-good ファイルをそのまま残します**(古くても誠実、決して空にしない)。*すべての*ソースが到達不能なときのみ非ゼロ終了(egress 全面ブロックの合図 — よりクリーンな egress で再実行)。
+- **誠実な境界。** これは**公開データの可用性のみ**を扱います。ビルダーは公開・再配布可能(public-domain / CC0)なデータのみ取り込み、リーダーは `accessLevel: "public"` でない封筒の提供を拒否します。**rate limit を尊重**(429 を回避しない)し、**プロキシ・IP ローテーション・認証/ペイウォール/CAPTCHA 回避なし**、off-host リダイレクトも拒否します。ブロックされた場合の誠実な解決策は、よりクリーンな egress からビルドすることであり、ブロックの回避ではありません。
 
 ---
 
