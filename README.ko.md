@@ -1,28 +1,31 @@
 # @cliwant/mcp-sam-gov
 
 > **가장 포괄적인 keyless 연방 데이터 MCP 서버.**
-> SAM.gov + USAspending + Federal Register + eCFR + Grants.gov 36개 도구.
+> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FEMA 외 **31개 keyless 연방 데이터 소스, 111개 도구.**
 > API 키 / 등록 / 가입 불필요. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
 
 [English README](./README.md) · [日本語 README](./README.ja.md)
+
+> 이 문서는 [영문 README](./README.md) 의 미러입니다. 최신·상세 내용(호스트별 설정, 전체 도구 카탈로그 원문)은 영문을 기준으로 하세요.
 
 ---
 
 ## Claude (와 다른 AI 에이전트) 가 할 수 있는 것
 
-| 영역 | 질문 예시 | 도구 수 |
+| 영역 | 질문 예시 | 소스 |
 |---|---|---|
-| 🔍 **활성 입찰** | "이번 달 마감되는 NAICS 541512 SAM.gov 입찰 찾아줘" | SAM.gov 5개 |
-| 💰 **수주 + 수주자** | "VA 에서 Booz Allen 의 작년 수주 내역" | USAspending 8개 |
-| 📊 **집계 분석** | "DoD 의 FY26 PSC 카테고리 top 10" | USAspending 6개 |
-| 🏛 **기관 프로필** | "VA 의 미션? FY25 예산 분해?" | USAspending 3개 |
-| 🏢 **수주자 프로필** | "Booz Allen 전체 프로필 + 별칭" | USAspending 2개 |
-| 🧠 **환각 방지** | NAICS / 수주자 / 기관 autocomplete + 용어집 | USAspending 5개 |
-| 📜 **Federal Register** | "이번 분기 VA 사이버보안 새 규정?" | 3개 |
-| ⚖️ **규정 (FAR/CFR)** | "SDVOSB 가산점 관련 FAR 조항 찾아줘" | eCFR 2개 |
-| 🎓 **연방 보조금** | "최근 30일 사이버보안 grant" | Grants.gov 2개 |
+| 🔍 **입찰 + 솔리시테이션** | "이번 달 마감되는 NAICS 541512 SAM.gov 입찰 — SOW·담당자·첨부까지" | SAM.gov, Grants.gov |
+| 💰 **spending·수주·경쟁** | "VA 에서 Booz Allen 작년 수주, DoD PSC 카테고리 top 10" | USAspending, FPDS, GAO |
+| 🕵️ **파트너·기업 검증** | "이 업체 스크리닝: OFAC 제재·SAM 배제·단일감사 지적·은행 건전성·EPA 준수" | OFAC, SAM, FAC, FDIC, EPA ECHO |
+| 📈 **재무 공시 (SEC)** | "이 상장사 매출 추이 + 최신 10-K" | SEC EDGAR |
+| ⚖️ **규정·입법** | "이번 분기 VA 사이버보안 규정? 열려있는 Regulations.gov docket?" | Federal Register, Regulations.gov, eCFR, FAR/DFARS, Congress.gov, GovInfo |
+| 💲 **가격·노무·재정** | "GSA CALC 노무 단가 밴드, 이 카운티 SCA 임금결정, CPI 에스컬레이션" | GSA CALC, SAM WD, BLS, US Treasury |
+| 🏥 **보건·연구 자금** | "이 주제 NIH/NSF grant, 모집 중 임상시험, 이 의사에 대한 산업계 지급" | NIH RePORTER, NSF, ClinicalTrials, CMS, NPPES |
+| 🛡 **사이버 준수** | "이 CVE 가 CISA KEV 필수 패치 목록에 있나?" | NVD, CISA KEV |
+| 🌐 **무역·지리·재난** | "이 품목 HTS 관세, 이 주소 Census tract, 이 주의 FEMA 선포" | USITC HTS, Census, FEMA, Socrata, CKAN |
+| 🎓 **grant·데이터셋** | "최근 30일 사이버보안 grant, 연방 오픈 데이터셋 발굴" | Grants.gov, data.gov |
 
-**총 36개 도구. API 키 0개. p50 257ms, p95 766ms** (실제 federal API 벤치마크).
+**31개 keyless 연방 데이터 소스, 총 111개 도구. API 키 0개.** (초기 52-도구 빌드 기준 대략 p50 ~0.25s / p95 ~0.8s 측정 — 소스·업스트림 부하에 따라 변동하는 근사치이며 보장값이 아님.)
 
 ---
 
@@ -49,7 +52,7 @@ PowerShell, npm 등 필요 없음.
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP 서버 + Claude 가 36개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
+MCP 서버 + Claude 가 111개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
 
 ### 🔵 경로 3 — Codex / Cursor / Continue / Gemini 등 수동 설치
 
@@ -155,11 +158,40 @@ npm install --omit=dev
 
 무료 키: [sam.gov/SAM/pages/public/searchKeyData.jsf](https://sam.gov/SAM/pages/public/searchKeyData.jsf). AI 는 알 필요 없음 — 자동 우회.
 
+### `DATA_GOV_API_KEY` — api.data.gov / api.gsa.gov 계열
+
+일부 소스(Congress.gov, GovInfo, Regulations.gov, FAC, NPPES, data.gov v4 카탈로그)는 공유 **api.data.gov** 게이트웨이를 사용합니다. 기본은 공개 `DEMO_KEY` 로 **keyless** 동작(낮은 공유 시간당 쿼터). `DATA_GOV_API_KEY` 를 설정하면 한도가 크게 상향됩니다. [api.data.gov/signup](https://api.data.gov/signup) 에서 즉시 무료 발급(대기 없음). 하나의 키가 모든 api.data.gov / api.gsa.gov 소스에 통용됩니다. BLS 소스도 선택적 무료 `BLS_API_KEY` 로 일일 쿼터를 올릴 수 있습니다.
+
 ---
 
-## 36개 도구 카탈로그
+## 도구 카탈로그 (111개)
 
-전체 도구 목록 + 입력 schema 는 영문 README 의 collapsible 섹션 참조: https://github.com/cliwant/mcp-sam-gov#tool-catalog-36-tools
+워크플로별 그룹. 모든 도구는 기본 keyless. 전체 per-tool 목록과 입력 schema·정직성 caveat 원문은 [영문 README 의 카탈로그 섹션](./README.md#tool-catalog-111-tools)을 기준으로 하세요.
+
+- **입찰 + 솔리시테이션 — SAM.gov + Grants.gov (10)**: `sam_search_opportunities` `sam_search_shaping` `sam_get_opportunity` `sam_fetch_description` `sam_fetch_attachment_text` `sam_attachment_url` `sam_lookup_organization` `sam_lookup_notice_fields` `grants_search` `grants_get_opportunity`
+- **spending·수주·경쟁 — USAspending + FPDS + GAO (29)**: `usas_search_awards` `usas_search_individual_awards` `usas_get_award_detail` `usas_search_awards_by_recipient` `usas_search_subawards` `usas_search_recompetes` `usas_search_expiring_contracts`(deprecated) `usas_analyze_incumbent` `usas_search_teaming_partners` `usas_spending_over_time` `usas_search_agency_spending` `usas_search_subagency_spending` `usas_search_psc_spending` `usas_search_cfda_spending` `usas_search_state_spending` `usas_search_federal_account_spending` `usas_search_recipients` `usas_get_recipient_profile` `usas_get_agency_profile` `usas_get_agency_awards_summary` `usas_get_agency_budget_function` `usas_list_toptier_agencies` `usas_lookup_agency` `usas_autocomplete_naics` `usas_autocomplete_recipient` `usas_naics_hierarchy` `usas_glossary` `fpds_search_awards` `gao_protest_lookup`
+- **파트너·기업 검증 — OFAC · SAM · FAC · FDIC · EPA (14)**: `ofac_screen_entity` `sam_check_exclusions` `sam_integrity_lookup` `fac_search_audits` `fac_get_findings` `fdic_search_institutions` `fdic_institution_financials` `fdic_risk_ratios` `fdic_institution_history` `fdic_branch_deposits` `fdic_bank_failures` `fdic_industry_summary` `echo_search_facilities` `echo_facility_report`
+- **재무 공시 — SEC EDGAR (8)**: `edgar_lookup_cik` `edgar_company_filings` `edgar_company_facts` `edgar_company_concept` `edgar_xbrl_frames` `edgar_full_text_search` `edgar_filing_index` `edgar_daily_filing_index`
+- **규정·입법 — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (18)**: `fed_register_search_documents` `fed_register_get_document` `fed_register_public_inspection` `fed_register_list_agencies` `regulations_search_dockets` `regulations_search_documents` `regulations_search_comments` `regulations_get_docket` `ecfr_search` `ecfr_list_titles` `far_clause_lookup` `far_search` `far_compliance_matrix` `congress_search_bills` `congress_get_bill` `govinfo_search_packages` `govinfo_get_package` `govinfo_list_collections`
+- **가격·노무·재정 — GSA CALC · SAM WD · BLS · Treasury (10)**: `gsa_benchmark_labor_rates` `sam_search_wage_determinations` `sam_get_wage_rates` `bls_timeseries` `bls_oews_wages` `bls_qcew` `treasury_debt_to_penny` `treasury_avg_interest_rates` `treasury_monthly_statement` `treasury_query_dataset`
+- **보건·연구 자금 — NIH · NSF · ClinicalTrials · CMS · NPPES (9)**: `nih_reporter_search_projects` `nsf_search_awards` `nsf_get_award` `clinicaltrials_search_studies` `clinicaltrials_get_study` `clinicaltrials_facet_counts` `cms_search_datasets` `cms_query_dataset` `nppes_lookup_provider`
+- **사이버 준수 — NVD + CISA KEV (2)**: `cve_lookup` `cisa_kev_lookup`
+- **무역·관세 — USITC (1)**: `hts_lookup`
+- **지리·재난·주/시 오픈데이터 — Census · FEMA · Socrata · CKAN (8)**: `census_geocode_address` `census_geographies_by_coordinates` `fema_disaster_declarations` `fema_search_public_assistance` `socrata_discover_datasets` `socrata_query` `ckan_discover_datasets` `ckan_query`
+- **데이터셋 발굴 — data.gov (1)**: `datagov_search_datasets`
+- **소상공인 — SBA (1)**: `sba_size_standard`
+
+---
+
+## 신뢰성 & 오프라인 스냅샷
+
+이 서버의 원칙은 하나입니다: **그럴듯한 조작보다 정직한 실패.** 아래는 모두 공개 데이터의 *가용성*에 관한 것이며, 어떤 접근 통제도 우회하지 않습니다.
+
+- **Keyless 우선, 다운된 소스는 예외를 *던진다*.** 모든 소스가 API 키 없이 동작합니다. 소스가 rate-limit·차단·다운되면 도구는 **타입이 지정된 에러**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)를 반환하며, 행을 지어내거나 다운된 서비스를 "결과 0" / "없음"으로 보고하지 않습니다. 진짜 빈 결과와 장애는 항상 구별됩니다.
+- **선택적 오프라인 스냅샷 (기본 off).** 느리게 바뀌는 참조 데이터(toptier 기관 목록, 상위 NAICS 트리, USAspending 용어집, SBA 규모 기준, 최신 Treasury "Debt to the Penny")에 한해, **스냅샷 미러**를 직접 호스팅할 수 있습니다. 라이브 소스가 자신의 egress 에서 도달 불가일 때만 읽는 정적 공개-데이터 캐시입니다. 스냅샷이 서빙되면 **절대 라이브처럼 표시하지 않습니다** — 응답에 `_meta.dataPath: "snapshot"` + `asOf` 타임스탬프가 붙고 `complete` 는 강제로 꺼집니다. 미설정 시 순수 라이브(오늘과 byte-identical).
+- **켜기:** `SAMGOV_SNAPSHOT_BASE_URL` 을 스냅샷 호스팅 base URL 로 설정. 미설정(기본) = 라이브 전용.
+- **스냅샷 빌드:** 차단되지 않은 깨끗한 egress(노트북 / 집 / 깨끗한 CI)에서 `node scripts/build-snapshots.mjs` 실행. **소스별 도달성을 자가 진단**하고 reachability 표 + `manifest.json` 을 출력합니다. 부분 커버리지에서는 도달 가능한 소스만 갱신하고 나머지는 **last-good 파일을 그대로 둡니다**(오래됐어도 정직, 절대 비우지 않음). *모든* 소스가 도달 불가일 때만 non-zero 종료(egress 전면 차단 신호 — 더 깨끗한 egress 에서 재실행).
+- **정직한 경계.** 이것은 **공개-데이터 가용성만** 다룹니다. 빌더는 공개·재배포 가능(public-domain / CC0) 데이터만 수집하고, 리더는 `accessLevel: "public"` 이 아닌 봉투는 서빙을 거부합니다. **rate limit 을 준수**(429 를 우회하지 않음)하고 **프록시·IP 로테이션·인증/페이월/CAPTCHA 우회 없음**, off-host 리다이렉트도 거부합니다. 차단되면 정직한 해법은 더 깨끗한 egress 에서 빌드하는 것이지 차단을 회피하는 것이 아닙니다.
 
 ---
 

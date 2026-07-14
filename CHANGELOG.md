@@ -5,7 +5,82 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] (unpublished — version stays 0.7.0)
+
+The largest expansion since 0.7.0: **52 → 111 tools across 31 keyless federal
+data sources**, a codebase-wide honesty dogfooding pass, and a resilience
+initiative for public-data availability. Not yet published to npm; version
+unchanged pending maintainer sign-off.
+
+### Added — new source families (+59 tools)
+
+- **Entity & partner vetting:**
+  - **OFAC** — `ofac_screen_entity` keyless denied-party / sanctions screening.
+  - **SEC EDGAR (depth)** — 8 tools: CIK lookup, company filings, curated XBRL
+    company facts, single-concept time-series, cross-filer XBRL frames, full-text
+    search (2001–present), and the quarterly + daily cross-filer filing indexes.
+  - **FDIC (depth)** — 7 tools: institution directory search, quarterly
+    financials, risk ratios, structural-change history, branch deposits, historical
+    bank failures, and industry/state banking aggregates.
+  - **FAC** — Federal Audit Clearinghouse Single Audit search + findings drill-down.
+  - **EPA ECHO** — regulated-facility compliance/enforcement search + Detailed
+    Facility Report.
+- **Health & research funding:** **NPPES** provider lookup; **CMS Open Payments**
+  (Sunshine Act) dataset discovery + datastore query; **ClinicalTrials.gov**
+  search / get / whole-registry facet counts; **NIH RePORTER** projects; **NSF**
+  award search + detail.
+- **Cyber compliance:** **NVD** `cve_lookup` + **CISA KEV** `cisa_kev_lookup`
+  (binding BOD 22-01 remediation due-dates).
+- **Trade & tariffs:** **USITC HTS** `hts_lookup` (import classification + duty rates).
+- **Regulatory & legislative (depth):** **Federal Register public-inspection**
+  desk; **Regulations.gov** dockets / documents / comments / get-docket;
+  **Congress.gov** bill search + detail; **GovInfo** (GPO-authoritative) package
+  search / get / collections; **eCFR** already present.
+- **Pricing, labor & fiscal:** **BLS** timeseries (CPI/ECI/PPI), OEWS wages, and
+  QCEW county×NAICS market size; **US Treasury** Fiscal Data — Debt to the Penny,
+  average interest rates, Monthly Treasury Statement, and a query escape-hatch.
+- **Spending & competition (depth):** **FPDS-NG** award-action search; plus new
+  USAspending recompete / incumbent / teaming-partner analysis tools.
+- **Geo, disaster & open data:** **US Census** geocoder (address + coordinates →
+  geographies); **FEMA** disaster declarations + Public Assistance; **Socrata**
+  and **CKAN** dataset discovery + query for state/city open data.
+- **Dataset discovery:** **data.gov v4** catalog search (`datagov_search_datasets`,
+  the CKAN-deprecation replacement for federal dataset discovery).
+
+### Added — reliability & resilience initiative
+
+- **Multi-path DataSource layer** (`src/datasource.ts`) — resilient-fetch
+  primitives (`getJsonWithProvenance`, a path chain, a single-path circuit
+  breaker, conditional-GET) that land **INERT**: with no snapshot configured every
+  source stays single-path (live-only) and output is byte-identical to before.
+- **P5 provenance / freshness** — a non-live response discloses its access path
+  via `_meta.dataPath: "snapshot"` + `asOf`; `provenanceMeta` returns `{}` for a
+  live body so the `_meta` stays byte-identical when nothing is degraded. A
+  snapshot is **never** presented as live.
+- **Snapshot mirror** (`src/snapshot.ts`) — an optional, env-gated
+  (`SAMGOV_SNAPSHOT_BASE_URL`, unset by default) reader that serves a static,
+  public-only cache of slow-changing reference data (agency list, NAICS tree,
+  glossary, SBA size standards, Treasury debt) **only** when the live source is
+  unreachable. Public-only gate: refuses any envelope not `accessLevel: "public"`;
+  honors 429s, no proxies, no off-host redirects.
+- **Self-diagnosing snapshot builder** (`scripts/build-snapshots.mjs`) — run from
+  any clean egress; probes per-source reachability, prints a reachability table +
+  `manifest.json`, refreshes only what it can reach and leaves last-good files for
+  the rest, and exits non-zero only when the egress is fully blocked. Not scheduled,
+  not in CI — on-demand.
+
+### Changed — honesty (Wave-3 dogfooding)
+
+- A **23-fix truthfulness pass** across the tool surface (from dogfooding all
+  tools): tightened `totalAvailable` / `complete` / disclosure-suppression
+  semantics so a rate-limited or down source, a confidentiality-withheld value, or
+  an unsupported filter is disclosed honestly rather than read as a real zero or a
+  silent drop.
+- **Repo hardening:** branch protection enabled on the default branch.
+
+### Note
+Additive: existing tool outputs and the `_meta` shape are unchanged. Version +
+changelog remain in-repo; **not published to npm** — awaiting maintainer sign-off.
 
 ## [0.7.0] — 2026-07-04 (FAR compliance, document reading, keyless backbone & a truthfulness sweep)
 
@@ -296,7 +371,7 @@ long-standing keyless-filter bug that returned unfiltered results is fixed.
 - Stdio JSON-RPC transport.
 - Claude Code plugin scaffold.
 
-[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/cliwant/mcp-sam-gov/compare/v0.7.0...HEAD
 [0.6.0]: https://github.com/cliwant/mcp-sam-gov/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cliwant/mcp-sam-gov/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cliwant/mcp-sam-gov/compare/v0.3.0...v0.4.0
