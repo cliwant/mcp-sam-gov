@@ -53,13 +53,13 @@ export const KEY_REGISTRY: readonly KeyRegistryEntry[] = [
   {
     envVar: "DATA_GOV_API_KEY",
     sources: [
-      "api.data.gov gateway: Regulations.gov, FAC, NPPES, CMS, data.gov catalog, GSA per-diem",
+      "api.data.gov keyed sources: Regulations.gov, Congress.gov, GovInfo, Federal Audit Clearinghouse (FAC), data.gov catalog",
     ],
     required: false,
     signupUrl: "https://api.data.gov/signup/",
     unlocks:
-      "higher rate limits on all api.data.gov sources (lifts the shared DEMO_KEY ~30/hr cap to ~1,000/hr)",
-    note: "Keyless by default via the public DEMO_KEY; a key only raises the shared hourly quota.",
+      "higher rate limits on the api.data.gov keyed sources (lifts the shared DEMO_KEY ~30/hr cap to ~1,000/hr)",
+    note: "Keyless by default via the public DEMO_KEY; a key only raises the shared hourly quota. (NPPES, CMS, and Federal Register are keyless on their own hosts and do NOT use this key.)",
   },
   {
     envVar: "SAM_GOV_API_KEY",
