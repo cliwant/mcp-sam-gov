@@ -37,6 +37,7 @@ import * as socrata from "./socrata.js";
 import * as ckan from "./ckan.js";
 import * as echo from "./echo.js";
 import * as datagov from "./datagov.js";
+import * as datagovCatalog from "./datagov-catalog.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
@@ -2249,6 +2250,39 @@ const CongressGetBillInput = z.object({
         .min(1)
         .describe("Bill number, e.g. 3076 (for H.R.3076)."),
 });
+// ─── data.gov v4 Catalog API (api.gsa.gov — CKAN-retirement replacement) ─
+// ADR-0046, resilience Phase 3. Federal dataset DISCOVERY. Same DATA_GOV_API_KEY/
+// DEMO_KEY/X-Api-Key discipline as the datagov trio (shared datagovKey.ts seam),
+// but a DIFFERENT host (api.gsa.gov). The opaque `cursor` is charclass-validated
+// here AND re-guarded in the handler (a bad token ⇒ invalid_input, 0 fetch).
+const DatagovSearchDatasetsInput = z.object({
+    query: z
+        .string()
+        .min(1)
+        .max(500)
+        .optional()
+        .describe("Free-text search over the dataset catalog (→ _q), e.g. 'wildfire'. LIVE-CONFIRMED to narrow."),
+    organization: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Publisher organization SLUG filter (→ organization), e.g. 'epa-gov', 'noaa-gov'. An org catalog lists that agency's published datasets."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe("Datasets per page (→ _size), 1..100, default 20."),
+    cursor: z
+        .string()
+        .min(1)
+        .max(4096)
+        .regex(datagovCatalog.DATAGOV_CURSOR_RE)
+        .optional()
+        .describe("Opaque continuation cursor (→ after) — pass back the _meta.nextCursor from the previous page. Pagination is a cursor, NOT a numeric offset (offset/nextOffset are null); nextCursor:null means the last page. A bad token (spaces/'../'/'%') ⇒ invalid_input pre-fetch."),
+});
 // ─── GovInfo (api.govinfo.gov — the api.data.gov keyed trio's 3rd API) ─
 // ADR-0010. Same DATA_GOV_API_KEY/DEMO_KEY/X-Api-Key discipline as the datagov
 // trio (shared datagovKey.ts seam). `collection` is grammar-checked here AND
@@ -3952,6 +3986,20 @@ export const TOOLS = [
         description: "Fetch ONE Regulations.gov docket by id via /v4/dockets/{docketId} (api.data.gov keyed; DATA_GOV_API_KEY or DEMO_KEY) — the detail view where `rin` lives. Input `docketId` (e.g. 'BLM-2026-0001'; the ONLY path-segment value, charclass-validated — a bad id ⇒ invalid_input, 0 fetch). Returns { docket:{ docketId, title, agencyId, docketType, rin, dkAbstract, keywords, program, shortTitle, effectiveDate, modifyDate, objectId, id } } + single-record _meta (returned:1, totalAvailable:null, complete:true). HONESTY: `rin` (Regulatory Identifier Number) is the cross-source JOIN KEY to the Federal Register (fed_register_search_documents) and the Unified Agenda — null-when-absent (never '', e.g. many Nonrulemaking dockets have no assigned RIN), which is NOT a join failure. A nonexistent id ⇒ not_found (or schema_drift if the API returns a 200 error-envelope) — never a fabricated docket. DEMO_KEY ~10 req/hr; set DATA_GOV_API_KEY for 1000/hr.",
         inputSchema: RegulationsGetDocketInput,
         handler: (input) => datagov.getDocket(input),
+    }),
+    // ━━━ data.gov v4 Catalog API (api.gsa.gov) — CKAN-retirement replacement (1) ━━━ ADR-0046
+    // Resilience Phase 3. data.gov RETIRED the CKAN package_search endpoint in 2025;
+    // the v4 Catalog API restores federal open-dataset DISCOVERY as a NEW keyed source.
+    // A DIFFERENT host (api.gsa.gov) than the datagov trio, but the SAME api.data.gov
+    // key (X-Api-Key header, shared datagovKey.ts seam) — keylessMode:false. The v4
+    // API reports NO match count ⇒ totalAvailable is NULL (P1, never results.length);
+    // pagination is an OPAQUE `after` cursor (nextCursor passed back verbatim); the
+    // dcat.accessLevel openness field is surfaced verbatim.
+    defineTool({
+        name: "datagov_search_datasets",
+        description: "Search the data.gov DATASET CATALOG for federal open datasets across all publishing agencies (api.gsa.gov v4 Catalog API, keyed — DATA_GOV_API_KEY or the shared DEMO_KEY) — the replacement for the CKAN package_search endpoint data.gov RETIRED in 2025, restoring federal dataset DISCOVERY. Input `query` (→_q free-text), `organization` (publisher slug, e.g. 'epa-gov'), `limit` (1..100, def 20 → _size), `cursor` (the OPAQUE continuation → after). Returns { datasets:[{ id (slug), title, organization, description, accessLevel, license, landingPage, modified, lastHarvested, keywords, themes, distributions:[{ title, format }], identifier }] } + honest _meta. HONESTY: the v4 API reports NO total match count ⇒ totalAvailable is NULL (NEVER results.length, NEVER a fabricated total — a note discloses it); pagination is an OPAQUE cursor (offset/nextOffset null; nextCursor = the `after` token passed back verbatim as `cursor`; nextCursor:null / hasMore:false = last page). accessLevel is surfaced VERBATIM (public / restricted public / non-public) — the openness signal, null-when-absent (this tool DISCOVERS datasets; it does not ingest distributions). A genuine no-match (results:[], no cursor) ⇒ complete:true/returned:0; a 429 (DEMO_KEY ~10 req/hr, hit quickly) ⇒ rate_limited THROWS; a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / a non-array results ⇒ schema_drift (never a fake empty). DEMO_KEY ~10 req/hr shared ceiling — set DATA_GOV_API_KEY (free at api.data.gov/signup) for 1000/hr. The key rides ONLY in the X-Api-Key header (never the URL/_meta).",
+        inputSchema: DatagovSearchDatasetsInput,
+        handler: (input) => datagovCatalog.searchDatasets(input),
     }),
     // ━━━ GovInfo (api.govinfo.gov) — the api.data.gov keyed trio's 3rd API (3) ━━━ ADR-0010
     // GPO-authoritative bulk publications (BILLS/PLAW/USCODE/CREC/CFR-FR editions/
