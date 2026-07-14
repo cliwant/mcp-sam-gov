@@ -36,6 +36,12 @@
  */
 export type UsasFilters = Record<string, unknown>;
 import { type MetaBundle } from "./meta.js";
+/**
+ * Test-only: reset the resilience circuit breaker between OFFLINE fixtures (the
+ * breaker is module-level process state; a fresh instance isolates cases).
+ * Mirrors treasury.ts's `_resetTreasuryBreakerForTests`.
+ */
+export declare function _resetUsasBreakerForTests(): void;
 export declare function searchAwards(args: {
     agency?: string;
     naics?: string;
