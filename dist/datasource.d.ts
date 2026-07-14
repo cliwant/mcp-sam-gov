@@ -174,4 +174,140 @@ export declare function driftError(label: string, message: string): ToolErrorCar
  *     real result/error still propagates on the promise returned to THAT caller.
  */
 export declare function throughGate<T>(key: string, minIntervalMs: number, fn: () => Promise<T>): Promise<T>;
+/**
+ * Provenance the resilience layer stamps on a served body (ADR-0045 B2). Mirrors
+ * `getJsonWithHeaders`'s `{ body, contentRange }` provenance shape. `dataPath` is
+ * a FRESHNESS enum (M2), not a topology label: an independent host serving live
+ * data is still `"live"`. `asOf` (ISO-8601 UTC, m3) is present ONLY for a
+ * non-live (`snapshot`) body.
+ */
+export type Provenance = {
+    dataPath: "live" | "snapshot";
+    asOf?: string;
+};
+/**
+ * getJsonWithProvenance — the resilient-fetch primitive (ADR-0045 B2). Runs the
+ * IDENTICAL init-assembly + `fetchWithRetry(url, init, opts.label)` envelope as
+ * `getJson`, and returns `{ body, provenance }`. The port ALWAYS returns an
+ * explicit provenance (honesty-B2 + regression-M1 reconciled): in Phase 1 there
+ * is a SINGLE live path, so `provenance` is ALWAYS `{ dataPath:"live" }` (asOf
+ * omitted). Because the port always stamps provenance, a mirror/snapshot body can
+ * never be structurally mislabelled as live (a future adapter that forgets to
+ * thread it still cannot claim live).
+ *
+ * ★INERT: NO adapter calls this yet — it is dormant infrastructure. It is a
+ * SEPARATE primitive (getJson is untouched, byte-identical), exported for the
+ * path-chain and for direct unit tests.
+ */
+export declare function getJsonWithProvenance<T = unknown>(url: string, opts: GetJsonOptions): Promise<{
+    body: T;
+    provenance: Provenance;
+}>;
+export declare class CircuitBreaker {
+    /** Bounded: only hosts in the fixed set are ever tracked (m3-regression). */
+    private readonly hosts;
+    private readonly states;
+    /** Injectable clock for deterministic offline unit tests (defaults Date.now). */
+    private readonly now;
+    constructor(hosts: Iterable<string>, now?: () => number);
+    private state;
+    /**
+     * Should the live attempt to `host` be SKIPPED right now? True only while the
+     * breaker is OPEN and its 30s window has not elapsed AND a half-open probe is
+     * already in flight. When the window elapses, exactly ONE caller is admitted as
+     * the half-open probe (this returns false and marks probeInFlight) and the rest
+     * are skipped until that probe reports back. An untracked host is NEVER skipped.
+     */
+    shouldSkip(host: string): boolean;
+    /** Record a live success — closes the breaker and resets the failure run. */
+    onSuccess(host: string): void;
+    /**
+     * Record a live failure. A NON-hard error (429 / honor-Retry-After / 404 /
+     * timeout / abort) is IGNORED — it neither counts toward the trip threshold nor
+     * resets the run (it is orthogonal to host health). A HARD error increments the
+     * consecutive count and trips the breaker at the threshold; if it arrives during
+     * a half-open probe it immediately re-opens the window.
+     */
+    onFailure(host: string, err: unknown): void;
+    /** Test-only introspection: is the breaker currently OPEN for `host`? */
+    isOpen(host: string): boolean;
+}
+/**
+ * Is a thrown error a HARD failure for circuit-breaker purposes (ADR-0045 B1)?
+ * HARD = a 5xx or a network `TypeError` ONLY. Everything else is excluded:
+ *   • isHonorRetryAfter (429 / 5xx+Retry-After) — B1-policy, honor the wait;
+ *   • Timeout/Abort — classified upstream_unavailable with retryable:FALSE
+ *     (errors.ts:169), so the `retryable===true` gate excludes it;
+ *   • 404 (not_found), 4xx (invalid_input), schema_drift, unknown — not outages.
+ * A 5xx-after-retries and a network TypeError both surface from `fetchWithRetry`
+ * as a `ToolErrorCarrier` upstream_unavailable with retryable:TRUE — the one
+ * signature this admits. A raw (unclassified) `TypeError` also counts, for
+ * robustness when the breaker is driven directly.
+ */
+export declare function isHardFailure(err: unknown): boolean;
+/**
+ * One ordered access path for a source. `provenance` is what a SUCCESS on this
+ * path yields (live for the primary API, snapshot for a self-hosted mirror);
+ * `host` is the HOST-ONLY key the breaker tracks (must be in the breaker's fixed
+ * set); `run` performs the fetch+parse (typically a `getJson*` call).
+ */
+export type ResiliencePath<T> = {
+    provenance: Provenance;
+    host: string;
+    run: () => Promise<T>;
+};
+/**
+ * Try an ordered array of access paths, returning the first success + its
+ * provenance (ADR-0045 §"경로 체인").
+ *
+ * ★A SINGLE-entry chain is a PURE PASSTHROUGH — no breaker consult, no try/catch
+ * overhead, byte-for-byte today's behavior (B1-regression). The breaker is
+ * consulted ONLY for a ≥2-path chain, so the 27 single-path sources are never
+ * affected.
+ *
+ * For a multi-path chain: an open breaker on a path's host SKIPS that path (no
+ * live attempt); a HARD failure records against the breaker and falls through to
+ * the next path; a SUCCESS records success and returns. An isHonorRetryAfter
+ * error (429 / 5xx+Retry-After) is RE-THROWN IMMEDIATELY (B1-policy) — it never
+ * counts against the breaker and never falls through to a mirror/snapshot; we
+ * wait and fail honestly. If every path is exhausted, the last error is thrown
+ * (honest failure — never a fabricated empty).
+ */
+export declare function throughPathChain<T>(paths: ReadonlyArray<ResiliencePath<T>>, breaker?: CircuitBreaker): Promise<{
+    body: T;
+    provenance: Provenance;
+}>;
+/**
+ * A validator-bearing cache entry for `getJsonConditional`. `body` is the last
+ * parsed payload; `etag`/`lastModified` are the validators to replay; `asOf`
+ * (ISO-8601 UTC) is when the body was fetched.
+ */
+export type CacheEntry<T> = {
+    body: T;
+    etag?: string;
+    lastModified?: string;
+    asOf?: string;
+};
+/**
+ * getJsonConditional — a SEPARATE conditional-GET primitive (ADR-0045
+ * B2-regression). It is DELIBERATELY NOT folded into the shared getJson/getText:
+ * adding If-None-Match/If-Modified-Since to getJson would make a 304 (a bodiless
+ * response) hit `r.json()` → a SyntaxError that fdic:340 / fedreg:588 reclassify
+ * as schema_drift — a hard regression. So this primitive:
+ *   (a) sends validators ONLY when it holds a cache entry;
+ *   (b) intercepts a 304 BEFORE the r.ok gate and returns the cached body;
+ *   (c) NEVER calls `r.json()` on a 304.
+ * It keeps getJson's retry taxonomy for the non-304 case (5xx/429/network retry;
+ * timeout/abort fast-fail), via a local loop that mirrors fetchWithRetry but adds
+ * the 304 short-circuit ABOVE the r.ok gate.
+ *
+ * ★INERT: no adapter uses it yet. A cache MISS (no entry) behaves like getJson
+ * (no validators sent, 200 parsed) — so an adapter that later adopts it without a
+ * warm cache is envelope-identical.
+ */
+export declare function getJsonConditional<T = unknown>(url: string, opts: GetJsonOptions, cache?: CacheEntry<T>): Promise<{
+    body: T;
+    notModified: boolean;
+    provenance: Provenance;
+}>;
 //# sourceMappingURL=datasource.d.ts.map
