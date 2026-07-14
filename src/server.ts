@@ -55,6 +55,7 @@ import * as nsf from "./nsf.js";
 import * as clinicaltrials from "./clinicaltrials.js";
 import * as census from "./census.js";
 import * as censusEconomic from "./census-economic.js";
+import * as fred from "./fred.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
@@ -3421,6 +3422,68 @@ const CensusBusinessPatternsInput = z.object({
     ),
 });
 
+// ─── FRED (Federal Reserve Economic Data) — the SECOND key-required source ──
+// ADR-0048. Macro context (GDP/CPI/rates/unemployment/PPI). REQUIRES a free
+// FRED_API_KEY; without it both tools throw an honest config error (the other 112
+// tools stay keyless). The key rides &api_key= ONLY. Missing observations ('.') → null.
+const FredSearchSeriesInput = z.object({
+  query: z
+    .string()
+    .min(1)
+    .describe(
+      "The FRED search_text — free-text terms to discover economic series, e.g. 'unemployment rate', 'CPI', 'GDP', '10-year treasury'. Required.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(1000)
+    .optional()
+    .describe("Max series to return (default 25, max 1000). Offset-paginated."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+});
+
+const FredSeriesObservationsInput = z.object({
+  seriesId: z
+    .string()
+    .regex(/^[A-Za-z0-9._-]+$/)
+    .describe(
+      "A FRED series id, e.g. 'GDP', 'CPIAUCSL' (CPI), 'UNRATE' (unemployment), 'DGS10' (10-yr Treasury), 'PPIACO' (PPI). Discover ids with fred_search_series. Validated ^[A-Za-z0-9._-]+$. Required.",
+    ),
+  startDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .describe("Earliest observation date (YYYY-MM-DD). Maps to FRED observation_start."),
+  endDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .describe("Latest observation date (YYYY-MM-DD). Maps to FRED observation_end."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100000)
+    .optional()
+    .describe("Max observations to return (default 100, max 100000). Offset-paginated."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+  sortOrder: z
+    .enum(["asc", "desc"])
+    .optional()
+    .describe("Observation date order: 'asc' (oldest first, FRED default) or 'desc' (newest first)."),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -4896,6 +4959,25 @@ export const TOOLS: ToolDef[] = [
       "Market sizing by NAICS × geography — establishments, employment, and annual payroll from the US Census County Business Patterns (CBP) API (api.census.gov/data/{year}/cbp). ★REQUIRES a free CENSUS_API_KEY: the Census Data API has NO keyless tier, so without the key this tool THROWS an honest config error (get one at https://api.census.gov/data/key_signup.html; this is the ONLY key-required tool — the other 111 are keyless). Input: optional `naics` (2–6 digit NAICS-2017, e.g. '5415'; omit to aggregate all sectors), `geography` (us|state|county, default us; county REQUIRES `state`), `state` (2-digit FIPS, e.g. '06'), `year` (default '2022'), optional `limit` (client-side top-N; CBP has no server pagination). Returns { rows:[{ name, geoId, naicsCode, naicsLabel, establishments, employees, annualPayrollUsd, state }] } + honest _meta. HONESTY: establishments/employees are integer counts and annualPayrollUsd is annual US dollars (×1000 from the source's $1,000-unit PAYANN); Census SUPPRESSED/withheld cells (large negative sentinels like -999999999) map to null — NEVER a negative number and NEVER 0 (a genuine 0 stays 0); geoId/naicsCode/state are STRINGS (leading zeros survive). CBP returns the COMPLETE geography set for the filter (no pagination) ⇒ totalAvailable = the row count, complete:true. A missing/invalid key ⇒ invalid_input (a 302 to the Missing-Key page); a header-only body ⇒ honest empty (returned:0); a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The key rides ONLY in the &key= query param — never logged or echoed.",
     inputSchema: CensusBusinessPatternsInput,
     handler: (input) => censusEconomic.businessPatterns(input),
+  }),
+  // ━━━ FRED (Federal Reserve Economic Data) — macro context (2) ━━━ ADR-0048
+  // ★The server's SECOND KEY-REQUIRED source: FRED has NO keyless tier, so WITHOUT
+  // a FRED_API_KEY both tools throw an honest invalid_input config error (the other
+  // 112 tools stay keyless). GDP/CPI/rates/unemployment/PPI — the macro backdrop for
+  // bid escalation / market timing. A missing observation ('.') maps to null (never 0).
+  defineTool({
+    name: "fred_search_series",
+    description:
+      "Discover FRED economic series (GDP, CPI, interest rates, unemployment, PPI…) by free-text search (FRED /fred/series/search; api.stlouisfed.org). ★REQUIRES a free FRED_API_KEY: FRED has NO keyless tier, so without the key this tool THROWS an honest config error (get one at https://fred.stlouisfed.org/docs/api/api_key.html; this and fred_series_observations are the key-required macro tools — the other 112 tools stay keyless). Input: `query` (the search_text, required, e.g. 'unemployment rate' / 'CPI' / '10-year treasury'), optional `limit` (default 25, max 1000), `offset`. Returns { series:[{ id, title, frequency, frequencyShort, units, seasonalAdjustment, observationStart, observationEnd, lastUpdated, popularity }] } + honest _meta. Feed `id` into fred_series_observations for the time series. HONESTY: totalAvailable is FRED's EXACT reported `count` (offset pagination via hasMore/nextOffset — never fabricated); every scalar is null-never-empty-string; a genuine no-match ⇒ honest empty (returned:0); a 400 (bad/missing key) ⇒ invalid_input CARRYING FRED's error_message; a 5xx ⇒ THROWS; a 200 non-JSON / non-array `seriess` ⇒ schema_drift. The key rides ONLY in the &api_key= query param — never logged or echoed.",
+    inputSchema: FredSearchSeriesInput,
+    handler: (input) => fred.searchSeries(input),
+  }),
+  defineTool({
+    name: "fred_series_observations",
+    description:
+      "Fetch a FRED series' time series of date/value observations (FRED /fred/series/observations; api.stlouisfed.org). ★REQUIRES a free FRED_API_KEY (FRED has NO keyless tier — without it this tool THROWS an honest config error; get one at https://fred.stlouisfed.org/docs/api/api_key.html). Input: `seriesId` (required, e.g. 'GDP', 'CPIAUCSL', 'UNRATE', 'DGS10', 'PPIACO'; discover with fred_search_series), optional `startDate`/`endDate` (YYYY-MM-DD), `limit` (default 100, max 100000), `offset`, `sortOrder` (asc|desc). Returns { observations:[{ date, value }] } + honest _meta. ★MISSING-VALUE HONESTY (the crux): FRED encodes a missing observation as the literal '.', which maps to value:null (missing) — NEVER 0; a genuine reported 0 is preserved as 0. HONESTY: totalAvailable is FRED's EXACT `count` (offset pagination via hasMore/nextOffset — never fabricated); a 400 (bad seriesId / missing key) ⇒ invalid_input CARRYING FRED's error_message (never a fake empty); a genuine empty ⇒ honest empty; a 5xx ⇒ THROWS; a 200 non-JSON / non-array `observations` ⇒ schema_drift. seriesId is charclass-validated (^[A-Za-z0-9._-]+$) and dates are YYYY-MM-DD; the key rides ONLY in the &api_key= query param.",
+    inputSchema: FredSeriesObservationsInput,
+    handler: (input) => fred.seriesObservations(input),
   }),
 ];
 
