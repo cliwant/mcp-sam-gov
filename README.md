@@ -340,6 +340,34 @@ A handful of sources ride the shared **api.data.gov** gateway — Congress.gov, 
 
 Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/signup). The same key is accepted across all api.data.gov / api.gsa.gov sources. Like the SAM key, it is sent only on the wire (never logged); unset simply means `DEMO_KEY`. BLS sources similarly accept an optional free `BLS_API_KEY` to lift their daily quota.
 
+### Keys & higher limits — the full inventory
+
+**Most tools are keyless.** Only **Census** (`census_business_patterns`) and **FRED** (`fred_search_series`, `fred_series_observations`) *require* a key — those sources have no keyless tier, so the tool throws without one. The other five keys are *optional*: they only raise a rate limit or unlock a single filter. **Every key below is free.**
+
+| Env var | Required? | What it unlocks | Free signup |
+|---|---|---|---|
+| `CENSUS_API_KEY` | **Required** | `census_business_patterns` (no keyless tier — throws without it) | [api.census.gov/data/key_signup.html](https://api.census.gov/data/key_signup.html) |
+| `FRED_API_KEY` | **Required** | the 2 FRED tools (no keyless tier — throw without it) | [fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html) |
+| `DATA_GOV_API_KEY` | Optional | higher limits on all api.data.gov sources (Regulations.gov, FAC, NPPES, CMS, data.gov catalog, GSA per-diem) — lifts the shared `DEMO_KEY` cap | [api.data.gov/signup](https://api.data.gov/signup/) |
+| `SAM_GOV_API_KEY` | Optional | authenticated SAM.gov v2 search + the organization-name filter | [open.gsa.gov/api/get-opportunities-public-api](https://open.gsa.gov/api/get-opportunities-public-api/) |
+| `BLS_API_KEY` | Optional | the BLS v2 tier (~500 queries/day vs keyless ~25/day) | [data.bls.gov/registrationEngine](https://data.bls.gov/registrationEngine/) |
+| `NVD_API_KEY` | Optional | a higher NVD rate limit (`cve_lookup`) | [nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key) |
+| `SOCRATA_APP_TOKEN` | Optional | higher Socrata throttling limits | [evergreen.data.socrata.com/signup](https://evergreen.data.socrata.com/signup) |
+
+**Two ways to set any key** — pick one:
+
+1. **Host env block** — the `"env": { … }` object shown in the examples above.
+2. **A `.env` file** in the server's working directory — configure your keys **once**:
+   ```
+   CENSUS_API_KEY=your-key-here
+   FRED_API_KEY=your-key-here
+   # optional — raise limits / unlock filters
+   SAM_GOV_API_KEY=your-key-here
+   ```
+   The server auto-loads `.env` at startup. A real environment variable always wins over `.env` (standard precedence), and `.env` is git-ignored so your keys never get committed.
+
+**Ask the server which keys it needs.** The keyless **`api_key_status`** tool lists every key, whether it's required or optional, the free signup URL + what it unlocks, and whether each is **currently configured** (a boolean — the key value is never shown). Creating the account at the signup URL is your one manual step; the server automates *discovery* (`api_key_status`) and *configuration* (`.env`). To confirm a key actually works, call that source's own tool.
+
 ---
 
 ## Tool catalog (111 tools)
