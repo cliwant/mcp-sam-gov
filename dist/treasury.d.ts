@@ -38,6 +38,12 @@
 import { num } from "./coerce.js";
 import { type MetaBundle } from "./meta.js";
 export { num };
+/**
+ * Test-only: reset the resilience circuit breaker between OFFLINE fixtures (the
+ * breaker is module-level process state; a fresh instance isolates cases). Not a
+ * runtime API — mirrors the `_reset*Cache` convention in the fault suite.
+ */
+export declare function _resetTreasuryBreakerForTests(): void;
 export declare const TREASURY_DATASETS: {
     readonly debt_to_penny: "/v2/accounting/od/debt_to_penny";
     readonly avg_interest_rates: "/v2/accounting/od/avg_interest_rates";
