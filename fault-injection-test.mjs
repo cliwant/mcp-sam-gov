@@ -175,6 +175,7 @@ import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordin
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
 import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num as cbpNum } from "./dist/census-economic.js";
+import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
@@ -15961,6 +15962,205 @@ async function testCensusBusinessPatterns() {
   ok("55b-parity census-economic.num === coerce.num (one shared audited impl — NO local num/str; the sentinel→null map is a WRAPPER around it, not a fork)", cbpNum === coerceNum, "cbp num diverged from coerce.num");
 }
 
+// §55c: FRED (Federal Reserve Economic Data, api.stlouisfed.org/fred, ADR-0048,
+// Wave-4 source #2 — the MACRO-context lane AND the server's SECOND key-required
+// source). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names
+// the mutation that turns it RED:
+//   [KEY]      unset FRED_API_KEY ⇒ invalid_input THROW pre-fetch (0 fetch), message
+//              names FRED_API_KEY; with the key set it fetches (proves the throw is
+//              CONDITIONAL) ⇒ remove the pre-fetch guard ⇒ RED.
+//   [K-test]   the built URL carries api_key=<value>; the key is ABSENT from the
+//              serialized {data,_meta} ⇒ leak the key into _meta/source/notes ⇒ RED.
+//   [P1]       count:500 + 25 rows @ offset 0 ⇒ totalAvailable:500, hasMore:true,
+//              nextOffset:25 ⇒ totalAvailable = returned ⇒ RED.
+//   [missing]  observation value "." ⇒ null (NOT 0, NOT "."); "3.14"⇒3.14; "0"⇒0.
+//   [P2]       400 {error_message} ⇒ invalid_input carrying it; empty ⇒ honest empty;
+//              503 ⇒ upstream_unavailable; non-array/non-JSON 200 ⇒ schema_drift.
+//   [SSRF]     seriesId '../x' / date '20x' / sortOrder 'sideways' ⇒ invalid_input, 0 fetch.
+const FRED_SEARCH_RE = /api\.stlouisfed\.org\/fred\/series\/search/;
+const FRED_OBS_RE = /api\.stlouisfed\.org\/fred\/series\/observations/;
+const isFredSearch = (u) => FRED_SEARCH_RE.test(u);
+const isFredObs = (u) => FRED_OBS_RE.test(u);
+const isFred = (u) => isFredSearch(u) || isFredObs(u);
+const fredMock = (body, status = 200) => (u) => (isFred(u) ? mockResponse({ status, json: body }) : failClosed()());
+const fredUrl = (calls) => calls.find((x) => isFred(x.url))?.url;
+const fredQuery = (calls) => new URL(fredUrl(calls)).searchParams;
+// A 200 whose .json() THROWS a SyntaxError (an HTML/error page parsed as JSON).
+const fredNonJson = (u) => (isFred(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>err</html>" }
+  : failClosed()());
+
+/** Build a FRED search body: `count` + `seriess` rows. */
+const fredSeriesRow = (id, title) => ({ id, title, frequency: "Monthly", frequency_short: "M", units: "Percent", seasonal_adjustment: "Seasonally Adjusted", observation_start: "1948-01-01", observation_end: "2026-06-01", last_updated: "2026-07-01 08:00:00-05", popularity: "88", notes: "…" });
+const fredSearchBody = (count, rows) => ({ seriess: rows, count, limit: 25, offset: 0 });
+const fredObsBody = (count, obs) => ({ observations: obs, count, limit: 100, offset: 0 });
+
+/** Run `fn` with FRED_API_KEY set to `val` (or deleted if undefined), restore after. */
+async function withFredKey(val, fn) {
+  const orig = process.env.FRED_API_KEY;
+  if (val === undefined) delete process.env.FRED_API_KEY;
+  else process.env.FRED_API_KEY = val;
+  try {
+    return await fn();
+  } finally {
+    if (orig === undefined) delete process.env.FRED_API_KEY;
+    else process.env.FRED_API_KEY = orig;
+  }
+}
+
+async function testFredHonesty() {
+  section("§55c. FRED (Federal Reserve Economic Data — ADR-0048, Wave-4 source #2 — macro context AND the SECOND key-required source) — no-key THROW + K-test + '.'→null missing + count-exact-total offset pagination + honest empty vs 400(error_message)/503/drift + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  const KEY = "test-fred-key-xyz789";
+
+  // ── [KEY] no FRED_API_KEY ⇒ invalid_input THROW *before any fetch* (0 fetch);
+  //    the message names FRED_API_KEY. This is the SECOND key-REQUIRED source. ──
+  await withFredKey(undefined, async () => {
+    for (const [tool, args] of [
+      ["fred_search_series", { query: "unemployment" }],
+      ["fred_series_observations", { seriesId: "UNRATE" }],
+    ]) {
+      await withFetch(failClosed(), async (calls) => {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool(tool, args, sam));
+        const te = threw ? toToolError(error) : null;
+        ok(`55c-key ${tool}: UNSET FRED_API_KEY ⇒ invalid_input THROW BEFORE any fetch (0 fetch) + the message NAMES FRED_API_KEY (honest key-required config error, never a fake-empty/keyless-pretend) ⇒ remove the pre-fetch key guard ⇒ RED`,
+          threw && te.kind === "invalid_input" && /FRED_API_KEY/.test(te.message) && calls.length === before, JSON.stringify({ kind: te?.kind, added: calls.length - before, msg: te?.message?.slice(0, 60) }));
+      });
+    }
+    // Non-vacuity: fredApiKey() reports undefined when unset (the guard reads env).
+    ok("55c-key (non-vacuity) fredApiKey() returns undefined when unset ⇒ the guard reads env, not a constant", fredApiKey() === undefined, JSON.stringify(fredApiKey()));
+  });
+
+  // ── [KEY non-vacuity] WITH the key set, the SAME call FETCHES + [K-test] the key
+  //    rides api_key= ONLY, ABSENT from the serialized {data,_meta}. ──
+  await withFredKey(KEY, async () => {
+    await withFetch(fredMock(fredSearchBody(1, [fredSeriesRow("UNRATE", "Unemployment Rate")])), async (calls) => {
+      const r = await runTool("fred_search_series", { query: "unemployment" }, sam);
+      const m = buildMeta(r.meta);
+      const q = fredQuery(calls);
+      ok("55c-key WITH FRED_API_KEY set the same request FETCHES (does NOT throw the key error) ⇒ the pre-fetch throw is CONDITIONAL on the missing key, not unconditional",
+        r.data.series.length === 1 && fredUrl(calls) !== undefined, JSON.stringify({ n: r.data.series.length }));
+      ok("55c-Ktest the built URL carries api_key=<value> + file_type=json in the query (the api_key is the ONLY key carrier) ⇒ move the key out of &api_key= ⇒ RED",
+        q.get("api_key") === KEY && q.get("file_type") === "json", JSON.stringify({ api_key: q.get("api_key"), ft: q.get("file_type") }));
+      const serialized = JSON.stringify({ data: r.data, _meta: m });
+      ok("55c-Ktest the key value is ABSENT from the serialized {data,_meta} (never in source/notes/label — the K-test) ⇒ leak the key into _meta.source or a note ⇒ RED",
+        !serialized.includes(KEY) && m.source.includes("FRED_API_KEY") && m.keylessMode === false, JSON.stringify({ leaked: serialized.includes(KEY), source: m.source }));
+      ok("55c-key the request is to api.stlouisfed.org/fred/series/search over https (fixed host) + search_text=unemployment",
+        new URL(fredUrl(calls)).hostname === "api.stlouisfed.org" && new URL(fredUrl(calls)).protocol === "https:" && /\/fred\/series\/search/.test(fredUrl(calls)) && q.get("search_text") === "unemployment", fredUrl(calls));
+      ok("55c-search row maps FRED fields → curated shape (frequencyShort/seasonalAdjustment/observationStart/popularity); popularity via num, strings via str",
+        r.data.series[0].id === "UNRATE" && r.data.series[0].frequencyShort === "M" && r.data.series[0].seasonalAdjustment === "Seasonally Adjusted" && r.data.series[0].observationStart === "1948-01-01" && r.data.series[0].popularity === 88, JSON.stringify(r.data.series[0]));
+    });
+
+    // ── [P1] search count:500 + 25 rows @ offset 0 ⇒ totalAvailable:500 (EXACT),
+    //    hasMore:true, nextOffset:25 (offset pagination) ⇒ totalAvailable=returned ⇒ RED. ──
+    await withFetch(fredMock(fredSearchBody(500, Array.from({ length: 25 }, (_, i) => fredSeriesRow(`S${i}`, `Series ${i}`)))), async () => {
+      const r = await runTool("fred_search_series", { query: "cpi", limit: 25 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55c-P1 search count:500 + 25 rows @ offset 0 ⇒ returned:25 but totalAvailable:500 (FRED's EXACT count, NOT the 25 returned), hasMore:true, nextOffset:25, truncated:true, complete:false ⇒ set totalAvailable=returned ⇒ RED",
+        r.data.series.length === 25 && m.returned === 25 && m.totalAvailable === 500 && m.pagination.hasMore === true && m.pagination.nextOffset === 25 && m.truncated === true && m.complete === false, JSON.stringify({ n: r.data.series.length, ta: m.totalAvailable, hm: m.pagination?.hasMore, no: m.pagination?.nextOffset }));
+      ok("55c-P1 keylessMode:false (KEYED — the second key-required source) + the key-required + count-total honesty notes are present",
+        m.keylessMode === false && m.notes.some((n) => /FRED_API_KEY/.test(n)) && m.notes.some((n) => /exact reported .count/.test(n)), JSON.stringify(m.notes.length));
+    });
+
+    // ── [P1] a LAST page (offset 480 + 20 rows, count 500) ⇒ hasMore:false, nextOffset:null. ──
+    await withFetch(fredMock(fredSearchBody(500, Array.from({ length: 20 }, (_, i) => fredSeriesRow(`S${i}`, `Series ${i}`)))), async () => {
+      const r = await runTool("fred_search_series", { query: "cpi", limit: 25, offset: 480 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55c-P1 last page (offset 480 + 20 rows, count 500 ⇒ 480+20=500) ⇒ hasMore:false, nextOffset:null (offset+returned reaches count exactly) ⇒ off-by-one (>= vs >) ⇒ RED",
+        m.pagination.hasMore === false && m.pagination.nextOffset === null && m.pagination.offset === 480, JSON.stringify({ hm: m.pagination?.hasMore, no: m.pagination?.nextOffset }));
+    });
+
+    // ── [missing] ★the crux: observation value "." ⇒ null (NOT 0, NOT "."); "3.14"
+    //    ⇒ 3.14; "0" ⇒ 0 (genuine). ──
+    await withFetch(fredMock(fredObsBody(3, [
+      { date: "2020-01-01", value: "." },
+      { date: "2020-02-01", value: "3.14" },
+      { date: "2020-03-01", value: "0" },
+    ])), async () => {
+      const r = await runTool("fred_series_observations", { seriesId: "GDP" }, sam);
+      const [missing, real, zero] = r.data.observations;
+      ok("55c-missing observation value '.' ⇒ value:null (FRED's missing sentinel — NOT 0, NOT the string '.') ⇒ fabricate 0 for missing (num(v) ?? 0) ⇒ RED",
+        missing.value === null && missing.date === "2020-01-01", JSON.stringify(missing));
+      ok("55c-missing a real '3.14' ⇒ 3.14 and a genuine '0' ⇒ 0 (NOT null) — a reported zero is an honest 0, distinct from the '.' missing marker ⇒ map all falsy to null ⇒ RED",
+        real.value === 3.14 && zero.value === 0 && typeof zero.value === "number", JSON.stringify({ real: real.value, zero: zero.value }));
+      const m = buildMeta(r.meta);
+      ok("55c-missing observations carry the missing-value note ('.'→null) + count-exact totalAvailable:3",
+        m.totalAvailable === 3 && m.notes.some((n) => /'\.'|literal '\.'/.test(n) && /null/.test(n)), JSON.stringify({ ta: m.totalAvailable }));
+    });
+
+    // ── [missing non-vacuity] the DIRECT fredValue seam: "."→null, "0"→0, "3.14"→3.14. ──
+    ok("55c-missing (direct fredValue) '.'⇒null, '0'⇒0, '3.14'⇒3.14, ''⇒null (wraps coerce.num) ⇒ drop the '.' guard AND naive-0 ⇒ RED",
+      fredValue(".") === null && fredValue("0") === 0 && fredValue("3.14") === 3.14 && fredValue("") === null, JSON.stringify({ dot: fredValue("."), zero: fredValue("0") }));
+
+    // ── [P2] a 400 carrying {error_message} ⇒ invalid_input CARRYING that message
+    //    (a bad series_id / expired key honestly reported, never a fake empty). ──
+    await withFetch(fredMock({ error_code: 400, error_message: "Bad Request. The series does not exist." }, 400), async () => {
+      const { threw, error } = await expectThrow(() => runTool("fred_series_observations", { seriesId: "NOTASERIES" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55c-P2 a 400 with {error_message:'…series does not exist.'} ⇒ invalid_input CARRYING the FRED error_message (fetchWithRetry discards the body, so the tool re-reads it) ⇒ swallow the 400 as empty / drop the error_message ⇒ RED",
+        threw && te.kind === "invalid_input" && /series does not exist/.test(te.message), JSON.stringify({ kind: te?.kind, msg: te?.message?.slice(0, 80) }));
+    });
+
+    // ── [P2] a genuine no-match (seriess:[]/observations:[], count:0) ⇒ honest empty
+    //    (returned:0, complete:true), NOT thrown, NOT drift. ──
+    await withFetch(fredMock(fredSearchBody(0, [])), async () => {
+      const r = await runTool("fred_search_series", { query: "zzzznomatch" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55c-P2 search no-match (seriess:[], count:0) ⇒ series:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+        r.data.series.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.series.length, ta: m.totalAvailable }));
+    });
+    await withFetch(fredMock(fredObsBody(0, [])), async () => {
+      const r = await runTool("fred_series_observations", { seriesId: "GDP" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55c-P2 observations no-match (observations:[], count:0) ⇒ observations:[], returned:0, complete:true (honest empty)",
+        r.data.observations.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.observations.length }));
+    });
+
+    // ── [P2] a 503 ⇒ upstream_unavailable (a DOWN endpoint is NEVER a returned:0). ──
+    await withFetch(fredMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("fred_series_observations", { seriesId: "GDP" }, sam));
+      ok("55c-P2 503 ⇒ upstream_unavailable THROW (a down FRED is never an empty result; distinct from the 400 key/series error and the honest empty)",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P4] a 200 non-array/non-JSON ⇒ schema_drift (never a fabricated empty). ──
+    await withFetch(fredMock({ notSeriess: "x" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("fred_search_series", { query: "cpi" }, sam));
+      ok("55c-P4 search body with a missing/non-array `seriess` ⇒ schema_drift (the contract broke; never a fabricated empty) ⇒ read {} as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(fredMock({ observations: "notanarray" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("fred_series_observations", { seriesId: "GDP" }, sam));
+      ok("55c-P4 observations body whose `observations` is a string (non-array) ⇒ schema_drift ⇒ trust a non-array ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(fredNonJson, async () => {
+      const { threw, error } = await expectThrow(() => runTool("fred_series_observations", { seriesId: "GDP" }, sam));
+      ok("55c-P2 a 200 whose body is non-JSON (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [SSRF] seriesId '../x' / date '20x' / sortOrder 'sideways' ⇒ invalid_input, 0 fetch. ──
+    for (const [args, label] of [
+      [{ seriesId: "../etc/passwd" }, "seriesId '../etc/passwd'"],
+      [{ seriesId: "GDP", startDate: "20x" }, "startDate '20x'"],
+      [{ seriesId: "GDP", endDate: "2020/01/01" }, "endDate '2020/01/01' (slash)"],
+      [{ seriesId: "GDP", sortOrder: "sideways" }, "sortOrder 'sideways'"],
+    ]) {
+      await withFetch(failClosed(), async (calls) => {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool("fred_series_observations", args, sam));
+        ok(`55c-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass/regex/enum re-guard PRE-fetch — a value never touches the fixed host) ⇒ widen the validation ⇒ RED`,
+          threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+      });
+    }
+  });
+
+  // ── (parity) fred re-exports the shared coerce.num (null-never-0). ──
+  ok("55c-parity fred.num === coerce.num (one shared audited impl — NO local num/str; fredValue's '.'→null map is a WRAPPER around it, not a fork)", fredNum === coerceNum, "fred num diverged from coerce.num");
+}
+
 // §54: shared disclosure tokenizer (src/disclosure.ts, ADR-0022) — the byte-identical
 // extraction of NSF's OR-note + ClinicalTrials' AND-note tokenizer into ONE audited
 // home, PLUS the lint guardrail against the whitespace-only recurrence adversarial
@@ -16546,6 +16746,7 @@ async function main() {
   await testClinicaltrialsFacetHonesty();
   await testCensusHonesty();
   await testCensusBusinessPatterns();
+  await testFredHonesty();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
   await testHonestyAuditRemediation();
