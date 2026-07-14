@@ -36,7 +36,15 @@
  *           path) — removes the SSRF surface for this slice.
  */
 
-import { getJson, driftError } from "./datasource.js";
+import {
+  getJson,
+  driftError,
+  throughPathChain,
+  CircuitBreaker,
+  type ResiliencePath,
+  type Provenance,
+} from "./datasource.js";
+import { snapshotPath } from "./snapshot.js";
 import { num, str } from "./coerce.js";
 import { memoize } from "./cache.js";
 import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
@@ -48,6 +56,24 @@ export { num };
 
 const BASE =
   "https://api.fiscaldata.treasury.gov/services/api/fiscal_service";
+
+// ─── Resilience wiring (ADR-0045 Phase 2 pilot — INERT by default) ─────────
+// The Treasury live host, and a per-host circuit breaker keyed on the FIXED set
+// {this host} (bounded — m3-regression). The breaker is CONSULTED only by
+// `throughPathChain` for a ≥2-path chain; when no snapshot is configured the
+// chain is single-path (live only) and the breaker is a pure no-op. See
+// datasource.ts §"RESILIENCE PORT".
+const TREASURY_HOST = "api.fiscaldata.treasury.gov";
+let treasuryBreaker = new CircuitBreaker([TREASURY_HOST]);
+
+/**
+ * Test-only: reset the resilience circuit breaker between OFFLINE fixtures (the
+ * breaker is module-level process state; a fresh instance isolates cases). Not a
+ * runtime API — mirrors the `_reset*Cache` convention in the fault suite.
+ */
+export function _resetTreasuryBreakerForTests(): void {
+  treasuryBreaker = new CircuitBreaker([TREASURY_HOST]);
+}
 
 // ─── Confirmed dataset paths (F5 allowlist enum) ──────────────────
 // Live-verified 2026-07-10: path + total-count + key fields (ADR-0002 §Context).
@@ -114,7 +140,8 @@ type TreasuryQuery = {
 async function getTreasury<Row = TreasuryRow>(
   path: string,
   query: TreasuryQuery,
-): Promise<TreasuryEnvelope<Row>> {
+  snapshotKey?: string,
+): Promise<{ env: TreasuryEnvelope<Row>; provenance: Provenance }> {
   const params = new URLSearchParams();
   if (query.fields) params.set("fields", query.fields);
   if (query.filter) params.set("filter", query.filter);
@@ -123,9 +150,29 @@ async function getTreasury<Row = TreasuryRow>(
   params.set("page[number]", String(query.pageNumber));
   const url = `${BASE}${path}?${params.toString()}`;
   const label = "treasury:" + path;
-  // Shared fetch envelope (ADR-0005): init === { signal } (no headers/redirect) —
-  // byte-identical to the prior hand-rolled AbortSignal.timeout(15_000) fetch.
-  const env = await getJson<TreasuryEnvelope<Row>>(url, { label });
+  // ★ADR-0045 Phase 2 pilot — route the fetch through `throughPathChain` INSTEAD
+  // of a bare getJson. The LIVE path is byte-identical to the prior hand-rolled
+  // fetch (init === { signal }, no headers/redirect — the same getJson call).
+  const livePath: ResiliencePath<TreasuryEnvelope<Row>> = {
+    host: TREASURY_HOST,
+    provenance: { dataPath: "live" },
+    run: () => getJson<TreasuryEnvelope<Row>>(url, { label }),
+  };
+  // The snapshot fallback is added ONLY when (a) this call declares a canned
+  // snapshot key AND (b) SAMGOV_SNAPSHOT_BASE_URL is configured (else
+  // snapshotPath returns null). ★When either is absent the chain is SINGLE-ENTRY
+  // (live only) ⇒ throughPathChain fast-paths (no breaker consult, no overhead)
+  // ⇒ behavior byte-identical to before this ADR (the INERT guarantee).
+  const snap = snapshotKey
+    ? snapshotPath<TreasuryEnvelope<Row>>(snapshotKey)
+    : null;
+  const paths = snap ? [livePath, snap] : [livePath];
+  const { body: env, provenance } = await throughPathChain<
+    TreasuryEnvelope<Row>
+  >(paths, treasuryBreaker);
+  // Drift guard applies to BOTH paths (a malformed snapshot fails as loudly as a
+  // malformed live body) — schema_drift is non-retryable, so it does not fall
+  // through nor trip the breaker.
   if (
     !env ||
     typeof env.meta !== "object" ||
@@ -138,7 +185,7 @@ async function getTreasury<Row = TreasuryRow>(
       `treasury:${path} returned an unexpected envelope shape (meta['total-count'] must be a number and data an array).`,
     );
   }
-  return env;
+  return { env, provenance };
 }
 
 // ─── meta layer ───────────────────────────────────────────────────
@@ -159,12 +206,21 @@ function treasuryMeta(opts: {
   notes: string[];
   filtersApplied?: string[];
   fieldsUnavailable?: string[];
+  /**
+   * The access path that served this response (ADR-0045 P5). When the live
+   * upstream answered (`dataPath:"live"`, the default and — with no snapshot
+   * configured — the ONLY path) the dataPath/asOf fields are OMITTED, so `_meta`
+   * is byte-identical to before this ADR. They are threaded ONLY for a NON-live
+   * (snapshot) body, which makes buildMeta emit a staleness note, gate `complete`
+   * off, and qualify `totalAvailable` as an as-of figure.
+   */
+  provenance?: Provenance;
 }): Partial<ResponseMeta> {
   const totalAvailable = opts.env.meta["total-count"];
   const returned = opts.env.data.length;
   const offset = (opts.pageNumber - 1) * opts.pageSize;
   const hasMore = offset + returned < totalAvailable;
-  return {
+  const meta: Partial<ResponseMeta> = {
     source: `api.fiscaldata.treasury.gov (keyless) ${opts.path}`,
     keylessMode: true,
     returned,
@@ -180,6 +236,13 @@ function treasuryMeta(opts: {
     fieldsUnavailable: opts.fieldsUnavailable ?? [],
     notes: opts.notes,
   };
+  // P5 threading (ADR-0045 B2): surface dataPath/asOf ONLY when NON-live, so a
+  // live response omits the keys and stays byte-identical. No `??` default.
+  if (opts.provenance && opts.provenance.dataPath !== "live") {
+    meta.dataPath = opts.provenance.dataPath;
+    if (opts.provenance.asOf !== undefined) meta.asOf = opts.provenance.asOf;
+  }
+  return meta;
 }
 
 /** Build `record_date` gte/lte filter clauses from optional ISO dates. */
@@ -205,7 +268,7 @@ function isoMonthsAgo(months: number): string {
  */
 async function latestRecordDate(path: string): Promise<string | null> {
   return memoize(`treasury:latestdate:${path}`, async () => {
-    const env = await getTreasury(path, {
+    const { env } = await getTreasury(path, {
       fields: "record_date",
       sort: "-record_date",
       pageSize: 1,
@@ -233,7 +296,7 @@ export async function queryDataset(args: {
   const path = TREASURY_DATASETS[args.dataset];
   const pageSize = args.pageSize ?? 100;
   const pageNumber = args.pageNumber ?? 1;
-  const env = await getTreasury(path, {
+  const { env, provenance } = await getTreasury(path, {
     fields: args.fields,
     filter: args.filter,
     sort: args.sort,
@@ -251,6 +314,7 @@ export async function queryDataset(args: {
       pageNumber,
       pageSize,
       filtersApplied,
+      provenance,
       notes: [
         "Raw pass-through: value/amount fields are the upstream strings (or numbers) verbatim — the literal string \"null\" or an empty value means 'no value reported', NOT zero. Parse client-side.",
       ],
@@ -281,13 +345,22 @@ export async function debtToPenny(args: {
   const filter = latest
     ? undefined
     : dateFilters(args.startDate, args.endDate).join(",") || undefined;
-  const env = await getTreasury(path, {
-    fields: DEBT_TO_PENNY_FIELDS,
-    filter,
-    sort: "-record_date",
-    pageSize,
-    pageNumber,
-  });
+  // ★Snapshot fallback ONLY for the canned "latest" read (a single, well-defined
+  // most-recent-day snapshot the builder can pre-fetch). Range/paginated reads
+  // pass no key ⇒ live only. Even for latest, the snapshot is INERT unless
+  // SAMGOV_SNAPSHOT_BASE_URL is configured (snapshotPath returns null).
+  const snapshotKey = latest ? "treasury_debt_to_penny_latest" : undefined;
+  const { env, provenance } = await getTreasury(
+    path,
+    {
+      fields: DEBT_TO_PENNY_FIELDS,
+      filter,
+      sort: "-record_date",
+      pageSize,
+      pageNumber,
+    },
+    snapshotKey,
+  );
   const data = {
     records: env.data.map((r) => ({
       recordDate: str(r.record_date),
@@ -306,6 +379,7 @@ export async function debtToPenny(args: {
       pageNumber,
       pageSize,
       filtersApplied,
+      provenance,
       notes: [
         latest
           ? "latest=true returns only the single most-recent day (page[size]=1)."
@@ -352,7 +426,7 @@ export async function monthlyStatement(args: {
   const filters = dateFilters(startDate, args.endDate);
   if (excludeSummary) filters.push("current_month_gross_outly_amt:gt:0");
   const filter = filters.length ? filters.join(",") : undefined;
-  const env = await getTreasury(path, {
+  const { env, provenance } = await getTreasury(path, {
     fields: MTS_FIELDS,
     filter,
     sort: "-record_date,line_code_nbr",
@@ -386,6 +460,7 @@ export async function monthlyStatement(args: {
       pageSize,
       filtersApplied,
       notes,
+      provenance,
     }),
   );
 }
@@ -456,7 +531,7 @@ async function avgInterestRatesQuery(opts: {
     filters.push(`security_type_desc:eq:${opts.securityType}`);
   }
   const filter = filters.length ? filters.join(",") : undefined;
-  const env = await getTreasury(path, {
+  const { env, provenance } = await getTreasury(path, {
     fields: AVG_INTEREST_FIELDS,
     filter,
     sort: "-record_date,security_type_desc",
@@ -494,6 +569,7 @@ async function avgInterestRatesQuery(opts: {
       pageSize: opts.pageSize,
       filtersApplied,
       notes,
+      provenance,
     }),
   );
 }
