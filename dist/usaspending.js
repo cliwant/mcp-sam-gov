@@ -99,8 +99,30 @@ function filtersAppliedFromFilters(f) {
     return applied;
 }
 import { fetchWithRetry, ToolErrorCarrier, errorFromResponse } from "./errors.js";
+import { throughPathChain, CircuitBreaker, } from "./datasource.js";
+import { snapshotPath, provenanceMeta } from "./snapshot.js";
 import { memoize } from "./cache.js";
 import { withMeta } from "./meta.js";
+// ─── Resilience wiring (ADR-0045 pilot expansion — INERT by default) ───────
+// The USAspending live host + a per-host circuit breaker keyed on the FIXED set
+// {this host} (bounded — m3-regression). CONSULTED only by `throughPathChain`
+// for a ≥2-path chain; when SAMGOV_SNAPSHOT_BASE_URL is unset the chain is
+// single-path (live only), the breaker is a pure no-op, and every opted-in
+// reference tool is BYTE-IDENTICAL to before this ADR. Only the three
+// SLOW-CHANGING, canonical/queryless REFERENCE reads opt in (toptier agencies,
+// the top-level NAICS tree, the glossary); the search/aggregate tools stay
+// live-only (a snapshot can't cover free queries). See datasource.ts §"RESILIENCE
+// PORT" and the policy boundary (no route-around / public-only / no-proxy).
+const USAS_HOST = "api.usaspending.gov";
+let usasBreaker = new CircuitBreaker([USAS_HOST]);
+/**
+ * Test-only: reset the resilience circuit breaker between OFFLINE fixtures (the
+ * breaker is module-level process state; a fresh instance isolates cases).
+ * Mirrors treasury.ts's `_resetTreasuryBreakerForTests`.
+ */
+export function _resetUsasBreakerForTests() {
+    usasBreaker = new CircuitBreaker([USAS_HOST]);
+}
 const SPENDING_BY_AWARD_SOURCE = "usaspending.gov/api/v2 search/spending_by_award";
 const SPENDING_BY_CATEGORY_RECIPIENT_SOURCE = "usaspending.gov/api/v2 search/spending_by_category/recipient";
 const SPENDING_OVER_TIME_SOURCE = "usaspending.gov/api/v2 search/spending_over_time";
@@ -253,6 +275,30 @@ async function postUsas(endpoint, body) {
 async function getUsas(endpoint) {
     const r = await fetchWithRetry(`${USAS}/${endpoint}`, { signal: AbortSignal.timeout(15_000) }, `usaspending:${endpoint}`);
     return (await r.json());
+}
+/**
+ * getUsas THROUGH the resilience path-chain (ADR-0045 pilot expansion). The LIVE
+ * path is byte-identical to a bare `getUsas(endpoint)` — same URL, same init
+ * ({signal} only), same label — so with no snapshot configured the chain is
+ * SINGLE-ENTRY and `throughPathChain` fast-paths (no breaker consult, no
+ * overhead) ⇒ output BYTE-IDENTICAL to before this ADR (the INERT guarantee).
+ *
+ * A snapshot fallback is added ONLY when (a) `snapshotKey` is provided (the
+ * caller declares this read is a canonical/queryless reference the builder can
+ * pre-fetch) AND (b) SAMGOV_SNAPSHOT_BASE_URL is configured (else `snapshotPath`
+ * returns null). When either is absent the chain stays live-only. The snapshot's
+ * `data` is the RAW upstream JSON (same shape as the live body), so the caller's
+ * existing mapping applies unchanged to both paths.
+ */
+async function getUsasResilient(endpoint, snapshotKey) {
+    const livePath = {
+        host: USAS_HOST,
+        provenance: { dataPath: "live" },
+        run: () => getUsas(endpoint),
+    };
+    const snap = snapshotKey ? snapshotPath(snapshotKey) : null;
+    const paths = snap ? [livePath, snap] : [livePath];
+    return throughPathChain(paths, usasBreaker);
 }
 // ─── Aggregate share-of-wallet ───────────────────────────────────
 export async function searchAwards(args) {
@@ -1799,7 +1845,12 @@ export async function naicsHierarchy(args) {
         const path = args.naicsFilter
             ? `references/naics/${encodeURIComponent(args.naicsFilter)}/`
             : "references/naics/";
-        const json = await getUsas(path);
+        // Snapshot ONLY the canonical UNFILTERED top-level NAICS tree (a single,
+        // well-defined queryless read the builder can pre-fetch). A drill-down
+        // (`naicsFilter` set) passes no key ⇒ live only. Even unfiltered, the
+        // snapshot is INERT unless SAMGOV_SNAPSHOT_BASE_URL is configured.
+        const snapshotKey = args.naicsFilter ? undefined : "usas_naics_hierarchy";
+        const { body: json, provenance } = await getUsasResilient(path, snapshotKey);
         const results = json.results ?? [];
         // NAICS levels are 2→4→6 digit (USAspending skips 3/5); only a 6-digit code is a
         // leaf. The top-level response carries no `children`, so hasChildren is derived
@@ -1850,17 +1901,29 @@ export async function naicsHierarchy(args) {
                 extraNotes: notes,
             }),
             filtersApplied: args.naicsFilter ? ["naicsFilter(direct-children)"] : [],
+            // P5 provenance: threaded ONLY when NON-live (snapshot) — live ⇒ {} ⇒
+            // byte-identical _meta (provenanceMeta returns the empty object).
+            ...provenanceMeta(provenance),
         });
     });
 }
+const GLOSSARY_DEFAULT_LIMIT = 25;
 export async function glossary(args) {
-    const limit = args.limit ?? 25;
+    const limit = args.limit ?? GLOSSARY_DEFAULT_LIMIT;
     return memoize(`usas:glossary:${args.search ?? ""}:${limit}`, async () => {
         const params = new URLSearchParams();
         params.set("limit", String(limit));
         if (args.search)
             params.set("search", args.search);
-        const json = await getUsas(`references/glossary/?${params.toString()}`);
+        // Snapshot ONLY the canonical read — NO search term AND the default limit —
+        // which is the exact query the builder pre-fetches (references/glossary/
+        // ?limit=25). A search or a non-default limit passes no key ⇒ live only, so
+        // the served snapshot can never desync `returned` from what was asked. INERT
+        // unless SAMGOV_SNAPSHOT_BASE_URL is configured.
+        const snapshotKey = !args.search && limit === GLOSSARY_DEFAULT_LIMIT
+            ? "usas_glossary"
+            : undefined;
+        const { body: json, provenance } = await getUsasResilient(`references/glossary/?${params.toString()}`, snapshotKey);
         const results = json.results ?? [];
         const total = json.page_metadata?.count ?? null;
         const data = {
@@ -1873,18 +1936,26 @@ export async function glossary(args) {
                 definition: r.plain ?? "",
             })),
         };
-        return withMeta(data, referenceMeta({
-            source: "usaspending.gov/api/v2 references/glossary",
-            returned: results.length,
-            limit,
-            totalAvailable: total,
-        }));
+        return withMeta(data, {
+            ...referenceMeta({
+                source: "usaspending.gov/api/v2 references/glossary",
+                returned: results.length,
+                limit,
+                totalAvailable: total,
+            }),
+            // P5 provenance — threaded ONLY when NON-live ⇒ live stays byte-identical.
+            ...provenanceMeta(provenance),
+        });
     });
 }
 export async function listToptierAgencies(args) {
     const limit = args.limit ?? 50;
     return memoize(`usas:toptier:${limit}`, async () => {
-        const json = await getUsas(`references/toptier_agencies/?limit=${limit}`);
+        // The toptier list is canonical + the endpoint IGNORES `limit` (returns the
+        // COMPLETE ~111-agency set for any limit — verified 2026-07-03), so the
+        // snapshot is limit-independent and always opted in (key stable). INERT
+        // unless SAMGOV_SNAPSHOT_BASE_URL is configured.
+        const { body: json, provenance } = await getUsasResilient(`references/toptier_agencies/?limit=${limit}`, "usas_toptier_agencies");
         const results = json.results ?? [];
         const data = {
             agencies: results.map((r) => ({
@@ -1901,16 +1972,20 @@ export async function listToptierAgencies(args) {
         // response is ALWAYS the complete set — truncated:false, and the returned
         // count IS the total. Deriving truncation from `returned >= limit` would be
         // a false positive, so limitHonored:false forces complete.
-        return withMeta(data, referenceMeta({
-            source: "usaspending.gov/api/v2 references/toptier_agencies",
-            returned: results.length,
-            limit,
-            totalAvailable: results.length,
-            limitHonored: false,
-            extraNotes: [
-                "The toptier_agencies endpoint returns the COMPLETE list of ~111 toptier agencies regardless of the `limit` value (limit is ignored upstream).",
-            ],
-        }));
+        return withMeta(data, {
+            ...referenceMeta({
+                source: "usaspending.gov/api/v2 references/toptier_agencies",
+                returned: results.length,
+                limit,
+                totalAvailable: results.length,
+                limitHonored: false,
+                extraNotes: [
+                    "The toptier_agencies endpoint returns the COMPLETE list of ~111 toptier agencies regardless of the `limit` value (limit is ignored upstream).",
+                ],
+            }),
+            // P5 provenance — threaded ONLY when NON-live ⇒ live stays byte-identical.
+            ...provenanceMeta(provenance),
+        });
     });
 }
 //# sourceMappingURL=usaspending.js.map

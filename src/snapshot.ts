@@ -29,6 +29,7 @@
  */
 
 import { getJson, driftError, type Provenance, type ResiliencePath } from "./datasource.js";
+import type { ResponseMeta } from "./meta.js";
 
 /**
  * The static snapshot envelope the builder writes and the reader parses. `data`
@@ -74,6 +75,27 @@ export function resolveSnapshotBaseUrl(): string | undefined {
 /** The env-driven resilience config (default = snapshot disabled). */
 export function resilienceConfig(): ResilienceConfig {
   return { snapshotBaseUrl: resolveSnapshotBaseUrl() };
+}
+
+/**
+ * P5 provenance → `_meta` partial (ADR-0045 B2/M1). The SHARED threading helper
+ * every opted-in adapter uses so a served body discloses its access path
+ * IDENTICALLY: it returns the EMPTY object `{}` for a `live` (or absent)
+ * provenance — so spreading it into a meta partial adds NO keys and the `_meta`
+ * stays BYTE-IDENTICAL to pre-ADR output (the INERT bar) — and returns
+ * `{ dataPath, asOf? }` ONLY for a NON-live (`snapshot`) body. This is exactly
+ * the guarded, `??`-free discipline treasury.ts inlines in `treasuryMeta`,
+ * factored out so the usaspending/sba reference opt-ins can't drift from it.
+ * buildMeta then surfaces the fields via its `if (partial.dataPath !== undefined)`
+ * passthrough (and forces `complete!==true` + `totalIsEstimated` on non-live).
+ */
+export function provenanceMeta(
+  provenance: Provenance | undefined,
+): Partial<ResponseMeta> {
+  if (!provenance || provenance.dataPath === "live") return {};
+  const meta: Partial<ResponseMeta> = { dataPath: provenance.dataPath };
+  if (provenance.asOf !== undefined) meta.asOf = provenance.asOf;
+  return meta;
 }
 
 /** A snapshot key is an internal identifier — restrict to a safe charset so it

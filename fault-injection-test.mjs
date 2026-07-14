@@ -181,7 +181,9 @@ import { getJson, getText, isRedirectError, driftError, throughGate, getJsonWith
 import { errorFromResponse, isHonorRetryAfter } from "./dist/errors.js";
 import { resolveSnapshotBaseUrl, resilienceConfig, snapshotPath } from "./dist/snapshot.js";
 import { _resetTreasuryBreakerForTests } from "./dist/treasury.js";
-import { buildEnvelope, isPublicRedistributable, manifestEntry, SNAPSHOT_SPECS } from "./scripts/build-snapshots.mjs";
+import { _resetUsasBreakerForTests } from "./dist/usaspending.js";
+import { _resetSbaBreakerForTests } from "./dist/sba.js";
+import { buildEnvelope, isPublicRedistributable, manifestEntry, SNAPSHOT_SPECS, buildManifest, summarize, exitCodeFor } from "./scripts/build-snapshots.mjs";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
 import {
@@ -9341,10 +9343,207 @@ async function testSnapshotMirror() {
     ok("71h isPublicRedistributable(public + us-government-work) === true (ingested)", isPublicRedistributable(spec) === true);
     ok("71h isPublicRedistributable(accessLevel:'restricted') === false (SKIPPED — public-only gate)", isPublicRedistributable({ ...spec, accessLevel: "restricted" }) === false);
     ok("71h isPublicRedistributable(non-redistributable license) === false (conservative default)", isPublicRedistributable({ ...spec, license: "proprietary" }) === false);
-    const me = manifestEntry(spec, SNAP_ASOF);
-    ok("71h manifestEntry records per-key { key, source, license, url, asOf }", me.key === spec.key && me.source === spec.source && me.license === spec.license && me.url === spec.url && me.asOf === SNAP_ASOF, JSON.stringify(me));
+    // manifestEntry (NEW signature): a reachability RECORD, not just an asOf.
+    const me = manifestEntry(spec, { asOf: SNAP_ASOF, reachable: true, httpStatus: 200, bytes: 321 });
+    ok("71h manifestEntry(reachable) records { key, source, license, accessLevel, url, asOf, reachable:true, httpStatus, bytes }",
+      me.key === spec.key && me.source === spec.source && me.license === spec.license && me.accessLevel === spec.accessLevel && me.url === spec.url && me.asOf === SNAP_ASOF && me.reachable === true && me.httpStatus === 200 && me.bytes === 321, JSON.stringify(me));
+    const meBlocked = manifestEntry(spec, { asOf: SNAP_ASOF, reachable: false, httpStatus: 500, bytes: 321, lastAttempt: "2026-07-14T00:00:00Z" });
+    ok("71h manifestEntry(blocked) ⇒ reachable:false + httpStatus + lastAttempt (a blocked source records its diagnosis)",
+      meBlocked.reachable === false && meBlocked.httpStatus === 500 && meBlocked.lastAttempt === "2026-07-14T00:00:00Z", JSON.stringify(meBlocked));
+  }
+
+  // ── (i) BUILDER EGRESS SELF-DIAGNOSIS (offline — injected fetchImpl + clock,
+  //        NO real network/fs). Proves: reachable ⇒ write queued + reachable:true;
+  //        BLOCKED ⇒ NO write (last-good left in place) + prior asOf/bytes carried
+  //        forward + lastAttempt; public-only skip NOT counted; partial ⇒ exit 0;
+  //        zero-reachable ⇒ exit 1; network fault ⇒ errorKind (no httpStatus).
+  {
+    const NOW = "2026-07-14T00:00:00Z";
+    const diagSpecs = [
+      { key: "reach_ok", url: "https://ok.test/x", source: "ok-src", license: "us-government-work", accessLevel: "public" },
+      { key: "reach_blocked", url: "https://blocked.test/y", source: "blk-src", license: "us-government-work", accessLevel: "public" },
+      { key: "skip_restricted", url: "https://r.test/z", source: "r-src", license: "us-government-work", accessLevel: "restricted" },
+    ];
+    const diagFetch = async (u) => {
+      if (/ok\.test/.test(u)) return mockResponse({ status: 200, json: { hello: "world" } });
+      if (/blocked\.test/.test(u)) return mockResponse({ status: 500 });
+      return failClosed()();
+    };
+    const prior = { reach_blocked: { key: "reach_blocked", asOf: "2026-06-01T00:00:00Z", bytes: 4242, reachable: true } };
+    const { manifest, writes, entries } = await buildManifest({ specs: diagSpecs, fetchImpl: diagFetch, priorEntriesByKey: prior, now: () => NOW });
+    const okE = entries.find((e) => e.key === "reach_ok");
+    const blkE = entries.find((e) => e.key === "reach_blocked");
+    const skipE = entries.find((e) => e.key === "skip_restricted");
+    ok("71i reachable source ⇒ reachable:true + httpStatus 200 + bytes>0 + asOf recorded (this-run diagnosis)", okE.reachable === true && okE.httpStatus === 200 && okE.bytes > 0 && okE.asOf === NOW, JSON.stringify(okE));
+    ok("71i reachable source ⇒ a snapshot WRITE is queued (refreshed)", writes.some((w) => w.key === "reach_ok"), JSON.stringify(writes.map((w) => w.key)));
+    ok("71i ★BLOCKED source ⇒ reachable:false + httpStatus 500 recorded (honest per-source status)", blkE.reachable === false && blkE.httpStatus === 500, JSON.stringify(blkE));
+    ok("71i ★BLOCKED source ⇒ 0 writes for it (last-good snapshot NOT overwritten — stale-but-honest)", !writes.some((w) => w.key === "reach_blocked"), JSON.stringify(writes.map((w) => w.key)));
+    ok("71i BLOCKED source carries PRIOR asOf/bytes forward + stamps lastAttempt (never blanks the last-good)", blkE.asOf === "2026-06-01T00:00:00Z" && blkE.bytes === 4242 && blkE.lastAttempt === NOW, JSON.stringify(blkE));
+    ok("71i non-public spec SKIPPED (public-only gate) — not attempted, no write, not counted", skipE.skipped === true && !writes.some((w) => w.key === "skip_restricted"), JSON.stringify(skipE));
+    ok("71i manifest top-level: egressReachable 1 / egressTotal 2 (skipped NOT in total) + builtAt present", manifest.egressReachable === 1 && manifest.egressTotal === 2 && typeof manifest.builtAt === "string" && manifest.builtAt.length > 0, JSON.stringify({ r: manifest.egressReachable, t: manifest.egressTotal, b: manifest.builtAt }));
+    ok("71i PARTIAL success (1 of 2 reachable) ⇒ exit code 0 (publish what we could)", exitCodeFor(manifest) === 0);
+    ok("71i summarize(entries) matches manifest totals (pure helper parity)", summarize(entries).egressReachable === 1 && summarize(entries).egressTotal === 2);
+
+    // Zero-reachable ⇒ non-zero exit (a fully-blocked egress is a real problem).
+    const zeroFetch = async () => mockResponse({ status: 503 });
+    const zero = await buildManifest({ specs: [{ key: "only_blocked", url: "https://b.test/y", source: "b", license: "us-government-work", accessLevel: "public" }], fetchImpl: zeroFetch, now: () => NOW });
+    ok("71i ★ZERO reachable (all blocked) ⇒ exitCodeFor === 1 (fully-blocked egress = operator must fix) + 0 writes", exitCodeFor(zero.manifest) === 1 && zero.manifest.egressReachable === 0 && zero.manifest.egressTotal === 1 && zero.writes.length === 0, JSON.stringify(zero.manifest));
+
+    // All-skipped (public gate) ⇒ egressTotal 0 ⇒ exit 0 (nothing attempted, not a block).
+    const allSkip = await buildManifest({ specs: [{ key: "s", url: "https://x", source: "s", license: "proprietary", accessLevel: "public" }], fetchImpl: failClosed(), now: () => NOW });
+    ok("71i all-skipped (egressTotal 0) ⇒ exit 0 (a skip is not a block; nothing attempted)", exitCodeFor(allSkip.manifest) === 0 && allSkip.manifest.egressTotal === 0);
+
+    // Network-level fault ⇒ errorKind recorded (no httpStatus), reachable:false.
+    const netFetch = async () => { throw new TypeError("fetch failed"); };
+    const net = await buildManifest({ specs: [{ key: "net_fail", url: "https://x.test/n", source: "n", license: "us-government-work", accessLevel: "public" }], fetchImpl: netFetch, now: () => NOW });
+    const netE = net.entries.find((e) => e.key === "net_fail");
+    ok("71i network fault ⇒ reachable:false + errorKind 'network' + NO httpStatus key (a network fault has no status)", netE.reachable === false && netE.errorKind === "network" && !("httpStatus" in netE), JSON.stringify(netE));
+
+    // The expanded SNAPSHOT_SPECS carry the new pilot keys (public + redistributable).
+    for (const key of ["usas_naics_hierarchy", "usas_glossary", "sba_size_standards"]) {
+      const s = SNAPSHOT_SPECS.find((x) => x.key === key);
+      ok(`71i SNAPSHOT_SPECS carries new pilot key ${key} (public + redistributable, ingested by the gate)`, !!s && isPublicRedistributable(s) === true, JSON.stringify(s ? { al: s.accessLevel, lic: s.license } : null));
+    }
   }
   _resetTreasuryBreakerForTests();
+}
+
+// §72: PILOT EXPANSION (ADR-0045) — the snapshottable REFERENCE tools opt into
+// the resilient path-chain, INERT by default. Four tools: usas_list_toptier_
+// agencies, usas_naics_hierarchy (top-level tree only), usas_glossary (canonical
+// no-search/default-limit only), sba_size_standard (the whole naics.json). For
+// EACH, all OFFLINE + deterministic + NON-VACUOUS:
+//   (a) INERT when SAMGOV_SNAPSHOT_BASE_URL unset: live 500 ⇒ behaves EXACTLY as
+//       today (throws upstream_unavailable) with 0 snapshot fetches — the chain
+//       is single-path, byte-identical. (The 39-series existing fixtures already
+//       pin the live-200 byte-identity via SNAPSHOT MATCH; this pins the fault path.)
+//   (b) SNAPSHOT SERVES on a HARD live failure: dataPath:"snapshot" + asOf +
+//       staleness note + complete!==true, and the DATA actually flows from the
+//       snapshot body (non-vacuity).
+//   (c) ★NO-ROUTE-AROUND-RATE-LIMIT (B1-policy): live 429+Retry-After ⇒ THROWS
+//       rate_limited, the snapshot URL is NEVER fetched (spy).
+//   (d) LIVE WINS when healthy even with a snapshot configured: dataPath ABSENT
+//       (_meta byte-identical), snapshot URL never fetched.
+async function testPilotExpansion() {
+  section("72. Pilot expansion (ADR-0045) — usas toptier/naics/glossary + sba size-standards opt-in (INERT, OFFLINE)");
+  const sam = new SamGovClient({});
+  const PIL_ASOF = "2026-07-02T00:00:00Z";
+  const envelope = (data, { asOf = PIL_ASOF, accessLevel = "public" } = {}) => ({
+    asOf, source: "pilot snapshot (test)", license: "us-government-work", accessLevel, data,
+  });
+  const resetAllPilotBreakers = () => { _resetUsasBreakerForTests(); _resetSbaBreakerForTests(); };
+
+  const pilots = [
+    {
+      tool: "usas_list_toptier_agencies", args: {}, key: "usas_toptier_agencies",
+      isLive: (u) => /\/references\/toptier_agencies/.test(u),
+      liveJson: { results: [{ agency_name: "Department of Veterans Affairs", abbreviation: "VA", toptier_code: "036" }] },
+      snapData: { results: [{ agency_name: "Snapshot Agency", abbreviation: "SNAP", toptier_code: "999" }] },
+      snapCheck: (r) => r.data.agencies.length === 1 && r.data.agencies[0].name === "Snapshot Agency",
+    },
+    {
+      tool: "usas_naics_hierarchy", args: {}, key: "usas_naics_hierarchy",
+      isLive: (u) => /\/references\/naics\/(?:\?|$)/.test(u),
+      liveJson: { results: [{ naics: "11", naics_description: "Agriculture", count: 3 }] },
+      snapData: { results: [{ naics: "54", naics_description: "Professional Services (snapshot)", count: 7 }] },
+      snapCheck: (r) => r.data.hierarchy.length === 1 && r.data.hierarchy[0].code === "54" && /snapshot/i.test(r.data.hierarchy[0].description),
+    },
+    {
+      tool: "usas_glossary", args: {}, key: "usas_glossary",
+      isLive: (u) => /\/references\/glossary/.test(u),
+      liveJson: { page_metadata: { count: 151 }, results: [{ term: "Obligation", slug: "obligation", plain: "a live term" }] },
+      snapData: { page_metadata: { count: 151 }, results: [{ term: "Snapshot Term", slug: "snap", plain: "from the snapshot" }] },
+      snapCheck: (r) => r.data.terms.length === 1 && r.data.terms[0].term === "Snapshot Term",
+    },
+    {
+      tool: "sba_size_standard", args: { naics: "541512" }, key: "sba_size_standards",
+      isLive: (u) => /naics\.json/.test(u),
+      liveJson: [{ id: "541512", description: "Computer Systems Design", sectorDescription: "Prof Svcs", subsectorDescription: "Prof Svcs", revenueLimit: 34 }],
+      snapData: [{ id: "541512", description: "Snapshot Standard", sectorDescription: "S", subsectorDescription: "S", revenueLimit: 99 }],
+      snapCheck: (r) => r.data.found === true && r.data.revenueLimitUSD === 99_000_000,
+    },
+  ];
+  const snapUrlFor = (key) => new RegExp(`snap\\.test/base/${key}\\.json$`);
+
+  for (const p of pilots) {
+    // ── (a) INERT (env unset) + live 500 ⇒ throws upstream_unavailable, 0 snapshot.
+    _clearCache(); resetAllPilotBreakers();
+    await withSnapshotEnv(undefined, async () => {
+      await withFetch((u) => (p.isLive(u) ? mockResponse({ status: 500 }) : failClosed()()), async (calls) => {
+        const { threw, error } = await expectThrow(() => runTool(p.tool, p.args, sam));
+        ok(`72a ${p.tool}: INERT (unset) + live 500 ⇒ throws upstream_unavailable (byte-identical to pre-ADR — single-path chain)`, threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+        ok(`72a ${p.tool}: INERT ⇒ 0 snapshot fetches (only the live host is hit)`, !calls.some((c) => isSnapshotUrl(c.url)) && calls.length > 0, JSON.stringify(calls.map((c) => c.url).slice(0, 3)));
+      });
+    });
+
+    // ── (b) SNAPSHOT SERVES on a hard live failure (env configured).
+    _clearCache(); resetAllPilotBreakers();
+    await withSnapshotEnv(SNAP_BASE, async () => {
+      await withFetch((u) => {
+        if (isSnapshotUrl(u)) return mockResponse({ status: 200, json: envelope(p.snapData) });
+        if (p.isLive(u)) return mockResponse({ status: 500 });
+        return failClosed()();
+      }, async (calls) => {
+        const r = await runTool(p.tool, p.args, sam);
+        const m = buildMeta(r.meta);
+        ok(`72b ${p.tool}: live 500 + snapshot configured ⇒ _meta.dataPath === 'snapshot' (revert provenance threading ⇒ RED)`, m.dataPath === "snapshot", JSON.stringify({ dp: m.dataPath }));
+        ok(`72b ${p.tool}: _meta.asOf === envelope asOf (P5 freshness)`, m.asOf === PIL_ASOF, JSON.stringify({ asOf: m.asOf }));
+        ok(`72b ${p.tool}: complete !== true on a snapshot (M1a — never claims live completeness)`, m.complete !== true, JSON.stringify({ complete: m.complete }));
+        ok(`72b ${p.tool}: staleness note present in _meta.notes (m1: reuses notes[])`, m.notes.some((n) => /snapshot/i.test(n) && /Freshness is NOT guaranteed/i.test(n)), JSON.stringify(m.notes));
+        ok(`72b ${p.tool}: DATA flows FROM the snapshot body (non-vacuity — the mapping actually ran on snapshot data)`, p.snapCheck(r), JSON.stringify(r.data));
+        ok(`72b ${p.tool}: the snapshot URL (…/${p.key}.json) was fetched AFTER the live host hard-failed`, calls.some((c) => snapUrlFor(p.key).test(c.url)) && calls.some((c) => p.isLive(c.url)), JSON.stringify(calls.map((c) => c.url)));
+      });
+    });
+
+    // ── (c) ★NO-ROUTE-AROUND-RATE-LIMIT: live 429+Retry-After ⇒ THROWS rate_limited,
+    //        snapshot URL NEVER fetched (the policy fixture, per tool).
+    _clearCache(); resetAllPilotBreakers();
+    await withSnapshotEnv(SNAP_BASE, async () => {
+      await withFetch((u) => {
+        if (isSnapshotUrl(u)) return mockResponse({ status: 200, json: envelope(p.snapData) });
+        if (p.isLive(u)) return mockResponse({ status: 429, headers: { "Retry-After": "30" } });
+        return failClosed()();
+      }, async (calls) => {
+        const { threw, error } = await expectThrow(() => runTool(p.tool, p.args, sam));
+        ok(`72c ★${p.tool}: live 429+Retry-After + snapshot configured ⇒ THROWS rate_limited (honor the throttle, never route around — revert the carve-out ⇒ RED)`, threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+        ok(`72c ★${p.tool}: the snapshot URL was NEVER fetched (0 snap.test hits) — a rate limit is HONORED, not bypassed onto the mirror`, !calls.some((c) => isSnapshotUrl(c.url)), JSON.stringify(calls.map((c) => c.url)));
+      });
+    });
+
+    // ── (d) LIVE WINS when healthy even with a snapshot configured.
+    _clearCache(); resetAllPilotBreakers();
+    await withSnapshotEnv(SNAP_BASE, async () => {
+      await withFetch((u) => {
+        if (p.isLive(u)) return mockResponse({ status: 200, json: p.liveJson });
+        return failClosed()();
+      }, async (calls) => {
+        const r = await runTool(p.tool, p.args, sam);
+        const m = buildMeta(r.meta);
+        ok(`72d ${p.tool}: live 200 (healthy) + snapshot configured ⇒ dataPath ABSENT (live wins; _meta byte-identical)`, !("dataPath" in m) && !("asOf" in m), JSON.stringify({ hasDp: "dataPath" in m, hasAsOf: "asOf" in m }));
+        ok(`72d ${p.tool}: live 200 ⇒ snapshot URL NEVER fetched (fallback only on a HARD live failure)`, !calls.some((c) => isSnapshotUrl(c.url)), JSON.stringify(calls.map((c) => c.url)));
+      });
+    });
+  }
+
+  // ── (e) NON-CANONICAL query ⇒ snapshot NOT opted in (live-only), even with a
+  //        base configured: naics DRILL-DOWN + glossary WITH a search term pass NO
+  //        key, so a hard live failure THROWS (no snapshot fetch). Proves the
+  //        canonical-only gate (a snapshot can't cover free queries).
+  _clearCache(); resetAllPilotBreakers();
+  await withSnapshotEnv(SNAP_BASE, async () => {
+    await withFetch((u) => (/\/references\/naics\/54\//.test(u) ? mockResponse({ status: 500 }) : failClosed()()), async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("usas_naics_hierarchy", { naicsFilter: "54" }, sam));
+      ok("72e usas_naics_hierarchy DRILL-DOWN (naicsFilter) ⇒ NO snapshot key ⇒ live 500 THROWS + 0 snapshot fetch (a filtered query is not snapshottable)", threw && toToolError(error).kind === "upstream_unavailable" && !calls.some((c) => isSnapshotUrl(c.url)), JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+  });
+  _clearCache(); resetAllPilotBreakers();
+  await withSnapshotEnv(SNAP_BASE, async () => {
+    await withFetch((u) => (/\/references\/glossary/.test(u) ? mockResponse({ status: 500 }) : failClosed()()), async (calls) => {
+      const { threw } = await expectThrow(() => runTool("usas_glossary", { search: "obligation" }, sam));
+      ok("72e usas_glossary WITH a search term ⇒ NO snapshot key ⇒ live 500 THROWS + 0 snapshot fetch (only the canonical no-search/default-limit read is snapshottable)", threw && !calls.some((c) => isSnapshotUrl(c.url)), "");
+    });
+  });
+  _clearCache(); resetAllPilotBreakers();
 }
 
 // §44: CKAN datastore_search source (ADR-0006) — the FIRST source on the R2 port.
@@ -16073,6 +16272,7 @@ async function main() {
   await testThroughGate();
   await testResiliencePort();
   await testSnapshotMirror();
+  await testPilotExpansion();
   await testCkanHonesty();
   await testFemaHonesty();
   await testFdicHonesty();

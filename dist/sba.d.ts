@@ -38,6 +38,9 @@
  * Keyless. Fetched once and served from the shared 5-minute reference cache
  * (the file is ~200 KB — we cache the parsed lookup, not one fetch per call).
  */
+/** Test-only: reset the resilience breaker between OFFLINE fixtures (mirrors
+ *  treasury.ts's `_resetTreasuryBreakerForTests`). */
+export declare function _resetSbaBreakerForTests(): void;
 export type SizeStandardResult = {
     naics: string;
     found: boolean;
