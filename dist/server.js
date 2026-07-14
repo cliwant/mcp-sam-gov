@@ -56,6 +56,7 @@ import * as cms from "./cms.js";
 import * as fac from "./fac.js";
 import * as usitc from "./usitc.js";
 import { fetchAttachmentText } from "./attachments.js";
+import * as keys from "./keys.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -2875,6 +2876,8 @@ const FredSeriesObservationsInput = z.object({
         .optional()
         .describe("Observation date order: 'asc' (oldest first, FRED default) or 'desc' (newest first)."),
 });
+// api_key_status takes no input — it is a pure status query over process.env.
+const ApiKeyStatusInput = z.object({});
 // Build a ToolDef whose `handler` is type-checked against the schema's inferred
 // input `I` at the call site (e.g. `input.searchText` is known-present). The
 // `I` binding is erased to `any` in the ToolDef[] array, so entries without a
@@ -4165,9 +4168,29 @@ export const TOOLS = [
         inputSchema: FredSeriesObservationsInput,
         handler: (input) => fred.seriesObservations(input),
     }),
+    // ━━━ Self-service key discovery (1) ━━━
+    // KEYLESS. A local status query — reads process.env (+ any .env auto-loaded at
+    // startup) and reports, per key, whether it is set (a BOOLEAN — the key VALUE is
+    // NEVER read into the output). Makes the 2-required + 5-optional key situation
+    // discoverable without reading source or docs.
+    defineTool({
+        name: "api_key_status",
+        description: "List every API key this server can use, whether each is REQUIRED or OPTIONAL, the free signup URL + what it unlocks, and whether it is CURRENTLY configured — a boolean only; the key VALUE is NEVER shown. KEYLESS (no input). Most sources are keyless; only Census (census_business_patterns) and FRED (2 tools) REQUIRE a key (they throw without one), the other 5 keys are OPTIONAL (raise a rate limit or unlock one filter). Keys can be set as host env vars OR in a `.env` file in the server's working directory (auto-loaded at startup; real env wins over .env). Returns { keys:[{ envVar, sources[], required, signupUrl, unlocks, note, currentlySet }], requiredMissing:[envVars], optionalMissing:[envVars], allKeysFree:true }. This tool tells you the CONFIG state; to verify a key actually WORKS, call that source's own tool. Getting a key (creating the account at the signup URL) is your step — the server automates discovery + configuration, not signup.",
+        inputSchema: ApiKeyStatusInput,
+        handler: async () => keys.apiKeyStatus(),
+    }),
 ];
 // ─── Server bootstrap ────────────────────────────────────────────
 async function main() {
+    // Auto-load API keys from a `.env` in the working directory BEFORE anything
+    // reads process.env (tools read env at call time; SamGovClient below reads
+    // SAM_GOV_API_KEY immediately). Real env wins over .env (precedence); no .env
+    // present ⇒ zero change ⇒ byte-identical startup. We log only the COUNT — never
+    // which keys or their values.
+    const loadedFromEnvFile = keys.loadDotEnv();
+    if (loadedFromEnvFile > 0) {
+        console.error(`[mcp-sam-gov] loaded ${loadedFromEnvFile} key(s) from .env`);
+    }
     const sam = new SamGovClient({
         apiKey: process.env.SAM_GOV_API_KEY?.trim() || undefined,
         logger: {
@@ -4281,6 +4304,9 @@ function synthesizeDefaultMeta(toolName, sam) {
     }
     else if (toolName.startsWith("fpds_")) {
         source = "www.fpds.gov ezSearch ATOM (FPDS-NG, keyless)";
+    }
+    else if (toolName === "api_key_status") {
+        source = "local (process.env + .env)";
     }
     else {
         source = "unknown";
