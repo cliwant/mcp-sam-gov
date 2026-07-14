@@ -174,6 +174,7 @@ import { searchDatasets as dgSearchDatasets, DATAGOV_CATALOG_HOST } from "./dist
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
+import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num as cbpNum } from "./dist/census-economic.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
@@ -15761,6 +15762,205 @@ async function testCensusHonesty() {
   ok("55-parity census.num === coerce.num (one shared audited impl — a num regression fails §40e/§51i/§55 together; NO local num/str in census.ts)", censusNum === coerceNum, "census.num diverged from coerce.num");
 }
 
+// §55b: US Census County Business Patterns (api.census.gov/data/{year}/cbp, ADR-0047,
+// Wave-4 source #1 — the market-sizing lane AND the server's FIRST key-required source).
+// NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the mutation
+// that turns it RED:
+//   [KEY]      unset CENSUS_API_KEY ⇒ invalid_input THROW pre-fetch (0 fetch), message
+//              names CENSUS_API_KEY; with the key set it fetches (proves the throw is
+//              CONDITIONAL, not unconditional) ⇒ remove the pre-fetch guard ⇒ RED.
+//   [K-test]   the built URL carries key=<value>; the key is ABSENT from the serialized
+//              {data,_meta} ⇒ leak the key into _meta/source/notes ⇒ RED.
+//   [P1]       a 2D array with 3 data rows ⇒ returned:3, totalAvailable:3, complete:true
+//              ⇒ totalAvailable=header-length or fabricated ⇒ RED.
+//   [sentinel] ESTAB -999999999 ⇒ establishments:null (NOT negative, NOT 0); ESTAB 0 ⇒ 0
+//              (genuine); PAYANN 500 ⇒ annualPayrollUsd 500000 ⇒ drop the sentinel map ⇒ RED.
+//   [P2]       302 ⇒ invalid_input (key); header-only ⇒ honest empty; 503 ⇒
+//              upstream_unavailable; non-JSON/non-array 200 ⇒ schema_drift.
+//   [SSRF]     naics '../x' / year '20x' / state 'AL' ⇒ invalid_input, 0 fetch.
+const CBP_RE = /api\.census\.gov\/data\/\d{4}\/cbp/;
+const isCbp = (u) => CBP_RE.test(u);
+const cbpMock = (body, status = 200) => (u) => (isCbp(u) ? mockResponse({ status, json: body }) : failClosed()());
+const cbpUrl = (calls) => calls.find((x) => isCbp(x.url))?.url;
+const cbpQuery = (calls) => new URL(cbpUrl(calls)).searchParams;
+// A 200 whose .json() THROWS a SyntaxError (an HTML 'Missing Key' page parsed as JSON).
+const cbpNonJson = (u) => (isCbp(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>Missing Key</html>" }
+  : failClosed()());
+// The CBP 2D-array shape: row 0 = string[] header, rows 1..N = data (header order is
+// intentionally NOT the get order — the parser is by header NAME, order-independent).
+const CBP_HEADER = ["NAME", "NAICS2017_LABEL", "ESTAB", "EMP", "PAYANN", "GEO_ID", "NAICS2017", "state"];
+const cbpRow = (name, estab, emp, payann, geoId, state) => [name, "Computer Systems Design and Related Services", estab, emp, payann, geoId, "5415", state];
+const cbp2D = (rows) => [CBP_HEADER, ...rows];
+
+/** Run `fn` with CENSUS_API_KEY set to `val` (or deleted if undefined), restore after. */
+async function withCensusKey(val, fn) {
+  const orig = process.env.CENSUS_API_KEY;
+  if (val === undefined) delete process.env.CENSUS_API_KEY;
+  else process.env.CENSUS_API_KEY = val;
+  try {
+    return await fn();
+  } finally {
+    if (orig === undefined) delete process.env.CENSUS_API_KEY;
+    else process.env.CENSUS_API_KEY = orig;
+  }
+}
+
+async function testCensusBusinessPatterns() {
+  section("§55b. US Census County Business Patterns (ADR-0047, Wave-4 source #1 — market sizing by NAICS×geography AND the FIRST key-required source) — no-key THROW + K-test + sentinel→null + 2D-array-by-header parse + honest empty vs 302/503/drift + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  const KEY = "test-census-key-abc123";
+
+  // ── [KEY] no CENSUS_API_KEY ⇒ invalid_input THROW *before any fetch* (0 fetch);
+  //    the message names CENSUS_API_KEY. This is the first key-REQUIRED source. ──
+  await withCensusKey(undefined, async () => {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("census_business_patterns", { naics: "5415", geography: "state" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55b-key UNSET CENSUS_API_KEY ⇒ invalid_input THROW BEFORE any fetch (0 fetch) + the message NAMES CENSUS_API_KEY (honest key-required config error, never a fake-empty/keyless-pretend) ⇒ remove the pre-fetch key guard ⇒ RED",
+        threw && te.kind === "invalid_input" && /CENSUS_API_KEY/.test(te.message) && calls.length === before, JSON.stringify({ kind: te?.kind, added: calls.length - before, msg: te?.message?.slice(0, 60) }));
+    });
+    // Non-vacuity: the DIRECT handler throws too, and censusApiKey() reports undefined.
+    ok("55b-key (non-vacuity) censusApiKey() returns undefined when unset ⇒ the guard reads env, not a constant", cbpApiKey() === undefined, JSON.stringify(cbpApiKey()));
+  });
+
+  // ── [KEY non-vacuity] WITH the key set, the SAME call FETCHES (proves the throw
+  //    is conditional on the key, not unconditional) + [K-test] key in the URL only. ──
+  await withCensusKey(KEY, async () => {
+    await withFetch(cbpMock(cbp2D([cbpRow("California", "39755", "512340", "89012345", "0400000US06", "06")])), async (calls) => {
+      const r = await runTool("census_business_patterns", { naics: "5415", geography: "state", state: "06" }, sam);
+      const m = buildMeta(r.meta);
+      const q = cbpQuery(calls);
+      ok("55b-key WITH CENSUS_API_KEY set the same request FETCHES (does NOT throw the key error) ⇒ the pre-fetch throw is CONDITIONAL on the missing key, not unconditional",
+        r.data.rows.length === 1 && cbpUrl(calls) !== undefined, JSON.stringify({ rows: r.data.rows.length }));
+      ok("55b-Ktest the built URL carries key=<value> in the &key= query param (the ONLY carrier) ⇒ move the key out of &key= ⇒ RED",
+        q.get("key") === KEY, JSON.stringify({ key: q.get("key") }));
+      const serialized = JSON.stringify({ data: r.data, _meta: m });
+      ok("55b-Ktest the key value is ABSENT from the serialized {data,_meta} (never in source/notes/label — the K-test) ⇒ leak the key into _meta.source or a note ⇒ RED",
+        !serialized.includes(KEY) && m.source.includes("CENSUS_API_KEY") && m.keylessMode === false, JSON.stringify({ leaked: serialized.includes(KEY), source: m.source }));
+      ok("55b-key the request is to api.census.gov/data/2022/cbp over https (fixed host; default year 2022) + get=NAME,NAICS2017_LABEL,ESTAB,EMP,PAYANN,GEO_ID + for=state:06 + NAICS2017=5415",
+        new URL(cbpUrl(calls)).hostname === "api.census.gov" && new URL(cbpUrl(calls)).protocol === "https:" && /\/data\/2022\/cbp/.test(cbpUrl(calls)) && q.get("for") === "state:06" && q.get("NAICS2017") === "5415" && q.get("get") === "NAME,NAICS2017_LABEL,ESTAB,EMP,PAYANN,GEO_ID", cbpUrl(calls));
+    });
+
+    // ── [P1] a 2D array with 3 data rows ⇒ returned:3, totalAvailable:3, complete:true
+    //    (CBP returns the complete set for the filter — no pagination). ──
+    await withFetch(cbpMock(cbp2D([
+      cbpRow("California", "39755", "512340", "89012345", "0400000US06", "06"),
+      cbpRow("Texas", "28110", "310220", "45678901", "0400000US48", "48"),
+      cbpRow("New York", "31220", "402110", "67890123", "0400000US36", "36"),
+    ])), async (calls) => {
+      const r = await runTool("census_business_patterns", { naics: "5415", geography: "state" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55b-P1 3 data rows ⇒ rows.length 3, returned:3, totalAvailable:3 (the ACTUAL row count, NOT the 8-col header length), complete:true, truncated:false ⇒ totalAvailable=header-length or fabricated ⇒ RED",
+        r.data.rows.length === 3 && m.returned === 3 && m.totalAvailable === 3 && m.complete === true && m.truncated === false, JSON.stringify({ n: r.data.rows.length, ret: m.returned, ta: m.totalAvailable, c: m.complete }));
+      ok("55b-P1 row 0 maps by HEADER NAME (order-independent): name/geoId/naicsCode/naicsLabel/state are STRINGS ('06' survives, not 6) ⇒ positional-mis-read or num-coerce a code ⇒ RED",
+        r.data.rows[0].name === "California" && r.data.rows[0].geoId === "0400000US06" && r.data.rows[0].naicsCode === "5415" && typeof r.data.rows[0].naicsCode === "string" && r.data.rows[0].state === "06" && typeof r.data.rows[0].state === "string" && r.data.rows[0].naicsLabel === "Computer Systems Design and Related Services", JSON.stringify(r.data.rows[0]));
+      ok("55b-P1 keylessMode:false (KEYED — the first key-required source) + the required honesty notes (key-required + payroll ×1000 + suppressed→null + no-pagination) are all present",
+        m.keylessMode === false && m.notes.some((n) => /CENSUS_API_KEY/.test(n)) && m.notes.some((n) => /PAYANN.*\$1,000 units/.test(n)) && m.notes.some((n) => /suppress/i.test(n) && /null/.test(n)) && m.notes.some((n) => /no server-side pagination/i.test(n)), JSON.stringify(m.notes.length));
+    });
+
+    // ── [sentinel] ★the crux: ESTAB -999999999 ⇒ establishments:null (NOT -999999999,
+    //    NOT 0); ESTAB 0 ⇒ 0 (genuine); PAYANN 500 ⇒ annualPayrollUsd 500000 (×1000). ──
+    await withFetch(cbpMock(cbp2D([
+      cbpRow("Suppressed County", "-999999999", "-888888888", "-666666666", "0500000US06003", "06"),
+      cbpRow("Genuine Zero County", "0", "0", "0", "0500000US06005", "06"),
+      cbpRow("Real County", "1234", "56789", "500", "0500000US06001", "06"),
+    ])), async () => {
+      const r = await runTool("census_business_patterns", { naics: "5415", geography: "county", state: "06" }, sam);
+      const [supp, zero, real] = r.data.rows;
+      ok("55b-sentinel ESTAB/EMP/PAYANN -999999999/-888888888/-666666666 (Census suppression sentinels) ⇒ establishments/employees/annualPayrollUsd ALL null (withheld — NOT a negative number, NOT 0) ⇒ remove the sentinel→null map (num() alone returns -999999999) ⇒ RED",
+        supp.establishments === null && supp.employees === null && supp.annualPayrollUsd === null, JSON.stringify(supp));
+      ok("55b-sentinel a GENUINE 0 (ESTAB '0') ⇒ 0 (NOT null) — the sentinel floor is -100000000, so a real zero is preserved (distinguishes 'withheld' from 'genuinely zero') ⇒ map all ≤0 to null ⇒ RED",
+        zero.establishments === 0 && zero.employees === 0 && zero.annualPayrollUsd === 0, JSON.stringify(zero));
+      ok("55b-sentinel PAYANN '500' ($1,000 units) ⇒ annualPayrollUsd 500000 (×1000 to USD); ESTAB '1234' ⇒ 1234 ⇒ drop the ×1000 or fabricate ⇒ RED",
+        real.annualPayrollUsd === 500000 && real.establishments === 1234 && real.employees === 56789, JSON.stringify(real));
+    });
+
+    // ── [P2] a 302 at the wire (missing/invalid key → Missing-Key page) ⇒ invalid_input
+    //    (never a fake-empty). ──
+    await withFetch(cbpMock([], 302), async () => {
+      const { threw, error } = await expectThrow(() => runTool("census_business_patterns", { geography: "state" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55b-P2 a 302 (an invalid key redirected to the Census 'Missing Key' page) ⇒ invalid_input THROW naming CENSUS_API_KEY (reclassified from the 3xx; NEVER read the redirect as an empty result) ⇒ swallow the 302 as empty ⇒ RED",
+        threw && te.kind === "invalid_input" && /CENSUS_API_KEY/.test(te.message), JSON.stringify({ kind: te?.kind }));
+    });
+
+    // ── [P2] a header-only body (0 data rows) ⇒ honest empty (returned:0, complete:true),
+    //    NOT thrown, NOT drift (the header row IS a valid 2D-array contract). ──
+    await withFetch(cbpMock(cbp2D([])), async () => {
+      const r = await runTool("census_business_patterns", { naics: "9999", geography: "state" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55b-P2 a header-only 2D array (no data rows) ⇒ rows:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+        r.data.rows.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.rows.length, ta: m.totalAvailable }));
+    });
+
+    // ── [P2] a 503 ⇒ upstream_unavailable (a DOWN endpoint is NEVER a returned:0). ──
+    await withFetch(cbpMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("census_business_patterns", { geography: "state" }, sam));
+      ok("55b-P2 503 ⇒ upstream_unavailable THROW (a down Census Data API is never an empty result; distinct from the 302 key-error and the honest header-only empty)",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P2/P4] a 200 non-array/non-JSON ⇒ schema_drift (never a fabricated empty). ──
+    await withFetch(cbpMock({ error: "not an array" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("census_business_patterns", { geography: "state" }, sam));
+      ok("55b-P4 a 200 body that is not a 2D array (an object) ⇒ schema_drift (the 2D-array contract broke; never a fabricated empty) ⇒ read {} as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(cbpMock([42, [1, 2]]), async () => {
+      const { threw, error } = await expectThrow(() => runTool("census_business_patterns", { geography: "state" }, sam));
+      ok("55b-P4 a 2D array whose row 0 is NOT a string[] header (a number) ⇒ schema_drift (the header contract broke) ⇒ trust a non-string header ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(cbpNonJson, async () => {
+      const { threw, error } = await expectThrow(() => runTool("census_business_patterns", { geography: "state" }, sam));
+      ok("55b-P2 a 200 whose body is non-JSON (an HTML 'Missing Key' page → r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [SSRF] naics '../x' / year '20x' / state 'AL' ⇒ invalid_input, 0 fetch. ──
+    for (const [args, label] of [
+      [{ naics: "../etc/passwd", geography: "state" }, "naics '../etc/passwd'"],
+      [{ year: "20x", geography: "state" }, "year '20x' (path-injection surface)"],
+      [{ state: "AL", geography: "county" }, "state 'AL' (non-numeric FIPS)"],
+      [{ geography: "planet" }, "geography 'planet'"],
+    ]) {
+      await withFetch(failClosed(), async (calls) => {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool("census_business_patterns", args, sam));
+        ok(`55b-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass/enum re-guard PRE-fetch — a value never touches the fixed host/path) ⇒ widen the validation ⇒ RED`,
+          threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+      });
+    }
+
+    // ── [SSRF] geography 'county' WITHOUT state ⇒ invalid_input, 0 fetch (CBP county
+    //    needs the in=state: predicate; never a silent us:* fallback). ──
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("census_business_patterns", { geography: "county", naics: "5415" }, sam));
+      ok("55b-ssrf geography 'county' with NO state ⇒ invalid_input, 0 fetch (county REQUIRES in=state:NN — never a silent broaden) ⇒ default to us:* ⇒ RED",
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+
+    // ── [limit] the OPTIONAL client-side top-N slice discloses the omission
+    //    (totalAvailable stays the FULL count; truncated:true; complete:false). ──
+    await withFetch(cbpMock(cbp2D([
+      cbpRow("California", "39755", "512340", "89012345", "0400000US06", "06"),
+      cbpRow("Texas", "28110", "310220", "45678901", "0400000US48", "48"),
+      cbpRow("New York", "31220", "402110", "67890123", "0400000US36", "36"),
+    ])), async () => {
+      const r = await runTool("census_business_patterns", { naics: "5415", geography: "state", limit: 1 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55b-limit limit=1 over 3 rows ⇒ returned:1 but totalAvailable:3 (the FULL count), truncated:true, complete:false + a disclosing note (CBP has no server pagination) ⇒ set totalAvailable=1 (hide the omission) ⇒ RED",
+        r.data.rows.length === 1 && m.returned === 1 && m.totalAvailable === 3 && m.truncated === true && m.complete === false && m.notes.some((n) => /first 1 of 3/.test(n)), JSON.stringify({ n: r.data.rows.length, ta: m.totalAvailable, t: m.truncated }));
+    });
+  });
+
+  // ── (parity) census-economic re-exports the shared coerce.num (null-never-0). ──
+  ok("55b-parity census-economic.num === coerce.num (one shared audited impl — NO local num/str; the sentinel→null map is a WRAPPER around it, not a fork)", cbpNum === coerceNum, "cbp num diverged from coerce.num");
+}
+
 // §54: shared disclosure tokenizer (src/disclosure.ts, ADR-0022) — the byte-identical
 // extraction of NSF's OR-note + ClinicalTrials' AND-note tokenizer into ONE audited
 // home, PLUS the lint guardrail against the whitespace-only recurrence adversarial
@@ -16345,6 +16545,7 @@ async function main() {
   await testClinicaltrialsHonesty();
   await testClinicaltrialsFacetHonesty();
   await testCensusHonesty();
+  await testCensusBusinessPatterns();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
   await testHonestyAuditRemediation();
