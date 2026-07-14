@@ -179,6 +179,9 @@ import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
 import { getJson, getText, isRedirectError, driftError, throughGate, getJsonWithProvenance, getJsonConditional, throughPathChain, CircuitBreaker, isHardFailure } from "./dist/datasource.js";
 import { errorFromResponse, isHonorRetryAfter } from "./dist/errors.js";
+import { resolveSnapshotBaseUrl, resilienceConfig, snapshotPath } from "./dist/snapshot.js";
+import { _resetTreasuryBreakerForTests } from "./dist/treasury.js";
+import { buildEnvelope, isPublicRedistributable, manifestEntry, SNAPSHOT_SPECS } from "./scripts/build-snapshots.mjs";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
 import {
@@ -9152,6 +9155,198 @@ async function testResiliencePort() {
   }
 }
 
+// §71: Snapshot-mirror infra (ADR-0045 Phase 2+4) — INERT by default + the
+// Treasury pilot's opt-in path-chain. All OFFLINE, deterministic, non-vacuous.
+//   Config: SAMGOV_SNAPSHOT_BASE_URL unset ⇒ resolveSnapshotBaseUrl undefined ⇒
+//     snapshotPath returns null ⇒ single-path chain ⇒ byte-identical.
+//   Reader: on a HARD live failure with a snapshot configured, serves the
+//     snapshot with dataPath:"snapshot" + asOf + staleness note + complete!==true
+//     + totalIsEstimated (revert the provenance threading ⇒ RED).
+//   ★no-route-around-rate-limit (LOAD-BEARING policy): live 429+Retry-After WITH a
+//     snapshot configured ⇒ THROWS rate_limited, snapshot URL NEVER fetched (spy).
+//   INERT: snapshot unset + live 500 ⇒ throws upstream_unavailable, 0 snapshot hits.
+//   Public-only gate: a non-public / asOf-less snapshot envelope is REFUSED
+//     (schema_drift) rather than served.
+//   Builder (offline): buildEnvelope shape, isPublicRedistributable gate, manifest.
+const SNAP_BASE = "https://snap.test/base";
+const isTreasuryLive = (u) => /fiscaldata\.treasury\.gov/.test(u);
+const isSnapshotUrl = (u) => /snap\.test/.test(u);
+/** Set SAMGOV_SNAPSHOT_BASE_URL for the duration of fn, then restore. */
+async function withSnapshotEnv(base, fn) {
+  const prev = process.env.SAMGOV_SNAPSHOT_BASE_URL;
+  if (base === undefined) delete process.env.SAMGOV_SNAPSHOT_BASE_URL;
+  else process.env.SAMGOV_SNAPSHOT_BASE_URL = base;
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.SAMGOV_SNAPSHOT_BASE_URL;
+    else process.env.SAMGOV_SNAPSHOT_BASE_URL = prev;
+  }
+}
+
+async function testSnapshotMirror() {
+  section("71. Snapshot-mirror infra (ADR-0045 Phase 2+4) — INERT default + Treasury pilot opt-in (OFFLINE)");
+  const sam = new SamGovClient({});
+  const debtRow = (d) => ({
+    record_date: d,
+    tot_pub_debt_out_amt: "39394977645639.05",
+    debt_held_public_amt: "31695882336712.26",
+    intragov_hold_amt: "7699095308926.79",
+  });
+  const treasuryEnv = (rows, totalCount) => ({
+    data: rows,
+    meta: { count: rows.length, "total-count": totalCount, "total-pages": totalCount },
+  });
+  const SNAP_ASOF = "2026-07-01T00:00:00Z";
+  const snapEnvelope = (data, { asOf = SNAP_ASOF, accessLevel = "public" } = {}) => ({
+    asOf,
+    source: "treasury snapshot (test)",
+    license: "us-government-work",
+    accessLevel,
+    data,
+  });
+  const debtSnapshotData = treasuryEnv([debtRow("2026-06-30")], 8400);
+
+  // ── (a) CONFIG: unset ⇒ INERT. resolveSnapshotBaseUrl undefined, config
+  //        disabled, snapshotPath returns null (⇒ single-path chain downstream).
+  await withSnapshotEnv(undefined, async () => {
+    ok("71a SAMGOV_SNAPSHOT_BASE_URL unset ⇒ resolveSnapshotBaseUrl() === undefined (INERT default)", resolveSnapshotBaseUrl() === undefined, JSON.stringify(resolveSnapshotBaseUrl()));
+    ok("71a resilienceConfig().snapshotBaseUrl === undefined (snapshot disabled)", resilienceConfig().snapshotBaseUrl === undefined, JSON.stringify(resilienceConfig()));
+    ok("71a snapshotPath('k') === null when unset (path NOT added to the chain ⇒ byte-identical)", snapshotPath("treasury_debt_to_penny_latest") === null);
+  });
+  // Trailing-slash + blank normalization.
+  await withSnapshotEnv("https://snap.test/base/", async () => {
+    ok("71a trailing slash stripped ⇒ 'https://snap.test/base'", resolveSnapshotBaseUrl() === "https://snap.test/base", resolveSnapshotBaseUrl());
+  });
+  await withSnapshotEnv("   ", async () => {
+    ok("71a blank/whitespace base ⇒ undefined (treated as unset, INERT)", resolveSnapshotBaseUrl() === undefined, JSON.stringify(resolveSnapshotBaseUrl()));
+  });
+
+  // ── (b) SNAPSHOT SERVES on a HARD live failure. base configured; live 500s;
+  //        snapshot 200s ⇒ dataPath:"snapshot", asOf present, staleness note,
+  //        complete!==true, totalIsEstimated, records mapped from the snapshot.
+  //        Reverting the treasuryMeta provenance threading turns this RED.
+  _resetTreasuryBreakerForTests();
+  await withSnapshotEnv(SNAP_BASE, async () => {
+    await withFetch((u) => {
+      if (isSnapshotUrl(u)) return mockResponse({ status: 200, json: snapEnvelope(debtSnapshotData) });
+      if (isTreasuryLive(u)) return mockResponse({ status: 500 });
+      return failClosed()();
+    }, async (calls) => {
+      const r = await runTool("treasury_debt_to_penny", { latest: true }, sam);
+      const m = buildMeta(r.meta);
+      ok("71b live 500 + snapshot configured ⇒ SERVES snapshot: _meta.dataPath === 'snapshot' (revert provenance threading ⇒ RED)", m.dataPath === "snapshot", JSON.stringify({ dp: m.dataPath }));
+      ok("71b _meta.asOf === the envelope asOf (ISO-8601 UTC, P5 freshness)", m.asOf === SNAP_ASOF, JSON.stringify({ asOf: m.asOf }));
+      ok("71b complete !== true on a snapshot (M1a — a snapshot can never claim live completeness)", m.complete !== true, JSON.stringify({ complete: m.complete }));
+      ok("71b totalIsEstimated:true (M1b — snapshot totalAvailable qualified as an as-of figure)", m.totalIsEstimated === true, JSON.stringify({ tie: m.totalIsEstimated, ta: m.totalAvailable }));
+      ok("71b a staleness note is present in _meta.notes (m1: reuses notes[], names the snapshot + as-of)", m.notes.some((n) => /snapshot/i.test(n) && /Freshness is NOT guaranteed/i.test(n)), JSON.stringify(m.notes));
+      ok("71b records mapped FROM the snapshot body (recordDate 2026-06-30, amount coerced) — non-vacuity: the snapshot data actually flowed through", r.data.records.length === 1 && r.data.records[0].recordDate === "2026-06-30" && r.data.records[0].totalPublicDebtOutstanding === 39394977645639.05, JSON.stringify(r.data.records));
+      ok("71b the snapshot URL WAS fetched (…/treasury_debt_to_penny_latest.json) after the live host hard-failed", calls.some((c) => /snap\.test\/base\/treasury_debt_to_penny_latest\.json$/.test(c.url)) && calls.some((c) => isTreasuryLive(c.url)), JSON.stringify(calls.map((c) => c.url)));
+    });
+  });
+
+  // ── (c) ★NO-ROUTE-AROUND-RATE-LIMIT (LOAD-BEARING B1-policy). live 429 +
+  //        Retry-After WITH a snapshot configured ⇒ the tool THROWS rate_limited
+  //        and the snapshot URL is NEVER fetched (fetch-spy). Reverting the
+  //        isHonorRetryAfter carve-out in throughPathChain turns this RED (it
+  //        would fall through and serve the snapshot).
+  _resetTreasuryBreakerForTests();
+  await withSnapshotEnv(SNAP_BASE, async () => {
+    await withFetch((u) => {
+      if (isSnapshotUrl(u)) return mockResponse({ status: 200, json: snapEnvelope(debtSnapshotData) });
+      if (isTreasuryLive(u)) return mockResponse({ status: 429, headers: { "Retry-After": "30" } });
+      return failClosed()();
+    }, async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
+      ok("71c ★live 429+Retry-After + snapshot configured ⇒ THROWS rate_limited (honor the throttle, never route around — revert the carve-out ⇒ RED)", threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+      ok("71c ★the snapshot URL was NEVER fetched (0 snap.test hits) — a rate limit is HONORED, not bypassed onto the mirror", !calls.some((c) => isSnapshotUrl(c.url)), JSON.stringify(calls.map((c) => c.url)));
+    });
+  });
+
+  // ── (d) INERT: snapshot UNSET + live 500 ⇒ behaves EXACTLY as today: throws
+  //        upstream_unavailable, and 0 snapshot fetches are attempted (the chain
+  //        is single-path live — the breaker is never consulted).
+  _resetTreasuryBreakerForTests();
+  await withSnapshotEnv(undefined, async () => {
+    await withFetch((u) => (isTreasuryLive(u) ? mockResponse({ status: 500 }) : failClosed()()), async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
+      ok("71d INERT (unset) + live 500 ⇒ throws upstream_unavailable (byte-identical to pre-ADR — no snapshot attempt)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+      ok("71d INERT ⇒ 0 snapshot fetches (only the live host is ever hit)", !calls.some((c) => isSnapshotUrl(c.url)) && calls.every((c) => isTreasuryLive(c.url)), JSON.stringify(calls.map((c) => c.url)));
+    });
+  });
+
+  // ── (e) LIVE WINS when healthy even with a snapshot configured: live 200 ⇒
+  //        dataPath ABSENT (byte-identical _meta), snapshot URL never fetched.
+  _resetTreasuryBreakerForTests();
+  await withSnapshotEnv(SNAP_BASE, async () => {
+    await withFetch((u) => {
+      if (isTreasuryLive(u)) return mockResponse({ status: 200, json: treasuryEnv([debtRow("2026-07-08")], 8345) });
+      return failClosed()();
+    }, async (calls) => {
+      const r = await runTool("treasury_debt_to_penny", { latest: true }, sam);
+      const m = buildMeta(r.meta);
+      ok("71e live 200 (healthy) + snapshot configured ⇒ dataPath ABSENT (live wins; _meta byte-identical to no-snapshot)", !("dataPath" in m) && !("asOf" in m), JSON.stringify({ hasDp: "dataPath" in m, hasAsOf: "asOf" in m }));
+      ok("71e live 200 ⇒ snapshot URL NEVER fetched (fallback only on a HARD live failure)", !calls.some((c) => isSnapshotUrl(c.url)), JSON.stringify(calls.map((c) => c.url)));
+      ok("71e live 200 ⇒ complete-able (returned 1 < total 8345 ⇒ truncated, but NOT snapshot-gated)", m.dataPath === undefined && m.totalIsEstimated === undefined, JSON.stringify({ tie: m.totalIsEstimated }));
+    });
+  });
+
+  // ── (f) PUBLIC-ONLY GATE + envelope validation (reader refuses to serve). A
+  //        non-public envelope OR a missing asOf on a snapshot served after a live
+  //        outage ⇒ schema_drift (refused), NOT served as data.
+  _resetTreasuryBreakerForTests();
+  await withSnapshotEnv(SNAP_BASE, async () => {
+    await withFetch((u) => {
+      if (isSnapshotUrl(u)) return mockResponse({ status: 200, json: snapEnvelope(debtSnapshotData, { accessLevel: "restricted" }) });
+      if (isTreasuryLive(u)) return mockResponse({ status: 500 });
+      return failClosed()();
+    }, async () => {
+      const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
+      ok("71f accessLevel!=='public' snapshot ⇒ REFUSED (schema_drift), restricted data NEVER served (public-only gate M3)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+  });
+  _resetTreasuryBreakerForTests();
+  await withSnapshotEnv(SNAP_BASE, async () => {
+    await withFetch((u) => {
+      // asOf-less envelope (P5 requires freshness on a non-live body).
+      if (isSnapshotUrl(u)) return mockResponse({ status: 200, json: { source: "x", license: "us-government-work", accessLevel: "public", data: debtSnapshotData } });
+      if (isTreasuryLive(u)) return mockResponse({ status: 500 });
+      return failClosed()();
+    }, async () => {
+      const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
+      ok("71f snapshot missing 'asOf' ⇒ schema_drift (a non-live body MUST disclose freshness — P5)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+  });
+
+  // ── (g) snapshotPath host-assert + redirect:"error". When configured, the path
+  //        fetches on the base host with redirect:"error" set (SSRF hardening).
+  await withSnapshotEnv(SNAP_BASE, async () => {
+    const p = snapshotPath("treasury_debt_to_penny_latest");
+    ok("71g snapshotPath returns a ResiliencePath when configured (host === base host, provenance dataPath snapshot)", p !== null && p.host === "snap.test" && p.provenance.dataPath === "snapshot", JSON.stringify(p ? { host: p.host, dp: p.provenance.dataPath } : null));
+    await withFetch((u) => (isSnapshotUrl(u) ? mockResponse({ status: 200, json: snapEnvelope(debtSnapshotData) }) : failClosed()()), async (calls) => {
+      const out = await p.run();
+      ok("71g run() returns the envelope's DATA (body), and mutates provenance.asOf to the envelope asOf", JSON.stringify(out) === JSON.stringify(debtSnapshotData) && p.provenance.asOf === SNAP_ASOF, JSON.stringify({ asOf: p.provenance.asOf }));
+      ok("71g the snapshot fetch sets redirect:'error' (SSRF hardening — off-host redirect fails closed)", calls[0].init.redirect === "error", JSON.stringify(calls[0].init.redirect));
+      ok("71g fetch URL is base/key.json on the base host", /^https:\/\/snap\.test\/base\/treasury_debt_to_penny_latest\.json$/.test(calls[0].url), calls[0].url);
+    });
+  });
+
+  // ── (h) BUILDER (offline-testable pure parts): envelope shape, the public-only
+  //        gate (accessLevel!=='public' ⇒ skipped), and the manifest entry.
+  {
+    const spec = SNAPSHOT_SPECS.find((s) => s.key === "treasury_debt_to_penny_latest");
+    ok("71h SNAPSHOT_SPECS carries the pilot key treasury_debt_to_penny_latest (public, us-government-work)", !!spec && spec.accessLevel === "public" && spec.license === "us-government-work", JSON.stringify(spec ? { al: spec.accessLevel, lic: spec.license } : null));
+    const envlp = buildEnvelope(spec, debtSnapshotData, SNAP_ASOF);
+    ok("71h buildEnvelope ⇒ { asOf, source, license, accessLevel, data } exact shape (the reader's contract)", JSON.stringify(Object.keys(envlp).sort()) === JSON.stringify(["accessLevel", "asOf", "data", "license", "source"]) && envlp.asOf === SNAP_ASOF && envlp.accessLevel === "public" && JSON.stringify(envlp.data) === JSON.stringify(debtSnapshotData), JSON.stringify({ keys: Object.keys(envlp) }));
+    ok("71h isPublicRedistributable(public + us-government-work) === true (ingested)", isPublicRedistributable(spec) === true);
+    ok("71h isPublicRedistributable(accessLevel:'restricted') === false (SKIPPED — public-only gate)", isPublicRedistributable({ ...spec, accessLevel: "restricted" }) === false);
+    ok("71h isPublicRedistributable(non-redistributable license) === false (conservative default)", isPublicRedistributable({ ...spec, license: "proprietary" }) === false);
+    const me = manifestEntry(spec, SNAP_ASOF);
+    ok("71h manifestEntry records per-key { key, source, license, url, asOf }", me.key === spec.key && me.source === spec.source && me.license === spec.license && me.url === spec.url && me.asOf === SNAP_ASOF, JSON.stringify(me));
+  }
+  _resetTreasuryBreakerForTests();
+}
+
 // §44: CKAN datastore_search source (ADR-0006) — the FIRST source on the R2 port.
 // SSRF (allowlist enum, 36-char lowercase-UUID regex + runtime M1 recheck,
 // redirect:"error") + honesty (EXACT vs ESTIMATE total, the B1 anti-livelock
@@ -15877,6 +16072,7 @@ async function main() {
   await testDataSourcePortParity();
   await testThroughGate();
   await testResiliencePort();
+  await testSnapshotMirror();
   await testCkanHonesty();
   await testFemaHonesty();
   await testFdicHonesty();
