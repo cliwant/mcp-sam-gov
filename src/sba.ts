@@ -40,11 +40,35 @@
  */
 
 import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
+import {
+  throughPathChain,
+  CircuitBreaker,
+  type ResiliencePath,
+  type Provenance,
+} from "./datasource.js";
+import { snapshotPath, provenanceMeta } from "./snapshot.js";
 import { memoize } from "./cache.js";
 import { withMeta } from "./meta.js";
 
 const SBA_NAICS_URL =
   "https://www.sba.gov/sites/default/files/data/naics.json";
+
+// ─── Resilience wiring (ADR-0045 pilot expansion — INERT by default) ───────
+// The whole naics.json file (all ~997 size standards) is a single, queryless,
+// slow-changing PUBLIC reference — the cleanest snapshot candidate: one
+// pre-fetch serves EVERY per-NAICS lookup. The live host + a per-host circuit
+// breaker keyed on the FIXED set {this host} (bounded — m3-regression),
+// CONSULTED only by `throughPathChain` for a ≥2-path chain. When
+// SAMGOV_SNAPSHOT_BASE_URL is unset the chain is single-path (live only), the
+// breaker is a pure no-op, and the tool is BYTE-IDENTICAL to before this ADR.
+const SBA_HOST = "www.sba.gov";
+let sbaBreaker = new CircuitBreaker([SBA_HOST]);
+
+/** Test-only: reset the resilience breaker between OFFLINE fixtures (mirrors
+ *  treasury.ts's `_resetTreasuryBreakerForTests`). */
+export function _resetSbaBreakerForTests(): void {
+  sbaBreaker = new CircuitBreaker([SBA_HOST]);
+}
 
 /** One raw entry in sba.gov/naics.json (only the fields we consume). */
 type SbaNaicsEntry = {
@@ -78,17 +102,37 @@ const MILLIONS = 1_000_000;
 async function loadSizeStandards(): Promise<{
   byId: Map<string, SbaNaicsEntry>;
   count: number;
+  provenance: Provenance;
 }> {
   return memoize("sba:size-standards", async () => {
-    const r = await fetchWithRetry(
-      SBA_NAICS_URL,
-      {
-        headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(15_000),
+    // ★Route the fetch through the resilience path-chain. The LIVE path is
+    // byte-identical to the prior bare fetch — same URL, same init
+    // ({headers:{Accept}, signal}), same label — so with no snapshot configured
+    // the chain is SINGLE-ENTRY, `throughPathChain` fast-paths (no breaker
+    // consult), and behavior is BYTE-IDENTICAL to before this ADR. The snapshot
+    // (key `sba_size_standards`, the whole array) is added only when
+    // SAMGOV_SNAPSHOT_BASE_URL is configured (else snapshotPath returns null).
+    const livePath: ResiliencePath<unknown> = {
+      host: SBA_HOST,
+      provenance: { dataPath: "live" },
+      run: async () => {
+        const r = await fetchWithRetry(
+          SBA_NAICS_URL,
+          {
+            headers: { Accept: "application/json" },
+            signal: AbortSignal.timeout(15_000),
+          },
+          "sba:naics.json",
+        );
+        return (await r.json()) as unknown;
       },
-      "sba:naics.json",
+    };
+    const snap = snapshotPath<unknown>("sba_size_standards");
+    const paths = snap ? [livePath, snap] : [livePath];
+    const { body: raw, provenance } = await throughPathChain<unknown>(
+      paths,
+      sbaBreaker,
     );
-    const raw = (await r.json()) as unknown;
     if (!Array.isArray(raw)) {
       // 200 with an unexpected shape ⇒ schema drift, not "no data".
       throw new ToolErrorCarrier({
@@ -109,7 +153,7 @@ async function loadSizeStandards(): Promise<{
         byId.set(id, entry);
       }
     }
-    return { byId, count: byId.size };
+    return { byId, count: byId.size, provenance };
   });
 }
 
@@ -159,7 +203,7 @@ export async function sizeStandard(args: { naics: string }) {
     });
   }
 
-  const { byId, count } = await loadSizeStandards();
+  const { byId, count, provenance } = await loadSizeStandards();
   const asOf = new Date().toISOString();
   const entry = byId.get(naics);
 
@@ -207,6 +251,8 @@ export async function sizeStandard(args: { naics: string }) {
         `NAICS ${naics} is not present in the SBA size-standards dataset (${count} 6-digit codes as of retrieval). No size standard was fabricated — confirm the code is a current 6-digit NAICS and check sba.gov.`,
         NOT_A_CONSTANT_CAVEAT,
       ],
+      // P5 provenance — threaded ONLY when NON-live ⇒ live stays byte-identical.
+      ...provenanceMeta(provenance),
     });
   }
 
@@ -302,5 +348,10 @@ export async function sizeStandard(args: { naics: string }) {
     complete: true,
     fieldsUnavailable,
     notes,
+    // P5 provenance — threaded ONLY when NON-live ⇒ live stays byte-identical.
+    // On a snapshot, buildMeta forces complete!==true (M1a) and qualifies the
+    // totalAvailable via totalIsEstimated (M1b) — the found standard is disclosed
+    // as an as-of figure, never a live-authoritative one.
+    ...provenanceMeta(provenance),
   });
 }
