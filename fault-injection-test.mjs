@@ -16810,6 +16810,23 @@ async function testApiKeyStatus() {
     );
     ok("keys-A all unset ⇒ every currentlySet:false", r0.keys.every((k) => k.currentlySet === false));
     ok("keys-A every entry has a non-empty signupUrl (https)", r0.keys.every((k) => typeof k.signupUrl === "string" && /^https:\/\//.test(k.signupUrl)));
+    // ★sources-accuracy: DATA_GOV_API_KEY must list only ACTUAL consumers (the
+    // files importing ./datagovKey.js = datagov.ts[Regulations.gov+Congress.gov],
+    // govinfo.ts[GovInfo], fac.ts[FAC], datagov-catalog.ts[data.gov catalog]) and
+    // must NOT advertise a non-consumer or a non-existent tool. Regression guard
+    // for the over-claim (NPPES/CMS keyless on their own hosts; GSA per-diem was
+    // never built): reintroducing any of those ⇒ RED.
+    const dataGovSrc = r0.keys.find((k) => k.envVar === "DATA_GOV_API_KEY").sources.join(" ");
+    ok(
+      "keys-A DATA_GOV_API_KEY sources name the REAL keyed consumers (Congress.gov + GovInfo + FAC + catalog)",
+      /Congress\.gov/.test(dataGovSrc) && /GovInfo/.test(dataGovSrc) && /FAC/.test(dataGovSrc) && /catalog/i.test(dataGovSrc),
+      dataGovSrc,
+    );
+    ok(
+      "keys-A ★DATA_GOV_API_KEY sources do NOT over-claim per-diem/NPPES/CMS (non-consumers of this key)",
+      !/per-?diem/i.test(dataGovSrc) && !/NPPES/i.test(dataGovSrc) && !/\bCMS\b/.test(dataGovSrc),
+      dataGovSrc,
+    );
     ok(
       "keys-A exactly CENSUS_API_KEY + FRED_API_KEY are required:true",
       JSON.stringify(r0.keys.filter((k) => k.required).map((k) => k.envVar).sort()) ===
