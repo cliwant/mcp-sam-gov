@@ -60,7 +60,8 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
-const SERVER_VERSION = "0.7.0";
+// Keep in sync with package.json "version" (asserted at release; see CHANGELOG).
+const SERVER_VERSION = "1.0.0";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
     query: z.string().optional().describe("Free-text title query"),

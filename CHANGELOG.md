@@ -5,12 +5,9 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] (unpublished — version stays 0.7.0)
+## [1.0.0] — 2026-07-14 (first npm release since 0.3.0 — 111 tools, resilience & a truthfulness overhaul)
 
-The largest expansion since 0.7.0: **52 → 111 tools across 31 keyless federal
-data sources**, a codebase-wide honesty dogfooding pass, and a resilience
-initiative for public-data availability. Not yet published to npm; version
-unchanged pending maintainer sign-off.
+The largest release yet and the **first npm publish since 0.3.0** — it consolidates the in-repo 0.4.0–0.7.0 iterations and adds a major expansion: **52 → 111 tools across 31 keyless federal data sources**, a codebase-wide honesty dogfooding pass, and a resilience initiative for public-data availability.
 
 ### Added — new source families (+59 tools)
 
@@ -79,8 +76,7 @@ unchanged pending maintainer sign-off.
 - **Repo hardening:** branch protection enabled on the default branch.
 
 ### Note
-Additive: existing tool outputs and the `_meta` shape are unchanged. Version +
-changelog remain in-repo; **not published to npm** — awaiting maintainer sign-off.
+Additive: existing tool outputs and the `_meta` shape are unchanged. Marked 1.0.0 to signal a stable, comprehensive, honesty-verified surface.
 
 ## [0.7.0] — 2026-07-04 (FAR compliance, document reading, keyless backbone & a truthfulness sweep)
 
