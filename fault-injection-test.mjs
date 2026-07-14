@@ -44,6 +44,10 @@ import zlib from "node:zlib";
 // smoke's spawn), never on an import like this one. §9/§12/§13 call this real
 // runTool over a mocked fetch so a regression in the real wrapper turns RED.
 import { runTool, TOOLS } from "./dist/server.js";
+import { apiKeyStatus, loadDotEnv, KEY_REGISTRY } from "./dist/keys.js";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as pathJoin } from "node:path";
 import { toToolError, ToolErrorCarrier, fetchWithRetry } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
 import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
@@ -16751,6 +16755,8 @@ async function main() {
   await testFetchWithRetryTimeout();
   await testHonestyAuditRemediation();
   await testW31UsasHonesty();
+  await testApiKeyStatus();
+  await testLoadDotEnv();
 
   // Prove the harness bites.
   await selfCheck();
@@ -16764,6 +16770,127 @@ async function main() {
   globalThis.fetch = REAL_FETCH;
   globalThis.setTimeout = REAL_SET_TIMEOUT;
   process.exit(FAIL === 0 ? 0 : 1);
+}
+
+// §keys-A: apiKeyStatus() — the CONFIG-discovery surface. OFFLINE (no fetch): it
+// reads process.env only. Two invariants under test:
+//   (1) with every key env UNSET → all currentlySet:false, requiredMissing is
+//       EXACTLY [CENSUS_API_KEY, FRED_API_KEY] (the 2 keyless-less sources), the
+//       registry has 7 entries with the right `required` flags + a non-empty
+//       signupUrl each; setting CENSUS_API_KEY flips its bool and drops it from
+//       requiredMissing.
+//   (2) ★K-TEST: the key VALUE is NEVER in the serialized output — only the bool.
+async function testApiKeyStatus() {
+  section("§keys-A apiKeyStatus() — required/optional discovery + VALUE never leaks");
+  const ALL = KEY_REGISTRY.map((k) => k.envVar);
+  const saved = Object.fromEntries(ALL.map((e) => [e, process.env[e]]));
+  const clearAll = () => {
+    for (const e of ALL) delete process.env[e];
+  };
+  try {
+    // (1) all unset.
+    clearAll();
+    const r0 = apiKeyStatus();
+    ok("keys-A registry has EXACTLY 7 entries", r0.keys.length === 7, String(r0.keys.length));
+    ok(
+      "keys-A envVars are the 7 code-grounded names",
+      JSON.stringify([...ALL].sort()) ===
+        JSON.stringify(
+          [
+            "BLS_API_KEY",
+            "CENSUS_API_KEY",
+            "DATA_GOV_API_KEY",
+            "FRED_API_KEY",
+            "NVD_API_KEY",
+            "SAM_GOV_API_KEY",
+            "SOCRATA_APP_TOKEN",
+          ].sort(),
+        ),
+      JSON.stringify(ALL),
+    );
+    ok("keys-A all unset ⇒ every currentlySet:false", r0.keys.every((k) => k.currentlySet === false));
+    ok("keys-A every entry has a non-empty signupUrl (https)", r0.keys.every((k) => typeof k.signupUrl === "string" && /^https:\/\//.test(k.signupUrl)));
+    ok(
+      "keys-A exactly CENSUS_API_KEY + FRED_API_KEY are required:true",
+      JSON.stringify(r0.keys.filter((k) => k.required).map((k) => k.envVar).sort()) ===
+        JSON.stringify(["CENSUS_API_KEY", "FRED_API_KEY"]),
+      JSON.stringify(r0.keys.filter((k) => k.required).map((k) => k.envVar)),
+    );
+    ok(
+      "keys-A requiredMissing (all unset) === [CENSUS_API_KEY, FRED_API_KEY]",
+      JSON.stringify([...r0.requiredMissing].sort()) === JSON.stringify(["CENSUS_API_KEY", "FRED_API_KEY"]),
+      JSON.stringify(r0.requiredMissing),
+    );
+    ok("keys-A optionalMissing (all unset) has the 5 optional envVars", r0.optionalMissing.length === 5, JSON.stringify(r0.optionalMissing));
+    ok("keys-A allKeysFree:true", r0.allKeysFree === true);
+
+    // (2) set CENSUS_API_KEY to a SENTINEL — its bool flips true, drops out of
+    // requiredMissing, AND ★the value never appears in the serialized output.
+    const SENTINEL = "SECRET-CENSUS-VALUE-do-not-leak-abc123";
+    process.env.CENSUS_API_KEY = SENTINEL;
+    const r1 = apiKeyStatus();
+    const census = r1.keys.find((k) => k.envVar === "CENSUS_API_KEY");
+    ok("keys-A CENSUS_API_KEY set ⇒ currentlySet:true", census?.currentlySet === true);
+    ok("keys-A CENSUS_API_KEY drops out of requiredMissing", !r1.requiredMissing.includes("CENSUS_API_KEY") && r1.requiredMissing.includes("FRED_API_KEY"), JSON.stringify(r1.requiredMissing));
+    const serialized = JSON.stringify(r1);
+    ok("keys-A ★K-TEST the key VALUE is NEVER in the serialized output (only the bool)", !serialized.includes(SENTINEL), serialized.includes(SENTINEL) ? "LEAKED" : "clean");
+    ok("keys-A ★K-TEST no entry carries a `value`/`raw` field", r1.keys.every((k) => !("value" in k) && !("raw" in k)));
+
+    // Whitespace-only value ⇒ NOT set (trim-aware).
+    process.env.CENSUS_API_KEY = "   ";
+    ok("keys-A whitespace-only value ⇒ currentlySet:false (trim-aware)", apiKeyStatus().keys.find((k) => k.envVar === "CENSUS_API_KEY")?.currentlySet === false);
+  } finally {
+    for (const e of ALL) {
+      if (saved[e] === undefined) delete process.env[e];
+      else process.env[e] = saved[e];
+    }
+  }
+}
+
+// §keys-B: loadDotEnv() — the MINIMAL, dependency-free .env parser. OFFLINE.
+// Invariants: parses KEY=VALUE / export KEY="q q", strips quotes, skips comments
+// + blanks; an ALREADY-SET env var is NOT overwritten (real env wins); a missing
+// file returns 0 and never throws.
+async function testLoadDotEnv() {
+  section("§keys-B loadDotEnv() — .env parse + precedence + missing-file safety");
+  const dir = mkdtempSync(pathJoin(tmpdir(), "mcp-dotenv-"));
+  const savedFoo = process.env.FOO;
+  const savedBaz = process.env.BAZ;
+  const savedPre = process.env.PRESET_KEY;
+  try {
+    // Precedence: PRESET_KEY is already in the real env → .env must NOT override.
+    process.env.PRESET_KEY = "from-real-env";
+    delete process.env.FOO;
+    delete process.env.BAZ;
+    const envBody = [
+      "# a comment line",
+      "",
+      "FOO=bar",
+      'export BAZ="q q"',
+      "PRESET_KEY=from-dot-env",
+      "MALFORMED_NO_EQUALS",
+      "=novalue",
+    ].join("\n");
+    writeFileSync(pathJoin(dir, ".env"), envBody, "utf8");
+    const n = loadDotEnv(dir);
+    ok("keys-B FOO=bar loaded", process.env.FOO === "bar", process.env.FOO);
+    ok("keys-B export BAZ=\"q q\" ⇒ quotes stripped, inner space kept", process.env.BAZ === "q q", JSON.stringify(process.env.BAZ));
+    ok("keys-B ★precedence: already-set PRESET_KEY NOT overwritten by .env", process.env.PRESET_KEY === "from-real-env", process.env.PRESET_KEY);
+    ok("keys-B comment/blank/malformed lines skipped ⇒ loaded count === 2 (FOO, BAZ)", n === 2, String(n));
+
+    // Missing file ⇒ 0, no throw.
+    const emptyDir = mkdtempSync(pathJoin(tmpdir(), "mcp-dotenv-empty-"));
+    let threw = false;
+    let m = -1;
+    try { m = loadDotEnv(emptyDir); } catch { threw = true; }
+    ok("keys-B missing .env ⇒ returns 0, no throw (byte-identical startup)", !threw && m === 0, JSON.stringify({ threw, m }));
+    rmSync(emptyDir, { recursive: true, force: true });
+  } finally {
+    if (savedFoo === undefined) delete process.env.FOO; else process.env.FOO = savedFoo;
+    if (savedBaz === undefined) delete process.env.BAZ; else process.env.BAZ = savedBaz;
+    if (savedPre === undefined) delete process.env.PRESET_KEY; else process.env.PRESET_KEY = savedPre;
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // §38: usas_naics_hierarchy drill-down (VQ-4). The tool must use the PATH form
