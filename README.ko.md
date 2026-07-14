@@ -188,8 +188,9 @@ npm install --omit=dev
 이 서버의 원칙은 하나입니다: **그럴듯한 조작보다 정직한 실패.** 아래는 모두 공개 데이터의 *가용성*에 관한 것이며, 어떤 접근 통제도 우회하지 않습니다.
 
 - **Keyless 우선, 다운된 소스는 예외를 *던진다*.** 모든 소스가 API 키 없이 동작합니다. 소스가 rate-limit·차단·다운되면 도구는 **타입이 지정된 에러**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)를 반환하며, 행을 지어내거나 다운된 서비스를 "결과 0" / "없음"으로 보고하지 않습니다. 진짜 빈 결과와 장애는 항상 구별됩니다.
-- **선택적 오프라인 스냅샷 (기본 off).** 느리게 바뀌는 참조 데이터(toptier 기관 목록, 상위 NAICS 트리, USAspending 용어집, SBA 규모 기준, 최신 Treasury "Debt to the Penny")에 한해, **스냅샷 미러**를 직접 호스팅할 수 있습니다. 라이브 소스가 자신의 egress 에서 도달 불가일 때만 읽는 정적 공개-데이터 캐시입니다. 스냅샷이 서빙되면 **절대 라이브처럼 표시하지 않습니다** — 응답에 `_meta.dataPath: "snapshot"` + `asOf` 타임스탬프가 붙고 `complete` 는 강제로 꺼집니다. 미설정 시 순수 라이브(오늘과 byte-identical).
-- **켜기:** `SAMGOV_SNAPSHOT_BASE_URL` 을 스냅샷 호스팅 base URL 로 설정. 미설정(기본) = 라이브 전용.
+- **오프라인 스냅샷 (기본 on).** 느리게 바뀌는 참조 데이터(toptier 기관 목록, 상위 NAICS 트리, USAspending 용어집, SBA 규모 기준, 최신 Treasury "Debt to the Penny")는, 라이브 연방 소스가 egress 에서 잠시 도달 불가일 때 서버가 기본적으로 `raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots` 에 호스팅된 **공개·주간 갱신 스냅샷**으로 폴백합니다. 라이브 **하드 실패**(장애 / IP 평판 차단) 시에만 가져오며 평상시엔 절대 아닙니다 — 공개 데이터, 텔레메트리 없음. 스냅샷이 서빙되면 **절대 라이브처럼 표시하지 않습니다** — 응답에 `_meta.dataPath: "snapshot"` + `asOf` 타임스탬프가 붙고 `complete` 는 강제로 꺼집니다. rate limit(429)은 항상 **준수**하며 미러로 우회하지 않습니다.
+- **끄기(순수 라이브 전용):** `SAMGOV_SNAPSHOT_BASE_URL=off` 설정 시 스냅샷 경로가 추가되지 않고 라이브 전용 클라이언트와 byte-identical.
+- **자체 미러 지정:** `SAMGOV_SNAPSHOT_BASE_URL` 을 자신의 base URL 로 설정하면 공개 기본값 대신 직접 호스팅.
 - **스냅샷 빌드:** 차단되지 않은 깨끗한 egress(노트북 / 집 / 깨끗한 CI)에서 `node scripts/build-snapshots.mjs` 실행. **소스별 도달성을 자가 진단**하고 reachability 표 + `manifest.json` 을 출력합니다. 부분 커버리지에서는 도달 가능한 소스만 갱신하고 나머지는 **last-good 파일을 그대로 둡니다**(오래됐어도 정직, 절대 비우지 않음). *모든* 소스가 도달 불가일 때만 non-zero 종료(egress 전면 차단 신호 — 더 깨끗한 egress 에서 재실행).
 - **정직한 경계.** 이것은 **공개-데이터 가용성만** 다룹니다. 빌더는 공개·재배포 가능(public-domain / CC0) 데이터만 수집하고, 리더는 `accessLevel: "public"` 이 아닌 봉투는 서빙을 거부합니다. **rate limit 을 준수**(429 를 우회하지 않음)하고 **프록시·IP 로테이션·인증/페이월/CAPTCHA 우회 없음**, off-host 리다이렉트도 거부합니다. 차단되면 정직한 해법은 더 깨끗한 egress 에서 빌드하는 것이지 차단을 회피하는 것이 아닙니다.
 

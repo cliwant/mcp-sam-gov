@@ -179,7 +179,7 @@ import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
 import { getJson, getText, isRedirectError, driftError, throughGate, getJsonWithProvenance, getJsonConditional, throughPathChain, CircuitBreaker, isHardFailure } from "./dist/datasource.js";
 import { errorFromResponse, isHonorRetryAfter } from "./dist/errors.js";
-import { resolveSnapshotBaseUrl, resilienceConfig, snapshotPath } from "./dist/snapshot.js";
+import { resolveSnapshotBaseUrl, resilienceConfig, snapshotPath, DEFAULT_SNAPSHOT_BASE_URL } from "./dist/snapshot.js";
 import { _resetTreasuryBreakerForTests } from "./dist/treasury.js";
 import { _resetUsasBreakerForTests } from "./dist/usaspending.js";
 import { _resetSbaBreakerForTests } from "./dist/sba.js";
@@ -6528,11 +6528,12 @@ async function testTreasuryHonesty() {
 
   // (a) OUTAGE — every attempt 503s ⇒ fetchWithRetry throws upstream_unavailable.
   // A masquerade that swallowed the error into {data:{records:[]}} turns this RED.
-  await withFetch(() => mockResponse({ status: 503 }), async () => {
+  // Snapshot DISABLED (=off) so this pins the pure LIVE outage path (single-chain).
+  await withSnapshotEnv("off", () => withFetch(() => mockResponse({ status: 503 }), async () => {
     const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
     ok("40a treasury_debt_to_penny 503 ⇒ throws upstream_unavailable (NOT a fake empty records[])",
       threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify(error?.toolError?.kind));
-  });
+  }));
 
   // (b) GENUINE EMPTY — total-count:0 (NUMBER), data:[] ⇒ honest complete:true,
   // totalAvailable:0, truncated:false — a real no-match, distinct from the outage.
@@ -6616,11 +6617,11 @@ async function testTreasuryHonesty() {
 
   // (g) SCHEMA DRIFT — total-count as a STRING (F1 says it's a NUMBER) ⇒ the
   // getTreasury guard throws schema_drift rather than silently mis-deriving meta.
-  await withFetch(() => mockResponse({ status: 200, json: { data: [], meta: { count: "0", "total-count": "0", "total-pages": "0" } } }), async () => {
+  await withSnapshotEnv("off", () => withFetch(() => mockResponse({ status: 200, json: { data: [], meta: { count: "0", "total-count": "0", "total-pages": "0" } } }), async () => {
     const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
     ok("40g total-count as STRING (drift) ⇒ throws schema_drift (F1 number-typing guard, not a silent mis-parse)",
       threw && error?.toolError?.kind === "schema_drift", JSON.stringify(error?.toolError?.kind));
-  });
+  }));
 
   // ── (h) treasury_avg_interest_rates golden fixtures (W3-9 hardening) — pins the
   //    null-never-0 amt→Percent mapping, the EXACT total-count total, and the outage
@@ -8699,10 +8700,12 @@ async function testDataSourcePortParity() {
       ok("43a Treasury init.signal instanceof AbortSignal (timeout; identity excluded)", c.init.signal instanceof AbortSignal, String(c.init.signal));
     });
     // Treasury label parity via the error path (upstreamEndpoint === label).
-    await withFetch(() => mockResponse({ status: 503 }), async () => {
+    // Snapshot DISABLED (=off) so the chain is single-path LIVE and the surfaced
+    // error is the treasury path's (default-on would fall through to the mirror).
+    await withSnapshotEnv("off", () => withFetch(() => mockResponse({ status: 503 }), async () => {
       const { error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
       eq("43a Treasury label baseline: upstreamEndpoint === 'treasury:/v2/accounting/od/debt_to_penny'", toToolError(error).upstreamEndpoint, "treasury:/v2/accounting/od/debt_to_penny");
-    });
+    }));
     // Socrata row init/url parity ({headers, redirect, signal}, redirect 'error').
     await withFetch(socrataRowsAndCount([{ x: "1" }], 1), async (calls) => {
       await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam);
@@ -9209,19 +9212,25 @@ async function testSnapshotMirror() {
   });
   const debtSnapshotData = treasuryEnv([debtRow("2026-06-30")], 8400);
 
-  // ── (a) CONFIG: unset ⇒ INERT. resolveSnapshotBaseUrl undefined, config
-  //        disabled, snapshotPath returns null (⇒ single-path chain downstream).
+  // ── (a) CONFIG resolution (DEFAULT-ON). unset ⇒ the hosted DEFAULT mirror
+  //        (resilience active out of the box); a disable sentinel ⇒ undefined
+  //        (live-only), snapshotPath null (⇒ single-path chain downstream); a
+  //        custom URL ⇒ that URL (trailing slash stripped).
   await withSnapshotEnv(undefined, async () => {
-    ok("71a SAMGOV_SNAPSHOT_BASE_URL unset ⇒ resolveSnapshotBaseUrl() === undefined (INERT default)", resolveSnapshotBaseUrl() === undefined, JSON.stringify(resolveSnapshotBaseUrl()));
-    ok("71a resilienceConfig().snapshotBaseUrl === undefined (snapshot disabled)", resilienceConfig().snapshotBaseUrl === undefined, JSON.stringify(resilienceConfig()));
-    ok("71a snapshotPath('k') === null when unset (path NOT added to the chain ⇒ byte-identical)", snapshotPath("treasury_debt_to_penny_latest") === null);
+    ok("71a SAMGOV_SNAPSHOT_BASE_URL UNSET ⇒ resolveSnapshotBaseUrl() === DEFAULT_SNAPSHOT_BASE_URL (resilience ON by default — flip the default back to undefined ⇒ RED)", resolveSnapshotBaseUrl() === DEFAULT_SNAPSHOT_BASE_URL && /^https:\/\/raw\.githubusercontent\.com\/cliwant\/mcp-sam-gov\/snapshots$/.test(DEFAULT_SNAPSHOT_BASE_URL), JSON.stringify(resolveSnapshotBaseUrl()));
+    ok("71a UNSET ⇒ resilienceConfig().snapshotBaseUrl === DEFAULT (config resolves the default mirror)", resilienceConfig().snapshotBaseUrl === DEFAULT_SNAPSHOT_BASE_URL, JSON.stringify(resilienceConfig()));
+    ok("71a UNSET ⇒ snapshotPath('k') is a real path on the DEFAULT host (default-on wires the chain)", snapshotPath("treasury_debt_to_penny_latest")?.host === "raw.githubusercontent.com", JSON.stringify(snapshotPath("treasury_debt_to_penny_latest")?.host));
   });
-  // Trailing-slash + blank normalization.
+  // DISABLE sentinels ⇒ undefined ⇒ snapshotPath null (live-only). Case-insensitive.
+  for (const sentinel of ["off", "none", "false", "0", "disabled", "OFF", "Off", "  ", ""]) {
+    await withSnapshotEnv(sentinel, async () => {
+      ok(`71a disable sentinel ${JSON.stringify(sentinel)} ⇒ resolveSnapshotBaseUrl() === undefined (snapshot DISABLED = live-only)`, resolveSnapshotBaseUrl() === undefined, JSON.stringify(resolveSnapshotBaseUrl()));
+      ok(`71a disable sentinel ${JSON.stringify(sentinel)} ⇒ snapshotPath('k') === null (path NOT added ⇒ byte-identical)`, snapshotPath("treasury_debt_to_penny_latest") === null);
+    });
+  }
+  // A custom URL ⇒ that URL, trailing slash stripped.
   await withSnapshotEnv("https://snap.test/base/", async () => {
-    ok("71a trailing slash stripped ⇒ 'https://snap.test/base'", resolveSnapshotBaseUrl() === "https://snap.test/base", resolveSnapshotBaseUrl());
-  });
-  await withSnapshotEnv("   ", async () => {
-    ok("71a blank/whitespace base ⇒ undefined (treated as unset, INERT)", resolveSnapshotBaseUrl() === undefined, JSON.stringify(resolveSnapshotBaseUrl()));
+    ok("71a custom URL: trailing slash stripped ⇒ 'https://snap.test/base'", resolveSnapshotBaseUrl() === "https://snap.test/base", resolveSnapshotBaseUrl());
   });
 
   // ── (b) SNAPSHOT SERVES on a HARD live failure. base configured; live 500s;
@@ -9265,15 +9274,15 @@ async function testSnapshotMirror() {
     });
   });
 
-  // ── (d) INERT: snapshot UNSET + live 500 ⇒ behaves EXACTLY as today: throws
+  // ── (d) DISABLED: snapshot =off + live 500 ⇒ behaves EXACTLY as today: throws
   //        upstream_unavailable, and 0 snapshot fetches are attempted (the chain
   //        is single-path live — the breaker is never consulted).
   _resetTreasuryBreakerForTests();
-  await withSnapshotEnv(undefined, async () => {
+  await withSnapshotEnv("off", async () => {
     await withFetch((u) => (isTreasuryLive(u) ? mockResponse({ status: 500 }) : failClosed()()), async (calls) => {
       const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
-      ok("71d INERT (unset) + live 500 ⇒ throws upstream_unavailable (byte-identical to pre-ADR — no snapshot attempt)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
-      ok("71d INERT ⇒ 0 snapshot fetches (only the live host is ever hit)", !calls.some((c) => isSnapshotUrl(c.url)) && calls.every((c) => isTreasuryLive(c.url)), JSON.stringify(calls.map((c) => c.url)));
+      ok("71d DISABLED (=off) + live 500 ⇒ throws upstream_unavailable (byte-identical to pre-ADR — no snapshot attempt)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+      ok("71d DISABLED ⇒ 0 snapshot fetches (only the live host is ever hit)", !calls.some((c) => isSnapshotUrl(c.url)) && calls.every((c) => isTreasuryLive(c.url)), JSON.stringify(calls.map((c) => c.url)));
     });
   });
 
@@ -9405,6 +9414,41 @@ async function testSnapshotMirror() {
       ok(`71i SNAPSHOT_SPECS carries new pilot key ${key} (public + redistributable, ingested by the gate)`, !!s && isPublicRedistributable(s) === true, JSON.stringify(s ? { al: s.accessLevel, lic: s.license } : null));
     }
   }
+
+  // ── (j) ★DEFAULT-ON END-TO-END (env UNSET ⇒ the hosted DEFAULT mirror is live).
+  //        Proves the default resolves through the REAL tool onto the DEFAULT base
+  //        URL — no env config at all. live 500 ⇒ SERVES the snapshot fetched from
+  //        `${DEFAULT_SNAPSHOT_BASE_URL}/treasury_debt_to_penny_latest.json`.
+  const isDefaultSnapUrl = (u) => u.startsWith(DEFAULT_SNAPSHOT_BASE_URL + "/");
+  _resetTreasuryBreakerForTests();
+  await withSnapshotEnv(undefined, async () => {
+    await withFetch((u) => {
+      if (isDefaultSnapUrl(u)) return mockResponse({ status: 200, json: snapEnvelope(debtSnapshotData) });
+      if (isTreasuryLive(u)) return mockResponse({ status: 500 });
+      return failClosed()();
+    }, async (calls) => {
+      const r = await runTool("treasury_debt_to_penny", { latest: true }, sam);
+      const m = buildMeta(r.meta);
+      ok("71j ★DEFAULT-ON (env UNSET) + live 500 ⇒ SERVES snapshot from the hosted DEFAULT mirror: _meta.dataPath === 'snapshot' (flip the default back to undefined ⇒ RED — no fallback)", m.dataPath === "snapshot" && m.asOf === SNAP_ASOF, JSON.stringify({ dp: m.dataPath, asOf: m.asOf }));
+      ok("71j ★DEFAULT-ON: the snapshot was fetched from raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots/treasury_debt_to_penny_latest.json (default base, no env set)", calls.some((c) => c.url === `${DEFAULT_SNAPSHOT_BASE_URL}/treasury_debt_to_penny_latest.json`), JSON.stringify(calls.map((c) => c.url)));
+      ok("71j ★DEFAULT-ON: snapshot data flowed through (non-vacuity — recordDate 2026-06-30 mapped from the mirror body)", r.data.records.length === 1 && r.data.records[0].recordDate === "2026-06-30", JSON.stringify(r.data.records));
+    });
+  });
+  // ★no-route-around-rate-limit PRESERVED under default-on: env UNSET + live
+  //   429+Retry-After ⇒ THROWS rate_limited, the DEFAULT mirror is NEVER fetched.
+  _resetTreasuryBreakerForTests();
+  await withSnapshotEnv(undefined, async () => {
+    await withFetch((u) => {
+      if (isDefaultSnapUrl(u)) return mockResponse({ status: 200, json: snapEnvelope(debtSnapshotData) });
+      if (isTreasuryLive(u)) return mockResponse({ status: 429, headers: { "Retry-After": "30" } });
+      return failClosed()();
+    }, async (calls) => {
+      const { threw, error } = await expectThrow(() => runTool("treasury_debt_to_penny", { latest: true }, sam));
+      ok("71j ★DEFAULT-ON + live 429+Retry-After ⇒ THROWS rate_limited (policy preserved under default-on — honor the throttle)", threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+      ok("71j ★DEFAULT-ON + 429 ⇒ the DEFAULT mirror was NEVER fetched (0 hits) — a rate limit is HONORED, not bypassed onto the hosted mirror", !calls.some((c) => isDefaultSnapUrl(c.url)), JSON.stringify(calls.map((c) => c.url)));
+    });
+  });
+
   _resetTreasuryBreakerForTests();
 }
 
@@ -9466,13 +9510,13 @@ async function testPilotExpansion() {
   const snapUrlFor = (key) => new RegExp(`snap\\.test/base/${key}\\.json$`);
 
   for (const p of pilots) {
-    // ── (a) INERT (env unset) + live 500 ⇒ throws upstream_unavailable, 0 snapshot.
+    // ── (a) DISABLED (=off) + live 500 ⇒ throws upstream_unavailable, 0 snapshot.
     _clearCache(); resetAllPilotBreakers();
-    await withSnapshotEnv(undefined, async () => {
+    await withSnapshotEnv("off", async () => {
       await withFetch((u) => (p.isLive(u) ? mockResponse({ status: 500 }) : failClosed()()), async (calls) => {
         const { threw, error } = await expectThrow(() => runTool(p.tool, p.args, sam));
-        ok(`72a ${p.tool}: INERT (unset) + live 500 ⇒ throws upstream_unavailable (byte-identical to pre-ADR — single-path chain)`, threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
-        ok(`72a ${p.tool}: INERT ⇒ 0 snapshot fetches (only the live host is hit)`, !calls.some((c) => isSnapshotUrl(c.url)) && calls.length > 0, JSON.stringify(calls.map((c) => c.url).slice(0, 3)));
+        ok(`72a ${p.tool}: DISABLED (=off) + live 500 ⇒ throws upstream_unavailable (byte-identical to pre-ADR — single-path chain)`, threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+        ok(`72a ${p.tool}: DISABLED ⇒ 0 snapshot fetches (only the live host is hit)`, !calls.some((c) => isSnapshotUrl(c.url)) && calls.length > 0, JSON.stringify(calls.map((c) => c.url).slice(0, 3)));
       });
     });
 
