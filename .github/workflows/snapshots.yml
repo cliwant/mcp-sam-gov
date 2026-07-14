@@ -1,0 +1,63 @@
+name: Refresh snapshots
+
+# Builds the offline snapshot mirror (public, slow-changing reference data) from
+# GitHub's clean egress and publishes each `<key>.json` to the ROOT of the
+# dedicated `snapshots` branch, served at:
+#   https://raw.githubusercontent.com/${{ github.repository }}/snapshots/<key>.json
+# The client reads these only when a live source is unreachable (SAMGOV_SNAPSHOT_BASE_URL).
+# Self-diagnosing: refreshes what the egress can reach, keeps last-good for the rest,
+# and NEVER routes around a rate limit (honored in the tool layer). Separate from ci.yml
+# so the required-gate workflow keeps `contents: read`.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "17 6 * * 1"   # weekly, Monday 06:17 UTC (reference data is slow-changing)
+
+concurrency:
+  group: refresh-snapshots
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code (main)
+        uses: actions/checkout@v4
+
+      - name: Checkout prior snapshots (for last-good retention)
+        uses: actions/checkout@v4
+        with:
+          ref: snapshots
+          path: _prior
+        continue-on-error: true
+
+      - name: Seed prior snapshots
+        run: |
+          mkdir -p snapshots
+          cp _prior/*.json snapshots/ 2>/dev/null || echo "no prior snapshots (first run)"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Build snapshots (self-diagnosing; partial success is OK)
+        # exits non-zero ONLY if the egress is fully blocked; a partial refresh keeps
+        # last-good files and still succeeds.
+        run: node scripts/build-snapshots.mjs
+
+      - name: Publish <key>.json to the snapshots branch root
+        run: |
+          cd snapshots
+          git init -q -b snapshots
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "snapshots: refresh $(date -u +%FT%TZ)"
+          git push -f -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" snapshots
