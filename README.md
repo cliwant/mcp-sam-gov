@@ -525,13 +525,14 @@ This server is built around one rule: **honest failure over confident fabricatio
 
 **Keyless-first, and a down source *throws*.** Every source works with no API key. When a source is rate-limited, blocked, or down, the tool returns a **typed error** (`rate_limited` / `upstream_unavailable` / `schema_drift` / …) — it never invents rows and never reports a DOWN service as "0 results" or "not found". A genuine empty result and an outage are always distinguishable.
 
-**Optional offline snapshots (off by default).** Some reference data changes slowly — the toptier-agency list, the top-level NAICS tree, the USAspending glossary, SBA size standards, the latest Treasury "Debt to the Penny." For those, you can optionally host a **snapshot mirror**: a static, public-data cache the server reads *only* when the live source is unreachable from your egress. A served snapshot is **never presented as live** — the response carries `_meta.dataPath: "snapshot"` plus an `asOf` timestamp, and `complete` is forced off, so an AI agent (and you) always see the staleness. Unset ⇒ pure live, byte-for-byte identical to today's behavior.
+**Offline snapshots (on by default).** Some reference data changes slowly — the toptier-agency list, the top-level NAICS tree, the USAspending glossary, SBA size standards, the latest Treasury "Debt to the Penny." By default, when a live federal source is briefly unreachable from your egress, the server falls back to a **public, weekly-refreshed snapshot** of that slow-changing reference data, hosted at `raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots`. It only fetches on a **live hard-failure** (an outage / IP-reputation block), never during normal operation — public data, no telemetry. A served snapshot is **never presented as live** — the response carries `_meta.dataPath: "snapshot"` plus an `asOf` timestamp, and `complete` is forced off, so an AI agent (and you) always see the staleness. A rate limit (429) is always **honored**, never routed around onto the mirror.
 
-- **Enable it:** set `SAMGOV_SNAPSHOT_BASE_URL` to the base URL where you host the snapshots. Unset (the default) = live-only, no snapshot path is ever added.
+- **Disable it (pure live-only):** set `SAMGOV_SNAPSHOT_BASE_URL=off`. Then no snapshot path is ever added and behavior is byte-for-byte identical to a live-only client.
+- **Point at your own mirror:** set `SAMGOV_SNAPSHOT_BASE_URL` to your base URL to host the snapshots yourself instead of using the public default.
 
   ```json
   { "mcpServers": { "sam-gov": { "command": "mcp-sam-gov",
-      "env": { "SAMGOV_SNAPSHOT_BASE_URL": "https://your-cdn.example.com/snapshots" } } } }
+      "env": { "SAMGOV_SNAPSHOT_BASE_URL": "off" } } } }
   ```
 
 - **Build the snapshots:** run `node scripts/build-snapshots.mjs` from any clean, non-blocked egress (a laptop / home / clean CI runner). It **self-diagnoses per-source reachability**, prints a reachability table, and writes a `manifest.json`. On partial coverage it refreshes only the sources it can reach and **leaves the last-good file in place** for the rest (stale-but-honest, never blanked). It exits non-zero only when *zero* sources were reachable (a fully blocked egress — the signal to re-run from a cleaner one).

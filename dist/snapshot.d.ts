@@ -9,12 +9,15 @@
  * egress (an edge/WAF IP-reputation block). This module is that reader; it slots
  * into the Phase-1 `throughPathChain` as a LOWER-priority `ResiliencePath`.
  *
- * ★INERT BY DEFAULT (the pass/fail bar): the snapshot base URL comes from the
- * env var `SAMGOV_SNAPSHOT_BASE_URL`, which is UNSET by default. When unset,
- * `snapshotPath()` returns `null` — the path is simply NOT added to a source's
- * chain, so every source stays single-path (live-only) and its output is
- * byte-identical to today. A snapshot fallback exists ONLY when an operator
- * explicitly configures a base URL.
+ * ★DEFAULT-ON (resilience active out of the box): the snapshot base URL comes
+ * from the env var `SAMGOV_SNAPSHOT_BASE_URL`. When it is UNSET, the reader now
+ * resolves to `DEFAULT_SNAPSHOT_BASE_URL` — the public, weekly-refreshed GitHub
+ * mirror — so every user gets offline fallback with zero configuration. An
+ * operator can point at their own mirror (any custom URL) or DISABLE the
+ * fallback entirely (pure live-only) with a disable sentinel
+ * (`SAMGOV_SNAPSHOT_BASE_URL=off`); when disabled, `snapshotPath()` returns
+ * `null` — the path is simply NOT added to a source's chain, so every source
+ * stays single-path (live-only) and its output is byte-identical to today.
  *
  * ★POLICY BOUNDARY (ADR-0045 §"정책 경계", invariant — mirrors datasource.ts):
  *   • PUBLIC-ONLY (M3/m2): the builder writes ONLY public + redistributable data
@@ -49,20 +52,33 @@ export type SnapshotEnvelope<T = unknown> = {
 /** Env-driven resilience config. Read at CALL TIME so it is togglable per call. */
 export type ResilienceConfig = {
     /**
-     * The snapshot mirror base URL (no trailing slash), or `undefined` when the
-     * env var is unset/blank ⇒ snapshot DISABLED ⇒ every source stays live-only.
+     * The snapshot mirror base URL (no trailing slash) — the hosted default when
+     * the env var is unset, a custom mirror when set to a URL, or `undefined` when
+     * DISABLED via a sentinel (`off`) ⇒ every source stays live-only.
      */
     snapshotBaseUrl: string | undefined;
 };
 /**
+ * The public, weekly-refreshed snapshot mirror (see .github/workflows/snapshots.yml);
+ * read-only public reference data. This is the DEFAULT base URL when
+ * `SAMGOV_SNAPSHOT_BASE_URL` is unset. Disable the fallback with
+ * `SAMGOV_SNAPSHOT_BASE_URL=off`.
+ */
+export declare const DEFAULT_SNAPSHOT_BASE_URL = "https://raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots";
+/**
  * Resolve `SAMGOV_SNAPSHOT_BASE_URL` at CALL TIME (never cached at module load,
  * so a test — or an operator flipping the env — takes effect immediately, and so
- * importing this module has zero config side effects). Returns `undefined` when
- * the var is unset or blank (the INERT default: snapshot disabled). A trailing
- * slash is stripped so `${base}/${key}.json` is well-formed.
+ * importing this module has zero config side effects). The resolution is
+ * DEFAULT-ON:
+ *   • env UNSET ⇒ `DEFAULT_SNAPSHOT_BASE_URL` (resilience ON by default).
+ *   • env is a DISABLE sentinel — case-insensitive one of `off` / `none` /
+ *     `false` / `0` / `disabled`, OR blank after trim ⇒ `undefined` (snapshot
+ *     disabled = live-only, byte-identical to pre-ADR output).
+ *   • any other value ⇒ that custom mirror URL, trailing slash stripped so
+ *     `${base}/${key}.json` is well-formed.
  */
 export declare function resolveSnapshotBaseUrl(): string | undefined;
-/** The env-driven resilience config (default = snapshot disabled). */
+/** The env-driven resilience config (default = hosted snapshot mirror ON). */
 export declare function resilienceConfig(): ResilienceConfig;
 /**
  * P5 provenance → `_meta` partial (ADR-0045 B2/M1). The SHARED threading helper
@@ -79,7 +95,7 @@ export declare function resilienceConfig(): ResilienceConfig;
 export declare function provenanceMeta(provenance: Provenance | undefined): Partial<ResponseMeta>;
 /**
  * Build a `ResiliencePath` that reads the snapshot for `key` — or `null` when
- * the snapshot mirror is not configured (the INERT default).
+ * the snapshot mirror is DISABLED (`SAMGOV_SNAPSHOT_BASE_URL=off`).
  *
  * When configured, the path fetches `${base}/${key}.json` via the shipped
  * `getJson` with `redirect:"error"` (off-host redirect ⇒ TypeError ⇒ honest
@@ -89,9 +105,10 @@ export declare function provenanceMeta(provenance: Provenance | undefined): Part
  * `throughPathChain` reads `path.provenance` AFTER awaiting `run()`, so the
  * per-fetch `asOf` is captured (mirrors the `{body,provenance}` contract).
  *
- * ★A NULL return is how INERTness is achieved structurally: the Treasury pilot
- * builds `[livePath, snapshotPath(key)].filter(Boolean)`, so when this returns
- * null the chain is single-entry (live only) ⇒ `throughPathChain` fast-paths ⇒
+ * ★A NULL return is how the DISABLED (live-only) path stays byte-identical
+ * structurally: the Treasury pilot builds
+ * `[livePath, snapshotPath(key)].filter(Boolean)`, so when this returns null the
+ * chain is single-entry (live only) ⇒ `throughPathChain` fast-paths ⇒
  * byte-identical to today.
  */
 export declare function snapshotPath<T = unknown>(key: string): ResiliencePath<T> | null;
