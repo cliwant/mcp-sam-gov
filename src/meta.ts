@@ -106,6 +106,28 @@ export type ResponseMeta = {
   degraded?: MetaDegraded;
   /** Present on list/search/aggregate tools. */
   pagination?: MetaPagination;
+  /**
+   * P5 PROVENANCE (ADR-0045 B2/M1). The access path that served THIS response:
+   * `"live"` (the current, and in Phase 1 the ONLY, path) or `"snapshot"` (a
+   * self-hosted cache served when the live upstream was unreachable). Set by the
+   * resilience port's provenance-returning primitive, then threaded by the
+   * adapter ONLY when NON-live — so a live response OMITS this field entirely and
+   * stays byte-identical to pre-P5 output. Surfaced via the guarded
+   * `if (partial.dataPath !== undefined)` passthrough below (NO `??` default).
+   * Absent ⇒ live; do NOT read absence as any other value. Freshness enum, not a
+   * topology label (M2): an independent host serving live data is still `"live"`.
+   */
+  dataPath?: "live" | "snapshot";
+  /**
+   * P5 FRESHNESS (ADR-0045 m3). ISO-8601 UTC timestamp of when a NON-live
+   * (`snapshot`) body was retrieved from the origin — the as-of instant for
+   * deterministic cross-tool freshness comparison. Present ONLY alongside a
+   * non-live `dataPath`; absent on a live response (byte-identical). When a
+   * snapshot carries a `totalAvailable`, it is qualified as an as-of figure via
+   * the existing `totalIsEstimated` flag (m1 forbids a dedicated `totalAsOf`
+   * field — the only NEW P5 fields are `dataPath` and `asOf`).
+   */
+  asOf?: string;
   /** Short, AI-actionable caveats (natural language). */
   notes: string[];
 };
@@ -147,6 +169,16 @@ export function buildMeta(partial: Partial<ResponseMeta> = {}): ResponseMeta {
     partial.truncated ?? (totalProvesTruncation || paginationHasMore);
   if (totalProvesTruncation || paginationHasMore) truncated = true;
 
+  // --- P5 provenance (ADR-0045 B2/M1) -----------------------------------
+  // A NON-live response (a snapshot served because the live upstream was
+  // unreachable) is honesty-qualified below. For a live/absent dataPath this
+  // whole strand is INERT — `nonLiveProvenance` is false, so `complete`, the
+  // notes[], and totalIsEstimated are all derived EXACTLY as before P5 (Phase 1:
+  // no adapter threads a dataPath ⇒ byte-identical output on every one of the
+  // 110 tools).
+  const nonLiveProvenance =
+    partial.dataPath !== undefined && partial.dataPath !== "live";
+
   // --- Derive complete (single source of truth = the §2.1 invariant) ----
   const degradedLoss = degraded ? degraded.failed > 0 : false;
   const derivedComplete =
@@ -154,7 +186,11 @@ export function buildMeta(partial: Partial<ResponseMeta> = {}): ResponseMeta {
     filtersDropped.length === 0 &&
     !paginationHasMore &&
     !degradedLoss &&
-    !totalProvesTruncation;
+    !totalProvesTruncation &&
+    // M1a: `complete` is defined against the LIVE result set (:53), so a snapshot
+    // can NEVER claim complete:true — gate the derivation behind a live/absent
+    // dataPath. (Inert for live: `!false` === true, no change.)
+    !nonLiveProvenance;
   // Honor an explicit complete:false, but never let a caller claim
   // complete:true when the invariant says otherwise.
   const complete =
@@ -164,6 +200,16 @@ export function buildMeta(partial: Partial<ResponseMeta> = {}): ResponseMeta {
   if (filtersDropped.length > 0 && notes.length === 0) {
     notes.push(
       `The following requested filters were NOT applied by the upstream and the results are unfiltered on them: ${filtersDropped.join(", ")}. Treat these results as unfiltered on those facets.`,
+    );
+  }
+
+  // --- P5 (ADR-0045 M1c/m1): staleness note on a non-live response ------
+  // Push into the EXISTING notes[] (m1 killed the separate `stalenessNote`
+  // field). Inert for live/absent dataPath. Names the as-of instant when known.
+  if (nonLiveProvenance) {
+    const asOfPhrase = partial.asOf ? ` (as of ${partial.asOf})` : "";
+    notes.push(
+      `Live upstream was unreachable — this response is served from a ${partial.dataPath} snapshot${asOfPhrase}. Freshness is NOT guaranteed; treat completeness and totals as of the snapshot time, not live.`,
     );
   }
 
@@ -198,6 +244,17 @@ export function buildMeta(partial: Partial<ResponseMeta> = {}): ResponseMeta {
   // logic — the value (the offsetMark token, or null on the last page) is set by the
   // cursor tool and passed through verbatim.
   if (partial.nextCursor !== undefined) meta.nextCursor = partial.nextCursor;
+  // P5 provenance passthrough (ADR-0045 B2) — IDENTICAL guarded idiom to
+  // totalIsLowerBound/nextCursor above: surfaced ONLY when the adapter provides
+  // it, so every existing (live, dataPath-absent) tool `_meta` stays
+  // byte-identical. NO `??` default. In Phase 1 no adapter threads these ⇒ inert.
+  if (partial.dataPath !== undefined) meta.dataPath = partial.dataPath;
+  if (partial.asOf !== undefined) meta.asOf = partial.asOf;
+  // M1b: a snapshot's totalAvailable is an as-of figure, NOT a live exact total —
+  // qualify it via the EXISTING totalIsEstimated flag (m1 forbids a new
+  // totalAsOf field) so an AI never reads it as a live count. Only when a total
+  // is actually present. Inert for live (nonLiveProvenance false).
+  if (nonLiveProvenance && totalAvailable !== null) meta.totalIsEstimated = true;
   return meta;
 }
 

@@ -45,6 +45,19 @@ export type ToolError = {
   upstreamStatus?: number;
   /** Endpoint that failed — for ops. */
   upstreamEndpoint?: string;
+  /**
+   * Set true when the upstream EXPLICITLY asked us to wait — i.e. a 429, or a
+   * 5xx that CARRIED a `Retry-After` header (ADR-0045 M2). The resilience layer
+   * (circuit breaker + path-chain) consults `isHonorRetryAfter(err)` and EXCLUDES
+   * such errors from the breaker failure count AND from fallback (B1-policy): we
+   * wait and fail honestly as `rate_limited`/`upstream_unavailable`, never route
+   * around a rate limit onto a mirror/snapshot. Absent (undefined) on a plain 5xx
+   * with no Retry-After header — that stays a HARD failure the breaker counts, so
+   * absence must NOT be read as `false`-meaning-"honor". The 429 path never sets
+   * this flag (it is detected by `kind==="rate_limited"`), keeping the 429 error
+   * envelope byte-identical to before this ADR.
+   */
+  honorRetryAfter?: boolean;
 };
 
 export type ToolResult<T> =
@@ -93,7 +106,7 @@ export function errorFromResponse(
     };
   }
   if (r.status >= 500) {
-    return {
+    const err: ToolError = {
       kind: "upstream_unavailable",
       message: `Upstream server error (HTTP ${r.status}) at ${endpoint}. Try again later.`,
       retryable: true,
@@ -101,6 +114,19 @@ export function errorFromResponse(
       upstreamStatus,
       upstreamEndpoint: endpoint,
     };
+    // ADR-0045 M2 — a 5xx MAY carry Retry-After (e.g. a 503 maintenance window).
+    // Parse it ONLY when the header is PRESENT (so a plain 5xx is byte-identical
+    // to before: retryAfterSeconds:60, no honorRetryAfter key), preserving the
+    // `Math.min(...,60)` worst-case cap. The 429 branch above is UNTOUCHED (it
+    // already parses Retry-After; re-implementing it is forbidden). Flagging
+    // honorRetryAfter lets the resilience layer EXCLUDE this from the breaker /
+    // fallback (B1-policy: honor the explicit wait, never route around it).
+    const retryAfterHeader = r.headers.get("Retry-After");
+    if (retryAfterHeader !== null) {
+      err.retryAfterSeconds = Math.min(parseRetryAfter(retryAfterHeader), 60);
+      err.honorRetryAfter = true;
+    }
+    return err;
   }
   if (r.status >= 400) {
     return {
@@ -118,6 +144,25 @@ export function errorFromResponse(
     upstreamStatus,
     upstreamEndpoint: endpoint,
   };
+}
+
+/**
+ * Does this thrown error carry an EXPLICIT "wait, then fail honestly" signal
+ * from the upstream — a 429 (`rate_limited`), or a 5xx that carried a
+ * `Retry-After` header (ADR-0045 M2, flagged `honorRetryAfter`)?
+ *
+ * The resilience layer (circuit breaker + path-chain, datasource.ts) consults
+ * this to EXCLUDE such errors from the breaker failure count AND from fallback
+ * (ADR-0045 B1-policy): a rate limit / honor-Retry-After outcome must NEVER
+ * count as a breaker "hard failure" nor trigger a mirror/snapshot fallback — we
+ * wait and fail honestly. This is a POLICY boundary, not a bypass: we honor the
+ * upstream's explicit throttle, we do not route around it.
+ */
+export function isHonorRetryAfter(err: unknown): boolean {
+  if (!(err instanceof ToolErrorCarrier)) return false;
+  const te = err.toolError;
+  if (te.kind === "rate_limited") return true;
+  return te.honorRetryAfter === true;
 }
 
 /**

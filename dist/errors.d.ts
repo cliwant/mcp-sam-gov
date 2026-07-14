@@ -41,6 +41,19 @@ export type ToolError = {
     upstreamStatus?: number;
     /** Endpoint that failed — for ops. */
     upstreamEndpoint?: string;
+    /**
+     * Set true when the upstream EXPLICITLY asked us to wait — i.e. a 429, or a
+     * 5xx that CARRIED a `Retry-After` header (ADR-0045 M2). The resilience layer
+     * (circuit breaker + path-chain) consults `isHonorRetryAfter(err)` and EXCLUDES
+     * such errors from the breaker failure count AND from fallback (B1-policy): we
+     * wait and fail honestly as `rate_limited`/`upstream_unavailable`, never route
+     * around a rate limit onto a mirror/snapshot. Absent (undefined) on a plain 5xx
+     * with no Retry-After header — that stays a HARD failure the breaker counts, so
+     * absence must NOT be read as `false`-meaning-"honor". The 429 path never sets
+     * this flag (it is detected by `kind==="rate_limited"`), keeping the 429 error
+     * envelope byte-identical to before this ADR.
+     */
+    honorRetryAfter?: boolean;
 };
 export type ToolResult<T> = {
     ok: true;
@@ -59,6 +72,19 @@ export declare class ToolErrorCarrier extends Error {
  * Honors `Retry-After` (both seconds-int and HTTP-date forms).
  */
 export declare function errorFromResponse(r: Response, endpoint: string): ToolError;
+/**
+ * Does this thrown error carry an EXPLICIT "wait, then fail honestly" signal
+ * from the upstream — a 429 (`rate_limited`), or a 5xx that carried a
+ * `Retry-After` header (ADR-0045 M2, flagged `honorRetryAfter`)?
+ *
+ * The resilience layer (circuit breaker + path-chain, datasource.ts) consults
+ * this to EXCLUDE such errors from the breaker failure count AND from fallback
+ * (ADR-0045 B1-policy): a rate limit / honor-Retry-After outcome must NEVER
+ * count as a breaker "hard failure" nor trigger a mirror/snapshot fallback — we
+ * wait and fail honestly. This is a POLICY boundary, not a bypass: we honor the
+ * upstream's explicit throttle, we do not route around it.
+ */
+export declare function isHonorRetryAfter(err: unknown): boolean;
 /**
  * Wrap a fetch + json call in retry-with-backoff for transient errors.
  *
