@@ -168,6 +168,40 @@
     }
   },
   {
+    "name": "census_business_patterns",
+    "description": "Market sizing by NAICS × geography — establishments, employment, and annual payroll from the US Census County Business Patterns (CBP) API (api.census.gov/data/{year}/cbp). ★REQUIRES a free CENSUS_API_KEY: the Census Data API has NO keyless tier, so without the key this tool THROWS an honest config error (get one at https://api.census.gov/data/key_signup.html; this is the ONLY key-required tool — the other 111 are keyless). Input: optional `naics` (2–6 digit NAICS-2017, e.g. '5415'; omit to aggregate all sectors), `geography` (us|state|county, default us; county REQUIRES `state`), `state` (2-digit FIPS, e.g. '06'), `year` (default '2022'), optional `limit` (client-side top-N; CBP has no server pagination). Returns { rows:[{ name, geoId, naicsCode, naicsLabel, establishments, employees, annualPayrollUsd, state }] } + honest _meta. HONESTY: establishments/employees are integer counts and annualPayrollUsd is annual US dollars (×1000 from the source's $1,000-unit PAYANN); Census SUPPRESSED/withheld cells (large negative sentinels like -999999999) map to null — NEVER a negative number and NEVER 0 (a genuine 0 stays 0); geoId/naicsCode/state are STRINGS (leading zeros survive). CBP returns the COMPLETE geography set for the filter (no pagination) ⇒ totalAvailable = the row count, complete:true. A missing/invalid key ⇒ invalid_input (a 302 to the Missing-Key page); a header-only body ⇒ honest empty (returned:0); a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The key rides ONLY in the &key= query param — never logged or echoed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "naics": {
+          "type": "string",
+          "description": "A NAICS-2017 code (2–6 digits), e.g. '5415' (Computer Systems Design & Related Services) or '54' (Professional/Scientific/Technical). Omit to aggregate across all sectors. Validated ^\\d{2,6}$."
+        },
+        "geography": {
+          "type": "string",
+          "enum": [
+            "us",
+            "state",
+            "county"
+          ],
+          "description": "The geography level (default 'us'). 'state' returns one row per state (or a single state when `state` is given); 'county' returns every county in a state and REQUIRES `state`."
+        },
+        "state": {
+          "type": "string",
+          "description": "A 2-digit state FIPS code, e.g. '06' (California), '48' (Texas). Optional filter for geography='state'; REQUIRED for geography='county' (the CBP `in=state:` predicate). Validated ^\\d{2}$."
+        },
+        "year": {
+          "type": "string",
+          "description": "The CBP data year (default '2022', the latest confirmed vintage). Validated ^\\d{4}$ (it rides in the request path)."
+        },
+        "limit": {
+          "type": "number",
+          "description": "OPTIONAL client-side top-N cap on the returned rows. CBP has NO server-side pagination, so this slices AFTER the full set is fetched and DISCLOSES the omission (totalAvailable stays the full count). Omit to return every matching row."
+        }
+      }
+    }
+  },
+  {
     "name": "census_geocode_address",
     "description": "Resolve a one-line US address → its matched address(es) + the Census GEOGRAPHIES that drive set-aside / place-of-performance analysis (US Census Geocoder, keyless; geocoding.geo.census.gov/geocoder/geographies/onelineaddress) — the NEW territory/geospatial domain. Input `address` (≤500 chars), optional `benchmark` (default Public_AR_Current) / `vintage` (default Current_Current). Returns { matches:[{ matchedAddress, coordinates:{x,y}, tigerLineId, addressComponents, geographies:{ state, county, congressionalDistrict, censusTract, censusBlock, place, cbsaOrCsa, stateLegislativeUpper, stateLegislativeLower } }], matchCount, vintageResolved } + honest _meta. Each geography = { layerKey (the RAW vintage-versioned key, e.g. '119th Congressional Districts'), geoid (a STRING — leading zeros survive: '0102'), name }. HONESTY: genuine-empty (addressMatches:[]) ⇒ matchCount:0/complete:true (NOT an error; verify spelling + add city/state/ZIP); MULTIPLE matches are ALL surfaced (each with its own geographies) + a note; a historical vintage can return >1 layer per type (e.g. 111th+113th Congressional Districts with DISTINCT GEOIDs for a redistricted place) ⇒ BOTH surfaced (chosen + alternates[]) + a mandatory note (NEVER silently dropped); the resolved benchmark/vintage is echoed + a 'Current is a MOVING vintage' note; an invalid/missing benchmark/vintage ⇒ HTTP 400 THROWS (never a fake empty); an outage/5xx ⇒ THROWS. MANDATORY CAVEAT every response: these are a NOMINAL input, NOT an authoritative HUBZone / Opportunity-Zone / set-aside determination (those require SBA's HUBZone map / Treasury's OZ-tract list). Feed censusTract.geoid / county.geoid onward to those authoritative sources.",
     "inputSchema": {

@@ -54,6 +54,7 @@ import * as nih from "./nih.js";
 import * as nsf from "./nsf.js";
 import * as clinicaltrials from "./clinicaltrials.js";
 import * as census from "./census.js";
+import * as censusEconomic from "./census-economic.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
@@ -3381,6 +3382,45 @@ const CensusGeographiesByCoordinatesInput = z
     path: ["latitude"],
   });
 
+// ─── US Census County Business Patterns (CBP) — the FIRST key-required source ──
+const CensusBusinessPatternsInput = z.object({
+  naics: z
+    .string()
+    .regex(/^\d{2,6}$/)
+    .optional()
+    .describe(
+      "A NAICS-2017 code (2–6 digits), e.g. '5415' (Computer Systems Design & Related Services) or '54' (Professional/Scientific/Technical). Omit to aggregate across all sectors. Validated ^\\d{2,6}$.",
+    ),
+  geography: z
+    .enum(["us", "state", "county"])
+    .optional()
+    .describe(
+      "The geography level (default 'us'). 'state' returns one row per state (or a single state when `state` is given); 'county' returns every county in a state and REQUIRES `state`.",
+    ),
+  state: z
+    .string()
+    .regex(/^\d{2}$/)
+    .optional()
+    .describe(
+      "A 2-digit state FIPS code, e.g. '06' (California), '48' (Texas). Optional filter for geography='state'; REQUIRED for geography='county' (the CBP `in=state:` predicate). Validated ^\\d{2}$.",
+    ),
+  year: z
+    .string()
+    .regex(/^\d{4}$/)
+    .optional()
+    .describe(
+      "The CBP data year (default '2022', the latest confirmed vintage). Validated ^\\d{4}$ (it rides in the request path).",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "OPTIONAL client-side top-N cap on the returned rows. CBP has NO server-side pagination, so this slices AFTER the full set is fetched and DISCLOSES the omission (totalAvailable stays the full count). Omit to return every matching row.",
+    ),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -4842,6 +4882,20 @@ export const TOOLS: ToolDef[] = [
       "Resolve a longitude/latitude point → the Census GEOGRAPHIES at that point, no address parsing (US Census Geocoder, keyless; geocoding.geo.census.gov/geocoder/geographies/coordinates). For a caller that already holds coordinates. Input `longitude`/`x` (required, -180..180) + `latitude`/`y` (required, -90..90) — x=longitude, y=latitude (the Census API's own names; `longitude`/`latitude` are the clearer aliases), optional `benchmark`/`vintage`. Returns { found, coordinates:{x,y}, geographies:{ state, county, congressionalDistrict, censusTract, censusBlock, place, cbsaOrCsa, stateLegislativeUpper, stateLegislativeLower }, vintageResolved } + honest _meta. HONESTY: a point outside any US Census geography (offshore / out-of-US) ⇒ geographies all null / found:false / complete:true (an honest empty geographies:{}, NOT an error); coordinate finiteness is re-guarded PRE-fetch (a non-finite x/y ⇒ invalid_input, 0 fetch); a historical vintage's >1-layer-per-type is surfaced with alternates[] + a note (same [B1] multi-key handling as the address tool); GEOIDs are STRINGS (leading zeros survive); the resolved benchmark/vintage is echoed + a moving-vintage note; a bad benchmark/vintage ⇒ HTTP 400 THROWS; an outage/5xx ⇒ THROWS. MANDATORY CAVEAT every response: these are a NOMINAL input, NOT an authoritative HUBZone / Opportunity-Zone / set-aside determination.",
     inputSchema: CensusGeographiesByCoordinatesInput,
     handler: (input) => census.geographiesByCoordinates(input),
+  }),
+  // ━━━ US Census County Business Patterns — market sizing (1) ━━━ ADR-0047
+  // ★The server's FIRST KEY-REQUIRED source: the Census Data API removed its
+  // keyless tier, so WITHOUT a CENSUS_API_KEY this tool throws an honest
+  // invalid_input config error (the other 111 tools stay keyless). NAICS×geography
+  // establishments / employment / annual payroll — the demand-side market-sizing
+  // lane. Census negative suppression sentinels (-999999999 …) map to null (never
+  // a negative number / never 0). The 2D-array body is parsed by header name.
+  defineTool({
+    name: "census_business_patterns",
+    description:
+      "Market sizing by NAICS × geography — establishments, employment, and annual payroll from the US Census County Business Patterns (CBP) API (api.census.gov/data/{year}/cbp). ★REQUIRES a free CENSUS_API_KEY: the Census Data API has NO keyless tier, so without the key this tool THROWS an honest config error (get one at https://api.census.gov/data/key_signup.html; this is the ONLY key-required tool — the other 111 are keyless). Input: optional `naics` (2–6 digit NAICS-2017, e.g. '5415'; omit to aggregate all sectors), `geography` (us|state|county, default us; county REQUIRES `state`), `state` (2-digit FIPS, e.g. '06'), `year` (default '2022'), optional `limit` (client-side top-N; CBP has no server pagination). Returns { rows:[{ name, geoId, naicsCode, naicsLabel, establishments, employees, annualPayrollUsd, state }] } + honest _meta. HONESTY: establishments/employees are integer counts and annualPayrollUsd is annual US dollars (×1000 from the source's $1,000-unit PAYANN); Census SUPPRESSED/withheld cells (large negative sentinels like -999999999) map to null — NEVER a negative number and NEVER 0 (a genuine 0 stays 0); geoId/naicsCode/state are STRINGS (leading zeros survive). CBP returns the COMPLETE geography set for the filter (no pagination) ⇒ totalAvailable = the row count, complete:true. A missing/invalid key ⇒ invalid_input (a 302 to the Missing-Key page); a header-only body ⇒ honest empty (returned:0); a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The key rides ONLY in the &key= query param — never logged or echoed.",
+    inputSchema: CensusBusinessPatternsInput,
+    handler: (input) => censusEconomic.businessPatterns(input),
   }),
 ];
 
