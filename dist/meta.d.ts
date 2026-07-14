@@ -103,6 +103,28 @@ export type ResponseMeta = {
     degraded?: MetaDegraded;
     /** Present on list/search/aggregate tools. */
     pagination?: MetaPagination;
+    /**
+     * P5 PROVENANCE (ADR-0045 B2/M1). The access path that served THIS response:
+     * `"live"` (the current, and in Phase 1 the ONLY, path) or `"snapshot"` (a
+     * self-hosted cache served when the live upstream was unreachable). Set by the
+     * resilience port's provenance-returning primitive, then threaded by the
+     * adapter ONLY when NON-live — so a live response OMITS this field entirely and
+     * stays byte-identical to pre-P5 output. Surfaced via the guarded
+     * `if (partial.dataPath !== undefined)` passthrough below (NO `??` default).
+     * Absent ⇒ live; do NOT read absence as any other value. Freshness enum, not a
+     * topology label (M2): an independent host serving live data is still `"live"`.
+     */
+    dataPath?: "live" | "snapshot";
+    /**
+     * P5 FRESHNESS (ADR-0045 m3). ISO-8601 UTC timestamp of when a NON-live
+     * (`snapshot`) body was retrieved from the origin — the as-of instant for
+     * deterministic cross-tool freshness comparison. Present ONLY alongside a
+     * non-live `dataPath`; absent on a live response (byte-identical). When a
+     * snapshot carries a `totalAvailable`, it is qualified as an as-of figure via
+     * the existing `totalIsEstimated` flag (m1 forbids a dedicated `totalAsOf`
+     * field — the only NEW P5 fields are `dataPath` and `asOf`).
+     */
+    asOf?: string;
     /** Short, AI-actionable caveats (natural language). */
     notes: string[];
 };

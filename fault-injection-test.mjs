@@ -176,7 +176,8 @@ import { readFileSync as censusReadFile } from "node:fs";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
-import { getJson, getText, isRedirectError, driftError, throughGate } from "./dist/datasource.js";
+import { getJson, getText, isRedirectError, driftError, throughGate, getJsonWithProvenance, getJsonConditional, throughPathChain, CircuitBreaker, isHardFailure } from "./dist/datasource.js";
+import { errorFromResponse, isHonorRetryAfter } from "./dist/errors.js";
 import { num as coerceNum, str as coerceStr } from "./dist/coerce.js";
 import { fetchAttachmentText } from "./dist/attachments.js";
 import {
@@ -8930,6 +8931,226 @@ async function testThroughGate() {
   }
 }
 
+// §70: Resilience port (ADR-0045 Phase 1 — landed COMPLETELY INERT). Unit-tests
+// the DORMANT primitives DIRECTLY (no adapter opts in this phase, so they never
+// run in production — this section is the ONLY thing that exercises them). All
+// OFFLINE, deterministic, NON-VACUOUS (every assertion names the mutation that
+// turns it RED). Covers: (a) the provenance primitive + buildMeta P5 threading,
+// (b) the per-host circuit breaker + isHardFailure carve-outs, (c) the path-chain
+// (single = pure passthrough / breaker never consulted; multi = skip/fallback +
+// honor-Retry-After never routes around), (d) getJsonConditional 304-interception,
+// (e) errorFromResponse 5xx Retry-After (M2) + the 429 path proven UNCHANGED.
+async function testResiliencePort() {
+  section("70. Resilience port (ADR-0045 Phase 1 INERT) — provenance primitive, circuit breaker, path-chain, conditional-GET, 5xx Retry-After");
+
+  const ISO = "2026-07-01T00:00:00Z";
+  const hard503Carrier = (host = "h") =>
+    new ToolErrorCarrier(errorFromResponse(mockResponse({ status: 503 }), host));
+  const carrier429 = (host = "h") =>
+    new ToolErrorCarrier(
+      errorFromResponse(mockResponse({ status: 429, headers: { "Retry-After": "30" } }), host),
+    );
+  const carrier404 = (host = "h") =>
+    new ToolErrorCarrier(errorFromResponse(mockResponse({ status: 404 }), host));
+  const timeoutCarrier = (host = "h") =>
+    new ToolErrorCarrier({ kind: "upstream_unavailable", message: "timed out", retryable: false, upstreamEndpoint: host });
+
+  // ── (a) provenance primitive: a LIVE fetch ⇒ { body, provenance:{dataPath:"live"} },
+  //        asOf undefined. getJson stays byte-identical (untouched).
+  await withFetch((u) => mockResponse({ status: 200, json: { ok: 1, v: "live" } }), async () => {
+    const r = await getJsonWithProvenance("https://x.test/api", { label: "x.test" });
+    eq("70a getJsonWithProvenance returns the parsed body", r.body, { ok: 1, v: "live" });
+    ok("70a provenance.dataPath==='live' (single live path in Phase 1)", r.provenance.dataPath === "live", JSON.stringify(r.provenance));
+    ok("70a provenance.asOf is undefined on a live body (asOf is non-live only)", r.provenance.asOf === undefined, JSON.stringify(r.provenance));
+  });
+
+  // ── (a) buildMeta P5 threading. The GUARD (`if partial.dataPath!==undefined`) +
+  //        the `!nonLiveProvenance` complete-gate are LOAD-BEARING:
+  //   • live/absent dataPath ⇒ NO dataPath/asOf keys, complete derivable true,
+  //     totalIsEstimated NOT forced, NO staleness note (byte-identical to pre-P5).
+  //   • snapshot ⇒ dataPath+asOf surfaced, complete FORCED false even when the row
+  //     count would otherwise be complete (returned===total), totalAvailable
+  //     qualified via totalIsEstimated, a staleness note pushed to notes[].
+  {
+    const liveControl = buildMeta({ source: "s", returned: 5, totalAvailable: 5 });
+    ok("70a live buildMeta: NO dataPath key (guard inert ⇒ byte-identical)", !("dataPath" in liveControl), JSON.stringify(liveControl));
+    ok("70a live buildMeta: NO asOf key", !("asOf" in liveControl), JSON.stringify(liveControl));
+    ok("70a live buildMeta: complete:true derivable (returned===total, not truncated)", liveControl.complete === true, JSON.stringify(liveControl));
+    ok("70a live buildMeta: totalIsEstimated NOT forced (undefined)", liveControl.totalIsEstimated === undefined, JSON.stringify(liveControl));
+    ok("70a live buildMeta: no staleness note", liveControl.notes.length === 0, JSON.stringify(liveControl.notes));
+
+    const snap = buildMeta({ source: "s", returned: 5, totalAvailable: 5, dataPath: "snapshot", asOf: ISO });
+    ok("70a snapshot buildMeta: dataPath==='snapshot' surfaced (guard passthrough)", snap.dataPath === "snapshot", JSON.stringify(snap));
+    ok("70a snapshot buildMeta: asOf surfaced verbatim (ISO-8601 UTC)", snap.asOf === ISO, JSON.stringify(snap));
+    ok("70a snapshot buildMeta: NOT truncated (returned===total) — isolates the complete-gate", snap.truncated === false, JSON.stringify(snap));
+    ok("70a snapshot buildMeta: complete FORCED !==true despite returned===total (M1a; drop `!nonLiveProvenance` ⇒ RED)", snap.complete !== true, JSON.stringify(snap));
+    ok("70a snapshot buildMeta: totalAvailable qualified via totalIsEstimated:true (M1b; drop the force ⇒ RED)", snap.totalIsEstimated === true, JSON.stringify(snap));
+    ok("70a snapshot buildMeta: staleness note pushed to notes[] (m1: reuses notes, no stalenessNote field)",
+      snap.notes.some((n) => /snapshot/i.test(n) && /Freshness is NOT guaranteed/i.test(n)) && !("stalenessNote" in snap), JSON.stringify(snap.notes));
+
+    // Enum discrimination: an explicit dataPath:"live" is treated as live (complete-able),
+    // NOT snapshot — proves nonLiveProvenance keys on the value, not merely presence.
+    const explicitLive = buildMeta({ source: "s", returned: 5, totalAvailable: 5, dataPath: "live" });
+    ok("70a explicit dataPath:'live' ⇒ complete:true (live is not gated)", explicitLive.complete === true && explicitLive.totalIsEstimated === undefined, JSON.stringify(explicitLive));
+  }
+
+  // ── (b) isHardFailure carve-outs (the breaker's trip predicate).
+  ok("70b isHardFailure(503) === true (5xx)", isHardFailure(hard503Carrier()) === true);
+  ok("70b isHardFailure(raw TypeError) === true (network fault)", isHardFailure(new TypeError("fetch failed")) === true);
+  ok("70b isHardFailure(429) === false (rate-limit carve-out)", isHardFailure(carrier429()) === false);
+  ok("70b isHardFailure(404) === false (not an outage)", isHardFailure(carrier404()) === false);
+  ok("70b isHardFailure(timeout/abort upstream_unavailable retryable:false) === false", isHardFailure(timeoutCarrier()) === false);
+  {
+    const c503RA = new ToolErrorCarrier(errorFromResponse(mockResponse({ status: 503, headers: { "Retry-After": "5" } }), "h"));
+    ok("70b isHardFailure(5xx+Retry-After) === false (honor-Retry-After carve-out, B1-policy)", isHardFailure(c503RA) === false);
+  }
+
+  // ── (b) circuit breaker: ≥2-path chain, 5 consecutive HARD 5xx ⇒ OPENS; then
+  //        the live primary is SKIPPED (fetch-spy). 30s later a single half-open
+  //        probe is admitted; a probe SUCCESS closes it. Fake clock — deterministic.
+  {
+    let clk = 1_000_000;
+    let primaryHealthy = false;
+    let primaryAttempts = 0;
+    const breaker = new CircuitBreaker(["host-a"], () => clk);
+    const snapBody = { rows: [1, 2, 3], via: "snapshot" };
+    const paths = [
+      {
+        host: "host-a",
+        provenance: { dataPath: "live" },
+        run: async () => {
+          primaryAttempts++;
+          if (primaryHealthy) return { via: "live" };
+          throw hard503Carrier("host-a");
+        },
+      },
+      { host: "snap-host", provenance: { dataPath: "snapshot", asOf: ISO }, run: async () => snapBody },
+    ];
+
+    // 5 calls: primary hard-fails each time, snapshot serves. On the 5th the breaker trips.
+    for (let i = 0; i < 5; i++) {
+      const r = await throughPathChain(paths, breaker);
+      ok(`70b call#${i + 1} falls through to snapshot on a hard 5xx primary`, r.provenance.dataPath === "snapshot" && r.body.via === "snapshot", JSON.stringify(r.provenance));
+    }
+    ok("70b breaker OPEN after 5 consecutive HARD failures (drop the threshold ⇒ RED)", breaker.isOpen("host-a") === true);
+    ok("70b all 5 live attempts happened BEFORE tripping (fetch-spy)", primaryAttempts === 5, `attempts=${primaryAttempts}`);
+
+    // 6th call: OPEN ⇒ live primary SKIPPED (fetch-spy: no new primary attempt).
+    const before6 = primaryAttempts;
+    const r6 = await throughPathChain(paths, breaker);
+    ok("70b OPEN breaker SKIPS the live primary (0 new attempts; drop shouldSkip ⇒ RED)", primaryAttempts === before6, `before=${before6} after=${primaryAttempts}`);
+    ok("70b OPEN breaker still serves the snapshot fallback", r6.provenance.dataPath === "snapshot");
+
+    // Advance past the 30s window → HALF-OPEN admits exactly ONE probe.
+    clk += 30_001;
+    const beforeProbe = primaryAttempts;
+    await throughPathChain(paths, breaker); // probe still hard-fails
+    ok("70b after 30s window, half-open admits EXACTLY ONE live probe", primaryAttempts === beforeProbe + 1, `Δ=${primaryAttempts - beforeProbe}`);
+    ok("70b failed probe RE-OPENS the breaker", breaker.isOpen("host-a") === true);
+    const beforeReopen = primaryAttempts;
+    await throughPathChain(paths, breaker);
+    ok("70b re-opened breaker SKIPS live again (0 new attempts)", primaryAttempts === beforeReopen, `Δ=${primaryAttempts - beforeReopen}`);
+
+    // Advance again + make primary healthy → probe SUCCEEDS → breaker CLOSES, live served.
+    clk += 30_001;
+    primaryHealthy = true;
+    const r9 = await throughPathChain(paths, breaker);
+    ok("70b half-open probe SUCCESS serves LIVE and CLOSES the breaker", r9.provenance.dataPath === "live" && breaker.isOpen("host-a") === false, JSON.stringify({ dp: r9.provenance.dataPath, open: breaker.isOpen("host-a") }));
+  }
+
+  // ── (b) 429×5 does NOT open (rate-limit carve-out) AND never routes around
+  //        (B1-policy): each call RE-THROWS rate_limited, never serves the snapshot.
+  {
+    let clk = 2_000_000;
+    const breaker429 = new CircuitBreaker(["host-b"], () => clk);
+    let snapshotServed = 0;
+    const paths429 = [
+      { host: "host-b", provenance: { dataPath: "live" }, run: async () => { throw carrier429("host-b"); } },
+      { host: "snap-host", provenance: { dataPath: "snapshot", asOf: ISO }, run: async () => { snapshotServed++; return { via: "snapshot" }; } },
+    ];
+    for (let i = 0; i < 5; i++) {
+      const { threw, error } = await expectThrow(() => throughPathChain(paths429, breaker429));
+      ok(`70b 429 call#${i + 1} RE-THROWS rate_limited (honor-Retry-After never routes around, B1-policy)`, threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    }
+    ok("70b 429×5 does NOT open the breaker (rate-limit carve-out)", breaker429.isOpen("host-b") === false);
+    ok("70b 429 NEVER fell through to the snapshot fallback (0 snapshot serves)", snapshotServed === 0, `served=${snapshotServed}`);
+  }
+
+  // ── (c) single-path chain = PURE PASSTHROUGH: breaker NEVER consulted, so even a
+  //        PRE-OPENED breaker on the host still attempts live (the 27 single-path
+  //        sources are unaffected by the breaker — the B1-regression guarantee).
+  {
+    let clk = 3_000_000;
+    const breakerC = new CircuitBreaker(["host-c"], () => clk);
+    for (let i = 0; i < 5; i++) breakerC.onFailure("host-c", hard503Carrier("host-c"));
+    ok("70c host-c breaker pre-opened (control)", breakerC.isOpen("host-c") === true);
+    let attempts = 0;
+    const single = [{ host: "host-c", provenance: { dataPath: "live" }, run: async () => { attempts++; return { via: "live" }; } }];
+    const r = await throughPathChain(single, breakerC);
+    ok("70c single-path chain attempts LIVE even with an OPEN breaker (breaker NOT consulted; consult it ⇒ RED)", attempts === 1 && r.provenance.dataPath === "live", `attempts=${attempts} dp=${r.provenance.dataPath}`);
+  }
+
+  // ── (d) conditional-GET: a 304 returns the CACHED body, sends validators, and
+  //        NEVER calls r.json() (booby-trapped 304.json() throws if touched).
+  {
+    const trapped304 = { ok: false, status: 304, headers: { get: () => null }, json: async () => { throw new Error("r.json() called on a 304!"); }, text: async () => "" };
+    const cache = { body: { cached: true, n: 7 }, etag: 'W/"abc"', asOf: ISO };
+    await withFetch((u) => trapped304, async (calls) => {
+      const r = await getJsonConditional("https://y.test/api", { label: "y.test" }, cache);
+      ok("70d 304 ⇒ notModified:true", r.notModified === true, JSON.stringify({ nm: r.notModified }));
+      eq("70d 304 ⇒ returns the CACHED body (never r.json())", r.body, { cached: true, n: 7 });
+      ok("70d 304 ⇒ validators SENT (If-None-Match from the held etag)", (calls[0].init.headers || {})["If-None-Match"] === 'W/"abc"', JSON.stringify(calls[0].init.headers));
+      ok("70d 304 ⇒ provenance carries the cache asOf (dataPath snapshot)", r.provenance.dataPath === "snapshot" && r.provenance.asOf === ISO, JSON.stringify(r.provenance));
+    });
+    // 200 + NO cache ⇒ validators NOT sent (only when a cache entry is held), body parsed.
+    await withFetch((u) => mockResponse({ status: 200, json: { fresh: 1 } }), async (calls) => {
+      const r = await getJsonConditional("https://y.test/api", { label: "y.test" });
+      ok("70d cache MISS: notModified:false, body parsed", r.notModified === false && r.body.fresh === 1, JSON.stringify(r.body));
+      ok("70d cache MISS: NO If-None-Match/If-Modified-Since sent (validators only when a cache entry is held)",
+        !(calls[0].init.headers && (calls[0].init.headers["If-None-Match"] || calls[0].init.headers["If-Modified-Since"])), JSON.stringify(calls[0].init.headers || {}));
+    });
+    // Shared getJson UNCHANGED: a non-JSON 200 still surfaces r.json()'s SyntaxError
+    // (which the caller reclassifies to schema_drift — fdic:340/fedreg:588).
+    {
+      const nonJson200 = { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON"); }, text: async () => "<html>" };
+      await withFetch((u) => nonJson200, async () => {
+        const { threw, error } = await expectThrow(() => getJson("https://z.test/api", { label: "z.test" }));
+        ok("70d shared getJson on a non-JSON 200 STILL throws SyntaxError (unchanged; conditional-GET is a SEPARATE primitive)", threw && error instanceof SyntaxError, String(error));
+      });
+    }
+  }
+
+  // ── (e) errorFromResponse 5xx Retry-After (M2) + the 429 path proven UNCHANGED.
+  {
+    const e503ra = errorFromResponse(mockResponse({ status: 503, headers: { "Retry-After": "5" } }), "h");
+    ok("70e 503+Retry-After:5 ⇒ upstream_unavailable, retryAfterSeconds:5, honorRetryAfter:true",
+      e503ra.kind === "upstream_unavailable" && e503ra.retryAfterSeconds === 5 && e503ra.honorRetryAfter === true, JSON.stringify(e503ra));
+    ok("70e isHonorRetryAfter(503+Retry-After) === true", isHonorRetryAfter(new ToolErrorCarrier(e503ra)) === true);
+
+    const e503cap = errorFromResponse(mockResponse({ status: 503, headers: { "Retry-After": "9999" } }), "h");
+    ok("70e 503+Retry-After:9999 ⇒ retryAfterSeconds capped at 60 (Math.min preserved)", e503cap.retryAfterSeconds === 60, JSON.stringify(e503cap));
+
+    const plain503 = errorFromResponse(mockResponse({ status: 503 }), "h");
+    eq("70e plain 503 (no header) BYTE-IDENTICAL to pre-ADR (retryAfterSeconds:60, no honorRetryAfter key)", plain503, {
+      kind: "upstream_unavailable",
+      message: "Upstream server error (HTTP 503) at h. Try again later.",
+      retryable: true,
+      retryAfterSeconds: 60,
+      upstreamStatus: 503,
+      upstreamEndpoint: "h",
+    });
+    ok("70e plain 503 has NO honorRetryAfter key (only present when header parsed)", !("honorRetryAfter" in plain503));
+    ok("70e isHonorRetryAfter(plain 503) === false (a plain 5xx IS a hard failure the breaker counts)", isHonorRetryAfter(new ToolErrorCarrier(plain503)) === false);
+
+    // 429 path UNCHANGED (fixture 11018 shape): rate_limited, Retry-After honored,
+    // NO honorRetryAfter key (429 is detected by kind, not the flag).
+    const e429 = errorFromResponse(mockResponse({ status: 429, headers: { "Retry-After": "25832" } }), "h");
+    ok("70e 429 path UNCHANGED: rate_limited, retryAfterSeconds:25832, NO honorRetryAfter key",
+      e429.kind === "rate_limited" && e429.retryable === true && e429.retryAfterSeconds === 25832 && !("honorRetryAfter" in e429), JSON.stringify(e429));
+    ok("70e isHonorRetryAfter(429) === true (via kind==='rate_limited')", isHonorRetryAfter(new ToolErrorCarrier(e429)) === true);
+  }
+}
+
 // §44: CKAN datastore_search source (ADR-0006) — the FIRST source on the R2 port.
 // SSRF (allowlist enum, 36-char lowercase-UUID regex + runtime M1 recheck,
 // redirect:"error") + honesty (EXACT vs ESTIMATE total, the B1 anti-livelock
@@ -12175,38 +12396,38 @@ async function testFpdsHonesty() {
   await withFetch(fpdsMock(MULTIPAGE), async () => {
     const r = await runTool("fpds_search_awards", { naics: "541511" }, sam);
     const m = buildMeta(r.meta);
-    ok("49a MULTIPAGE parses 10 entries (real award + real IDV + 8 fillers)", r.data.awards.length === 10, `got ${r.data.awards.length}`);
+    ok("70a MULTIPAGE parses 10 entries (real award + real IDV + 8 fillers)", r.data.awards.length === 10, `got ${r.data.awards.length}`);
     const a = r.data.awards.find((x) => x.piid === "00000099FL5GG02");
-    ok("49a award anchor: piid/mod/parentIdvPiid (scoped to referencedIDVID, not the award's own PIID)",
+    ok("70a award anchor: piid/mod/parentIdvPiid (scoped to referencedIDVID, not the award's own PIID)",
       a && a.piid === "00000099FL5GG02" && a.modNumber === "0" && a.parentIdvPiid === "F1963093D0001",
       JSON.stringify({ piid: a?.piid, mod: a?.modNumber, parent: a?.parentIdvPiid }));
-    ok("49a award anchor: vendorName/UEI/ultimateParentUEI(+Name) entity-decoded (BLACK & DECKER, J5JXMYR1QMW4)",
+    ok("70a award anchor: vendorName/UEI/ultimateParentUEI(+Name) entity-decoded (BLACK & DECKER, J5JXMYR1QMW4)",
       a && a.vendorName === "BLACK & DECKER CORPORATION, TH" && a.vendorUei === "J5JXMYR1QMW4" && a.ultimateParentUei === "J5JXMYR1QMW4" && a.ultimateParentUeiName === "THE BLACK & DECKER CORPORATION",
       JSON.stringify({ v: a?.vendorName, u: a?.vendorUei, up: a?.ultimateParentUei, upn: a?.ultimateParentUeiName }));
-    ok("49a award anchor: amounts num() — obligated 107271 (from '107271.00'), total 107271, base 0 (from '0.00')",
+    ok("70a award anchor: amounts num() — obligated 107271 (from '107271.00'), total 107271, base 0 (from '0.00')",
       a && a.obligatedAmount === 107271 && a.totalObligatedAmount === 107271 && a.baseAndAllOptionsValue === 0,
       JSON.stringify({ o: a?.obligatedAmount, t: a?.totalObligatedAmount, b: a?.baseAndAllOptionsValue }));
-    ok("49a award anchor: naics 541511, psc D307, signedDate, businessSize, extentCompeted, offers 2, setAside",
+    ok("70a award anchor: naics 541511, psc D307, signedDate, businessSize, extentCompeted, offers 2, setAside",
       a && a.naics === "541511" && a.psc === "D307" && a.signedDate === "1998-11-20 00:00:00" && a.businessSize === "OTHER THAN SMALL BUSINESS" && a.extentCompeted === "FULL AND OPEN COMPETITION" && a.offersReceived === 2 && a.setAside === "NO SET ASIDE USED.",
       JSON.stringify({ n: a?.naics, p: a?.psc, s: a?.signedDate, bs: a?.businessSize, e: a?.extentCompeted, of: a?.offersReceived, sa: a?.setAside }));
-    ok("49a award anchor: vendorCity BALTIMORE / vendorState MD (scoped to vendorLocation, not PoP), popState VA (scoped to placeOfPerformance)",
+    ok("70a award anchor: vendorCity BALTIMORE / vendorState MD (scoped to vendorLocation, not PoP), popState VA (scoped to placeOfPerformance)",
       a && a.vendorCity === "BALTIMORE" && a.vendorState === "MD" && a.placeOfPerformanceState === "VA",
       JSON.stringify({ vc: a?.vendorCity, vs: a?.vendorState, pop: a?.placeOfPerformanceState }));
-    ok("49a award anchor: contractingDepartment 9700/DEPT OF DEFENSE (awardContractID/agencyID), office DEPT OF THE NAVY",
+    ok("70a award anchor: contractingDepartment 9700/DEPT OF DEFENSE (awardContractID/agencyID), office DEPT OF THE NAVY",
       a && a.contractingDepartmentId === "9700" && a.contractingDepartmentName === "DEPT OF DEFENSE" && a.contractingOfficeAgencyName === "DEPT OF THE NAVY",
       JSON.stringify({ did: a?.contractingDepartmentId, dn: a?.contractingDepartmentName, off: a?.contractingOfficeAgencyName }));
-    ok("49a award anchor: CDATA title decoded ($107,271 intact — no $1 back-reference corruption)",
+    ok("70a award anchor: CDATA title decoded ($107,271 intact — no $1 back-reference corruption)",
       a && a.title === "New DELIVERY ORDER 00000099FL5GG02 awarded to BLACK & DECKER CORPORATION, TH for the amount of $107,271", JSON.stringify(a?.title));
-    ok("49a award anchor: socioeconomic booleans false (real 'false' leaf), fpdsHtmlUrl decoded",
+    ok("70a award anchor: socioeconomic booleans false (real 'false' leaf), fpdsHtmlUrl decoded",
       a && a.socioeconomic.smallBusiness === false && a.socioeconomic.womenOwned === false && a.fpdsHtmlUrl === "https://www.fpds.gov/ezsearch/search.do?s=FPDS&indexName=awardfull&templateName=1.5.3&q=00000099FL5GG02+9700+",
       JSON.stringify({ so: a?.socioeconomic, url: a?.fpdsHtmlUrl }));
     // (b) content-root tolerance — the ns1:IDV entry parses (NOT dropped as "not an award").
     const iv = r.data.awards.find((x) => x.recordType === "idv");
-    ok("49b content-root tolerance: the ns1:IDV entry parses (recordType idv, piid GS06B70103 from contractID/IDVID/PIID — a DIFFERENT path than award, proving the flat extractor is not path-sensitive)",
+    ok("70b content-root tolerance: the ns1:IDV entry parses (recordType idv, piid GS06B70103 from contractID/IDVID/PIID — a DIFFERENT path than award, proving the flat extractor is not path-sensitive)",
       iv && iv.recordType === "idv" && iv.piid === "GS06B70103" && iv.parentIdvPiid === null && iv.vendorUei === "L88SRK33JSR6" && iv.ultimateParentUeiName === "S.N.C. SCIONTI" && iv.obligatedAmount === 0 && iv.totalObligatedAmount === 161968.18 && iv.psc === "J039" && iv.actionType === "IDC",
       JSON.stringify({ t: iv?.recordType, p: iv?.piid, par: iv?.parentIdvPiid, u: iv?.vendorUei, o: iv?.obligatedAmount, to: iv?.totalObligatedAmount, ps: iv?.psc, at: iv?.actionType }));
     // (c) missing element ⇒ null (never "" / 0). The award has no descriptionOfContractRequirement / cageCode / PoP-city.
-    ok("49c missing element ⇒ null (never '' or 0): description/cageCode/placeOfPerformanceCity absent ⇒ null; IDV vendorName (empty vendorHeader) ⇒ null; IDV naics (no principalNAICSCode) ⇒ null",
+    ok("70c missing element ⇒ null (never '' or 0): description/cageCode/placeOfPerformanceCity absent ⇒ null; IDV vendorName (empty vendorHeader) ⇒ null; IDV naics (no principalNAICSCode) ⇒ null",
       a.description === null && a.cageCode === null && a.placeOfPerformanceCity === null && iv.vendorName === null && iv.naics === null,
       JSON.stringify({ d: a.description, c: a.cageCode, pc: a.placeOfPerformanceCity, ivn: iv.vendorName, ivnn: iv.naics }));
     // (d) M2 — attribute ELEMENT-SCOPED. naicsDescription comes from principalNAICSCode's
@@ -12268,7 +12489,7 @@ async function testFpdsHonesty() {
     `\n<entry><content xmlns:ns2="https://www.fpds.gov/FPDS" type="application/xml"><ns2:IDV><ns2:contractID><ns2:IDVID><ns2:PIID>GS06B70103</ns2:PIID></ns2:IDVID></ns2:contractID></ns2:IDV></content></entry>\n</feed>`;
   await withFetch(fpdsMock(DRIFT_NS2), async () => {
     const { threw, error } = await expectThrow(() => runTool("fpds_search_awards", { naics: "541511" }, sam));
-    ok("49e M3 namespace-drift: a non-empty feed whose entries ALL yield null piid (ns2: prefix) ⇒ schema_drift (never a page of hollow records) — mutate the guard off ⇒ the hollow page returns ⇒ RED",
+    ok("70e M3 namespace-drift: a non-empty feed whose entries ALL yield null piid (ns2: prefix) ⇒ schema_drift (never a page of hollow records) — mutate the guard off ⇒ the hollow page returns ⇒ RED",
       threw && toToolError(error).kind === "schema_drift" && /all entries yielded null piid/.test(toToolError(error).message),
       JSON.stringify(threw ? toToolError(error) : "did-not-throw"));
   });
@@ -15444,6 +15665,7 @@ async function main() {
   await testSocrataHonesty();
   await testDataSourcePortParity();
   await testThroughGate();
+  await testResiliencePort();
   await testCkanHonesty();
   await testFemaHonesty();
   await testFdicHonesty();
