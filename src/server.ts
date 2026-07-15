@@ -58,6 +58,7 @@ import * as censusEconomic from "./census-economic.js";
 import * as fred from "./fred.js";
 import * as bea from "./bea.js";
 import * as gsaPerdiem from "./gsa-perdiem.js";
+import * as dol from "./dol.js";
 import * as lda from "./lda.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
@@ -3566,6 +3567,88 @@ const GsaPerdiemRatesInput = z
     "Look up GSA per-diem rates by EITHER (city + state) OR zip. Supplying both, or neither, ⇒ invalid_input.",
   );
 
+// ─── US DOL Data API v4 (apiprod.dol.gov) — the labor-enforcement lane ──
+// ADR-0053. A DELIBERATE key split: dol_list_datasets (the CATALOG) is KEYLESS;
+// dol_get_dataset (the DATA endpoint) is the 4th REQUIRED key (DOL_API_KEY, no keyless
+// tier — throws pre-fetch without it). The key rides the X-API-KEY HEADER ONLY. The
+// data envelope is key-gated/unverified ⇒ records are surfaced verbatim + totalAvailable
+// defaults null (never `returned` faked as the total). agency/query filter is CLIENT-SIDE.
+const DolListDatasetsInput = z.object({
+  agency: z
+    .string()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe(
+      "CLIENT-SIDE filter by agency abbreviation (e.g. 'WHD', 'OSHA', 'ILAB', 'ETA') or a substring of the agency name. The DOL catalog API does not filter server-side, so this is applied to the fetched catalog.",
+    ),
+  query: z
+    .string()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe(
+      "CLIENT-SIDE free-text filter (substring over dataset name / description / category / table / endpoint), e.g. 'child labor', 'wage', 'inspection'.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe("Datasets to return per page (default 25, max 200). Offset-paginated over the (filtered) catalog."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+});
+
+const DolGetDatasetInput = z.object({
+  agency: z
+    .string()
+    .regex(/^[A-Za-z0-9_]+$/)
+    .describe(
+      "The agency abbreviation (the `agencyAbbr` from dol_list_datasets), e.g. 'WHD', 'OSHA', 'ILAB'. Rides in the request PATH. Validated ^[A-Za-z0-9_]+$. Required.",
+    ),
+  table: z
+    .string()
+    .regex(/^[A-Za-z0-9_]+$/)
+    .describe(
+      "The dataset endpoint — the `apiUrl` field from dol_list_datasets (the DOL 'api_url', NOT the tablename), e.g. 'Child_Labor_Report__2016_to_2022'. Rides in the request PATH. Validated ^[A-Za-z0-9_]+$. Required.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe("Max records to return (default 10, max 100). Offset-paginated."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+  filterField: z
+    .string()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe("Optional: a dataset field name to filter on (paired with filterValue → a DOL filter_object equality filter). Supply BOTH or NEITHER."),
+  filterValue: z
+    .string()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe("Optional: the value the filterField must equal. Supply BOTH filterField and filterValue, or NEITHER."),
+  fields: z
+    .array(z.string().min(1))
+    .optional()
+    .describe("Optional: best-effort column selection (a subset of field names to return). Not documented for v4; the API ignores or 400s an unsupported selection (surfaced honestly)."),
+});
+
 // ─── US Senate LDA lobbying filings (lda.senate.gov) — the lobbying/B2G lane ──
 // ADR-0052. Who is paid HOW MUCH to lobby WHICH federal agency on WHICH issue.
 // KEYLESS (anonymous 200); an optional free LDA_API_KEY only raises the rate limit
@@ -5150,6 +5233,27 @@ export const TOOLS: ToolDef[] = [
     inputSchema: GsaPerdiemRatesInput,
     handler: (input) => gsaPerdiem.perdiemRates(input),
   }),
+  // ━━━ US DOL Data API v4 (apiprod.dol.gov) — the labor-enforcement lane (2) ━━━ ADR-0053
+  // A DELIBERATE key split: dol_list_datasets (the dataset CATALOG) is KEYLESS;
+  // dol_get_dataset (the DATA endpoint) is the server's 4th REQUIRED key (DOL_API_KEY —
+  // the data endpoint has NO keyless tier, so without the key it THROWS pre-fetch). The
+  // key rides the X-API-KEY HEADER ONLY. The data-record envelope is key-gated/unverified
+  // ⇒ records are surfaced VERBATIM + totalAvailable defaults null (never `returned` faked
+  // as the total). agency/query filtering on the catalog is CLIENT-SIDE.
+  defineTool({
+    name: "dol_list_datasets",
+    description:
+      "List the US Department of Labor Data API v4 dataset catalog (apiprod.dol.gov /v4/datasets) — the machine inventory of DOL enforcement/statistics datasets (WHD wage & hour, OSHA inspections, ILAB child/forced-labor reports, MSHA mine safety, ETA …). KEYLESS: the catalog needs NO API key (only dol_get_dataset does). Input (all optional): `agency` (CLIENT-SIDE filter by agency abbreviation like 'WHD'/'OSHA'/'ILAB', or an agency-name substring), `query` (CLIENT-SIDE free-text substring over dataset name/description/category/table/endpoint), `limit` (default 25, max 200), `offset`. Returns { datasets:[{ name, tablename, apiUrl, agency, agencyAbbr, description, frequency, datasetType, category }] } + honest _meta. ★Feed a row's `apiUrl` (the DOL 'api_url' endpoint) + its `agencyAbbr` into dol_get_dataset to fetch that dataset's records. HONESTY: agency/query filtering is CLIENT-SIDE (the DOL catalog API does not filter server-side, verified live); totalAvailable is the catalog's REAL total (meta.total_count) for an unfiltered scan, or the exact filtered-set size (the whole catalog is fetched in one page); offset pagination. Every scalar is null-never-empty-string. A non-array `datasets` / 200 non-JSON ⇒ schema_drift; a 5xx ⇒ THROWS.",
+    inputSchema: DolListDatasetsInput,
+    handler: (input) => dol.listDatasets(input),
+  }),
+  defineTool({
+    name: "dol_get_dataset",
+    description:
+      "Fetch records from ONE US DOL dataset (apiprod.dol.gov /v4/get/{agency}/{endpoint}/json). ★REQUIRES a free DOL_API_KEY: the DOL DATA endpoint has NO keyless tier, so without the key this tool THROWS an honest config error (get one at https://dol.gov/developer; the dataset CATALOG — dol_list_datasets — and agency list stay keyless). Input: `agency` (required — the `agencyAbbr` from dol_list_datasets, e.g. 'WHD', 'OSHA', 'ILAB'; rides the PATH, ^[A-Za-z0-9_]+$), `table` (required — the dataset's `apiUrl` endpoint from dol_list_datasets, e.g. 'Child_Labor_Report__2016_to_2022'; rides the PATH, ^[A-Za-z0-9_]+$), optional `limit` (default 10, max 100), `offset`, `filterField`+`filterValue` (a paired equality filter → a DOL filter_object), `fields` (best-effort column selection). Returns { records:[…verbatim dataset rows…] } + honest _meta. HONESTY: records are surfaced VERBATIM (the data-record envelope is key-gated and unverified, so field names/values are preserved as-is — a genuine 0 stays 0, a missing field stays null; the tool never coerces or fabricates). totalAvailable is a real count field ONLY when the response carries one, else null (an honest unknown — `returned` is NEVER passed off as the total); offset pagination (a full page ⇒ hasMore, page forward to confirm). A missing/invalid key (401/403) ⇒ invalid_input carrying the DOL_API_KEY guidance (never empty); a 400 ⇒ invalid_input; a genuine empty ⇒ honest empty (returned:0); a 429 ⇒ rate_limited THROWS (Retry-After honored); a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / no row array ⇒ schema_drift. The key rides ONLY in the X-API-KEY request header — never the URL / _meta / a log.",
+    inputSchema: DolGetDatasetInput,
+    handler: (input) => dol.getDataset(input),
+  }),
   // ━━━ US Senate LDA lobbying filings (lda.senate.gov) — the lobbying/B2G lane (1) ━━━ ADR-0052
   // Who is paid HOW MUCH to lobby WHICH federal agency on WHICH issue — the
   // registrant→client→government-entity signal no contract/spending source carries.
@@ -5167,12 +5271,12 @@ export const TOOLS: ToolDef[] = [
   // ━━━ Self-service key discovery (1) ━━━
   // KEYLESS. A local status query — reads process.env (+ any .env auto-loaded at
   // startup) and reports, per key, whether it is set (a BOOLEAN — the key VALUE is
-  // NEVER read into the output). Makes the 3-required + 6-optional key situation
+  // NEVER read into the output). Makes the 4-required + 6-optional key situation
   // discoverable without reading source or docs.
   defineTool({
     name: "api_key_status",
     description:
-      "List every API key this server can use, whether each is REQUIRED or OPTIONAL, the free signup URL + what it unlocks, and whether it is CURRENTLY configured — a boolean only; the key VALUE is NEVER shown. KEYLESS (no input). Most sources are keyless; only Census (census_business_patterns), FRED (2 tools), and BEA (bea_regional_data) REQUIRE a key (they throw without one), the other 6 keys are OPTIONAL (raise a rate limit or unlock one filter). Keys can be set as host env vars OR in a `.env` file in the server's working directory (auto-loaded at startup; real env wins over .env). Returns { keys:[{ envVar, sources[], required, signupUrl, unlocks, note, currentlySet }], requiredMissing:[envVars], optionalMissing:[envVars], allKeysFree:true }. This tool tells you the CONFIG state; to verify a key actually WORKS, call that source's own tool. Getting a key (creating the account at the signup URL) is your step — the server automates discovery + configuration, not signup.",
+      "List every API key this server can use, whether each is REQUIRED or OPTIONAL, the free signup URL + what it unlocks, and whether it is CURRENTLY configured — a boolean only; the key VALUE is NEVER shown. KEYLESS (no input). Most sources are keyless; four sources need a key — Census (census_business_patterns), FRED (2 tools), and BEA (bea_regional_data) require one outright, and DOL's DATA endpoint (dol_get_dataset) needs one too (its catalog, dol_list_datasets, stays keyless) — the other 6 keys are OPTIONAL (raise a rate limit or unlock one filter). Keys can be set as host env vars OR in a `.env` file in the server's working directory (auto-loaded at startup; real env wins over .env). Returns { keys:[{ envVar, sources[], required, signupUrl, unlocks, note, currentlySet }], requiredMissing:[envVars], optionalMissing:[envVars], allKeysFree:true }. This tool tells you the CONFIG state; to verify a key actually WORKS, call that source's own tool. Getting a key (creating the account at the signup URL) is your step — the server automates discovery + configuration, not signup.",
     inputSchema: ApiKeyStatusInput,
     handler: async () => keys.apiKeyStatus(),
   }),
