@@ -182,6 +182,7 @@ import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { enforcement as openfdaEnforcement, openfdaApiKey, buildSearch as openfdaBuildSearch, luceneQuote as openfdaQuote, OPENFDA_HOST } from "./dist/openfda.js";
 import { deviceClearances as openfdaDeviceClearances, buildDeviceSearch as openfdaBuildDeviceSearch } from "./dist/openfda-device.js";
+import { recalls as nhtsaRecalls, complaints as nhtsaComplaints, NHTSA_HOST } from "./dist/nhtsa.js";
 import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum } from "./dist/bea.js";
 import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
 import { dolApiKey } from "./dist/dol.js";
@@ -17061,6 +17062,237 @@ async function testOpenfdaDeviceClearances() {
   });
 }
 
+// §57-nhtsa: NHTSA vehicle safety — nhtsa_recalls + nhtsa_complaints (api.nhtsa.gov,
+// ADR-0057 — the KEYLESS vehicle/parts supplier product-safety vetting lane).
+// NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the mutation
+// that turns it RED:
+//   [P1]  Count 5 + 5 rows ⇒ totalAvailable:5, complete:true; Count 335 + 2 rows ⇒
+//         totalAvailable:335 (NOT results.length=2) ⇒ set totalAvailable=results.length ⇒ RED.
+//   [P2]  Count 0/results:[] ⇒ honest empty (returned:0, complete:true), NOT an error;
+//         400 ⇒ invalid_input; 503 ⇒ upstream_unavailable; 200 non-JSON ⇒ schema_drift.
+//   [P3]  crash/fire/parkIt/parkOutSide/overTheAirUpdate booleans preserved AS booleans;
+//         numberOfInjuries 0 ⇒ 0 (NOT null-for-0); dates as strings ⇒ RED.
+//   [★PII] a complaint mock WITH a vin ⇒ vin ABSENT from the serialized output ⇒ RED.
+//   [P4]  results non-array ⇒ drift; a present non-number Count ⇒ drift.
+//   [SSRF] make '../' rejected (0 fetch); modelYear regex; fixed host api.nhtsa.gov.
+const NHTSA_RECALLS_RE = /api\.nhtsa\.gov\/recalls\/recallsByVehicle/;
+const NHTSA_COMPLAINTS_RE = /api\.nhtsa\.gov\/complaints\/complaintsByVehicle/;
+const isNhtsaRecalls = (u) => NHTSA_RECALLS_RE.test(u);
+const isNhtsaComplaints = (u) => NHTSA_COMPLAINTS_RE.test(u);
+const nhtsaRecallsMock = (body, status = 200) => (u) => (isNhtsaRecalls(u) ? mockResponse({ status, json: body }) : failClosed()());
+const nhtsaComplaintsMock = (body, status = 200) => (u) => (isNhtsaComplaints(u) ? mockResponse({ status, json: body }) : failClosed()());
+const nhtsaRecallsUrl = (calls) => calls.find((x) => isNhtsaRecalls(x.url))?.url;
+const nhtsaComplaintsUrl = (calls) => calls.find((x) => isNhtsaComplaints(x.url))?.url;
+const nhtsaNonJson = (re) => (u) => (re.test(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" }
+  : failClosed()());
+// The recalls envelope: { Count, Message, results:[...] }.
+const nhtsaRecallsBody = (count, rows) => ({ Count: count, Message: "Results returned successfully", results: rows });
+const nhtsaRecallRow = (over = {}) => ({
+  Manufacturer: "Honda (American Honda Motor Co.)",
+  NHTSACampaignNumber: "20V505000",
+  ReportReceivedDate: "13/08/2020",
+  Component: "AIR BAGS",
+  Summary: "Certain airbag inflators may explode.",
+  Consequence: "An inflator explosion may result in sharp metal fragments.",
+  Remedy: "Dealers will replace the airbag inflator, free of charge.",
+  Notes: "Owners may contact Honda customer service.",
+  ModelYear: "2020",
+  Make: "HONDA",
+  Model: "ACCORD",
+  parkIt: false,
+  parkOutSide: false,
+  overTheAirUpdate: false,
+  ...over,
+});
+// The complaints envelope: { count, message, results:[...] }.
+const nhtsaComplaintsBody = (count, rows) => ({ count, message: "Results returned successfully", results: rows });
+const nhtsaComplaintRow = (over = {}) => ({
+  odiNumber: 11374558,
+  manufacturer: "American Honda Motor Co., Inc.",
+  crash: false,
+  fire: false,
+  numberOfInjuries: 0,
+  numberOfDeaths: 0,
+  dateOfIncident: "2020-06-15",
+  dateComplaintFiled: "2020-07-01",
+  vin: "1HGCV1F30LA000000",
+  components: "ELECTRICAL SYSTEM",
+  summary: "The vehicle stalled while driving.",
+  products: [{ type: "Vehicle", productYear: "2020", productMake: "HONDA", productModel: "ACCORD" }],
+  ...over,
+});
+
+async function testNhtsaVehicleSafety() {
+  section("§57-nhtsa. NHTSA vehicle safety recalls + complaints (ADR-0057 — KEYLESS vehicle/parts supplier vetting) — Count=real-total P1 + honest-empty/4xx/5xx/drift P2 + bool/num/date P3 + ★vin-PII-excluded + P4 drift + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── [P1] recalls: Count 5 + 5 rows ⇒ totalAvailable:5, returned:5, complete:true. ──
+  await withFetch(nhtsaRecallsMock(nhtsaRecallsBody(5, [nhtsaRecallRow(), nhtsaRecallRow(), nhtsaRecallRow(), nhtsaRecallRow(), nhtsaRecallRow()])), async (calls) => {
+    const r = await runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam);
+    const m = buildMeta(r.meta);
+    const q = new URL(nhtsaRecallsUrl(calls)).searchParams;
+    ok("57-nhtsa-recalls the request is to api.nhtsa.gov/recalls/recallsByVehicle over https (fixed host) + make/model/modelYear in the query ⇒ steer the host/path ⇒ RED",
+      new URL(nhtsaRecallsUrl(calls)).hostname === "api.nhtsa.gov" && new URL(nhtsaRecallsUrl(calls)).protocol === "https:" && q.get("make") === "honda" && q.get("model") === "accord" && q.get("modelYear") === "2020", nhtsaRecallsUrl(calls));
+    ok("57-nhtsa-recalls-P1 Count 5 + 5 rows ⇒ returned:5, totalAvailable:5 (the EXACT Count), complete:true (NHTSA returns the complete set, no pagination) ⇒ fabricate the total ⇒ RED",
+      r.data.recalls.length === 5 && m.returned === 5 && m.totalAvailable === 5 && m.complete === true, JSON.stringify({ n: r.data.recalls.length, ta: m.totalAvailable, c: m.complete }));
+    ok("57-nhtsa-recalls keyless: keylessMode true + a keyless note (no API key at all) ⇒ claim a key ⇒ RED",
+      m.keylessMode === true && m.notes.some((n) => /keyless/i.test(n)) && q.get("api_key") === null, JSON.stringify({ keyless: m.keylessMode, api_key: q.get("api_key") }));
+  });
+
+  // ── [P1] recalls: Count 335 + 2 rows ⇒ totalAvailable:335 (NOT results.length=2). The
+  //    artificial mismatch PROVES the total comes from Count, never the page length. ──
+  await withFetch(nhtsaRecallsMock(nhtsaRecallsBody(335, [nhtsaRecallRow(), nhtsaRecallRow()])), async () => {
+    const r = await runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam);
+    const m = buildMeta(r.meta);
+    ok("57-nhtsa-recalls-P1 Count 335 + 2 rows ⇒ returned:2 but totalAvailable:335 (NHTSA's EXACT Count, NOT results.length=2) ⇒ set totalAvailable=results.length ⇒ RED",
+      r.data.recalls.length === 2 && m.returned === 2 && m.totalAvailable === 335, JSON.stringify({ n: r.data.recalls.length, ta: m.totalAvailable }));
+  });
+
+  // ── [P3] recalls: parkIt/parkOutside/overTheAirUpdate preserved AS booleans (incl. a
+  //    genuine true), dates as strings, scalars surfaced. ──
+  await withFetch(nhtsaRecallsMock(nhtsaRecallsBody(1, [nhtsaRecallRow({ parkIt: true, parkOutSide: true, overTheAirUpdate: false })])), async () => {
+    const r = await runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam);
+    const row = r.data.recalls[0];
+    ok("57-nhtsa-recalls-P3 parkIt:true / parkOutside:true / overTheAirUpdate:false preserved AS booleans (true stays true, false stays false — never a fabricated/stringified value) ⇒ coerce the booleans ⇒ RED",
+      row.parkIt === true && typeof row.parkIt === "boolean" && row.parkOutside === true && typeof row.parkOutside === "boolean" && row.overTheAirUpdate === false && typeof row.overTheAirUpdate === "boolean", JSON.stringify({ parkIt: row.parkIt, parkOutside: row.parkOutside, ota: row.overTheAirUpdate }));
+    ok("57-nhtsa-recalls-P3 campaignNumber/manufacturer/component/consequence/remedy surfaced + reportReceivedDate preserved as the STRING '13/08/2020' (never numerically coerced) ⇒ drop a field or date-coerce ⇒ RED",
+      row.campaignNumber === "20V505000" && row.manufacturer === "Honda (American Honda Motor Co.)" && row.component === "AIR BAGS" && typeof row.reportReceivedDate === "string" && row.reportReceivedDate === "13/08/2020" && row.consequence.startsWith("An inflator") && row.remedy.startsWith("Dealers"), JSON.stringify(row));
+  });
+
+  // ── [P3] recalls: a "" / whitespace / null field ⇒ null; a NON-boolean flag ⇒ null. ──
+  await withFetch(nhtsaRecallsMock(nhtsaRecallsBody(1, [nhtsaRecallRow({ Component: "", Remedy: "  ", parkIt: "false" })])), async () => {
+    const r = await runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam);
+    const row = r.data.recalls[0];
+    ok("57-nhtsa-recalls-P3 a '' / whitespace field ⇒ null (null-never-empty-string via str); a NON-boolean parkIt ('false' the string) ⇒ null (never a fabricated false) ⇒ surface '' or coerce the string ⇒ RED",
+      row.component === null && row.remedy === null && row.parkIt === null, JSON.stringify({ component: row.component, remedy: row.remedy, parkIt: row.parkIt }));
+  });
+
+  // ── [P2] recalls: Count 0 / results:[] ⇒ HONEST EMPTY (returned:0, complete:true). ──
+  await withFetch(nhtsaRecallsMock(nhtsaRecallsBody(0, [])), async () => {
+    const r = await runTool("nhtsa_recalls", { make: "zzz", model: "notacar", modelYear: "1999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("57-nhtsa-recalls-P2 Count 0 / results:[] (a bad make/model that returns 200) ⇒ recalls:[], returned:0, totalAvailable:0, complete:true — an HONEST EMPTY, NOT an error ⇒ throw on empty ⇒ RED",
+      r.data.recalls.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.recalls.length, ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // ── [P2] recalls: 400 ⇒ invalid_input; 503 ⇒ upstream_unavailable; 200 non-JSON ⇒ drift. ──
+  await withFetch(nhtsaRecallsMock("Bad request", 400), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam));
+    ok("57-nhtsa-recalls-P2 a 400 ⇒ invalid_input THROW (a caller-fixable request, never a fake-empty)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nhtsaRecallsMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam));
+    ok("57-nhtsa-recalls-P2 a 503 ⇒ upstream_unavailable THROW (a down NHTSA is never an empty result)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nhtsaNonJson(NHTSA_RECALLS_RE), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam));
+    ok("57-nhtsa-recalls-P2 a 200 non-JSON body (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P4] recalls: results non-array ⇒ drift; a PRESENT non-number Count ⇒ drift. ──
+  await withFetch(nhtsaRecallsMock({ Count: 5, results: "notanarray" }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam));
+    ok("57-nhtsa-recalls-P4 results is a string (non-array) ⇒ schema_drift ⇒ trust a non-array ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nhtsaRecallsMock({ Count: "notanumber", results: [nhtsaRecallRow()] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam));
+    ok("57-nhtsa-recalls-P4 a PRESENT non-number Count ('notanumber') ⇒ schema_drift (a broken total contract, never a fabricated empty) ⇒ trust a non-number ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── [P1] recalls: MISSING Count ⇒ fall back to results.length WITH an honest note. ──
+  await withFetch(nhtsaRecallsMock({ Message: "ok", results: [nhtsaRecallRow(), nhtsaRecallRow()] }), async () => {
+    const r = await runTool("nhtsa_recalls", { make: "honda", model: "accord", modelYear: "2020" }, sam);
+    const m = buildMeta(r.meta);
+    ok("57-nhtsa-recalls-P1 a MISSING Count ⇒ totalAvailable falls back to results.length=2 WITH an honest note (never fabricated/thrown) ⇒ invent a total ⇒ RED",
+      m.returned === 2 && m.totalAvailable === 2 && m.notes.some((n) => /did not report a Count|results\.length/i.test(n)), JSON.stringify({ ta: m.totalAvailable, notes: m.notes }));
+  });
+
+  // ── [SSRF] recalls: make '../' rejected, modelYear regex rejected ⇒ invalid_input, 0 fetch. ──
+  for (const [args, label] of [
+    [{ make: "../etc", model: "accord", modelYear: "2020" }, "make '../etc' (path-traversal chars)"],
+    [{ make: "honda", model: "accord", modelYear: "20" }, "modelYear '20' (not 4 digits)"],
+    [{ make: "honda", model: "accord", modelYear: "abcd" }, "modelYear 'abcd' (non-digit)"],
+    [{ make: "honda%2f", model: "accord", modelYear: "2020" }, "make 'honda%2f' (percent/slash)"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("nhtsa_recalls", args, sam));
+      ok(`57-nhtsa-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass/regex re-guard PRE-fetch — a value never touches the fixed host/path) ⇒ widen the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ══ COMPLAINTS ══
+  // ── [P1] complaints: count 335 + 2 rows ⇒ totalAvailable:335 (NOT results.length). ──
+  await withFetch(nhtsaComplaintsMock(nhtsaComplaintsBody(335, [nhtsaComplaintRow(), nhtsaComplaintRow({ odiNumber: 11374559 })])), async (calls) => {
+    const r = await runTool("nhtsa_complaints", { make: "honda", model: "accord", modelYear: "2020" }, sam);
+    const m = buildMeta(r.meta);
+    const q = new URL(nhtsaComplaintsUrl(calls)).searchParams;
+    ok("57-nhtsa-complaints the request is to api.nhtsa.gov/complaints/complaintsByVehicle over https (fixed host) + make/model/modelYear in the query ⇒ steer the host/path ⇒ RED",
+      new URL(nhtsaComplaintsUrl(calls)).hostname === "api.nhtsa.gov" && new URL(nhtsaComplaintsUrl(calls)).protocol === "https:" && q.get("make") === "honda" && q.get("model") === "accord" && q.get("modelYear") === "2020", nhtsaComplaintsUrl(calls));
+    ok("57-nhtsa-complaints-P1 count 335 + 2 rows ⇒ returned:2 but totalAvailable:335 (NHTSA's EXACT count, NOT results.length=2) ⇒ set totalAvailable=results.length ⇒ RED",
+      r.data.complaints.length === 2 && m.returned === 2 && m.totalAvailable === 335, JSON.stringify({ n: r.data.complaints.length, ta: m.totalAvailable }));
+  });
+
+  // ── [★PII] complaints: a mock WITH a vin ⇒ vin ABSENT from the serialized output. ──
+  await withFetch(nhtsaComplaintsMock(nhtsaComplaintsBody(1, [nhtsaComplaintRow({ vin: "1HGCV1F30LA123456" })])), async () => {
+    const r = await runTool("nhtsa_complaints", { make: "honda", model: "accord", modelYear: "2020" }, sam);
+    const m = buildMeta(r.meta);
+    const row = r.data.complaints[0];
+    const serialized = JSON.stringify({ data: r.data, _meta: m });
+    ok("57-nhtsa-complaints-PII ★the upstream `vin` (an individual-vehicle PII identifier) is ABSENT — no `vin` KEY on the curated row AND the VIN VALUE never appears in the ENTIRE serialized {data,_meta} even though the mock included it ⇒ map vin into the output ⇒ RED",
+      row.vin === undefined && !("vin" in row) && !serialized.includes("1HGCV1F30LA123456"), JSON.stringify({ hasVin: "vin" in row, leaked: serialized.includes("1HGCV1F30LA123456") }));
+    ok("57-nhtsa-complaints-PII a privacy note discloses the VIN exclusion (the omission is documented, not silent)",
+      m.notes.some((n) => /VIN/i.test(n) && /exclud/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── [P3] complaints: crash/fire booleans preserved (incl. true); injuries 0 ⇒ 0 (NOT
+  //    null-for-0); a genuine positive count; dates as strings; component ← components. ──
+  await withFetch(nhtsaComplaintsMock(nhtsaComplaintsBody(1, [nhtsaComplaintRow({ crash: true, fire: true, numberOfInjuries: 0, numberOfDeaths: 2 })])), async () => {
+    const r = await runTool("nhtsa_complaints", { make: "honda", model: "accord", modelYear: "2020" }, sam);
+    const row = r.data.complaints[0];
+    ok("57-nhtsa-complaints-P3 crash:true / fire:true preserved AS booleans ⇒ coerce ⇒ RED",
+      row.crash === true && typeof row.crash === "boolean" && row.fire === true && typeof row.fire === "boolean", JSON.stringify({ crash: row.crash, fire: row.fire }));
+    ok("57-nhtsa-complaints-P3 ★numberOfInjuries 0 ⇒ 0 (a GENUINE zero stays 0, NEVER null-for-0) + numberOfDeaths 2 ⇒ 2 (num) ⇒ null-a-zero ⇒ RED",
+      row.numberOfInjuries === 0 && typeof row.numberOfInjuries === "number" && row.numberOfDeaths === 2, JSON.stringify({ inj: row.numberOfInjuries, dth: row.numberOfDeaths }));
+    ok("57-nhtsa-complaints-P3 odiNumber/component(←components)/summary surfaced + dateOfIncident/dateComplaintFiled preserved as STRINGS ⇒ drop a field or date-coerce ⇒ RED",
+      row.odiNumber === "11374558" && row.component === "ELECTRICAL SYSTEM" && row.summary.startsWith("The vehicle") && typeof row.dateOfIncident === "string" && row.dateOfIncident === "2020-06-15" && row.dateComplaintFiled === "2020-07-01", JSON.stringify(row));
+  });
+
+  // ── [P2] complaints: count 0 / results:[] ⇒ honest empty; 503 ⇒ upstream; non-JSON ⇒ drift. ──
+  await withFetch(nhtsaComplaintsMock(nhtsaComplaintsBody(0, [])), async () => {
+    const r = await runTool("nhtsa_complaints", { make: "zzz", model: "notacar", modelYear: "1999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("57-nhtsa-complaints-P2 count 0 / results:[] ⇒ complaints:[], returned:0, totalAvailable:0, complete:true — an HONEST EMPTY, NOT an error ⇒ throw on empty ⇒ RED",
+      r.data.complaints.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.complaints.length, ta: m.totalAvailable, c: m.complete }));
+  });
+  await withFetch(nhtsaComplaintsMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nhtsa_complaints", { make: "honda", model: "accord", modelYear: "2020" }, sam));
+    ok("57-nhtsa-complaints-P2 a 503 ⇒ upstream_unavailable THROW (a down NHTSA is never an empty result)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(nhtsaNonJson(NHTSA_COMPLAINTS_RE), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nhtsa_complaints", { make: "honda", model: "accord", modelYear: "2020" }, sam));
+    ok("57-nhtsa-complaints-P2 a 200 non-JSON body ⇒ schema_drift (never read as an empty result)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── [P4] complaints: results non-array ⇒ drift. ──
+  await withFetch(nhtsaComplaintsMock({ count: 5, results: { not: "an array" } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nhtsa_complaints", { make: "honda", model: "accord", modelYear: "2020" }, sam));
+    ok("57-nhtsa-complaints-P4 results is an object (non-array) ⇒ schema_drift ⇒ trust a non-array ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [direct] the module NHTSA_HOST is the fixed literal (non-vacuity of the fixed-host idiom). ──
+  ok("57-nhtsa (non-vacuity) NHTSA_HOST is the fixed literal 'api.nhtsa.gov' (the SSRF fixed host)",
+    NHTSA_HOST === "api.nhtsa.gov", NHTSA_HOST);
+}
+
 // §55d: BEA Regional Economic Accounts (apps.bea.gov/api/data, ADR-0051, Wave-4
 // source #3 — regional GDP/income AND the server's THIRD key-required source).
 // NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the
@@ -18344,6 +18576,7 @@ async function main() {
   await testFredHonesty();
   await testOpenfdaEnforcement();
   await testOpenfdaDeviceClearances();
+  await testNhtsaVehicleSafety();
   await testBeaRegionalData();
   await testDolDataApi();
   await testLdaSearchFilings();
