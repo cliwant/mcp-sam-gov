@@ -182,6 +182,7 @@ import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum } from "./dist/bea.js";
 import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
+import { searchFilings as ldaSearchFilings, ldaAuthHeader, ldaKeyPresent, nameOf as ldaNameOf, LDA_HOST, num as ldaNum } from "./dist/lda.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
@@ -16595,6 +16596,252 @@ async function testBeaRegionalData() {
   ok("55d-parity bea.num === coerce.num (one shared audited impl — NO local num/str; beaDataValue's comma/sentinel→null map is a WRAPPER around it, not a fork)", beaNum === coerceNum, "bea num diverged from coerce.num");
 }
 
+// §55e: US Senate LDA lobbying filings (lda.senate.gov/api/v1/filings, ADR-0052 —
+// the lobbying/B2G lane; KEYLESS with an OPTIONAL rate-limit key). NON-VACUOUS,
+// OFFLINE, deterministic. Each assertion pins a value + names the mutation that
+// turns it RED:
+//   [P1]       count 1953969 + 2 results ⇒ totalAvailable 1953969 (the API's REAL
+//              total), NOT results.length(2); page-based pagination (hasMore, next
+//              page surfaced) ⇒ revert totalAvailable to results.length ⇒ RED.
+//   [P3]       income null ⇒ incomeUsd null (NOT 0); "12345.67" ⇒ 12345.67; a real
+//              "0" ⇒ 0; government_entities surfaced; missing arrays ⇒ []; the
+//              registrant/client name resolves from object-with-name OR a string.
+//   [P2]       results:[] ⇒ honest empty; 400 ⇒ invalid_input SURFACING the API
+//              body; 503 ⇒ upstream_unavailable; 429 ⇒ rate_limited THROW (Retry-
+//              After honored, never routed around); 200 non-JSON ⇒ schema_drift.
+//   [P4]       results non-array OR count non-number ⇒ schema_drift.
+//   [K-test]   LDA_API_KEY set ⇒ Authorization: Token … header ONLY, ABSENT from the
+//              serialized {data,_meta} AND the URL; unset ⇒ NO auth header.
+//   [SSRF]     filters ride URLSearchParams (agency→government_entity, issue→
+//              filing_specific_lobbying_issues); filingYear charclass; fixed host.
+const LDA_RE = /lda\.senate\.gov\/api\/v1\/filings/;
+const isLda = (u) => LDA_RE.test(u);
+const ldaMock = (body, status = 200, headers = {}) => (u) => (isLda(u) ? mockResponse({ status, json: body, headers }) : failClosed()());
+const ldaUrl = (calls) => calls.find((x) => isLda(x.url))?.url;
+const ldaQuery = (calls) => new URL(ldaUrl(calls)).searchParams;
+const ldaInit = (calls) => calls.find((x) => isLda(x.url))?.init;
+// A 200 whose .json() THROWS a SyntaxError (an HTML error page parsed as JSON).
+const ldaNonJson = (u) => (isLda(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" }
+  : failClosed()());
+// One LDA filing row (the /filings/ results[] shape) — registrant/client as OBJECTS
+// carrying `name`; income set / expenses null (a firm files income; the other is null).
+const ldaFiling = (overrides = {}) => ({
+  filing_uuid: "11111111-1111-1111-1111-111111111111",
+  filing_type: "Q1",
+  filing_type_display: "First Quarter - Report",
+  filing_year: 2024,
+  filing_period: "first_quarter",
+  filing_period_display: "First Quarter (Jan 1 - Mar 31)",
+  filing_document_url: "https://lda.senate.gov/filings/public/filing/uuid/print/",
+  income: "120000.00",
+  expenses: null,
+  dt_posted: "2024-04-20T12:00:00.000000-04:00",
+  termination_date: null,
+  registrant: { name: "Akin Gump Strauss Hauer & Feld LLP", address_1: "2001 K St NW" },
+  client: { name: "Google LLC", general_description: "Technology" },
+  lobbying_activities: [
+    { general_issue_code: "TAX", general_issue_code_display: "Taxation", description: "Tax reform proposals", government_entities: [{ name: "U.S. HOUSE OF REPRESENTATIVES" }, { name: "U.S. SENATE" }] },
+  ],
+  ...overrides,
+});
+// The paginated envelope: { count, next, previous, results }.
+const ldaBody = (count, results) => ({ count, next: count > results.length ? "https://lda.senate.gov/api/v1/filings/?page=2" : null, previous: null, results });
+
+async function testLdaSearchFilings() {
+  section("§55e. US Senate LDA lobbying filings (ADR-0052 — the lobbying/B2G lane, KEYLESS + OPTIONAL rate-limit key) — P1 count=real-total(not results.length)/page-pagination + P3 income null-not-0/decimal/real-0/govt-entities/name-of + P2 empty/400-surfaced/503/429-RetryAfter/non-JSON + P4 drift + optional-key K-test + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // Keep the env clean (keyless) for the default assertions; the K-test sets it.
+  const priorKey = process.env.LDA_API_KEY;
+  delete process.env.LDA_API_KEY;
+  try {
+    // ── [P1] count 1953969 (the API's REAL total ~1.95M) + 2 results ⇒
+    //    totalAvailable 1953969 (NOT results.length 2); page-based pagination. ──
+    await withFetch(ldaMock(ldaBody(1953969, [ldaFiling(), ldaFiling({ filing_uuid: "22222222-2222-2222-2222-222222222222" })])), async (calls) => {
+      const r = await runTool("lda_search_filings", { registrantName: "Akin" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55e-P1 count 1953969 + 2 results ⇒ returned:2 but totalAvailable:1953969 (the API's REAL total, NOT results.length 2), complete:false, truncated:true ⇒ set totalAvailable = results.length ⇒ RED",
+        r.data.filings.length === 2 && m.returned === 2 && m.totalAvailable === 1953969 && m.complete === false && m.truncated === true, JSON.stringify({ n: r.data.filings.length, ret: m.returned, ta: m.totalAvailable, c: m.complete }));
+      ok("55e-P1 page-based pagination: page 1 (pageSize 25) of ~1.95M ⇒ hasMore:true, nextOffset:25 (=page*pageSize), and a note surfaces the NEXT PAGE (page=2) ⇒ short-circuit hasMore:false on a full page ⇒ RED",
+        m.pagination.hasMore === true && m.pagination.offset === 0 && m.pagination.limit === 25 && m.pagination.nextOffset === 25 && m.notes.some((n) => /page=2/.test(n)), JSON.stringify(m.pagination));
+      ok("55e-P1 keylessMode:true (the optional key only raises the rate limit — NOT a key-required source) + the required honesty notes present (real-total + income/expenses null-not-0 + keyless/Authorization-header)",
+        m.keylessMode === true && m.notes.some((n) => /real total match count/i.test(n)) && m.notes.some((n) => /NEVER 0/.test(n)) && m.notes.some((n) => /Authorization: Token/.test(n)), JSON.stringify(m.notes.length));
+    });
+
+    // ── [P1 last page] count fits in one page ⇒ hasMore:false, complete:true. ──
+    await withFetch(ldaMock(ldaBody(2, [ldaFiling(), ldaFiling()])), async (calls) => {
+      const r = await runTool("lda_search_filings", { registrantName: "Akin" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55e-P1 a full page that EXHAUSTS the total (count 2 ≤ page*pageSize 25) ⇒ hasMore:false, complete:true, totalAvailable:2 (an honest complete) ⇒ RED if hasMore ignores the real total",
+        m.totalAvailable === 2 && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.complete === true, JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore, c: m.complete }));
+    });
+
+    // ── [filters mapping + SSRF] agency→government_entity, issue→
+    //    filing_specific_lobbying_issues, page/page_size; special chars ride
+    //    URLSearchParams (encoded, no host steer). ──
+    await withFetch(ldaMock(ldaBody(0, [])), async (calls) => {
+      await runTool("lda_search_filings", { registrantName: "A & B / C", clientName: "Google", lobbyistName: "Jane Doe", filingYear: "2024", filingType: "Q1", agency: "DEPARTMENT OF DEFENSE", issue: "x=1&y=2", page: 3, pageSize: 10 }, sam);
+      const q = ldaQuery(calls);
+      ok("55e-map every filter maps to its LDA query param (registrant_name/client_name/lobbyist_name/filing_year/filing_type/government_entity(agency)/filing_specific_lobbying_issues(issue)) + page/page_size ⇒ rename a mapping ⇒ RED",
+        q.get("registrant_name") === "A & B / C" && q.get("client_name") === "Google" && q.get("lobbyist_name") === "Jane Doe" && q.get("filing_year") === "2024" && q.get("filing_type") === "Q1" && q.get("government_entity") === "DEPARTMENT OF DEFENSE" && q.get("filing_specific_lobbying_issues") === "x=1&y=2" && q.get("page") === "3" && q.get("page_size") === "10", ldaUrl(calls));
+      ok("55e-ssrf special-char values (& / =) round-trip through URLSearchParams WITHOUT steering the host — the request stays on lda.senate.gov over https ⇒ raw string concat instead of URLSearchParams ⇒ RED",
+        new URL(ldaUrl(calls)).hostname === "lda.senate.gov" && new URL(ldaUrl(calls)).protocol === "https:", ldaUrl(calls));
+    });
+
+    // ── [P3] income null ⇒ incomeUsd null (NOT 0); "12345.67" ⇒ 12345.67; a real
+    //    "0" ⇒ 0; government_entities surfaced. ──
+    await withFetch(ldaMock(ldaBody(3, [
+      ldaFiling({ income: null, expenses: "50000.00" }),
+      ldaFiling({ income: "12345.67", expenses: null }),
+      ldaFiling({ income: "0", expenses: null }),
+    ])), async () => {
+      const r = await runTool("lda_search_filings", { clientName: "x" }, sam);
+      const [nullInc, decInc, zeroInc] = r.data.filings;
+      ok("55e-P3 income null (not reported) ⇒ incomeUsd null — NOT 0, and expenses '50000.00' ⇒ expensesUsd 50000 ⇒ map null→0 (Number(null)===0 landmine) ⇒ RED",
+        nullInc.incomeUsd === null && nullInc.expensesUsd === 50000, JSON.stringify({ inc: nullInc.incomeUsd, exp: nullInc.expensesUsd }));
+      ok("55e-P3 income '12345.67' (decimal string) ⇒ incomeUsd 12345.67 (num parses the decimal string) ⇒ RED if the string is passed through unparsed",
+        decInc.incomeUsd === 12345.67, JSON.stringify(decInc.incomeUsd));
+      ok("55e-P3 a GENUINE '0' ⇒ incomeUsd 0 (NOT null) — a real reported zero is preserved, distinct from a null (not-reported) ⇒ map all falsy to null ⇒ RED",
+        zeroInc.incomeUsd === 0, JSON.stringify(zeroInc.incomeUsd));
+      ok("55e-P3 lobbyingActivities surfaced: issueCode 'TAX' + governmentEntities ['U.S. HOUSE OF REPRESENTATIVES','U.S. SENATE'] (the B2G targets) ⇒ drop the government_entities map ⇒ RED",
+        JSON.stringify(nullInc.lobbyingActivities) === JSON.stringify([{ issueCode: "TAX", description: "Tax reform proposals", governmentEntities: ["U.S. HOUSE OF REPRESENTATIVES", "U.S. SENATE"] }]), JSON.stringify(nullInc.lobbyingActivities));
+    });
+
+    // ── [P3] missing lobbying_activities / government_entities ⇒ [] (never fabricated). ──
+    await withFetch(ldaMock(ldaBody(2, [
+      ldaFiling({ lobbying_activities: undefined }),
+      ldaFiling({ lobbying_activities: [{ general_issue_code: "DEF", description: "Defense appropriations" }] }),
+    ])), async () => {
+      const r = await runTool("lda_search_filings", { agency: "DOD" }, sam);
+      ok("55e-P3 a missing lobbying_activities ⇒ [] (an honest 'none listed', never fabricated) ⇒ RED if it throws or invents a row",
+        Array.isArray(r.data.filings[0].lobbyingActivities) && r.data.filings[0].lobbyingActivities.length === 0, JSON.stringify(r.data.filings[0].lobbyingActivities));
+      ok("55e-P3 an activity with NO government_entities ⇒ governmentEntities:[] (never fabricated) + issueCode 'DEF' still surfaced ⇒ RED",
+        r.data.filings[1].lobbyingActivities[0].issueCode === "DEF" && JSON.stringify(r.data.filings[1].lobbyingActivities[0].governmentEntities) === "[]", JSON.stringify(r.data.filings[1].lobbyingActivities[0]));
+    });
+
+    // ── [P3 name-of] registrant/client resolve from object-with-name OR a plain
+    //    string (defensive, per the live API's dual shape). ──
+    await withFetch(ldaMock(ldaBody(2, [
+      ldaFiling(),
+      ldaFiling({ registrant: "String Registrant Inc", client: "String Client Co" }),
+    ])), async () => {
+      const r = await runTool("lda_search_filings", { registrantName: "x" }, sam);
+      ok("55e-P3 registrant/client from an OBJECT ⇒ the `name` (never the whole address object); from a plain STRING ⇒ the string ⇒ break the object-or-string helper ⇒ RED",
+        r.data.filings[0].registrant === "Akin Gump Strauss Hauer & Feld LLP" && r.data.filings[0].client === "Google LLC" && r.data.filings[1].registrant === "String Registrant Inc" && r.data.filings[1].client === "String Client Co", JSON.stringify({ o: r.data.filings[0].registrant, s: r.data.filings[1].registrant }));
+    });
+    ok("55e-P3 (direct nameOf) {name:'X'}⇒'X', 'Y'⇒'Y', null⇒null, {}⇒null (object-or-string-or-absent) ⇒ RED if it fabricates or surfaces the object",
+      ldaNameOf({ name: "X" }) === "X" && ldaNameOf("Y") === "Y" && ldaNameOf(null) === null && ldaNameOf({}) === null, JSON.stringify([ldaNameOf({ name: "X" }), ldaNameOf("Y"), ldaNameOf(null)]));
+
+    // ── [P2] a genuine empty results:[] ⇒ honest empty (returned:0, complete:true). ──
+    await withFetch(ldaMock(ldaBody(0, [])), async () => {
+      const r = await runTool("lda_search_filings", { registrantName: "no-such-registrant-xyz" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55e-P2 an empty results:[] (count 0) ⇒ filings:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+        r.data.filings.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.filings.length, ta: m.totalAvailable }));
+    });
+
+    // ── [P2] a 400 (bad filter) ⇒ invalid_input SURFACING the DRF error body (re-read
+    //    on the error path), NEVER a fake empty. ──
+    await withFetch(ldaMock({ filing_year: ["Enter a valid year."] }, 400), async () => {
+      const { threw, error } = await expectThrow(() => runTool("lda_search_filings", { filingType: "ZZ" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55e-P2 a 400 (bad filter/param) ⇒ invalid_input SURFACING the API's error body ('Enter a valid year.') — NEVER a fake empty, NEVER schema_drift ⇒ read the 400 as empty ⇒ RED",
+        threw && te.kind === "invalid_input" && /valid year/.test(te.message) && /filing_year/.test(te.message), JSON.stringify({ kind: te?.kind, msg: te?.message?.slice(0, 90) }));
+    });
+
+    // ── [P2] a 503 ⇒ upstream_unavailable (a DOWN endpoint is NEVER a returned:0). ──
+    await withFetch(ldaMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("lda_search_filings", { registrantName: "x" }, sam));
+      ok("55e-P2 503 ⇒ upstream_unavailable THROW (a down LDA API is never an empty result) ⇒ RED if it degrades to empty",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P2] a 429 ⇒ rate_limited THROW honoring Retry-After (never routed around). ──
+    await withFetch(ldaMock("", 429, { "Retry-After": "42" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("lda_search_filings", { registrantName: "x" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55e-P2 429 ⇒ rate_limited THROW carrying Retry-After 42s (HONORED, never routed around/silently-swallowed to an empty) ⇒ RED if 429 becomes upstream_unavailable or a fake empty",
+        threw && te.kind === "rate_limited" && te.retryAfterSeconds === 42, JSON.stringify({ kind: te?.kind, ra: te?.retryAfterSeconds }));
+    });
+
+    // ── [P2] a 200 whose body is non-JSON ⇒ schema_drift (never a fabricated empty). ──
+    await withFetch(ldaNonJson, async () => {
+      const { threw, error } = await expectThrow(() => runTool("lda_search_filings", { registrantName: "x" }, sam));
+      ok("55e-P2 a 200 non-JSON body (HTML error page → r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P4] results non-array OR count non-number ⇒ schema_drift. ──
+    await withFetch(ldaMock({ count: 5, results: "not-an-array" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("lda_search_filings", { registrantName: "x" }, sam));
+      ok("55e-P4 a 200 with results NOT an array (a string) ⇒ schema_drift (the results contract broke, never a fabricated empty) ⇒ trust a non-array ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(ldaMock({ count: "not-a-number", results: [] }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("lda_search_filings", { registrantName: "x" }, sam));
+      ok("55e-P4 a 200 with count NOT a number (a string) ⇒ schema_drift (the real-total contract broke — never fabricate a total from results.length) ⇒ coerce count blindly ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [K-test] LDA_API_KEY set ⇒ Authorization: Token … header ONLY; ABSENT from
+    //    the serialized {data,_meta} AND the URL. Unset ⇒ NO auth header. ──
+    const SECRET = "SECRET-LDA-TOKEN-do-not-leak-xyz789";
+    process.env.LDA_API_KEY = SECRET;
+    await withFetch(ldaMock(ldaBody(1, [ldaFiling()])), async (calls) => {
+      const r = await runTool("lda_search_filings", { registrantName: "Akin" }, sam);
+      const m = buildMeta(r.meta);
+      const init = ldaInit(calls);
+      ok("55e-Ktest LDA_API_KEY set ⇒ the fetch carries `Authorization: Token <value>` (the ONLY key carrier; keyless-first: header only) ⇒ move the key out of the header ⇒ RED",
+        init.headers.Authorization === `Token ${SECRET}`, JSON.stringify(Object.keys(init.headers)));
+      ok("55e-Ktest the key value is ABSENT from the serialized {data,_meta} (never in source/notes/label) ⇒ leak the key into _meta ⇒ RED",
+        !JSON.stringify({ data: r.data, _meta: m }).includes(SECRET), JSON.stringify({ leaked: JSON.stringify({ data: r.data, _meta: m }).includes(SECRET) }));
+      ok("55e-Ktest the key value is ABSENT from the request URL (it rides the header, NEVER a query param) ⇒ put the key in the URL ⇒ RED",
+        !ldaUrl(calls).includes(SECRET), ldaUrl(calls));
+      ok("55e-Ktest the _meta note discloses the key is PRESENT (a boolean fact) WITHOUT the value + keylessMode stays true (an optional key does not flip it) ⇒ RED",
+        m.notes.some((n) => /LDA API key: present/.test(n) && !n.includes(SECRET)) && m.keylessMode === true, JSON.stringify(m.notes.find((n) => /LDA API key/.test(n))));
+    });
+    // m7-style: even on error the label is host+path only, never the token.
+    await withFetch(ldaMock("", 503), async () => {
+      const { error } = await expectThrow(() => runTool("lda_search_filings", { registrantName: "x" }, sam));
+      const te = toToolError(error);
+      ok("55e-Ktest key SET + 503 ⇒ error.upstreamEndpoint is host+path only 'lda:/api/v1/filings'; the token is NOT in the error ⇒ RED",
+        te.upstreamEndpoint === "lda:/api/v1/filings" && !JSON.stringify(te).includes(SECRET), JSON.stringify(te.upstreamEndpoint));
+    });
+    ok("55e-Ktest (direct) LDA_API_KEY set ⇒ ldaAuthHeader() deep-equals { Authorization: 'Token <value>' } + ldaKeyPresent() true ⇒ RED",
+      JSON.stringify(ldaAuthHeader()) === JSON.stringify({ Authorization: `Token ${SECRET}` }) && ldaKeyPresent() === true, JSON.stringify(Object.keys(ldaAuthHeader())));
+    delete process.env.LDA_API_KEY;
+    await withFetch(ldaMock(ldaBody(1, [ldaFiling()])), async (calls) => {
+      await runTool("lda_search_filings", { registrantName: "Akin" }, sam);
+      const init = ldaInit(calls);
+      ok("55e-Ktest LDA_API_KEY UNSET ⇒ NO Authorization header on the fetch (keyless works without a token; init.headers deep-equals {}) ⇒ send an auth header when unset ⇒ RED",
+        !("Authorization" in init.headers) && JSON.stringify(init.headers) === "{}", JSON.stringify(init.headers));
+    });
+    ok("55e-Ktest (direct) LDA_API_KEY unset ⇒ ldaAuthHeader() deep-equals {} + ldaKeyPresent() false ⇒ RED",
+      JSON.stringify(ldaAuthHeader()) === "{}" && ldaKeyPresent() === false, JSON.stringify(ldaAuthHeader()));
+
+    // ── [SSRF] a bad filingYear ⇒ invalid_input, 0 fetch (charclass re-guard pre-fetch). ──
+    for (const [args, label] of [
+      [{ filingYear: "20x" }, "filingYear '20x' (non-digit)"],
+      [{ filingYear: "12345" }, "filingYear '12345' (5 digits)"],
+      [{ filingYear: "2024\n" }, "filingYear '2024\\n' (trailing newline)"],
+    ]) {
+      await withFetch(failClosed(), async (calls) => {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool("lda_search_filings", args, sam));
+        ok(`55e-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch — a value never touches the fixed host) ⇒ widen the validation ⇒ RED`,
+          threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+      });
+    }
+  } finally {
+    if (priorKey === undefined) delete process.env.LDA_API_KEY;
+    else process.env.LDA_API_KEY = priorKey;
+  }
+
+  // ── (parity) lda re-exports the shared coerce.num (null-never-0). ──
+  ok("55e-parity lda.num === coerce.num (one shared audited impl — NO local num/str fork)", ldaNum === coerceNum, "lda num diverged from coerce.num");
+}
+
 // §54: shared disclosure tokenizer (src/disclosure.ts, ADR-0022) — the byte-identical
 // extraction of NSF's OR-note + ClinicalTrials' AND-note tokenizer into ONE audited
 // home, PLUS the lint guardrail against the whitespace-only recurrence adversarial
@@ -17183,6 +17430,7 @@ async function main() {
   await testCensusBusinessPatterns();
   await testFredHonesty();
   await testBeaRegionalData();
+  await testLdaSearchFilings();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
   await testHonestyAuditRemediation();
@@ -17223,9 +17471,9 @@ async function testApiKeyStatus() {
     // (1) all unset.
     clearAll();
     const r0 = apiKeyStatus();
-    ok("keys-A registry has EXACTLY 8 entries", r0.keys.length === 8, String(r0.keys.length));
+    ok("keys-A registry has EXACTLY 9 entries", r0.keys.length === 9, String(r0.keys.length));
     ok(
-      "keys-A envVars are the 8 code-grounded names",
+      "keys-A envVars are the 9 code-grounded names",
       JSON.stringify([...ALL].sort()) ===
         JSON.stringify(
           [
@@ -17234,6 +17482,7 @@ async function testApiKeyStatus() {
             "CENSUS_API_KEY",
             "DATA_GOV_API_KEY",
             "FRED_API_KEY",
+            "LDA_API_KEY",
             "NVD_API_KEY",
             "SAM_GOV_API_KEY",
             "SOCRATA_APP_TOKEN",
@@ -17273,7 +17522,8 @@ async function testApiKeyStatus() {
       JSON.stringify([...r0.requiredMissing].sort()) === JSON.stringify(["BEA_API_KEY", "CENSUS_API_KEY", "FRED_API_KEY"]),
       JSON.stringify(r0.requiredMissing),
     );
-    ok("keys-A optionalMissing (all unset) has the 5 optional envVars", r0.optionalMissing.length === 5, JSON.stringify(r0.optionalMissing));
+    ok("keys-A optionalMissing (all unset) has the 6 optional envVars", r0.optionalMissing.length === 6, JSON.stringify(r0.optionalMissing));
+    ok("keys-A LDA_API_KEY is present + OPTIONAL (required:false) with the register signup URL", (() => { const l = r0.keys.find((k) => k.envVar === "LDA_API_KEY"); return l && l.required === false && /lda\.senate\.gov\/api\/register/.test(l.signupUrl) && r0.optionalMissing.includes("LDA_API_KEY") && !r0.requiredMissing.includes("LDA_API_KEY"); })(), JSON.stringify(r0.keys.find((k) => k.envVar === "LDA_API_KEY")));
     ok("keys-A allKeysFree:true", r0.allKeysFree === true);
 
     // (2) set CENSUS_API_KEY to a SENTINEL — its bool flips true, drops out of

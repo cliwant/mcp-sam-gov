@@ -58,6 +58,7 @@ import * as censusEconomic from "./census-economic.js";
 import * as fred from "./fred.js";
 import * as bea from "./bea.js";
 import * as gsaPerdiem from "./gsa-perdiem.js";
+import * as lda from "./lda.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
@@ -3565,6 +3566,63 @@ const GsaPerdiemRatesInput = z
     "Look up GSA per-diem rates by EITHER (city + state) OR zip. Supplying both, or neither, ⇒ invalid_input.",
   );
 
+// ─── US Senate LDA lobbying filings (lda.senate.gov) — the lobbying/B2G lane ──
+// ADR-0052. Who is paid HOW MUCH to lobby WHICH federal agency on WHICH issue.
+// KEYLESS (anonymous 200); an optional free LDA_API_KEY only raises the rate limit
+// and rides the Authorization: Token … header ONLY. `count` is the REAL total
+// (~1.95M) — never results.length; page-based pagination (page/pageSize ≤25). All
+// filter VALUES ride URLSearchParams; filingYear/page/pageSize charclass/range-guarded.
+const LdaSearchFilingsInput = z.object({
+  registrantName: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by the registrant (the lobbying firm / in-house filer) name, e.g. 'Akin Gump'. Substring match, upstream-validated."),
+  clientName: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by the client name (who the lobbying is FOR), e.g. 'Google'. Substring match, upstream-validated."),
+  lobbyistName: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by an individual lobbyist's name. Substring match, upstream-validated."),
+  filingYear: z
+    .string()
+    .regex(/^\d{4}$/)
+    .optional()
+    .describe("Filter by filing year, a 4-digit year (e.g. '2024'). Validated ^\\d{4}$."),
+  filingType: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by the filing type short code (e.g. 'Q1' Q1 report, 'RR' registration, 'YE' year-end). A bad code ⇒ upstream HTTP 400 ⇒ invalid_input (surfaced)."),
+  agency: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by the federal government entity lobbied (maps to government_entity — the B2G signal), e.g. 'DEPARTMENT OF DEFENSE'."),
+  issue: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by the specific lobbying issues text (maps to filing_specific_lobbying_issues), e.g. 'appropriations'."),
+  page: z
+    .number()
+    .int()
+    .min(1)
+    .default(1)
+    .describe("1-based page number (default 1). Page with the next page number from _meta.notes / when _meta.pagination.hasMore."),
+  pageSize: z
+    .number()
+    .int()
+    .min(1)
+    .max(25)
+    .default(25)
+    .describe("Filings per page, 1..25 (the LDA API caps at 25), default 25."),
+});
+
 // api_key_status takes no input — it is a pure status query over process.env.
 const ApiKeyStatusInput = z.object({});
 
@@ -5092,15 +5150,29 @@ export const TOOLS: ToolDef[] = [
     inputSchema: GsaPerdiemRatesInput,
     handler: (input) => gsaPerdiem.perdiemRates(input),
   }),
+  // ━━━ US Senate LDA lobbying filings (lda.senate.gov) — the lobbying/B2G lane (1) ━━━ ADR-0052
+  // Who is paid HOW MUCH to lobby WHICH federal agency on WHICH issue — the
+  // registrant→client→government-entity signal no contract/spending source carries.
+  // KEYLESS (anonymous 200); the OPTIONAL free LDA_API_KEY only raises the rate limit
+  // and rides the Authorization: Token … header ONLY (the socrata app-token lineage —
+  // NOT key-required). ★count is the API's REAL total (~1.95M) — never results.length;
+  // page-based pagination. income/expenses are null-or-decimal-string ⇒ null-never-0.
+  defineTool({
+    name: "lda_search_filings",
+    description:
+      "Search US Senate LDA (Lobbying Disclosure Act) filings — who is paid HOW MUCH to lobby WHICH federal agency on WHICH issue (lda.senate.gov/api/v1/filings, KEYLESS — anonymous access works; an optional free LDA_API_KEY only raises the rate limit). All inputs optional: `registrantName` (the lobbying firm/in-house filer), `clientName` (who it's for), `lobbyistName`, `filingYear` (4-digit), `filingType` (short code, e.g. 'Q1'/'RR'/'YE'), `agency` (the federal government_entity lobbied — the B2G signal), `issue` (specific lobbying issues text), `page` (1-based, default 1), `pageSize` (1..25, default 25). Returns { filings:[{ filingUuid, filingType, filingYear, filingPeriod, incomeUsd, expensesUsd, registrant, client, lobbyingActivities:[{ issueCode, description, governmentEntities:[names] }], documentUrl, postedDate, terminationDate }] } + honest _meta. HONESTY: totalAvailable is the API's REAL total match count (the corpus is ~1.95M filings) — NOT the rows on this page; pagination is page-based (pass the next page number when hasMore). incomeUsd/expensesUsd are parsed from the null-or-decimal-string income/expenses — null (not reported) ⇒ null, NEVER 0 (a genuine 0 stays 0); a filing reports EITHER income OR expenses, so the other is typically null. Missing lobbying_activities/government_entities ⇒ empty arrays (never fabricated). A genuine no-match (results:[]) ⇒ honest empty (returned:0); a 400 (bad filter) ⇒ invalid_input surfacing the API's message; a 429 ⇒ rate_limited THROWS (Retry-After honored, never routed around); a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-array results / non-number count ⇒ schema_drift. The optional key rides ONLY in the Authorization: Token header (never the URL/_meta).",
+    inputSchema: LdaSearchFilingsInput,
+    handler: (input) => lda.searchFilings(input),
+  }),
   // ━━━ Self-service key discovery (1) ━━━
   // KEYLESS. A local status query — reads process.env (+ any .env auto-loaded at
   // startup) and reports, per key, whether it is set (a BOOLEAN — the key VALUE is
-  // NEVER read into the output). Makes the 2-required + 5-optional key situation
+  // NEVER read into the output). Makes the 3-required + 6-optional key situation
   // discoverable without reading source or docs.
   defineTool({
     name: "api_key_status",
     description:
-      "List every API key this server can use, whether each is REQUIRED or OPTIONAL, the free signup URL + what it unlocks, and whether it is CURRENTLY configured — a boolean only; the key VALUE is NEVER shown. KEYLESS (no input). Most sources are keyless; only Census (census_business_patterns) and FRED (2 tools) REQUIRE a key (they throw without one), the other 5 keys are OPTIONAL (raise a rate limit or unlock one filter). Keys can be set as host env vars OR in a `.env` file in the server's working directory (auto-loaded at startup; real env wins over .env). Returns { keys:[{ envVar, sources[], required, signupUrl, unlocks, note, currentlySet }], requiredMissing:[envVars], optionalMissing:[envVars], allKeysFree:true }. This tool tells you the CONFIG state; to verify a key actually WORKS, call that source's own tool. Getting a key (creating the account at the signup URL) is your step — the server automates discovery + configuration, not signup.",
+      "List every API key this server can use, whether each is REQUIRED or OPTIONAL, the free signup URL + what it unlocks, and whether it is CURRENTLY configured — a boolean only; the key VALUE is NEVER shown. KEYLESS (no input). Most sources are keyless; only Census (census_business_patterns), FRED (2 tools), and BEA (bea_regional_data) REQUIRE a key (they throw without one), the other 6 keys are OPTIONAL (raise a rate limit or unlock one filter). Keys can be set as host env vars OR in a `.env` file in the server's working directory (auto-loaded at startup; real env wins over .env). Returns { keys:[{ envVar, sources[], required, signupUrl, unlocks, note, currentlySet }], requiredMissing:[envVars], optionalMissing:[envVars], allKeysFree:true }. This tool tells you the CONFIG state; to verify a key actually WORKS, call that source's own tool. Getting a key (creating the account at the signup URL) is your step — the server automates discovery + configuration, not signup.",
     inputSchema: ApiKeyStatusInput,
     handler: async () => keys.apiKeyStatus(),
   }),
