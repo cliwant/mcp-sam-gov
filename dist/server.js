@@ -62,6 +62,7 @@ import * as fac from "./fac.js";
 import * as usitc from "./usitc.js";
 import * as openfda from "./openfda.js";
 import * as openfdaDevice from "./openfda-device.js";
+import * as nhtsa from "./nhtsa.js";
 import { fetchAttachmentText } from "./attachments.js";
 import * as keys from "./keys.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
@@ -2988,6 +2989,24 @@ const OpenfdaDeviceClearancesInput = z.object({
         .optional()
         .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
 });
+// ─── NHTSA vehicle safety (api.nhtsa.gov) — KEYLESS vehicle/parts supplier vetting ──
+// ADR-0057. Two tools (recalls + complaints) share make/model/modelYear inputs. NO
+// API key at all. ★The complaints VIN (PII) is excluded from the output. modelYear is
+// ^\d{4}$; make/model are letters/digits/space/hyphen only (SSRF/injection guard).
+const NhtsaVehicleInput = z.object({
+    make: z
+        .string()
+        .regex(/^[A-Za-z0-9 -]+$/)
+        .describe("Vehicle make (required), e.g. 'honda', 'ford'. Letters/digits/space/hyphen only (^[A-Za-z0-9 -]+$)."),
+    model: z
+        .string()
+        .regex(/^[A-Za-z0-9 -]+$/)
+        .describe("Vehicle model (required), e.g. 'accord', 'f-150'. Letters/digits/space/hyphen only (^[A-Za-z0-9 -]+$)."),
+    modelYear: z
+        .string()
+        .regex(/^\d{4}$/)
+        .describe("4-digit model year (required), e.g. '2020'. Validated ^\\d{4}$."),
+});
 // ─── BEA Regional Economic Accounts (apps.bea.gov) — the THIRD key-required source ──
 // ADR-0051. County/state/MSA GDP-by-industry (CAGDP2/SAGDP2N) + personal income
 // (CAINC1/SAINC1) — the regional/sub-national place-of-performance lane. REQUIRES a
@@ -4538,6 +4557,24 @@ export const TOOLS = [
         description: "Search openFDA 510(k) DEVICE CLEARANCES — the FDA's premarket-notification (510(k)) clearances for medical devices, with the applicant/manufacturer, device name, clearance number (K-number), decision (date + description), clearance type, product code, advisory committee, and geography (openFDA /device/510k.json; api.fda.gov). KEYLESS (an OPTIONAL free OPENFDA_API_KEY only RAISES the rate limit — keyless works at ~1000 requests/day; it NEVER throws for a missing key; get one at https://open.fda.gov/apis/authentication/; call api_key_status to see every source's key requirement). Input: STRUCTURED filters — `applicant` (→applicant), `deviceName` (→device_name), `productCode` (→product_code), `clearanceType` (→clearance_type, e.g. Traditional/Special/Abbreviated), `kNumber` (→k_number, e.g. 'K123456'), `state` (2-letter, e.g. 'CA') — the tool safely assembles + escapes these into the openFDA search= Lucene string (NO raw passthrough — injection-safe), plus `limit` (1..100, default 25) and `skip` (offset ≥0). Returns { clearances:[{ applicant, deviceName, kNumber, decisionDate, decisionDescription, clearanceType, productCode, advisoryCommittee, state }] } + honest _meta. HONESTY: totalAvailable is openFDA's EXACT meta.results.total (skip/limit pagination via hasMore/nextOffset — never results.length); every scalar (dates included, decision_date is a YYYY-MM-DD string) is null-never-empty-string. ★A no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an HONEST EMPTY (returned:0, totalAvailable:0), NOT an error; a 400 syntax error ⇒ invalid_input surfacing openFDA's message; a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The optional key rides ONLY the &api_key= query param — never logged or echoed.",
         inputSchema: OpenfdaDeviceClearancesInput,
         handler: (input) => openfdaDevice.deviceClearances(input),
+    }),
+    // ━━━ NHTSA vehicle safety (api.nhtsa.gov) — vehicle/parts supplier vetting (2) ━━━ ADR-0057
+    // ★KEYLESS — no API key at all (no parameter, no header). The cross-agency
+    // product-safety family alongside openFDA (medical). Both tools share
+    // make/model/modelYear inputs and return the COMPLETE matching set (no pagination
+    // ⇒ totalAvailable = the upstream Count/count, complete:true). ★The complaints VIN
+    // (an individual-vehicle PII identifier) is EXCLUDED from the output.
+    defineTool({
+        name: "nhtsa_recalls",
+        description: "Look up NHTSA vehicle safety RECALLS for a specific vehicle — the manufacturer's recall campaigns with the affected component, the safety consequence, the remedy, and 'do not drive'/'park outside'/over-the-air-update flags (NHTSA /recalls/recallsByVehicle; api.nhtsa.gov). KEYLESS — no API key is required or accepted. Input: `make` (required, e.g. 'honda'), `model` (required, e.g. 'accord'), `modelYear` (required, 4-digit, e.g. '2020'). Returns { recalls:[{ campaignNumber, manufacturer, component, summary, consequence, remedy, reportReceivedDate, parkIt, parkOutside, overTheAirUpdate }] } + honest _meta. HONESTY: totalAvailable is NHTSA's EXACT Count and NHTSA returns the COMPLETE set for the vehicle (no pagination) ⇒ complete:true; a no-match (Count 0 / a bad make/model) ⇒ an HONEST EMPTY (returned:0), NOT an error; a 4xx ⇒ invalid_input; a 5xx/timeout ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The park-it/park-outside/over-the-air-update flags are preserved as booleans (never a fabricated false); dates are strings; every scalar is null-never-empty-string. Fixed host api.nhtsa.gov (SSRF-guarded); make/model are letters/digits/space/hyphen only and modelYear is ^\\d{4}$.",
+        inputSchema: NhtsaVehicleInput,
+        handler: (input) => nhtsa.recalls(input),
+    }),
+    defineTool({
+        name: "nhtsa_complaints",
+        description: "Look up NHTSA consumer COMPLAINTS for a specific vehicle — owner-filed safety complaints with the affected component, crash/fire flags, injury/death counts, and incident/filing dates (NHTSA /complaints/complaintsByVehicle; api.nhtsa.gov). KEYLESS — no API key is required or accepted. Input: `make` (required, e.g. 'honda'), `model` (required, e.g. 'accord'), `modelYear` (required, 4-digit, e.g. '2020'). Returns { complaints:[{ odiNumber, manufacturer, component, summary, crash, fire, numberOfInjuries, numberOfDeaths, dateOfIncident, dateComplaintFiled }] } + honest _meta. ★PRIVACY: the NHTSA complaint VIN (an individual-vehicle identifier) is INTENTIONALLY EXCLUDED from the output — the B2G signal is the manufacturer/component/crash/fire/injury/death safety history, not the VIN. HONESTY: totalAvailable is NHTSA's EXACT count and NHTSA returns the COMPLETE set for the vehicle (no pagination) ⇒ complete:true; a no-match ⇒ an HONEST EMPTY (returned:0), NOT an error; crash/fire preserved as booleans (never a fabricated false); numberOfInjuries/numberOfDeaths via numeric coercion (a genuine 0 stays 0, NEVER null-for-0); dates are strings; a 4xx ⇒ invalid_input; a 5xx/timeout ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. Fixed host api.nhtsa.gov (SSRF-guarded); make/model are letters/digits/space/hyphen only and modelYear is ^\\d{4}$.",
+        inputSchema: NhtsaVehicleInput,
+        handler: (input) => nhtsa.complaints(input),
     }),
     // ━━━ BEA Regional Economic Accounts (apps.bea.gov) — regional GDP/income (1) ━━━ ADR-0051
     // ★The server's THIRD KEY-REQUIRED source: the BEA Data API has NO keyless tier, so
