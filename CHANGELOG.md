@@ -5,6 +5,48 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-07-15 (Waves 6–7: cross-agency safety/vetting + healthcare depth — 120 → 134 tools, all keyless)
+
+Additive minor release. Every 1.3.0 tool is unchanged and byte-identical; this adds **14 keyless tools** across new B2G vetting/market lanes. All the new sources are keyless (a couple of non-.gov republishers of federal public data are provenance-disclosed).
+
+### Added — cross-agency product-safety vetting
+
+- **openFDA** — `openfda_enforcement` (FDA drug/device/food recalls & enforcement) and
+  `openfda_device_clearances` (FDA 510(k) medical-device clearances). Health/medical
+  supplier responsibility + capability vetting. A no-match query (openFDA's 404) is an
+  honest empty, never an error.
+- **NHTSA** — `nhtsa_recalls` and `nhtsa_complaints` (vehicle safety by make/model/year).
+  Vehicle/parts/fleet supplier vetting. (VINs are excluded — never surfaced.)
+- **CPSC** — `cpsc_recalls` (consumer-product recalls). Product supplier vetting.
+
+### Added — environmental, legal & nonprofit vetting
+
+- **EPA Envirofacts** — `epa_tri_facilities` (Toxics Release Inventory facilities;
+  real totals via a count sub-query). Environmental/ESG facility vetting, distinct
+  from EPA ECHO.
+- **CourtListener** — `courtlistener_search_opinions` (US federal court opinions:
+  Court of Federal Claims contract claims/bid protests, Federal Circuit appeals).
+  Legal-risk / contract-dispute intel. *Data = federal court records via CourtListener
+  (Free Law Project); disclosed in `_meta`.*
+- **IRS Form 990 nonprofits** — `nonprofit_search` + `nonprofit_financials`
+  (nonprofit vendor / grant-recipient vetting: EIN, exempt status, NTEE, 990
+  financials). *Via ProPublica Nonprofit Explorer; disclosed in `_meta`.*
+
+### Added — healthcare depth (CMS)
+
+- `cms_medicare_provider_services` (Medicare Part-B provider utilization & payments —
+  demand-side market sizing), `cms_hospital_compare` (hospital quality ratings),
+  `cms_facility_directory` (nursing home / home health / hospice / dialysis
+  directories, 4 datasets in one tool), `cms_dmepos_suppliers` (DME supplier
+  directory + Medicare spend), and `cms_revoked_providers` (Medicare
+  revocation/exclusion list — a compliance lane alongside OFAC + SAM exclusions).
+  All keyless, org/provider-level public data, real totals via CMS count endpoints.
+
+### Changed
+
+- Documentation refreshed to **134 tools**; `api_key_status` / `API_KEYS.md` track
+  **12 keys** (4 required, 8 optional) — every new source above is keyless.
+
 ## [1.3.0] — 2026-07-15 (Wave 5: BEA + Senate lobbying + DOL enforcement — 116 → 120 tools)
 
 Additive minor release. Every 1.2.0 tool is unchanged and byte-identical; this adds 4 tools across 3 new sources, extending market-sizing, influence, and labor-compliance coverage.
