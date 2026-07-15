@@ -39,6 +39,31 @@ const USAS = "https://api.usaspending.gov/api/v2";
 
 export type UsasFilters = Record<string, unknown>;
 
+/**
+ * Build the awarding-agency filter for spending_by_category / spending_by_award —
+ * ALWAYS a canonical NAME match. A purely-numeric value is a toptier CODE (e.g.
+ * "036"), which the sibling code-based tools (usas_get_agency_profile /
+ * usas_get_agency_budget_function) take but which silently matches NOTHING here —
+ * returning a confidently-wrong empty (e.g. "VA had $0 subagency spending" when VA
+ * actually has $66.87B). Fail loud instead of faking a zero (dogfooding 2026-07-16;
+ * same confidently-wrong-empty class as the subaward drift). No real agency NAME is
+ * purely numeric, so the /^\d+$/ test never rejects a legitimate name.
+ */
+function awardingAgencyFilter(
+  agency: string,
+): { type: string; tier: string; name: string }[] {
+  if (/^\d+$/.test(agency.trim())) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      retryable: false,
+      message: `agency ${JSON.stringify(
+        agency,
+      )} looks like a toptier CODE, but this filter matches the canonical agency NAME (e.g. "Department of Veterans Affairs") — a code silently matches nothing here and would return a false empty. Resolve the name via usas_lookup_agency or usas_list_toptier_agencies, or use a code-based tool (usas_get_agency_profile / usas_get_agency_budget_function) that takes a toptierCode.`,
+    });
+  }
+  return [{ type: "awarding", tier: "toptier", name: agency }];
+}
+
 function buildFilters(args: {
   agency?: string;
   naics?: string;
@@ -48,9 +73,7 @@ function buildFilters(args: {
 }): UsasFilters {
   const filters: UsasFilters = { award_type_codes: ["A", "B", "C", "D"] };
   if (args.agency) {
-    filters.agencies = [
-      { type: "awarding", tier: "toptier", name: args.agency },
-    ];
+    filters.agencies = awardingAgencyFilter(args.agency);
   }
   if (args.naics) filters.naics_codes = [args.naics];
   if (args.fiscalYear) {
@@ -1375,7 +1398,7 @@ export async function searchRecompetes(args: {
   const filtersApplied: string[] = ["awardType(contracts A/B/C/D)"];
   const filtersDropped: string[] = [];
   if (args.agency) {
-    filters.agencies = [{ type: "awarding", tier: "toptier", name: args.agency }];
+    filters.agencies = awardingAgencyFilter(args.agency);
     filtersApplied.push("agency");
   }
   if (args.naics) {
@@ -1853,9 +1876,7 @@ export async function searchCfdaSpending(args: {
     award_type_codes: ["02", "03", "04", "05"], // grants
   };
   if (args.agency) {
-    filters.agencies = [
-      { type: "awarding", tier: "toptier", name: args.agency },
-    ];
+    filters.agencies = awardingAgencyFilter(args.agency);
   }
   if (args.fiscalYear) {
     filters.time_period = [

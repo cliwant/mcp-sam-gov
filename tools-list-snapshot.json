@@ -4273,7 +4273,8 @@
       "type": "object",
       "properties": {
         "agency": {
-          "type": "string"
+          "type": "string",
+          "description": "Canonical agency NAME (e.g. 'Department of Veterans Affairs'), NOT a toptier code — this filter matches by name; a numeric code silently matches nothing. Resolve via usas_lookup_agency."
         },
         "fiscalYear": {
           "type": "number"
@@ -4315,7 +4316,8 @@
       "type": "object",
       "properties": {
         "agency": {
-          "type": "string"
+          "type": "string",
+          "description": "Canonical agency NAME (e.g. 'Department of Veterans Affairs'), NOT a toptier code — this filter matches by name; a numeric code silently matches nothing. Resolve via usas_lookup_agency."
         },
         "naics": {
           "type": "string"
@@ -4371,7 +4373,8 @@
       "type": "object",
       "properties": {
         "agency": {
-          "type": "string"
+          "type": "string",
+          "description": "Canonical agency NAME (e.g. 'Department of Veterans Affairs'), NOT a toptier code — this filter matches by name; a numeric code silently matches nothing. Resolve via usas_lookup_agency."
         },
         "naics": {
           "type": "string"
@@ -4489,7 +4492,8 @@
       "type": "object",
       "properties": {
         "agency": {
-          "type": "string"
+          "type": "string",
+          "description": "Canonical agency NAME (e.g. 'Department of Veterans Affairs'), NOT a toptier code — this filter matches by name; a numeric code silently matches nothing. Resolve via usas_lookup_agency."
         },
         "naics": {
           "type": "string"
@@ -4510,7 +4514,8 @@
       "type": "object",
       "properties": {
         "agency": {
-          "type": "string"
+          "type": "string",
+          "description": "Canonical agency NAME (e.g. 'Department of Veterans Affairs'), NOT a toptier code — this filter matches by name; a numeric code silently matches nothing. Resolve via usas_lookup_agency / usas_list_toptier_agencies."
         },
         "fiscalYear": {
           "type": "number"

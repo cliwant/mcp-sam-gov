@@ -230,7 +230,11 @@ const UsasIndividualAwardsInput = UsasFiltersBase.extend({
 });
 
 const UsasSubAgencyInput = z.object({
-  agency: z.string(),
+  agency: z
+    .string()
+    .describe(
+      "Canonical agency NAME (e.g. 'Department of Veterans Affairs'), NOT a toptier code — this filter matches by name; a numeric code silently matches nothing. Resolve via usas_lookup_agency / usas_list_toptier_agencies.",
+    ),
   fiscalYear: z.number().int().min(2007).optional(),
 });
 
@@ -377,14 +381,24 @@ const UsasSpendingOverTimeInput = z.object({
 });
 
 const UsasCategorySpendingInput = z.object({
-  agency: z.string().optional(),
+  agency: z
+    .string()
+    .optional()
+    .describe(
+      "Canonical agency NAME (e.g. 'Department of Veterans Affairs'), NOT a toptier code — this filter matches by name; a numeric code silently matches nothing. Resolve via usas_lookup_agency.",
+    ),
   naics: z.string().optional(),
   fiscalYear: z.number().int().min(2007).optional(),
   limit: z.number().min(1).max(50).optional(),
 });
 
 const UsasCfdaInput = z.object({
-  agency: z.string().optional(),
+  agency: z
+    .string()
+    .optional()
+    .describe(
+      "Canonical agency NAME (e.g. 'Department of Veterans Affairs'), NOT a toptier code — this filter matches by name; a numeric code silently matches nothing. Resolve via usas_lookup_agency.",
+    ),
   fiscalYear: z.number().int().min(2007).optional(),
   limit: z.number().min(1).max(50).optional(),
 });
