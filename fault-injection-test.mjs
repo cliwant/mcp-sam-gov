@@ -183,6 +183,7 @@ import { triFacilities as epaTriFacilities, normalizeClosed as epaNormalizeClose
 import { providerServices as cmsProviderServices, joinProviderName as cmsJoinName, num as cmsUtilNum, str as cmsUtilStr } from "./dist/cms-utilization.js";
 import { hospitalCompare as cmsHospitalCompare, emergencyBool as cmsEmergencyBool, num as cmsHospNum, str as cmsHospStr } from "./dist/cms-hospital.js";
 import { facilityDirectory as cmsFacilityDirectory, coalesceField as cmsCoalesceField, str as cmsFacStr } from "./dist/cms-facility.js";
+import { dmeposSuppliers as cmsDmeposSuppliers, revokedProviders as cmsRevokedProviders, joinSupplierName as cmsSupJoinName, coalesceRevokedName as cmsSupCoalesceName, num as cmsSupNum, str as cmsSupStr } from "./dist/cms-supplier.js";
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { enforcement as openfdaEnforcement, openfdaApiKey, buildSearch as openfdaBuildSearch, luceneQuote as openfdaQuote, OPENFDA_HOST } from "./dist/openfda.js";
 import { deviceClearances as openfdaDeviceClearances, buildDeviceSearch as openfdaBuildDeviceSearch } from "./dist/openfda-device.js";
@@ -17234,6 +17235,262 @@ async function testDolDataApi() {
   });
 }
 
+// §55e4: CMS Supplier/vetting lanes (data.cms.gov /data-api/v1/dataset/{uuid},
+// ADR-0064 — cms_dmepos_suppliers + cms_revoked_providers; KEYLESS; the SAME
+// TWO-REQUEST stats-count-total pattern + URLSearchParams filter-value SSRF as
+// cms_medicare_provider_services). NON-VACUOUS, OFFLINE, deterministic. Each
+// assertion pins a value + names the mutation that turns it RED:
+//   [P1]     stats { data:{ found_rows:N } } + a 2-row slice ⇒ totalAvailable N (NOT
+//            the slice length 2), hasMore; stats FAILS ⇒ totalAvailable:null + a
+//            disclosing note (NEVER length-faked); stats runs BEFORE data.
+//   [P2]     empty slice ⇒ honest empty (returned:0); dmepos no-filter ⇒ invalid_input,
+//            0 fetch; 400 ⇒ invalid_input; 503 ⇒ upstream_unavailable; non-array 200 ⇒
+//            schema_drift.
+//   [P3]     Suplr_Mdcr_Pymt_Amt "…"→number, a real 0→0, absent→null; revoked name
+//            coalesces ORG_NAME else FIRST+LAST; dates stay strings.
+//   [SSRF]   npi/state regex re-guard; a filter value rides ENCODED via URLSearchParams;
+//            fixed-host assert.
+const isCmsSupData = (u) => /\/data\?/.test(u) && CMS_UTIL_RE.test(u) && !/data-viewer/.test(u);
+const isCmsSupStats = (u) => /\/data-viewer\/stats\?/.test(u) && CMS_UTIL_RE.test(u);
+const cmsSupStatsUrl = (calls) => calls.find((x) => isCmsSupStats(x.url))?.url;
+const cmsSupDataUrl = (calls) => calls.find((x) => isCmsSupData(x.url))?.url;
+// A combined stats+data mock (mirrors cmsUtilMock): routes by URL.
+const cmsSupMock = ({ found = 4231, statsStatus = 200, statsBody, data = [], dataStatus = 200 } = {}) => (u) => {
+  if (isCmsSupStats(u)) return mockResponse({ status: statsStatus, json: statsBody ?? { meta: { success: true }, data: { found_rows: found, total_rows: 4837362 } } });
+  if (isCmsSupData(u)) return mockResponse({ status: dataStatus, json: data });
+  return failClosed()();
+};
+// A live-shaped DMEPOS supplier row (numeric-STRING aggregate values).
+const cmsSupRow = (over = {}) => ({
+  Suplr_NPI: "1003002478",
+  Suplr_Prvdr_Last_Name_Org: "APRIA HEALTHCARE LLC",
+  Suplr_Prvdr_First_Name: "",
+  Suplr_Prvdr_MI: "",
+  Suplr_Prvdr_Crdntls: "",
+  Suplr_Prvdr_Ent_Cd: "O",
+  Suplr_Prvdr_City: "Richmond",
+  Suplr_Prvdr_State_Abrvtn: "VA",
+  Suplr_Prvdr_Zip5: "23230",
+  Tot_Suplr_HCPCS_Cds: "42",
+  Tot_Suplr_Benes: "1387",
+  Tot_Suplr_Clms: "8123",
+  Tot_Suplr_Srvcs: "10456",
+  Suplr_Sbmtd_Chrgs: "1234567.89",
+  Suplr_Mdcr_Alowd_Amt: "654321.01",
+  Suplr_Mdcr_Pymt_Amt: "512345.67",
+  ...over,
+});
+// A live-shaped revocation row.
+const cmsRevRow = (over = {}) => ({
+  ENRLMT_ID: "I20040309000221",
+  NPI: "1234567893",
+  FIRST_NAME: "JOHN",
+  MDL_NAME: "Q",
+  LAST_NAME: "SMITH",
+  ORG_NAME: "",
+  MULTIPLE_NPI_FLAG: "N",
+  STATE_CD: "FL",
+  PROVIDER_TYPE_DESC: "Durable Medical Equipment",
+  REVOCATION_RSN: "Non-compliance",
+  REVOCATION_EFCTV_DT: "2021-05-01",
+  REENROLLMENT_BAR_EXPRTN_DT: "2024-05-01",
+  ...over,
+});
+// A 200 data slice whose .json() THROWS (isolates the DATA-body drift path).
+const cmsSupDataNonJson = (u) => {
+  if (isCmsSupStats(u)) return mockResponse({ status: 200, json: { data: { found_rows: 5, total_rows: 4837362 } } });
+  if (isCmsSupData(u)) return { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html/>" };
+  return failClosed()();
+};
+
+async function testCmsSupplier() {
+  section("§55e4. CMS Supplier/vetting lanes (ADR-0064, KEYLESS — cms_dmepos_suppliers + cms_revoked_providers on the getJson GET port) — TWO-request stats-count P1 (totalAvailable=found_rows, never slice length; stats-fail→null+note) + honest empty vs 400/503/drift P2 + dmepos npi-OR-state input-guard + revoked ORG/FIRST+LAST name coalesce + numeric-string→number P3 + URLSearchParams filter-value SSRF (charclass+encode, host-pin) (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ══════ cms_dmepos_suppliers ══════
+
+  // ── [P1] stats found_rows 4231 + a 2-row slice ⇒ totalAvailable 4231 (NOT the
+  //    slice length 2), returned:2, hasMore, complete:false. Stats runs FIRST. ──
+  await withFetch(cmsSupMock({ found: 4231, data: [cmsSupRow(), cmsSupRow({ Suplr_NPI: "1013025916", Suplr_Prvdr_Last_Name_Org: "LINCARE INC" })] }), async (calls) => {
+    const r = await runTool("cms_dmepos_suppliers", { state: "VA", size: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e4-dmepos-P1 stats found_rows 4231 + 2-row slice ⇒ returned:2 but totalAvailable:4231 (the EXACT stats total, NOT slice length 2), truncated:true, complete:false ⇒ set totalAvailable=suppliers.length ⇒ RED",
+      r.data.suppliers.length === 2 && m.returned === 2 && m.totalAvailable === 4231 && m.truncated === true && m.complete === false, JSON.stringify({ n: r.data.suppliers.length, ta: m.totalAvailable }));
+    ok("55e4-dmepos-P1 hasMore:true (0+2 < 4231), nextOffset:2, offset:0, limit:2 ⇒ compute hasMore off the slice alone ⇒ RED",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.pagination.offset === 0 && m.pagination.limit === 2, JSON.stringify(m.pagination));
+    ok("55e4-dmepos-P1 TWO requests: a /data-viewer/stats sub-query AND a /data?size=&offset= slice, BOTH to data.cms.gov over https, both carrying filter[Suplr_Prvdr_State_Abrvtn]=VA ⇒ drop the stats sub-query ⇒ RED",
+      cmsSupStatsUrl(calls) !== undefined && cmsSupDataUrl(calls) !== undefined && new URL(cmsSupStatsUrl(calls)).hostname === "data.cms.gov" && new URL(cmsSupStatsUrl(calls)).protocol === "https:" && /size=2/.test(cmsSupDataUrl(calls)) && /offset=0/.test(cmsSupDataUrl(calls)) && /filter%5BSuplr_Prvdr_State_Abrvtn%5D=VA/.test(cmsSupDataUrl(calls)) && /filter%5BSuplr_Prvdr_State_Abrvtn%5D=VA/.test(cmsSupStatsUrl(calls)), JSON.stringify({ stats: cmsSupStatsUrl(calls), data: cmsSupDataUrl(calls) }));
+    ok("55e4-dmepos-P1 keylessMode:true (no key sent) + the annual-vintage + aggregate-only notes present",
+      m.keylessMode === true && m.notes.some((n) => /ANNUAL VINTAGE|dataset/i.test(n)) && m.notes.some((n) => /AGGREGATE|no patient identifiers/i.test(n)), JSON.stringify(m.notes.length));
+  });
+
+  // ── [P1] stats sub-query FAILS (503) but the data slice SUCCEEDS ⇒ totalAvailable:
+  //    null + a disclosing note (NEVER the slice length), data still returned. ──
+  await withFetch(cmsSupMock({ statsStatus: 503, data: [cmsSupRow(), cmsSupRow()] }), async (calls) => {
+    const r = await runTool("cms_dmepos_suppliers", { state: "VA", size: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e4-dmepos-P1 stats 503 (fails) but data OK ⇒ totalAvailable:null (NOT the slice length 2 — never length-faked) + a disclosing note, and the 2 suppliers STILL return ⇒ fall back to suppliers.length ⇒ RED",
+      r.data.suppliers.length === 2 && m.totalAvailable === null && m.notes.some((n) => /count sub-query/i.test(n) && /null/.test(n)), JSON.stringify({ n: r.data.suppliers.length, ta: m.totalAvailable }));
+    ok("55e4-dmepos-P1 a stats failure does NOT throw (data is authoritative) — the stats fetch was attempted then swallowed", cmsSupStatsUrl(calls) !== undefined && cmsSupDataUrl(calls) !== undefined, JSON.stringify({ stats: !!cmsSupStatsUrl(calls), data: !!cmsSupDataUrl(calls) }));
+  });
+
+  // ── [P2] empty slice + stats found_rows 0 ⇒ honest empty (returned:0,
+  //    totalAvailable:0, complete:true — a genuine no-match, NOT thrown, NOT drift). ──
+  await withFetch(cmsSupMock({ found: 0, data: [] }), async () => {
+    const r = await runTool("cms_dmepos_suppliers", { npi: "1999999984", size: 25 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e4-dmepos-P2 an empty slice + stats 0 ⇒ suppliers:[], returned:0, totalAvailable:0, complete:true (honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+      r.data.suppliers.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.suppliers.length, ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // ── [P2] a 400 on the DATA request ⇒ invalid_input (never a fake empty). ──
+  await withFetch(cmsSupMock({ found: 5, data: {}, dataStatus: 400 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_dmepos_suppliers", { state: "VA" }, sam));
+    ok("55e4-dmepos-P2 400 on the data slice ⇒ invalid_input THROW (a bad request is never an empty result) ⇒ swallow as empty ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2] a 503 on the DATA request ⇒ upstream_unavailable (a DOWN endpoint is
+  //    NEVER a returned:0). ──
+  await withFetch(cmsSupMock({ found: 5, data: "", dataStatus: 503 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_dmepos_suppliers", { state: "VA" }, sam));
+    ok("55e4-dmepos-P2 503 on the data slice ⇒ upstream_unavailable THROW (a down CMS endpoint is never an empty result) ⇒ read empty ⇒ RED",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P4] a 200 data body that is not an array (an object) ⇒ schema_drift. ──
+  await withFetch(cmsSupMock({ found: 5, data: { error: "not an array" } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_dmepos_suppliers", { state: "VA" }, sam));
+    ok("55e4-dmepos-P4 a 200 data body that is not a JSON array (an object) ⇒ schema_drift (the array contract broke; never a fabricated empty) ⇒ read {} as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2] a 200 data body that is non-JSON (r.json() SyntaxError) ⇒ schema_drift. ──
+  await withFetch(cmsSupDataNonJson, async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_dmepos_suppliers", { state: "VA" }, sam));
+    ok("55e4-dmepos-P2 a 200 whose data body is non-JSON (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P3] numeric-STRING coercion + supplierName join. ──
+  await withFetch(cmsSupMock({ found: 3, data: [
+    cmsSupRow({ Suplr_Mdcr_Pymt_Amt: "512345.67", Tot_Suplr_Clms: "8123", Suplr_Sbmtd_Chrgs: "0", Tot_Suplr_Benes: undefined }),
+    cmsSupRow({ Suplr_Prvdr_Last_Name_Org: "Saddhra", Suplr_Prvdr_First_Name: "Rorie", Suplr_Prvdr_Ent_Cd: "I" }),
+    cmsSupRow({ Suplr_Prvdr_Last_Name_Org: "", Suplr_Prvdr_First_Name: "Rorie" }),
+  ] }), async () => {
+    const r = await runTool("cms_dmepos_suppliers", { state: "VA", size: 3 }, sam);
+    const [a, b, c] = r.data.suppliers;
+    ok("55e4-dmepos-P3 Suplr_Mdcr_Pymt_Amt '512345.67' ⇒ 512345.67 (number) AND Tot_Suplr_Clms '8123' ⇒ 8123 (numeric string parsed) ⇒ pass the raw string through ⇒ RED",
+      a.medicarePayment === 512345.67 && a.totalClaims === 8123, JSON.stringify({ pay: a.medicarePayment, clm: a.totalClaims }));
+    ok("55e4-dmepos-P3 a real '0' (Suplr_Sbmtd_Chrgs) ⇒ 0 (preserved, NEVER null) AND an ABSENT Tot_Suplr_Benes ⇒ null (NEVER 0-faked) — the data-absence-as-zero forbidden class ⇒ RED",
+      a.submittedCharges === 0 && a.totalBeneficiaries === null, JSON.stringify({ chg: a.submittedCharges, ben: a.totalBeneficiaries }));
+    ok("55e4-dmepos-P3 NPI is a STRING (leading-digit structure survives) + entityType 'O' preserved", typeof a.npi === "string" && a.npi === "1003002478" && a.entityType === "O", JSON.stringify({ npi: a.npi, ent: a.entityType }));
+    ok("55e4-dmepos-P3 supplierName: org (First '') ⇒ the org name alone ('APRIA HEALTHCARE LLC'); individual ⇒ 'Last, First' ('Saddhra, Rorie'); last '' + first only ⇒ 'Rorie' ⇒ fabricate a '' or drop a name ⇒ RED",
+      a.supplierName === "APRIA HEALTHCARE LLC" && b.supplierName === "Saddhra, Rorie" && c.supplierName === "Rorie", JSON.stringify([a.supplierName, b.supplierName, c.supplierName]));
+  });
+
+  // ── [input-guard] an all-empty query (no npi, no state) ⇒ invalid_input, 0 fetch. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cms_dmepos_suppliers", { size: 10 }, sam));
+    ok("55e4-dmepos-input an all-empty query (no npi/state) ⇒ invalid_input, 0 fetch (never scan the whole supplier table) ⇒ allow an unscoped scan ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── [SSRF] a bad npi / state charclass ⇒ the re-guard rejects PRE-fetch. ──
+  for (const [args, label] of [
+    [{ npi: "12345" }, "npi '12345' (not 10 digits)"],
+    [{ npi: "abcdefghij" }, "npi 'abcdefghij' (non-digit)"],
+    [{ state: "ABC" }, "state 'ABC' (3 letters)"],
+    [{ state: "V1" }, "state 'V1' (a digit)"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("cms_dmepos_suppliers", args, sam));
+      ok(`55e4-dmepos-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch) ⇒ widen the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ══════ cms_revoked_providers ══════
+
+  // ── [P1] stats found_rows 7059 + a 2-row slice ⇒ totalAvailable 7059 (NOT 2). ──
+  await withFetch(cmsSupMock({ found: 7059, data: [cmsRevRow(), cmsRevRow({ ENRLMT_ID: "I20040309000222", LAST_NAME: "DOE" })] }), async (calls) => {
+    const r = await runTool("cms_revoked_providers", { state: "FL", size: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e4-revoked-P1 stats found_rows 7059 + 2-row slice ⇒ returned:2 but totalAvailable:7059 (the EXACT stats total, NOT slice length 2), hasMore:true, nextOffset:2 ⇒ set totalAvailable=revocations.length ⇒ RED",
+      r.data.revocations.length === 2 && m.returned === 2 && m.totalAvailable === 7059 && m.pagination.hasMore === true && m.pagination.nextOffset === 2, JSON.stringify({ n: r.data.revocations.length, ta: m.totalAvailable, p: m.pagination }));
+    ok("55e4-revoked-P1 stats + data BOTH to data.cms.gov over https, both carrying filter[STATE_CD]=FL ⇒ drop the stats sub-query ⇒ RED",
+      cmsSupStatsUrl(calls) !== undefined && new URL(cmsSupStatsUrl(calls)).hostname === "data.cms.gov" && /filter%5BSTATE_CD%5D=FL/.test(cmsSupDataUrl(calls)) && /filter%5BSTATE_CD%5D=FL/.test(cmsSupStatsUrl(calls)), JSON.stringify({ stats: cmsSupStatsUrl(calls), data: cmsSupDataUrl(calls) }));
+    ok("55e4-revoked-P1 keylessMode:true + the public-revocation-list note present (this is a legally-published exclusion register)",
+      m.keylessMode === true && m.notes.some((n) => /revocation|exclusion/i.test(n) && /public|due-diligence/i.test(n)), JSON.stringify(m.notes.length));
+  });
+
+  // ── [P2] empty slice + stats 0 ⇒ honest empty (returned:0). Revoked filters are
+  //    ALL optional, so an unfiltered call is allowed (0 fetch NOT required). ──
+  await withFetch(cmsSupMock({ found: 0, data: [] }), async () => {
+    const r = await runTool("cms_revoked_providers", { state: "WY" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e4-revoked-P2 an empty slice + stats 0 ⇒ revocations:[], returned:0, totalAvailable:0, complete:true (honest genuine-empty) ⇒ throw/drift on a valid empty ⇒ RED",
+      r.data.revocations.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.revocations.length, ta: m.totalAvailable }));
+  });
+
+  // ── [P2] an UNFILTERED revoked call fetches (all filters optional — NOT refused). ──
+  await withFetch(cmsSupMock({ found: 7059, data: [cmsRevRow()] }), async (calls) => {
+    const r = await runTool("cms_revoked_providers", { size: 1 }, sam);
+    ok("55e4-revoked-P2 an UNFILTERED query (no npi/state/lastName) is ALLOWED (the ~7K-row list is safe to page unfiltered) and fetches ⇒ refuse it like dmepos ⇒ RED",
+      r.data.revocations.length === 1 && cmsSupDataUrl(calls) !== undefined, JSON.stringify({ n: r.data.revocations.length, fetched: !!cmsSupDataUrl(calls) }));
+  });
+
+  // ── [P2] 503 on the DATA request ⇒ upstream_unavailable THROW. ──
+  await withFetch(cmsSupMock({ found: 5, data: "", dataStatus: 503 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_revoked_providers", { state: "FL" }, sam));
+    ok("55e4-revoked-P2 503 on the data slice ⇒ upstream_unavailable THROW (a down CMS endpoint is never an empty result) ⇒ read empty ⇒ RED",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P4] a 200 data body that is not an array ⇒ schema_drift. ──
+  await withFetch(cmsSupMock({ found: 5, data: { error: "not an array" } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_revoked_providers", { state: "FL" }, sam));
+    ok("55e4-revoked-P4 a 200 data body that is not a JSON array ⇒ schema_drift (never a fabricated empty) ⇒ read {} as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P3] name coalesce (ORG_NAME else FIRST+LAST) + dates as strings. ──
+  await withFetch(cmsSupMock({ found: 3, data: [
+    cmsRevRow({ ORG_NAME: "ACME MEDICAL SUPPLY LLC", FIRST_NAME: "", LAST_NAME: "" }),
+    cmsRevRow({ ORG_NAME: "", FIRST_NAME: "JOHN", LAST_NAME: "SMITH" }),
+    cmsRevRow({ ORG_NAME: "", FIRST_NAME: "", LAST_NAME: "DOE" }),
+  ] }), async () => {
+    const r = await runTool("cms_revoked_providers", { state: "FL", size: 3 }, sam);
+    const [a, b, c] = r.data.revocations;
+    ok("55e4-revoked-P3 name coalesces ORG_NAME when present ('ACME MEDICAL SUPPLY LLC'); else FIRST+LAST ('JOHN SMITH'); else the one present ('DOE') ⇒ fabricate a '' or drop a name ⇒ RED",
+      a.name === "ACME MEDICAL SUPPLY LLC" && b.name === "JOHN SMITH" && c.name === "DOE", JSON.stringify([a.name, b.name, c.name]));
+    ok("55e4-revoked-P3 REVOCATION_EFCTV_DT / REENROLLMENT_BAR_EXPRTN_DT stay STRINGS (never coerced to a number/Date) + enrollmentId/npi/reason strings",
+      b.revocationEffectiveDate === "2021-05-01" && b.reenrollmentBarExpiration === "2024-05-01" && typeof b.enrollmentId === "string" && typeof b.npi === "string" && b.revocationReason === "Non-compliance", JSON.stringify({ eff: b.revocationEffectiveDate, bar: b.reenrollmentBarExpiration, npi: b.npi }));
+  });
+
+  // ── [SSRF] a bad npi / state charclass + a lastName VALUE rides ENCODED. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cms_revoked_providers", { npi: "12345" }, sam));
+    ok("55e4-revoked-ssrf npi '12345' (not 10 digits) ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch) ⇒ widen the validation ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  await withFetch(cmsSupMock({ found: 6, data: [cmsRevRow()] }), async (calls) => {
+    await runTool("cms_revoked_providers", { lastName: "O'Neill-Smith" }, sam);
+    const su = cmsSupStatsUrl(calls), du = cmsSupDataUrl(calls);
+    ok("55e4-revoked-ssrf lastName \"O'Neill-Smith\" rides ENCODED via URLSearchParams (filter%5BLAST_NAME%5D=O%27Neill-Smith) on BOTH the stats + data URLs, host-pinned to data.cms.gov, with no raw breakout ⇒ hand-concatenate the filter ⇒ RED",
+      su.includes("filter%5BLAST_NAME%5D=O%27Neill-Smith") && du.includes("filter%5BLAST_NAME%5D=O%27Neill-Smith") && new URL(du).hostname === "data.cms.gov", JSON.stringify({ data: du }));
+  });
+
+  // ── [parity] cms-supplier re-exports the shared coerce.num / coerce.str (NO fork). ──
+  ok("55e4-parity cms-supplier.num === coerce.num AND str === coerce.str (one shared audited impl — NO local num/str fork)", cmsSupNum === coerceNum && cmsSupStr === coerceStr, "cms-supplier coerce diverged from coerce.js");
+  // ── [parity] the exported name helpers are the honest mappings (direct-unit). ──
+  ok("55e4-parity (non-vacuity) joinSupplierName('APRIA','')==='APRIA'; ('Saddhra','Rorie')==='Saddhra, Rorie'; ('','Rorie')==='Rorie'; ('','')===null AND coalesceRevokedName('ORG','J','S')==='ORG'; ('','J','S')==='J S'; ('','','D')==='D'; ('','','')===null",
+    cmsSupJoinName("APRIA", "") === "APRIA" && cmsSupJoinName("Saddhra", "Rorie") === "Saddhra, Rorie" && cmsSupJoinName("", "Rorie") === "Rorie" && cmsSupJoinName("", "") === null && cmsSupCoalesceName("ORG", "J", "S") === "ORG" && cmsSupCoalesceName("", "J", "S") === "J S" && cmsSupCoalesceName("", "", "D") === "D" && cmsSupCoalesceName("", "", "") === null, "cms-supplier name helpers diverged");
+}
+
 // §55c: FRED (Federal Reserve Economic Data, api.stlouisfed.org/fred, ADR-0048,
 // Wave-4 source #2 — the MACRO-context lane AND the server's SECOND key-required
 // source). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names
@@ -19733,6 +19990,7 @@ async function main() {
   await testCmsProviderServices();
   await testCmsHospitalCompare();
   await testCmsFacilityDirectory();
+  await testCmsSupplier();
   await testFredHonesty();
   await testOpenfdaEnforcement();
   await testOpenfdaDeviceClearances();
