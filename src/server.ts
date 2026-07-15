@@ -59,6 +59,7 @@ import * as epaEnvirofacts from "./epa-envirofacts.js";
 import * as cmsUtilization from "./cms-utilization.js";
 import * as cmsHospital from "./cms-hospital.js";
 import * as cmsFacility from "./cms-facility.js";
+import * as cmsSupplier from "./cms-supplier.js";
 import * as fred from "./fred.js";
 import * as bea from "./bea.js";
 import * as gsaPerdiem from "./gsa-perdiem.js";
@@ -3639,6 +3640,88 @@ const CmsFacilityDirectoryInput = z.object({
     .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
 });
 
+// ─── CMS DMEPOS by Supplier (data.cms.gov data-API, ADR-0064) — KEYLESS ──
+// SAME host/endpoint/two-request-stats-count pattern as cms_medicare_provider_services.
+// REQUIRE npi OR state (the supplier table is never scanned unscoped). Filter VALUES
+// ride as URLSearchParams filter[Col]=Val (bracket key + value encoded — the SSRF guard).
+const CmsDmeposSuppliersInput = z
+  .object({
+    npi: z
+      .string()
+      .regex(/^\d{10}$/)
+      .optional()
+      .describe(
+        "A 10-digit supplier National Provider Identifier (→ Suplr_NPI), e.g. '1003000126'. Provide at least this OR `state`. Validated ^\\d{10}$.",
+      ),
+    state: z
+      .string()
+      .regex(/^[A-Za-z]{2}$/)
+      .optional()
+      .describe(
+        "A 2-letter US state/territory code (→ Suplr_Prvdr_State_Abrvtn), e.g. 'VA', 'CA'. Provide at least this OR `npi`. Validated ^[A-Za-z]{2}$.",
+      ),
+    size: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Max supplier rows to return (1–100, default 25). Offset-paginated."),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+  })
+  .refine((v) => v.npi !== undefined || v.state !== undefined, {
+    message: "Provide at least `npi` or `state` (an all-empty query would scan the entire DMEPOS supplier table and is refused).",
+    path: ["npi"],
+  });
+
+// ─── CMS Revoked Medicare Providers & Suppliers (data.cms.gov data-API, ADR-0064) ──
+// KEYLESS. A legally-published revocation/exclusion register (~7,059 rows) — the same
+// vetting class as the OFAC / SAM exclusion lists. ALL filters optional (small table —
+// pagination is fine unfiltered). SAME two-request stats-count P1 pattern.
+const CmsRevokedProvidersInput = z.object({
+  npi: z
+    .string()
+    .regex(/^\d{10}$/)
+    .optional()
+    .describe(
+      "An optional 10-digit National Provider Identifier (→ NPI), e.g. '1003000126'. Validated ^\\d{10}$.",
+    ),
+  state: z
+    .string()
+    .regex(/^[A-Za-z]{2}$/)
+    .optional()
+    .describe(
+      "An optional 2-letter US state/territory code (→ STATE_CD, EXACT match), e.g. 'FL', 'CA'. Validated ^[A-Za-z]{2}$.",
+    ),
+  lastName: z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z0-9 .,'-]+$/)
+    .optional()
+    .describe(
+      "An optional last-name filter (→ LAST_NAME, EXACT match). Allowed: letters/digits/space/. , ' - (≤100 chars).",
+    ),
+  size: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe("Max revocation rows to return (1–100, default 25). Offset-paginated."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+});
+
 // ─── FRED (Federal Reserve Economic Data) — the SECOND key-required source ──
 // ADR-0048. Macro context (GDP/CPI/rates/unemployment/PPI). REQUIRES a free
 // FRED_API_KEY; without it both tools throw an honest config error (the other 112
@@ -5733,6 +5816,32 @@ export const TOOLS: ToolDef[] = [
       "Look up Medicare/Medicaid-certified healthcare FACILITIES by type — nursing homes, home health agencies, hospices, or dialysis facilities — with their name, address, city, state, zip, and ownership (CMS provider-data, keyless; data.cms.gov datastore-query API, four datasets). A healthcare-facility directory / market-map lane that generalizes cms_hospital_compare beyond hospitals. Input: `facilityType` (REQUIRED enum — 'nursing_home' ~14,695 / 'home_health' ~12,460 / 'hospice' ~6,852 / 'dialysis' ~7,490; selects the dataset id via a constant map, the value never enters the URL path), optional `state` (2-letter, EXACT), `facilityName` (a name fragment, case-insensitive substring/contains match against the dataset's primary-name column), `size` (1–100, default 25), `offset`. Returns { facilities:[{ name, address, city, state, zip, facilityType, ownership }] } + honest _meta. ★HONESTY: totalAvailable is the response's EXACT top-level `count` for the filter set, NEVER the returned-rows length; offset/size pagination (hasMore = offset+returned < count). name/address/ownership column names DIFFER across the four datasets, so each is COALESCED over per-dataset candidates (name: provider_name/facility_name/legal_business_name; address: address/provider_address/address_line_1; ownership: ownership_type/type_of_ownership/profit_or_nonprofit) — a field absent in the chosen dataset is null (unknown), NEVER an empty string and NEVER fabricated. facilityType is echoed on each row. A genuine no-match ⇒ honest empty (returned:0); an invalid facilityType ⇒ invalid_input (blocked by the enum); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array body or one missing count/results ⇒ schema_drift. Filters are applied SERVER-SIDE (AND-combined) — nothing is silently dropped. This is a facility directory, NOT a clinical-quality or fitness determination. KEYLESS — no key is sent.",
     inputSchema: CmsFacilityDirectoryInput,
     handler: (input) => cmsFacility.facilityDirectory(input),
+  }),
+  // ━━━ CMS DMEPOS by Supplier — supply-side utilization (1) ━━━ ADR-0064
+  // KEYLESS (data.cms.gov /data-api/v1/dataset/{uuid}). ★Two requests: a stats count
+  // sub-query yields the EXACT per-filter total (P1 — found_rows), then the data slice
+  // (a bare JSON array). All filter VALUES ride via URLSearchParams (bracket key +
+  // value encoded — the SSRF guard). REQUIRE npi OR state (the supplier table is never
+  // scanned unscoped). The dataset UUID is a SPECIFIC ANNUAL VINTAGE (update yearly).
+  defineTool({
+    name: "cms_dmepos_suppliers",
+    description:
+      "Look up Medicare DMEPOS (Durable Medical Equipment, Devices & Supplies) SUPPLIERS — for a given supplier (NPI) or state, the supplier's identity plus aggregate Medicare figures: HCPCS codes billed, beneficiaries served, claims, services, and submitted / Medicare-allowed / Medicare-paid amounts (CMS 'Medicare DMEPOS — by Supplier', keyless; data.cms.gov data-API). The supply-side complement to cms_medicare_provider_services for healthcare-market / competitor / teaming due-diligence on equipment suppliers. Input: `npi` (10-digit) OR `state` (2-letter) — at least ONE is REQUIRED (an all-empty query is refused; the supplier table is never scanned unscoped); optional `size` (1–100, default 25), `offset`. Returns { suppliers:[{ npi, supplierName, credentials, entityType, city, state, zip, totalHcpcsCodes, totalBeneficiaries, totalClaims, totalServices, submittedCharges, medicareAllowed, medicarePayment }] } + honest _meta. ★HONESTY: totalAvailable is the EXACT count from a SEPARATE stats sub-query (…/data-viewer/stats → found_rows), NEVER the returned-rows length; if that count fails, totalAvailable is null + a disclosing note (never length-faked). offset/size pagination (hasMore = offset+returned < total). Aggregate/payment values are numeric-string → number|null (a genuine 0 stays 0, absent → null, never 0-faked); NPI/entityType/names are null-never-empty-string; supplierName joins Last_Name_Org + First_Name ('Last, First' for individuals, the org name alone for organizations). A genuine no-match ⇒ honest empty (returned:0); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array/non-JSON ⇒ schema_drift. These are public SUPPLIER-level AGGREGATE figures (no patient identifiers) for ONE annual vintage (disclosed in _meta) — a utilization snapshot, NOT a fraud/quality/fitness determination. KEYLESS — no key is sent.",
+    inputSchema: CmsDmeposSuppliersInput,
+    handler: (input) => cmsSupplier.dmeposSuppliers(input),
+  }),
+  // ━━━ CMS Revoked Medicare Providers & Suppliers — vetting/exclusion list (1) ━━━ ADR-0064
+  // KEYLESS (data.cms.gov /data-api/v1/dataset/{uuid}). A legally-published
+  // revocation/exclusion register (~7,059 rows) — the SAME vetting class as the OFAC /
+  // SAM exclusion lists already shipped (surfacing the names IS the point). ALL filters
+  // optional (small table — pagination is fine unfiltered). SAME two-request stats-count
+  // P1 pattern; filter VALUES ride via URLSearchParams (bracket key + value encoded).
+  defineTool({
+    name: "cms_revoked_providers",
+    description:
+      "Search CMS's PUBLIC 'Revoked Medicare Providers & Suppliers' list — the legally-published register of Medicare enrollment revocations, with the revoked provider/supplier's identity, provider type, revocation reason, effective date, and re-enrollment-bar expiration (CMS 'Revoked Providers and Suppliers', keyless; data.cms.gov data-API, ~7,059 rows). A vetting / due-diligence lane in the SAME class as the OFAC / SAM-exclusions lists — for screening a counterparty before teaming or subcontracting. Input (ALL optional — the ~7K-row list is safe to page unfiltered): `npi` (10-digit → NPI), `state` (2-letter → STATE_CD, exact), `lastName` (→ LAST_NAME, exact), `size` (1–100, default 25), `offset`. Returns { revocations:[{ enrollmentId, npi, name, state, providerType, revocationReason, revocationEffectiveDate, reenrollmentBarExpiration }] } + honest _meta (which notes this is CMS's public revocation/exclusion list — a due-diligence signal, NOT a current-eligibility, guilt, or fitness determination). ★HONESTY: totalAvailable is the EXACT count from a SEPARATE stats sub-query (…/data-viewer/stats → found_rows), NEVER the returned-rows length; if that count fails, totalAvailable is null + a disclosing note (never length-faked). offset/size pagination (hasMore = offset+returned < total). name coalesces ORG_NAME (organizations) else FIRST_NAME + LAST_NAME (individuals) — null if none, never a fabricated empty; NPI/reasons/dates are strings (null-never-empty-string). A genuine no-match ⇒ honest empty (returned:0); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array/non-JSON ⇒ schema_drift. KEYLESS — no key is sent.",
+    inputSchema: CmsRevokedProvidersInput,
+    handler: (input) => cmsSupplier.revokedProviders(input),
   }),
   // ━━━ FRED (Federal Reserve Economic Data) — macro context (2) ━━━ ADR-0048
   // ★The server's SECOND KEY-REQUIRED source: FRED has NO keyless tier, so WITHOUT
