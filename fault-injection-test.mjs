@@ -181,6 +181,7 @@ import { readFileSync as censusReadFile } from "node:fs";
 import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num as cbpNum } from "./dist/census-economic.js";
 import { triFacilities as epaTriFacilities, normalizeClosed as epaNormalizeClosed, num as epaNum, str as epaStr } from "./dist/epa-envirofacts.js";
 import { providerServices as cmsProviderServices, joinProviderName as cmsJoinName, num as cmsUtilNum, str as cmsUtilStr } from "./dist/cms-utilization.js";
+import { hospitalCompare as cmsHospitalCompare, emergencyBool as cmsEmergencyBool, num as cmsHospNum, str as cmsHospStr } from "./dist/cms-hospital.js";
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { enforcement as openfdaEnforcement, openfdaApiKey, buildSearch as openfdaBuildSearch, luceneQuote as openfdaQuote, OPENFDA_HOST } from "./dist/openfda.js";
 import { deviceClearances as openfdaDeviceClearances, buildDeviceSearch as openfdaBuildDeviceSearch } from "./dist/openfda-device.js";
@@ -16610,6 +16611,185 @@ async function testCmsProviderServices() {
     cmsJoinName("Saddhra", "Rorie") === "Saddhra, Rorie" && cmsJoinName("QUARLES PETROLEUM INC", "") === "QUARLES PETROLEUM INC" && cmsJoinName("", "Rorie") === "Rorie" && cmsJoinName("", "") === null && cmsJoinName(null, null) === null, "joinProviderName diverged");
 }
 
+// §55e3: CMS Hospital Compare "Hospital General Information" (data.cms.gov
+// /provider-data/api/1/datastore/query/{datasetId}, ADR-0062 — the healthcare-facility
+// directory lane; KEYLESS; the ONE-REQUEST top-level-count P1 + DKAN conditions[]
+// filter-value SSRF). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a
+// value + names the mutation that turns it RED:
+//   [P1]     response { count:96 } + a 2-row slice ⇒ totalAvailable 96 (NOT the slice
+//            length 2), hasMore; the single request carries conditions[0]=state VA.
+//   [P2]     results:[] ⇒ honest empty (returned:0); 400 ⇒ invalid_input; 503 ⇒
+//            upstream_unavailable; non-array / non-JSON / missing-count 200 ⇒ schema_drift.
+//   [P3]     hospital_overall_rating "4"→4; "Not Available"→null (NOT 0); a real "5"
+//            preserved; emergency_services "Yes"→true / "No"→false / "" → null.
+//   [input]  all-empty (no state/facilityName) ⇒ invalid_input, 0 fetch; hospitalType-only too.
+//   [SSRF]   state regex re-guard; a facilityName VALUE rides ENCODED via URLSearchParams
+//            (space→+, &→%26, bracket key→%5B/%5D); fixed-host assert.
+const CMS_HOSP_RE = /data\.cms\.gov\/provider-data\/api\/1\/datastore\/query\//;
+const isCmsHosp = (u) => CMS_HOSP_RE.test(u);
+const cmsHospUrl = (calls) => calls.find((x) => isCmsHosp(x.url))?.url;
+// A datastore-query mock: `count` is the top-level total; `results` is the slice
+// array; `status` forces an HTTP status for fault cases; `body` overrides the whole
+// JSON (for the missing-count / non-array case).
+const cmsHospMock = ({ count = 96, results = [], status = 200, body } = {}) => (u) => {
+  if (isCmsHosp(u)) return mockResponse({ status, json: body ?? { count, results, schema: {}, query: {} } });
+  return failClosed()();
+};
+// A live-shaped hospital row (all STRING fields, as the DKAN datastore returns).
+const cmsHosp = (over = {}) => ({
+  facility_id: "490002",
+  facility_name: "RUSSELL COUNTY HOSPITAL",
+  address: "58 CARROLL STREET",
+  citytown: "LEBANON",
+  state: "VA",
+  zip_code: "24266",
+  countyparish: "RUSSELL",
+  telephone_number: "(276) 883-8000",
+  hospital_type: "Acute Care Hospitals",
+  hospital_ownership: "Voluntary non-profit - Private",
+  emergency_services: "Yes",
+  hospital_overall_rating: "4",
+  ...over,
+});
+// A 200 body whose .json() THROWS a SyntaxError (an HTML error page) — the non-JSON
+// drift path.
+const cmsHospNonJson = (u) => {
+  if (isCmsHosp(u)) return { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html/>" };
+  return failClosed()();
+};
+
+async function testCmsHospitalCompare() {
+  section("§55e3. CMS Hospital Compare — Hospital General Information (ADR-0062, KEYLESS — the healthcare-facility directory lane on the getJson GET port) — ONE-request top-level-count P1 (totalAvailable=count, never slice length) + honest empty vs 400/503/drift P2 + rating Not-Available→null NOT 0 + emergency Yes/No→bool P3 + state-OR-facilityName input-guard + DKAN conditions[] filter-value SSRF (charclass+encode, host-pin) (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── [P1] count 96 + a 2-row slice ⇒ totalAvailable 96 (the response count, NOT
+  //    the slice length 2), returned:2, hasMore, complete:false. ONE request to
+  //    data.cms.gov over https carrying conditions[0] = state VA. ──
+  await withFetch(cmsHospMock({ count: 96, results: [cmsHosp(), cmsHosp({ facility_id: "490007", facility_name: "CARILION" })] }), async (calls) => {
+    const r = await runTool("cms_hospital_compare", { state: "VA", size: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e3-P1 count 96 + 2-row slice ⇒ returned:2 but totalAvailable:96 (the EXACT top-level count, NOT the slice length 2), truncated:true, complete:false ⇒ set totalAvailable=hospitals.length ⇒ RED",
+      r.data.hospitals.length === 2 && m.returned === 2 && m.totalAvailable === 96 && m.truncated === true && m.complete === false, JSON.stringify({ n: r.data.hospitals.length, ta: m.totalAvailable, t: m.truncated }));
+    ok("55e3-P1 hasMore:true (offset 0 + returned 2 < 96), nextOffset:2, offset:0, limit:2 ⇒ compute hasMore off the slice alone ⇒ RED",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.pagination.offset === 0 && m.pagination.limit === 2, JSON.stringify(m.pagination));
+    ok("55e3-P1 ONE request to data.cms.gov over https carrying limit=2, offset=0 AND conditions[0] state VA with the exact operator '=' (encoded %3D) ⇒ drop/mangle the condition ⇒ RED",
+      cmsHospUrl(calls) !== undefined && new URL(cmsHospUrl(calls)).hostname === "data.cms.gov" && new URL(cmsHospUrl(calls)).protocol === "https:" && /limit=2/.test(cmsHospUrl(calls)) && /offset=0/.test(cmsHospUrl(calls)) && /conditions%5B0%5D%5Bproperty%5D=state/.test(cmsHospUrl(calls)) && /conditions%5B0%5D%5Bvalue%5D=VA/.test(cmsHospUrl(calls)) && /conditions%5B0%5D%5Boperator%5D=%3D/.test(cmsHospUrl(calls)), JSON.stringify({ url: cmsHospUrl(calls) }));
+    ok("55e3-P1 keylessMode:true (no key sent) + the dataset + filter + rating notes present",
+      m.keylessMode === true && m.notes.some((n) => /Hospital General Information|datastore/i.test(n)) && m.notes.some((n) => /SERVER-SIDE|contains/i.test(n)) && m.notes.some((n) => /Not Available|star/i.test(n)), JSON.stringify(m.notes.length));
+  });
+
+  // ── [P2] an empty results slice + count 0 ⇒ honest empty (returned:0,
+  //    totalAvailable:0, complete:true — a genuine no-match, NOT thrown, NOT drift). ──
+  await withFetch(cmsHospMock({ count: 0, results: [] }), async () => {
+    const r = await runTool("cms_hospital_compare", { state: "ZZ" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e3-P2 an empty results slice + count 0 ⇒ hospitals:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+      r.data.hospitals.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.hospitals.length, ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // ── [P2] a 400 on the request ⇒ invalid_input (never a fake empty). ──
+  await withFetch(cmsHospMock({ status: 400, body: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_hospital_compare", { state: "VA" }, sam));
+    ok("55e3-P2 400 ⇒ invalid_input THROW (a bad request is never an empty result) ⇒ swallow as empty ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2] a 503 ⇒ upstream_unavailable (a DOWN endpoint is NEVER a returned:0). ──
+  await withFetch(cmsHospMock({ status: 503, body: "" }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_hospital_compare", { state: "VA" }, sam));
+    ok("55e3-P2 503 ⇒ upstream_unavailable THROW (a down CMS endpoint is never an empty result) ⇒ read empty ⇒ RED",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P4] a 200 body whose `results` is not an array (an object) ⇒ schema_drift. ──
+  await withFetch(cmsHospMock({ body: { count: 5, results: { error: "not an array" } } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_hospital_compare", { state: "VA" }, sam));
+    ok("55e3-P4 a 200 body whose results is not a JSON array (an object) ⇒ schema_drift (the array contract broke; never a fabricated empty) ⇒ read {} as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P4] a 200 body MISSING `count` (or a non-number count) ⇒ schema_drift (the
+  //    total contract broke — never length-fake it from the rows). ──
+  await withFetch(cmsHospMock({ body: { results: [cmsHosp()] } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_hospital_compare", { state: "VA" }, sam));
+    ok("55e3-P4 a 200 body MISSING the top-level `count` ⇒ schema_drift (the total contract broke; never length-fake the total from results) ⇒ read results.length as the total ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2] a 200 body that is non-JSON (r.json() SyntaxError) ⇒ schema_drift. ──
+  await withFetch(cmsHospNonJson, async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_hospital_compare", { state: "VA" }, sam));
+    ok("55e3-P2 a 200 whose body is non-JSON (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P3] rating "4"→4; "Not Available"→null (NOT 0); a real "5" preserved;
+  //    emergency "Yes"→true, "No"→false, other ("")→null; IDs/names stay strings. ──
+  await withFetch(cmsHospMock({ count: 3, results: [
+    cmsHosp({ hospital_overall_rating: "4", emergency_services: "Yes" }),
+    cmsHosp({ hospital_overall_rating: "Not Available", emergency_services: "No" }),
+    cmsHosp({ hospital_overall_rating: "5", emergency_services: "" }),
+  ] }), async () => {
+    const r = await runTool("cms_hospital_compare", { state: "VA", size: 3 }, sam);
+    const [a, b, c] = r.data.hospitals;
+    ok("55e3-P3 hospital_overall_rating '4' ⇒ 4 (number) AND a real '5' ⇒ 5 (preserved) ⇒ pass the raw string through ⇒ RED",
+      a.overallRating === 4 && c.overallRating === 5, JSON.stringify({ a: a.overallRating, c: c.overallRating }));
+    ok("55e3-P3 'Not Available' rating ⇒ overallRating:null (NEVER 0 — the data-absence-as-zero forbidden class) ⇒ Number('Not Available')||0 ⇒ RED",
+      b.overallRating === null, JSON.stringify({ b: b.overallRating }));
+    ok("55e3-P3 emergency_services 'Yes'⇒true, 'No'⇒false, ''⇒null (NEVER a fabricated false) ⇒ default '' to false ⇒ RED",
+      a.emergencyServices === true && b.emergencyServices === false && c.emergencyServices === null, JSON.stringify({ a: a.emergencyServices, b: b.emergencyServices, c: c.emergencyServices }));
+    ok("55e3-P3 facilityId is a STRING (leading-zero structure survives) not a number", typeof a.facilityId === "string" && a.facilityId === "490002", JSON.stringify(a.facilityId));
+  });
+
+  // ── [input-guard] an all-empty query (no state, no facilityName) ⇒ invalid_input,
+  //    0 fetch (never scan the whole ~5,432-hospital table). ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cms_hospital_compare", { size: 10 }, sam));
+    ok("55e3-input an all-empty query (no state/facilityName) ⇒ invalid_input, 0 fetch (never scan the entire ~5,432-hospital table) ⇒ allow an unscoped scan ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // A hospitalType-ONLY query is likewise refused (state OR facilityName is required).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cms_hospital_compare", { hospitalType: "Acute" }, sam));
+    ok("55e3-input a hospitalType-ONLY query ⇒ invalid_input, 0 fetch (that alone can't scope; state OR facilityName is required) ⇒ let hospitalType alone through ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── [SSRF] a bad state charclass ⇒ the re-guard rejects PRE-fetch (invalid_input,
+  //    0 fetch — a value never touches the fixed host). ──
+  for (const [args, label] of [
+    [{ state: "ABC" }, "state 'ABC' (3 letters)"],
+    [{ state: "V1" }, "state 'V1' (a digit)"],
+    [{ state: "VA", facilityName: "children$" }, "facilityName 'children$' (non-allowed char)"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("cms_hospital_compare", args, sam));
+      ok(`55e3-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch) ⇒ widen the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ── [SSRF] a facilityName VALUE with a space / '&' rides ENCODED via URLSearchParams
+  //    (space→'+', &→%26, bracket key→%5B/%5D, contains operator) — so it can never
+  //    break out into the path or inject a parameter. Host-pinned to data.cms.gov. ──
+  await withFetch(cmsHospMock({ count: 1, results: [cmsHosp()] }), async (calls) => {
+    await runTool("cms_hospital_compare", { facilityName: "Johnson & Children" }, sam);
+    const u = cmsHospUrl(calls);
+    ok("55e3-ssrf facilityName 'Johnson & Children' rides ENCODED via URLSearchParams (conditions%5B…%5D%5Bvalue%5D=Johnson+%26+Children) with the contains operator, host-pinned to data.cms.gov, with no raw space/'&' ⇒ hand-concatenate the condition (raw space/& in the URL) ⇒ RED",
+      u.includes("%5Bvalue%5D=Johnson+%26+Children") && /%5Boperator%5D=contains/.test(u) && !/ /.test(u) && new URL(u).hostname === "data.cms.gov", JSON.stringify({ url: u }));
+  });
+
+  // ── [parity] cms-hospital re-exports the shared coerce.num / coerce.str
+  //    (null-never-0 / null-never-empty-string) — NO local fork. ──
+  ok("55e3-parity cms-hospital.num === coerce.num AND str === coerce.str (one shared audited impl — NO local num/str fork)", cmsHospNum === coerceNum && cmsHospStr === coerceStr, "cms-hospital coerce diverged from coerce.js");
+  // ── [parity] the exported emergencyBool is the honest mapping (direct-unit). ──
+  ok("55e3-parity (non-vacuity) emergencyBool('Yes')===true; ('No')===false; ('yes')===true; ('')===null; (null)===null; ('Maybe')===null",
+    cmsEmergencyBool("Yes") === true && cmsEmergencyBool("No") === false && cmsEmergencyBool("yes") === true && cmsEmergencyBool("") === null && cmsEmergencyBool(null) === null && cmsEmergencyBool("Maybe") === null, "emergencyBool diverged");
+}
+
 // §55f: US DOL Data API v4 (apiprod.dol.gov, ADR-0053 — the labor-enforcement lane
 // with a DELIBERATE key split: dol_list_datasets KEYLESS + dol_get_dataset the 4th
 // REQUIRED key). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value +
@@ -19370,6 +19550,7 @@ async function main() {
   await testCensusBusinessPatterns();
   await testEpaTriFacilities();
   await testCmsProviderServices();
+  await testCmsHospitalCompare();
   await testFredHonesty();
   await testOpenfdaEnforcement();
   await testOpenfdaDeviceClearances();
