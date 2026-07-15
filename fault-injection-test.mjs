@@ -17825,8 +17825,8 @@ async function testApiKeyStatus() {
     );
     ok("keys-A optionalMissing (all unset) has the 6 optional envVars", r0.optionalMissing.length === 6, JSON.stringify(r0.optionalMissing));
     ok(
-      "keys-A DOL_API_KEY is present + REQUIRED (required:true) with the dol.gov/developer signup URL, and its note discloses the catalog-keyless split",
-      (() => { const d = r0.keys.find((k) => k.envVar === "DOL_API_KEY"); return d && d.required === true && /dol\.gov\/developer/.test(d.signupUrl) && r0.requiredMissing.includes("DOL_API_KEY") && !r0.optionalMissing.includes("DOL_API_KEY") && /keyless/i.test(d.note) && /dol_list_datasets/.test(d.note); })(),
+      "keys-A DOL_API_KEY is present + REQUIRED (required:true) with a LIVE dataportal.dol.gov signup URL (not the dead dol.gov/developer 404), and its note discloses the catalog-keyless split",
+      (() => { const d = r0.keys.find((k) => k.envVar === "DOL_API_KEY"); return d && d.required === true && /dataportal\.dol\.gov/.test(d.signupUrl) && !/dol\.gov\/developer/.test(d.signupUrl) && r0.requiredMissing.includes("DOL_API_KEY") && !r0.optionalMissing.includes("DOL_API_KEY") && /keyless/i.test(d.note) && /dol_list_datasets/.test(d.note); })(),
       JSON.stringify(r0.keys.find((k) => k.envVar === "DOL_API_KEY")),
     );
     ok("keys-A LDA_API_KEY is present + OPTIONAL (required:false) with the register signup URL", (() => { const l = r0.keys.find((k) => k.envVar === "LDA_API_KEY"); return l && l.required === false && /lda\.senate\.gov\/api\/register/.test(l.signupUrl) && r0.optionalMissing.includes("LDA_API_KEY") && !r0.requiredMissing.includes("LDA_API_KEY"); })(), JSON.stringify(r0.keys.find((k) => k.envVar === "LDA_API_KEY")));

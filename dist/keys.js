@@ -106,7 +106,7 @@ export const KEY_REGISTRY = [
             "US DOL enforcement data (dol_get_dataset; dol_list_datasets is keyless)",
         ],
         required: true,
-        signupUrl: "https://dol.gov/developer",
+        signupUrl: "https://dataportal.dol.gov/registration",
         unlocks: "the dol_get_dataset tool (dataset records need a free key; dol_list_datasets works keyless)",
         note: "The DOL data endpoint needs a free key; the dataset CATALOG (dol_list_datasets) and agency list are keyless.",
     },
