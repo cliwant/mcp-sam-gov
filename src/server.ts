@@ -73,6 +73,7 @@ import * as usitc from "./usitc.js";
 import * as openfda from "./openfda.js";
 import * as openfdaDevice from "./openfda-device.js";
 import * as nhtsa from "./nhtsa.js";
+import * as cpsc from "./cpsc.js";
 import { fetchAttachmentText } from "./attachments.js";
 import * as keys from "./keys.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
@@ -3649,6 +3650,44 @@ const NhtsaVehicleInput = z.object({
     .describe("4-digit model year (required), e.g. '2020'. Validated ^\\d{4}$."),
 });
 
+// ─── CPSC consumer-product recalls (www.saferproducts.gov) — KEYLESS goods/import vetting ──
+// ADR-0058. One tool. NO API key at all. The response is a bare JSON ARRAY with no
+// total-count field / no pagination (totalAvailable = the returned count). All filters
+// optional; with NO filter the tool defaults RecallDateStart to ~90 days ago (disclosed)
+// rather than fetch the whole dataset. dates are ^\d{4}-\d{2}-\d{2}$; recallNumber is
+// letters/digits/hyphen only (SSRF/injection guard).
+const CpscRecallsInput = z.object({
+  dateStart: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .describe(
+      "Recall date range START (optional), YYYY-MM-DD, e.g. '2025-01-01' (→ RecallDateStart). Validated ^\\d{4}-\\d{2}-\\d{2}$.",
+    ),
+  dateEnd: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .describe(
+      "Recall date range END (optional), YYYY-MM-DD, e.g. '2025-01-31' (→ RecallDateEnd). Validated ^\\d{4}-\\d{2}-\\d{2}$.",
+    ),
+  productName: z
+    .string()
+    .optional()
+    .describe("Product name substring filter (optional), e.g. 'helmet' (→ ProductName)."),
+  manufacturer: z
+    .string()
+    .optional()
+    .describe("Manufacturer name substring filter (optional) (→ Manufacturer)."),
+  recallNumber: z
+    .string()
+    .regex(/^[A-Za-z0-9-]+$/)
+    .optional()
+    .describe(
+      "A specific CPSC recall number (optional), e.g. '25088' (→ RecallNumber). Letters/digits/hyphen only (^[A-Za-z0-9-]+$).",
+    ),
+});
+
 // ─── BEA Regional Economic Accounts (apps.bea.gov) — the THIRD key-required source ──
 // ADR-0051. County/state/MSA GDP-by-industry (CAGDP2/SAGDP2N) + personal income
 // (CAINC1/SAINC1) — the regional/sub-national place-of-performance lane. REQUIRES a
@@ -5459,6 +5498,20 @@ export const TOOLS: ToolDef[] = [
       "Look up NHTSA consumer COMPLAINTS for a specific vehicle — owner-filed safety complaints with the affected component, crash/fire flags, injury/death counts, and incident/filing dates (NHTSA /complaints/complaintsByVehicle; api.nhtsa.gov). KEYLESS — no API key is required or accepted. Input: `make` (required, e.g. 'honda'), `model` (required, e.g. 'accord'), `modelYear` (required, 4-digit, e.g. '2020'). Returns { complaints:[{ odiNumber, manufacturer, component, summary, crash, fire, numberOfInjuries, numberOfDeaths, dateOfIncident, dateComplaintFiled }] } + honest _meta. ★PRIVACY: the NHTSA complaint VIN (an individual-vehicle identifier) is INTENTIONALLY EXCLUDED from the output — the B2G signal is the manufacturer/component/crash/fire/injury/death safety history, not the VIN. HONESTY: totalAvailable is NHTSA's EXACT count and NHTSA returns the COMPLETE set for the vehicle (no pagination) ⇒ complete:true; a no-match ⇒ an HONEST EMPTY (returned:0), NOT an error; crash/fire preserved as booleans (never a fabricated false); numberOfInjuries/numberOfDeaths via numeric coercion (a genuine 0 stays 0, NEVER null-for-0); dates are strings; a 4xx ⇒ invalid_input; a 5xx/timeout ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. Fixed host api.nhtsa.gov (SSRF-guarded); make/model are letters/digits/space/hyphen only and modelYear is ^\\d{4}$.",
     inputSchema: NhtsaVehicleInput,
     handler: (input) => nhtsa.complaints(input),
+  }),
+  // ━━━ CPSC consumer-product recalls (www.saferproducts.gov) — goods/import vetting (1) ━━━ ADR-0058
+  // ★KEYLESS — no API key at all (no parameter, no header). The third leg of the
+  // cross-agency product-safety family alongside NHTSA (vehicles) and openFDA
+  // (medical). The response is a bare JSON ARRAY with NO total-count field and NO
+  // pagination ⇒ totalAvailable = the returned count, complete:true. All filters are
+  // optional; with NO filter the tool bounds results to a ~90-day default window
+  // (disclosed) rather than silently fetch the entire dataset.
+  defineTool({
+    name: "cpsc_recalls",
+    description:
+      "Look up U.S. CPSC consumer-product RECALLS — the recall title, hazard description, remedy, affected products, manufacturers, retailers, injuries, and country of manufacture (CPSC SaferProducts /RestWebServices/Recall; www.saferproducts.gov). The consumer-goods / import product-safety lane alongside nhtsa_recalls (vehicles) and openfda (medical). KEYLESS — no API key is required or accepted. Inputs (ALL optional): `dateStart`/`dateEnd` (YYYY-MM-DD recall date range), `productName` (substring), `manufacturer` (substring), `recallNumber` (a specific CPSC recall number). Returns { recalls:[{ recallNumber, recallDate, title, description, url, products:[names], numberOfUnits, manufacturers:[names], retailers:[names], hazards:[descriptions], remedies:[descriptions], injuries:[names], manufacturerCountries:[names] }] } + honest _meta. HONESTY: the CPSC response is a bare array with NO count field and NO pagination — it returns the COMPLETE matching set, so totalAvailable = the number of returned recalls and complete:true (never a fabricated total). ★With NO filter given, results are bounded to a DEFAULT ~90-day recent window (RecallDateStart, disclosed in _meta.notes) rather than a silent whole-dataset fetch. An empty result ⇒ an HONEST EMPTY (returned:0), NOT an error; a 4xx ⇒ invalid_input; a 5xx/timeout ⇒ THROWS; a 200 non-JSON OR a non-array body ⇒ schema_drift. Nested arrays are flattened to name/description strings (an empty {} object is skipped, never fabricated); NumberOfUnits is free text kept as a string; dates are strings; every scalar is null-never-empty-string. Fixed host www.saferproducts.gov (SSRF-guarded); dates are ^\\d{4}-\\d{2}-\\d{2}$ and recallNumber is letters/digits/hyphen only.",
+    inputSchema: CpscRecallsInput,
+    handler: (input) => cpsc.recalls(input),
   }),
   // ━━━ BEA Regional Economic Accounts (apps.bea.gov) — regional GDP/income (1) ━━━ ADR-0051
   // ★The server's THIRD KEY-REQUIRED source: the BEA Data API has NO keyless tier, so
