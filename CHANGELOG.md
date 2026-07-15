@@ -5,6 +5,49 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-07-15 (Wave 4 sources + always-on resilience + key self-service — 111 → 115 tools)
+
+Additive minor release. Every tool from 1.0.0 is unchanged and byte-identical; this adds 4 tools, turns the snapshot backstop on by default, and lands two truthfulness fixes found in a pre-release review sweep.
+
+### Added — new sources (+4 tools, 31 → 33 sources)
+
+- **US Census — County Business Patterns** (`census_business_patterns`): market
+  sizing by establishments / employment / annual payroll across NAICS × geography.
+  The Census Data API has no keyless tier, so this is a **key-required** source —
+  it throws an honest `invalid_input` (naming `CENSUS_API_KEY`) when no key is set.
+  Census confidentiality sentinels (large negatives) map to `null`, never a
+  negative or a fake `0`.
+- **FRED — macroeconomic series** (`fred_search_series`, `fred_series_observations`):
+  GDP / CPI / rates / unemployment and the rest of the St. Louis Fed catalog for
+  bid-escalation and market-timing context. Also **key-required** (`FRED_API_KEY`);
+  missing observations (`"."`) map to `null`.
+- **API-key self-service** (`api_key_status`): a keyless tool that reports, for all
+  7 keys the server can use, which env var each source reads, whether it is
+  **required** or merely **optional** (raises a limit), the free signup URL, and
+  whether it is **currently set** — as a boolean only; a key's value is never read
+  into the output.
+
+### Added — reliability
+
+- **Snapshot backstop is now ON by default.** If a live source is unreachable, the
+  server transparently serves the last-good hosted public-data snapshot with full
+  provenance disclosure (`_meta.dataPath: "snapshot"` + `asOf`), never presented as
+  live. Set `SAMGOV_SNAPSHOT_BASE_URL=off` to disable. A weekly (and on-demand)
+  GitHub Action refreshes the snapshots from a clean egress. Rate limits are always
+  honored — a 429/Retry-After is never routed around a mirror.
+- **`.env` auto-loading**: keys can be set once in a project `.env` (real
+  environment variables always win); no `.env` present ⇒ byte-identical startup.
+
+### Fixed — truthfulness
+
+- `api_key_status` listed the wrong sources for `DATA_GOV_API_KEY` (advertised
+  NPPES/CMS, which are keyless on their own hosts, and a non-existent GSA per-diem
+  tool; omitted Congress.gov and GovInfo). Corrected to the real keyed consumers.
+- `census_business_patterns` misclassified an **invalid** `CENSUS_API_KEY` as a
+  transient outage (`upstream_unavailable`) instead of a config error. The Census
+  API 302-redirects a bad key to its "Missing Key" page; the tool now detects that
+  via `redirect:"manual"` and throws an honest `invalid_input` naming the key.
+
 ## [1.0.0] — 2026-07-14 (first npm release since 0.3.0 — 111 tools, resilience & a truthfulness overhaul)
 
 The largest release yet and the **first npm publish since 0.3.0** — it consolidates the in-repo 0.4.0–0.7.0 iterations and adds a major expansion: **52 → 111 tools across 31 keyless federal data sources**, a codebase-wide honesty dogfooding pass, and a resilience initiative for public-data availability.
