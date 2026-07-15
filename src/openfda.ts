@@ -95,6 +95,14 @@ const KEYED_NOTE =
   "OPENFDA_API_KEY is set — it rides ONLY the &api_key= query parameter to api.fda.gov (openFDA has no header option), raising the rate limit. Its value is NEVER logged, echoed, or placed in this response.";
 const NO_FILTER_NOTE =
   "No structured filters were applied — this is an unscoped scan of the WHOLE recall/enforcement category. Add firm / product / reason / classification / status / state to scope the result set.";
+// dogfooding 2026-07-16: `category` defaults to 'drug'. A DEVICE- or FOOD-intent
+// caller who omits it silently searches the DRUG dataset (a separate openFDA index
+// with its own, much smaller total — e.g. "pacemaker" returns 1 drug recall vs 197
+// device recalls). The default is convenient but load-bearing, so when it is TAKEN
+// (not explicitly chosen) we say so and point to the alternatives. `category` is
+// also echoed in filtersApplied so the drug/device/food choice is never invisible.
+const CATEGORY_DEFAULT_NOTE =
+  "category was NOT specified and DEFAULTED to 'drug' — this searched the DRUG recall dataset (/drug/enforcement) ONLY. For medical DEVICES pass category:'device'; for FOOD pass category:'food'. Each category is a SEPARATE openFDA dataset with its own total, so a device/food-intent query left on the default MISSES all of those recalls.";
 
 // ─── The OPTIONAL key seam (value NEVER leaked past the &api_key= param) ──
 /** Read OPENFDA_API_KEY from env; trim; return the value or undefined (unset/blank). */
@@ -322,6 +330,14 @@ export async function enforcement(
   if (args.classification !== undefined) filtersApplied.push("classification");
   if (args.status !== undefined) filtersApplied.push("status");
   if (args.state !== undefined) filtersApplied.push("state");
+  // NO_FILTER_NOTE gates on the STRUCTURED filters only — capture that BEFORE the
+  // always-present category selector is appended below.
+  const hasStructuredFilter = filtersApplied.length > 0;
+  // The category (drug|device|food) is the ENDPOINT selector — always applied and
+  // consequential — so echo it in filtersApplied to make the choice VISIBLE (a
+  // device query left on the drug default must not look identical to a device query).
+  const categoryDefaulted = args.category === undefined;
+  filtersApplied.push(`category:${category}`);
 
   const params = new URLSearchParams();
   if (search !== "") params.set("search", search);
@@ -342,7 +358,7 @@ export async function enforcement(
     const { code, message } = await readOpenfdaError(res);
     if (code === "NOT_FOUND") {
       // Honest empty — NOT thrown, NOT not_found (the openFDA no-match idiom).
-      return emptyResult(category, limit, skip, filtersApplied, key !== undefined);
+      return emptyResult(category, limit, skip, filtersApplied, key !== undefined, categoryDefaulted);
     }
     // A non-NOT_FOUND 404 ⇒ the shared not_found taxonomy (never a fake-empty).
     throw new ToolErrorCarrier({
@@ -424,7 +440,8 @@ export async function enforcement(
   const nextOffset = hasMore ? skip + returned : null;
 
   const notes: string[] = [NOT_DETERMINATION_NOTE, keyNote(key !== undefined)];
-  if (filtersApplied.length === 0) notes.push(NO_FILTER_NOTE);
+  if (!hasStructuredFilter) notes.push(NO_FILTER_NOTE);
+  if (categoryDefaulted) notes.push(CATEGORY_DEFAULT_NOTE);
 
   return withMeta(
     { recalls },
@@ -457,7 +474,17 @@ function emptyResult(
   skip: number,
   filtersApplied: string[],
   hasKey: boolean,
+  categoryDefaulted: boolean,
 ): MetaBundle {
+  const notes = [
+    "No recall/enforcement records matched this query (openFDA returned HTTP 404 NOT_FOUND — the source's honest no-match). This is an exact empty, not an error.",
+    NOT_DETERMINATION_NOTE,
+    keyNote(hasKey),
+  ];
+  // A defaulted category on an EMPTY result is the most misleading case — a device
+  // analyst reads "0 recalls" as "clean" when they actually searched the wrong
+  // dataset. Surface the default + the alternatives.
+  if (categoryDefaulted) notes.push(CATEGORY_DEFAULT_NOTE);
   return withMeta(
     { recalls: [] as OpenfdaRecall[] },
     {
@@ -471,11 +498,7 @@ function emptyResult(
       filtersDropped: [],
       fieldsUnavailable: [],
       pagination: { offset: skip, limit, hasMore: false, nextOffset: null },
-      notes: [
-        "No recall/enforcement records matched this query (openFDA returned HTTP 404 NOT_FOUND — the source's honest no-match). This is an exact empty, not an error.",
-        NOT_DETERMINATION_NOTE,
-        keyNote(hasKey),
-      ],
+      notes,
     } satisfies Partial<ResponseMeta>,
   );
 }
