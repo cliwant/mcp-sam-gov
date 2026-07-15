@@ -62,6 +62,7 @@ import * as gsaPerdiem from "./gsa-perdiem.js";
 import * as dol from "./dol.js";
 import * as lda from "./lda.js";
 import * as courtlistener from "./courtlistener.js";
+import * as nonprofit from "./nonprofit.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
@@ -4003,6 +4004,48 @@ const CourtlistenerSearchOpinionsInput = z.object({
     .describe("Sort order (maps to order_by), default 'dateFiled desc' (most recent first). E.g. 'dateFiled asc', 'score desc'."),
 });
 
+// ─── US tax-exempt nonprofits (projects.propublica.org) — the nonprofit lane ──
+// ADR-0060. IRS Form 990 public records republished KEYLESS by ProPublica Nonprofit
+// Explorer (a non-profit newsroom) — NOT a .gov API (the IRS has no clean query
+// API). ★PROVENANCE disclosed in _meta.source + a note. KEYLESS (no key of any
+// kind). search: q/state[id]/ntee[id]/page (0-based); total_results is the REAL
+// total — never organizations.length. All VALUES ride URLSearchParams (incl. the
+// bracket keys); state/ntee charclass/range-guarded.
+const NonprofitSearchInput = z.object({
+  query: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Full-text query (maps to q) — an organization name or keyword, e.g. 'american red cross'. Matches across the org name/metadata."),
+  state: z
+    .string()
+    .regex(/^[A-Za-z]{2}$/)
+    .optional()
+    .describe("Filter by a 2-letter US state/territory code (maps to state[id]), e.g. 'VA'. Validated ^[A-Za-z]{2}$."),
+  ntee: z
+    .number()
+    .int()
+    .min(1)
+    .max(10)
+    .optional()
+    .describe("Filter by NTEE major category, an integer 1..10 (maps to ntee[id]) — the National Taxonomy of Exempt Entities top-level group (e.g. 1 Arts, 3 Environment, 8 Health)."),
+  page: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe("0-BASED page number (default 0). Page with cur_page+1 from _meta.notes / when _meta.pagination.hasMore."),
+});
+
+// nonprofit_financials — one org's Form 990 profile + financials by EIN. KEYLESS.
+// ein rides the URL PATH ⇒ digits-only ^\d{1,9}$. An unknown EIN (404) ⇒ not_found.
+const NonprofitFinancialsInput = z.object({
+  ein: z
+    .string()
+    .regex(/^\d{1,9}$/)
+    .describe("The organization's EIN (Employer Identification Number), 1..9 digits, e.g. '530196605' (American National Red Cross). Validated ^\\d{1,9}$; rides the URL path."),
+});
+
 // api_key_status takes no input — it is a pure status query over process.env.
 const ApiKeyStatusInput = z.object({});
 
@@ -5654,6 +5697,28 @@ export const TOOLS: ToolDef[] = [
       "Search US FEDERAL COURT OPINIONS (case law / litigation) via CourtListener (www.courtlistener.com/api/rest/v4/search, type=o). ★PROVENANCE: the DATA is US federal court PUBLIC RECORDS, but the API is CourtListener, run by the Free Law Project (a NON-PROFIT) — this is NOT a .gov API; CourtListener republishes these records KEYLESS because the .gov primary source (PACER) is PAYWALLED. KEYLESS (anonymous access works; an optional free COURTLISTENER_API_TOKEN only raises the rate limit; get one at https://www.courtlistener.com/help/api/rest/; call api_key_status to see every source's key requirement). All inputs optional: `query` (full-text → q), `court` (a court id, ^[a-z0-9]+$ — e.g. 'uscfc' US Court of Federal Claims for contract claims/bid protests, 'cafc' Federal Circuit for contract/patent appeals, 'scotus'), `dateFiledAfter`/`dateFiledBefore` (ISO ^\\d{4}-\\d{2}-\\d{2}$ → filed_after/filed_before), `natureOfSuit` (folded into the q query — no verified dedicated filter, disclosed in notes), `cursor` (opaque continuation — pass back _meta.nextCursor), `order` (→ order_by, default 'dateFiled desc'). Returns { opinions:[{ caseName, court, courtId, dateFiled, docketNumber, natureOfSuit, status, judge, citation, absoluteUrl }] } + honest _meta. HONESTY: totalAvailable is the API's REAL `count` (the total match count for the filter) — NOT the rows on this page; pagination is an OPAQUE CURSOR (offset/nextOffset are null/meaningless — pass _meta.nextCursor back as `cursor`; nextCursor:null/hasMore:false = last page). CourtListener v4 stops counting on deep cursor pages (count:null) ⇒ totalAvailable:null is DISCLOSED, never faked as results.length. dateFiled is a date STRING; citation may be an array/object ⇒ flattened to a safe string/string[] (never fabricated); judge/natureOfSuit/docketNumber are null when absent (never ''); absoluteUrl is the full https://www.courtlistener.com link. A genuine no-match (results:[]) ⇒ honest empty (returned:0); a 400 (bad param) ⇒ invalid_input surfacing the API's message; a 429 (unauth throttle) ⇒ rate_limited THROWS (Retry-After honored, never routed around); a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-array results / a count that is neither a number nor null ⇒ schema_drift; an off-host `next` is REFUSED (SSRF). The optional token rides ONLY in the Authorization: Token header (never the URL/_meta).",
     inputSchema: CourtlistenerSearchOpinionsInput,
     handler: (input) => courtlistener.searchOpinions(input),
+  }),
+  // ━━━ US tax-exempt nonprofits (projects.propublica.org) — the nonprofit lane (2) ━━━ ADR-0060
+  // Who a 501(c) org IS (EIN, NTEE, subsection, ruling date, status) + its Form 990
+  // FINANCIALS (revenue/expenses/assets/liabilities by year) — the nonprofit/grantee/
+  // subcontractor vetting signal no contract/spending/grant/lobbying source carries.
+  // ★PROVENANCE: IRS Form 990 public records republished KEYLESS by ProPublica Nonprofit
+  // Explorer (a non-profit newsroom), NOT a .gov API (the IRS has no clean query API).
+  // KEYLESS (no key). search total_results is the REAL total — never organizations.length;
+  // financials totalAvailable = filings.length (the complete set). Money via num (null-never-0).
+  defineTool({
+    name: "nonprofit_search",
+    description:
+      "Search US TAX-EXEMPT NONPROFITS (501(c) organizations) by IRS Form 990 data via ProPublica Nonprofit Explorer (projects.propublica.org/nonprofits/api/v2/search). ★PROVENANCE: the DATA is IRS Form 990 filings — FEDERAL tax-exempt PUBLIC RECORDS — but the API is ProPublica Nonprofit Explorer, run by ProPublica (a NON-PROFIT newsroom) — this is NOT a .gov API; ProPublica republishes these records KEYLESS because the IRS itself has no clean query API (only bulk downloads / a web UI). KEYLESS (no key of any kind). All inputs optional: `query` (full-text org name/keyword → q), `state` (2-letter code → state[id], ^[A-Za-z]{2}$), `ntee` (NTEE major category, integer 1..10 → ntee[id]), `page` (0-BASED, default 0). Returns { organizations:[{ ein, name, city, state, nteeCode, subsectionCode }] } + honest _meta. HONESTY: totalAvailable is the API's REAL total_results (the total match count for the query) — NOT the organizations on this page; pagination is page-based and 0-INDEXED (pass page=cur_page+1 when hasMore). ein/nteeCode/subsectionCode are strings (never num-coerced). A genuine no-match (organizations:[]) ⇒ honest empty (returned:0, complete:true); a 4xx ⇒ invalid_input; a 429 ⇒ rate_limited THROWS (Retry-After honored, never routed around); a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-array organizations / non-number total_results ⇒ schema_drift. Data is IRS Form 990 data via ProPublica Nonprofit Explorer, disclosed in _meta.source and a note.",
+    inputSchema: NonprofitSearchInput,
+    handler: (input) => nonprofit.search(input),
+  }),
+  defineTool({
+    name: "nonprofit_financials",
+    description:
+      "Fetch ONE US tax-exempt nonprofit's IRS Form 990 profile + FINANCIALS by EIN via ProPublica Nonprofit Explorer (projects.propublica.org/nonprofits/api/v2/organizations/{ein}.json). ★PROVENANCE: the DATA is IRS Form 990 filings (federal tax-exempt public records) but the API is ProPublica Nonprofit Explorer, run by ProPublica (a NON-PROFIT newsroom) — NOT a .gov API; ProPublica republishes these records KEYLESS because the IRS has no clean query API. KEYLESS (no key). Input: `ein` (required — the Employer Identification Number, 1..9 digits ^\\d{1,9}$, e.g. '530196605' American National Red Cross; rides the URL path). Returns { organization:{ ein, name, address, city, state, zip, nteeCode, subsectionCode, rulingDate, statusCode }, filings:[{ taxYear, formType, revenueUsd, expensesUsd, assetsUsd, liabilitiesUsd, pdfUrl }] } + honest _meta. HONESTY: the four Form 990 figures (revenueUsd/expensesUsd/assetsUsd/liabilitiesUsd, from totrevenue/totfuncexpns/totassetsend/totliabend) ride null-never-0 coercion — a genuine reported 0 stays 0, an absent figure ⇒ null (NEVER 0-faked); ein/codes are strings; rulingDate is a date string. totalAvailable = filings.length (the COMPLETE Form 990 filing set from the one detail document — no pagination). An unknown EIN (HTTP 404) ⇒ not_found (NEVER a fabricated empty org); a 4xx ⇒ invalid_input; a 429 ⇒ rate_limited THROWS; a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-object organization / non-array filings_with_data ⇒ schema_drift. Data is IRS Form 990 data via ProPublica Nonprofit Explorer, disclosed in _meta.source and a note.",
+    inputSchema: NonprofitFinancialsInput,
+    handler: (input) => nonprofit.financials(input),
   }),
   // ━━━ Self-service key discovery (1) ━━━
   // KEYLESS. A local status query — reads process.env (+ any .env auto-loaded at
