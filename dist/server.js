@@ -47,6 +47,7 @@ import * as census from "./census.js";
 import * as censusEconomic from "./census-economic.js";
 import * as epaEnvirofacts from "./epa-envirofacts.js";
 import * as cmsUtilization from "./cms-utilization.js";
+import * as cmsHospital from "./cms-hospital.js";
 import * as fred from "./fred.js";
 import * as bea from "./bea.js";
 import * as gsaPerdiem from "./gsa-perdiem.js";
@@ -2922,6 +2923,50 @@ const CmsMedicareProviderServicesInput = z
     message: "Provide at least `npi` or `state` (an all-empty query would scan the entire 9.78M-row Medicare utilization table and is refused; providerType/hcpcsCode alone are not enough to scope).",
     path: ["npi"],
 });
+// ─── CMS Hospital Compare "Hospital General Information" (ADR-0062) — keyless ──
+// data.cms.gov /provider-data/api/1/datastore/query/{datasetId}/0. A SINGLE request:
+// the response's top-level `count` is the EXACT per-filter total (P1). Filters ride
+// as DKAN conditions[] triples via URLSearchParams (bracket key + value encoded).
+// REQUIRE state OR facilityName (the ~5,432-hospital table is never scanned unscoped).
+const CmsHospitalCompareInput = z
+    .object({
+    state: z
+        .string()
+        .regex(/^[A-Za-z]{2}$/)
+        .optional()
+        .describe("A 2-letter US state/territory code (→ state, EXACT match), e.g. 'VA', 'CA'. Provide at least this OR `facilityName`. Validated ^[A-Za-z]{2}$."),
+    facilityName: z
+        .string()
+        .min(1)
+        .max(100)
+        .regex(/^[A-Za-z0-9 &.,()/'-]+$/)
+        .optional()
+        .describe("A hospital-name fragment (→ facility_name, case-insensitive SUBSTRING/contains match), e.g. 'children'. Provide at least this OR `state`. Allowed: letters/digits/space/& . , ( ) / ' - (≤100 chars)."),
+    hospitalType: z
+        .string()
+        .min(1)
+        .max(100)
+        .regex(/^[A-Za-z0-9 &.,()/'-]+$/)
+        .optional()
+        .describe("An optional hospital-type filter (→ hospital_type, case-insensitive SUBSTRING/contains match), e.g. 'Acute', 'Critical Access'. Allowed: letters/digits/space/& . , ( ) / ' - (≤100 chars)."),
+    size: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Max hospital rows to return (1–100, default 25). Offset-paginated."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+})
+    .refine((v) => v.state !== undefined || v.facilityName !== undefined, {
+    message: "Provide at least `state` or `facilityName` (an all-empty query would scan the entire ~5,432-hospital table and is refused; hospitalType alone is not enough to scope).",
+    path: ["state"],
+});
 // ─── FRED (Federal Reserve Economic Data) — the SECOND key-required source ──
 // ADR-0048. Macro context (GDP/CPI/rates/unemployment/PPI). REQUIRES a free
 // FRED_API_KEY; without it both tools throw an honest config error (the other 112
@@ -4702,6 +4747,19 @@ export const TOOLS = [
         description: "Look up Medicare Part-B provider utilization — for a given provider (NPI) or state, the HCPCS services rendered, beneficiaries served, and submitted / Medicare-allowed / Medicare-paid amounts (CMS 'Medicare Physician & Other Practitioners — by Provider and Service', keyless; data.cms.gov data-API). The demand-side complement to nppes_lookup_provider (who providers ARE → what they BILL) for healthcare-market / competitor / teaming due-diligence. Input: `npi` (10-digit) OR `state` (2-letter) — at least ONE is REQUIRED (the table is 9.78M rows; an all-empty query is refused; providerType/hcpcsCode alone are NOT enough to scope); optional `providerType` (exact CMS specialty, e.g. 'Family Practice'), `hcpcsCode` (e.g. '97110', 'G0463'), `size` (1–100, default 25), `offset`. Returns { services:[{ npi, providerName, credentials, providerType, city, state, zip, hcpcsCode, hcpcsDescription, totalBeneficiaries, totalServices, avgSubmittedCharge, avgMedicareAllowed, avgMedicarePayment }] } + honest _meta. ★HONESTY: totalAvailable is the EXACT count from a SEPARATE stats sub-query (…/data-viewer/stats → found_rows, e.g. VA=278254), NEVER the returned-rows length; if that count fails, totalAvailable is null + a disclosing note (never length-faked). offset/size pagination (hasMore = offset+returned < total). Aggregate/payment values are numeric-string → number|null (a genuine 0 stays 0, absent → null, never 0-faked); NPI/HCPCS/names are null-never-empty-string. A genuine no-match ⇒ honest empty (returned:0); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array/non-JSON ⇒ schema_drift. These are public PROVIDER-level AGGREGATE figures (no patient identifiers) for ONE annual vintage (the dataset year is disclosed in _meta) — a utilization snapshot, NOT a fraud/quality/fitness determination. KEYLESS — no key is sent.",
         inputSchema: CmsMedicareProviderServicesInput,
         handler: (input) => cmsUtilization.providerServices(input),
+    }),
+    // ━━━ CMS Hospital Compare — Hospital General Information (1) ━━━ ADR-0062
+    // KEYLESS (data.cms.gov /provider-data/api/1/datastore/query/{datasetId}). A
+    // SINGLE request: the response's top-level `count` is the EXACT per-filter total
+    // (P1 — VA=96), never the slice length. Filters ride as DKAN conditions[] triples
+    // via URLSearchParams (bracket key + value encoded — the SSRF guard): state is an
+    // EXACT match, facilityName/hospitalType are case-insensitive substring matches,
+    // AND-combined server-side. REQUIRE state OR facilityName (never scanned unscoped).
+    defineTool({
+        name: "cms_hospital_compare",
+        description: "Look up Medicare-certified hospitals by US state and/or facility-name fragment — location, type, ownership, emergency-services flag, and CMS star rating (CMS Hospital Compare 'Hospital General Information', keyless; data.cms.gov provider-data datastore-query API, ~5,432 hospitals). A healthcare-facility directory / market-map lane (WHERE hospitals are and HOW CMS rates them). Input: `state` (2-letter, EXACT) OR `facilityName` (a name fragment, case-insensitive substring/contains match) — at least ONE is REQUIRED (an all-empty query is refused; hospitalType alone is NOT enough to scope); optional `hospitalType` (substring, e.g. 'Acute', 'Critical Access'), `size` (1–100, default 25), `offset`. Returns { hospitals:[{ facilityId, facilityName, address, city, state, zip, county, phone, hospitalType, ownership, emergencyServices, overallRating }] } + honest _meta. ★HONESTY: totalAvailable is the response's EXACT top-level `count` for the filter set (VA=96), NEVER the returned-rows length; offset/size pagination (hasMore = offset+returned < count). overallRating is CMS's 1–5 star rating as a number; 'Not Available'/blank/non-numeric ⇒ null (NEVER 0). emergencyServices normalizes 'Yes'⇒true / 'No'⇒false / else null (never a fabricated false). IDs/names/addresses are null-never-empty-string. A genuine no-match ⇒ honest empty (returned:0); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array body or one missing count/results ⇒ schema_drift. Filters are applied SERVER-SIDE (AND-combined) — nothing is silently dropped. This is a summary star rating, NOT a clinical-quality or fitness determination. KEYLESS — no key is sent.",
+        inputSchema: CmsHospitalCompareInput,
+        handler: (input) => cmsHospital.hospitalCompare(input),
     }),
     // ━━━ FRED (Federal Reserve Economic Data) — macro context (2) ━━━ ADR-0048
     // ★The server's SECOND KEY-REQUIRED source: FRED has NO keyless tier, so WITHOUT
