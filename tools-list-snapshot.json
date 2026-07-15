@@ -3599,6 +3599,10 @@
         },
         "limit": {
           "type": "number"
+        },
+        "offset": {
+          "type": "number",
+          "description": "Page offset into the result set (default 0)."
         }
       }
     }
