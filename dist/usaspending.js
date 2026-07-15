@@ -510,8 +510,11 @@ export async function searchAwardsByRecipient(args) {
 // ─── Subaward enumeration ─────────────────────────────────────────
 export async function searchSubawards(args) {
     const filters = buildFilters(args);
-    if (args.primeRecipientName) {
-        filters.recipient_search_text = [args.primeRecipientName];
+    // recipient_search_text on a subawards spending_by_award search matches the
+    // SUBAWARDEE name (live-verified 2026-07-16), so this param is subRecipientName —
+    // NOT a prime filter (the old `primeRecipientName` name was inverted).
+    if (args.subRecipientName) {
+        filters.recipient_search_text = [args.subRecipientName];
     }
     const limit = args.limit ?? 15;
     // A3 (spec §1.2, §3.2): the OLD code requested "Sub-Award NAICS", which is

@@ -247,7 +247,14 @@ const UsasRecipientAwardsInput = z.object({
 });
 
 const UsasSubawardsInput = z.object({
-  primeRecipientName: z.string().optional(),
+  // DRIFT/SEMANTICS FIX (dogfooding 2026-07-16): this filters the SUBAWARDEE name,
+  // NOT the prime. On spending_by_award{subawards:true} the only keyless recipient
+  // filter is `recipient_search_text`, which USAspending matches against the
+  // SUB-recipient (live-verified: recipient_search_text:["Leidos"] returns rows
+  // whose Sub-Awardee Name IS Leidos, under OTHER primes). The old name
+  // `primeRecipientName` promised the opposite. Renamed to `subRecipientName`; the
+  // #182 unknown-key guard makes the old name fail loud with the valid-key list.
+  subRecipientName: z.string().optional(),
   agency: z.string().optional(),
   naics: z.string().optional(),
   fiscalYear: z.number().int().min(2007).optional(),
@@ -4919,7 +4926,7 @@ export const TOOLS: ToolDef[] = [
   defineTool({
     name: "usas_search_subawards",
     description:
-      "Enumerate subcontracts on prime awards. Use for 'who teams with Leidos at DISA' or 'show small-business subs on Accenture's DHS contracts' — surfaces the prime/sub network for teaming-map artifacts.",
+      "Enumerate federal subawards (subcontracts), optionally filtered by SUBAWARDEE name. Use for 'where does Leidos appear as a SUBcontractor, and under which primes' — surfaces the prime/sub network for teaming-map artifacts. NOTE: subRecipientName matches the SUB-recipient, NOT the prime (the keyless spending_by_award subaward view has no prime-name filter); to see the subs UNDER a specific prime, resolve that prime's awards first (usas_search_awards → usas_get_award_detail) and read their sub network. Each row carries subRecipient (the subawardee), amount, actionDate, the prime award id, and the prime award's NAICS.",
     inputSchema: UsasSubawardsInput,
     handler: (input) => usas.searchSubawards(input),
   }),

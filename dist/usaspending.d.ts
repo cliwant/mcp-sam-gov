@@ -104,7 +104,7 @@ export declare function searchAwardsByRecipient(args: {
     totalRecords: number | null;
 }>>;
 export declare function searchSubawards(args: {
-    primeRecipientName?: string;
+    subRecipientName?: string;
     agency?: string;
     naics?: string;
     fiscalYear?: number;

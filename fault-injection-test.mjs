@@ -5233,7 +5233,7 @@ async function testUsasPaginationTruthfulness() {
       JSON.stringify({ pg: rec.pagination, notes: rec.notes }));
   });
   await withFetch(usasHandler({ page: awardRows(10), hasNext: true, count: { subcontracts: 500, subgrants: 0 } }), async () => {
-    const sub = finalize(await searchSubawards({ primeRecipientName: "ACME CO", limit: 10 }));
+    const sub = finalize(await searchSubawards({ subRecipientName: "ACME CO", limit: 10 }));
     ok("W3-7 usas_search_subawards ⇒ total(500)>limit(10) ⇒ hasMore+truncated true BUT pagination.nextOffset===null (NOT consumable — no offset input; revert awardPagination ⇒ nextOffset 10 ⇒ RED) + not-page-reachable note present",
       sub.pagination.nextOffset === null && sub.pagination.hasMore === true && sub.truncated === true &&
       sub.notes.some((n) => /NOT page-reachable/i.test(n) && /limit/.test(n)),
@@ -6462,6 +6462,30 @@ async function testSearchSubawardsMapping() {
       s0.naicsCode === "541512" && s0.naicsDescription === "COMPUTER SYSTEMS DESIGN SERVICES", JSON.stringify({ c: s0.naicsCode, d: s0.naicsDescription }));
     ok("36 count-honesty: totalAvailable = SUM of spending_by_award_count buckets (2,209,649) — the REAL uncapped total, NOT the 1 returned row",
       res.meta.totalAvailable === 2209649, JSON.stringify(res.meta.totalAvailable));
+  });
+
+  // SEMANTICS FIX (dogfooding 2026-07-16): the recipient filter param is
+  // `subRecipientName` and maps to `recipient_search_text`, which on a subawards
+  // search matches the SUBAWARDEE (live-verified). The old `primeRecipientName`
+  // name was inverted (promised prime, filtered sub). NON-VACUITY: passing
+  // subRecipientName MUST land in the POST body's filters.recipient_search_text —
+  // dropping the arg (or not wiring it) ⇒ absent ⇒ RED.
+  await withFetch((u, init) => {
+    if (isAwardCount(u)) return mockResponse({ status: 200, json: { results: { subcontracts: 1 } } });
+    if (isAwardPage(u)) {
+      const body = JSON.parse(init.body);
+      ok("36-sem subRecipientName ⇒ filters.recipient_search_text === ['Leidos'] (the SUBAWARDEE filter; old primeRecipientName was inverted — not wiring it ⇒ RED)",
+        Array.isArray(body.filters.recipient_search_text) && body.filters.recipient_search_text[0] === "Leidos",
+        JSON.stringify({ rst: body.filters.recipient_search_text }));
+      return mockResponse({ status: 200, json: { results: [
+        { "Sub-Award ID": "SX", "Sub-Awardee Name": "LEIDOS, INC.", "Sub-Award Amount": 1, "Sub-Award Date": "2025-01-01", NAICS: { code: "541512" }, prime_award_generated_internal_id: "P" },
+      ], page_metadata: { hasNext: false } } });
+    }
+    return failClosed()();
+  }, async () => {
+    const res = await searchSubawards({ subRecipientName: "Leidos", limit: 1 });
+    ok("36-sem the returned row's subRecipient IS the searched name (subawardee-side filter, as documented)",
+      res.data.subawards[0].subRecipient === "LEIDOS, INC.", JSON.stringify(res.data.subawards[0].subRecipient));
   });
 }
 
@@ -19836,7 +19860,7 @@ async function testHonestyAuditRemediation() {
     if (isSpendingByAward(u)) return mockResponse({ status: 200, json: { results: subRows, page_metadata: { hasNext: false } } });
     return failClosed()();
   }, async () => {
-    const res = await searchSubawards({ primeRecipientName: "P1" });
+    const res = await searchSubawards({ subRecipientName: "P1" });
     ok("F2 usas_search_subawards: ABSENT Sub-Award Amount ⇒ amount null; genuine 0 stays 0",
       res.data.subawards[0].amount === null && res.data.subawards[1].amount === 0, JSON.stringify(res.data.subawards.map((s) => s.amount)));
   });
