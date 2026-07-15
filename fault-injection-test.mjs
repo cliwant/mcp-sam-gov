@@ -180,6 +180,7 @@ import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-in
 import { readFileSync as censusReadFile } from "node:fs";
 import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num as cbpNum } from "./dist/census-economic.js";
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
+import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
@@ -12243,6 +12244,222 @@ async function testDatagovCatalogHonesty() {
   });
 }
 
+// §45E: GSA Federal Travel Per-Diem (api.gsa.gov, ADR-0050) — a NEW travel-cost lane
+// on the SAME api.gsa.gov host + SAME api.data.gov key seam (datagovKey.ts, X-Api-Key
+// header) as §45C. Covers: [INPUT] EITHER (city+state) OR zip — both/neither ⇒
+// invalid_input, 0 fetch; charclass guards (zip 4-digit, state 3-char, city "../");
+// [P1] no-pagination totalAvailable = flattened row count, complete:true; [P3] value/
+// meals null-never-0 (a genuine 0 stays 0), standardRate/isOconus STRING-boolean →
+// real boolean, months preserved AS-IS (never padded to 12); [P2] errors non-null ⇒
+// invalid_input (never fake-empty), rates:[]/rate:[] ⇒ honest empty, 429 ⇒ rate_limited
+// THROW (never routed around), 503 ⇒ upstream_unavailable, 200 non-JSON ⇒ schema_drift;
+// [P4] rates/rate/months.month non-array ⇒ driftError; [SSRF] fixed-host assert;
+// [K-test] the key rides ONLY the X-Api-Key header. OFFLINE, deterministic, NON-VACUOUS.
+const isGp = (u) => /api\.gsa\.gov\/travel\/perdiem\/v2\/rates/.test(u);
+const GP_MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+// A 12-value → months.month[] builder (value=monthly lodging $; number=1-12; long=name).
+const gpMonths = (values) => ({ month: values.map((v, i) => ({ value: v, number: i + 1, short: GP_MONTH_NAMES[i].slice(0, 3), long: GP_MONTH_NAMES[i] })) });
+// One inner rate (city-level); zip null for a city query, meals=M&IE cap, standardRate STRING boolean.
+const gpRate = ({ city = "District of Columbia", county = "Washington DC", zip = null, meals = 92, standardRate = "false", months }) => ({ city, county, zip, meals, standardRate, months });
+// One outer group (state/year/isOconus level) carrying an inner rate[].
+const gpGroup = ({ state = "DC", year = 2025, isOconus = "false", rate }) => ({ state, year, isOconus, oconusInfo: null, rate });
+// The full v2 body: { request, errors, version, rates } — errors null on success (the P2 crux).
+const gpBody = ({ rates = [], errors = null }) => ({ request: null, errors, version: null, rates });
+const gpMock = (body, status = 200) => (u) => (isGp(u) ? mockResponse({ status, json: body }) : failClosed()());
+const gpCall = (calls) => calls.find((x) => isGp(x.url));
+
+async function testGsaPerdiemHonesty() {
+  section("45E. GSA Federal Travel Per-Diem (api.gsa.gov, ADR-0050 — the travel-cost lane on the api.data.gov key seam) — INPUT either/or (0 fetch) + P1 no-total-pagination + P3 null-never-0/string-boolean/months-as-is + P2 errors/429/503/non-JSON honesty + P4 drift ladder + SSRF fixed-host + X-Api-Key K-test (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── P1 + P3: 1 group × 1 rate × 12 months ⇒ totalAvailable 1, monthlyLodging 12,
+  //    complete:true; value 196/276 pass through; value 0 stays 0 (NOT null); meals
+  //    92 ⇒ mealsUsd 92; standardRate "false" ⇒ false; isOconus "false" ⇒ false. ──
+  const twelve = [196, 196, 276, 276, 276, 276, 183, 183, 275, 275, 196, 0];
+  await withFetch(gpMock(gpBody({ rates: [gpGroup({ rate: [gpRate({ months: gpMonths(twelve) })] })] })), async (calls) => {
+    const r = await runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam);
+    const m = buildMeta(r.meta);
+    const row = r.data.rates[0];
+    ok("45E-P1 no pagination ⇒ totalAvailable = flattened row count (1), returned:1, complete:true — mutate the total to anything but the row count (e.g. months.length=12) ⇒ RED (the fabricated-total class)",
+      m.totalAvailable === 1 && m.returned === 1 && m.complete === true, JSON.stringify({ ta: m.totalAvailable, r: m.returned, c: m.complete }));
+    ok("45E-P1 the 12-month array is preserved AS-IS (length 12) — pad/truncate/fabricate-to-12 ⇒ RED",
+      row.monthlyLodgingUsd.length === 12 && row.monthlyLodgingUsd[0].month === 1 && row.monthlyLodgingUsd[0].monthName === "January", JSON.stringify(row.monthlyLodgingUsd.map((x) => x.month)));
+    ok("45E-P3 value passthrough: Jan 196, Mar 276 ⇒ lodgingUsd as-is (num, null-never-0) — reroute value through anything that rescales/nulls a real figure ⇒ RED",
+      row.monthlyLodgingUsd[0].lodgingUsd === 196 && row.monthlyLodgingUsd[2].lodgingUsd === 276, JSON.stringify({ jan: row.monthlyLodgingUsd[0].lodgingUsd, mar: row.monthlyLodgingUsd[2].lodgingUsd }));
+    ok("45E-P3 ★a genuine 0 lodging value stays 0 (NOT null) — the Dec month value:0 ⇒ lodgingUsd:0; mutate num→`?? null` or `|| null` on 0 ⇒ RED (the forbidden 0→null class)",
+      row.monthlyLodgingUsd[11].lodgingUsd === 0, JSON.stringify(row.monthlyLodgingUsd[11]));
+    ok("45E-P3 meals 92 ⇒ mealsUsd 92 (num); standardRate 'false' ⇒ false; isOconus 'false' ⇒ false (STRING boolean → REAL boolean) — leave them as the string 'false' (truthy!) ⇒ RED",
+      row.mealsUsd === 92 && row.standardRate === false && row.isOconus === false, JSON.stringify({ meals: row.mealsUsd, sr: row.standardRate, oc: row.isOconus }));
+    ok("45E-P3 scalars: city/county/state/zip via str, year via num; a city-query zip is null (not '')",
+      row.city === "District of Columbia" && row.county === "Washington DC" && row.state === "DC" && row.zip === null && row.year === 2025, JSON.stringify(row));
+    const url = new URL(gpCall(calls).url);
+    ok("45E-P1 the URL rides the FIXED city template on api.gsa.gov over https (city/state/year path segments; NO api_key query)",
+      url.hostname === GSA_PERDIEM_HOST && url.protocol === "https:" && /\/travel\/perdiem\/v2\/rates\/city\/Washington\/state\/DC\/year\/2025$/.test(url.pathname) && !/api_key=/i.test(gpCall(calls).url), url.pathname);
+  });
+
+  // ── P3 both-boolean branches: group1 isOconus/standardRate "false", group2 "true"
+  //    ⇒ 2 flattened rows; the 'true' branch coerces to real true. ──
+  await withFetch(gpMock(gpBody({ rates: [
+    gpGroup({ isOconus: "false", rate: [gpRate({ standardRate: "false", months: gpMonths(twelve) })] }),
+    gpGroup({ state: "AK", isOconus: "true", rate: [gpRate({ city: "Juneau", county: "Juneau", standardRate: "true", months: gpMonths(twelve) })] }),
+  ] })), async () => {
+    const r = await runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam);
+    const [a, b] = r.data.rates;
+    ok("45E-P3 the 'true' branch: standardRate 'true' ⇒ true, isOconus 'true' ⇒ true (both string-booleans coerced); 'false' ⇒ false — a coercion that only handles one literal ⇒ RED",
+      a.standardRate === false && a.isOconus === false && b.standardRate === true && b.isOconus === true, JSON.stringify({ a: { sr: a.standardRate, oc: a.isOconus }, b: { sr: b.standardRate, oc: b.isOconus } }));
+    ok("45E-P3 two groups × one rate each ⇒ 2 flattened rows (each combines outer state/year/isOconus with inner city/rate)", r.data.rates.length === 2 && b.state === "AK" && b.city === "Juneau", JSON.stringify(r.data.rates.map((x) => x.state)));
+  });
+
+  // ── P2: `errors` non-null ⇒ invalid_input surfacing the message (NEVER fake-empty). ──
+  await withFetch(gpMock(gpBody({ errors: "No per diem data found for the given input." })), async () => {
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", { city: "Nowheresville", state: "ZZ" }, sam));
+    ok("45E-P2 `errors` non-null ⇒ invalid_input carrying the message (a lookup problem is NEVER read as an empty result — swallow it as returned:0 ⇒ RED)",
+      threw && toToolError(error).kind === "invalid_input" && /No per diem data found/.test(toToolError(error).message), JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P2: a genuine no-match (rates:[]) ⇒ honest empty. ──
+  await withFetch(gpMock(gpBody({ rates: [] })), async () => {
+    const r = await runTool("gsa_perdiem_rates", { zip: "99999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45E-P2 genuine no-match (rates:[], errors null) ⇒ returned:0, rates:[], totalAvailable:0, complete:true (an honest empty, DISTINCT from a loud-fail — NOT thrown)",
+      r.data.rates.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify(m));
+  });
+  // ── P2: an empty inner rate[] ⇒ honest empty (the group carries no rows). ──
+  await withFetch(gpMock(gpBody({ rates: [gpGroup({ rate: [] })] })), async () => {
+    const r = await runTool("gsa_perdiem_rates", { zip: "20001" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45E-P2 an empty inner rate[] ⇒ honest empty (returned:0/complete:true) — an empty rate array is a genuine no-match, NOT drift",
+      r.data.rates.length === 0 && m.returned === 0 && m.complete === true, JSON.stringify(m));
+  });
+  // ── P2: 429 (DEMO_KEY ~10/hr) ⇒ rate_limited THROW, never fake-empty, never routed around. ──
+  await withFetch(gpMock("Rate limit exceeded", 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam));
+    ok("45E-P2 ★HTTP 429 ⇒ rate_limited THROWS (the DEMO_KEY ~10/hr frontier — read as an empty result, or routed around, ⇒ RED, the forbidden swallowed-429 class)",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P2: 503 ⇒ upstream_unavailable THROW. ──
+  await withFetch(gpMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam));
+    ok("45E-P2 HTTP 503 ⇒ upstream_unavailable THROWS (a DOWN api.gsa.gov is NEVER a returned:0)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P2/P4: a 200 non-JSON body ⇒ schema_drift VIA the catch-ladder (SyntaxError rung). ──
+  await withFetch((u) => (isGp(u) ? { ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>maintenance</html>" } : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam));
+    ok("45E-P4 a 200 NON-JSON body (HTML masquerade) ⇒ schema_drift via the catch-ladder (SyntaxError→driftError rung) — never a fake empty, never a bare unknown",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4 ladder ordering NON-VACUITY: a 429 THROUGH the ladder STAYS rate_limited
+  //    (ToolErrorCarrier-first rung — a broader `catch ⇒ driftError` would regress it). ──
+  await withFetch(gpMock("Rate limit exceeded", 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", { zip: "20001" }, sam));
+    ok("45E-P4 ladder ordering: a 429 propagating THROUGH the catch-ladder STAYS rate_limited (ToolErrorCarrier rethrow FIRST) — reorder to catch-all→schema_drift ⇒ the 429 regresses to schema_drift ⇒ RED",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4: rates non-array ⇒ schema_drift (never a fake empty, never a TypeError). ──
+  await withFetch(gpMock({ request: null, errors: null, version: null, rates: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", { zip: "20001" }, sam));
+    ok("45E-P4 rates non-array ({}) ⇒ schema_drift (container-guarded — a TypeError must never mask drift as upstream_unavailable, never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4: a group's rate non-array ⇒ schema_drift. ──
+  await withFetch(gpMock(gpBody({ rates: [{ state: "DC", year: 2025, isOconus: "false", rate: "oops" }] })), async () => {
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", { zip: "20001" }, sam));
+    ok("45E-P4 a rates[].rate non-array ('oops') ⇒ schema_drift (never read as an empty result set)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4: months.month non-array ⇒ schema_drift (the months contract changed). ──
+  await withFetch(gpMock(gpBody({ rates: [gpGroup({ rate: [gpRate({ months: { month: {} } })] })] })), async () => {
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", { zip: "20001" }, sam));
+    ok("45E-P4 months.month non-array ({}) ⇒ schema_drift (never padded/fabricated to a 12-month array)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── INPUT: EITHER (city+state) OR zip — both, or neither, ⇒ invalid_input, 0 fetch. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", { city: "Washington", state: "DC", zip: "20001" }, sam));
+    ok("45E-input BOTH (city+state) AND zip ⇒ invalid_input, 0 fetch (the two lookup modes are mutually exclusive — guessing which to use ⇒ RED)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", {}, sam));
+    ok("45E-input NEITHER city/state NOR zip ⇒ invalid_input, 0 fetch (an empty lookup is a caller error, never a whole-catalog guess)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // Direct-handler re-guard (bypassing Zod): city WITHOUT state ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => gpPerdiemRates({ city: "Washington" }));
+    ok("45E-input DIRECT handler city-without-state (a Zod-BYPASSING call) ⇒ invalid_input, 0 fetch (the in-handler mode check closes it even when Zod is bypassed)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── SSRF / charclass guards: bad zip / state / city / year ⇒ invalid_input, 0 fetch
+  //    (each rides a PATH segment; the charclass closes injection BEFORE any fetch). ──
+  const badInputs = [
+    ["zip 4-digit", { zip: "2001" }],
+    ["zip 6-digit", { zip: "200012" }],
+    ["state 3-char", { city: "Washington", state: "DCX" }],
+    ["state with digit", { city: "Washington", state: "D1" }],
+    ["city path-traversal ../", { city: "../etc", state: "DC" }],
+    ["city slash", { city: "a/b", state: "DC" }],
+    ["year 3-digit", { zip: "20001", year: "202" }],
+  ];
+  for (const [name, badArgs] of badInputs) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("gsa_perdiem_rates", badArgs, sam));
+      ok(`45E-ssrf ${name} ⇒ invalid_input, 0 fetch (charclass-validated BEFORE it rides a PATH segment — a ../ / slash / over-length can never reach api.gsa.gov) — skip the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // Direct-handler SSRF re-guard: a Zod-bypassing "../" city still fails closed.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => gpPerdiemRates({ city: "../../secret", state: "DC" }));
+    ok("45E-ssrf DIRECT handler city '../../secret' (a Zod-BYPASSING call) ⇒ invalid_input, 0 fetch (the in-handler charclass re-guard closes it) — remove the handler re-guard ⇒ it reaches api.gsa.gov ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // A VALID zip round-trips to the FIXED host on the zip template; redirect:'error'.
+  await withFetch(gpMock(gpBody({ rates: [gpGroup({ rate: [gpRate({ zip: "20001", months: gpMonths(twelve) })] })] })), async (calls) => {
+    const r = await runTool("gsa_perdiem_rates", { zip: "20001" }, sam);
+    const url = new URL(gpCall(calls).url);
+    ok("45E-ssrf a VALID zip rides the zip template to the FIXED host api.gsa.gov over https; redirect:'error' (fail-closed off-host 3xx); the zip surfaces in the row",
+      /\/travel\/perdiem\/v2\/rates\/zip\/20001\/year\/2025$/.test(url.pathname) && url.hostname === GSA_PERDIEM_HOST && url.protocol === "https:" && gpCall(calls).init.redirect === "error" && r.data.rates[0].zip === "20001", JSON.stringify({ path: url.pathname, host: url.hostname }));
+  });
+
+  // ── K-test: the key rides ONLY the X-Api-Key header, NEVER the URL/_meta/output;
+  //    keylessMode:false; source names the MODE (DATA_GOV_API_KEY / DEMO_KEY). ──
+  await withEnvKey("SECRET-perdiem-777", async () => {
+    await withFetch(gpMock(gpBody({ rates: [gpGroup({ rate: [gpRate({ months: gpMonths(twelve) })] })] })), async (calls) => {
+      const r = await runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam);
+      const m = buildMeta(r.meta);
+      const call = gpCall(calls);
+      const full = JSON.stringify({ data: r.data, meta: m });
+      ok("45E-K K-test: SECRET-perdiem-777 is ABSENT from the serialized {data,_meta} AND the URL; sent ONLY in the X-Api-Key header; source names the (DATA_GOV_API_KEY) MODE; keylessMode:false — leak the value anywhere but the header ⇒ RED",
+        !full.includes("SECRET-perdiem-777") && !call.url.includes("SECRET-perdiem-777") && call.init.headers["X-Api-Key"] === "SECRET-perdiem-777" && !/api_key=/i.test(call.url) && /\(DATA_GOV_API_KEY\)/.test(m.source) && m.keylessMode === false, JSON.stringify({ src: m.source, keyless: m.keylessMode }));
+    });
+  });
+  // DEMO_KEY mode (env unset): X-Api-Key: DEMO_KEY, keylessMode:false, the ~10/hr disclosure note.
+  await withEnvKey(undefined, async () => {
+    await withFetch(gpMock(gpBody({ rates: [gpGroup({ rate: [gpRate({ months: gpMonths(twelve) })] })] })), async (calls) => {
+      const r = await runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam);
+      const m = buildMeta(r.meta);
+      ok("45E-K DEMO_KEY mode (env unset): X-Api-Key: DEMO_KEY sent, source names (DEMO_KEY), keylessMode:false, the ~10 requests/hour DEMO_KEY disclosure note present (set DATA_GOV_API_KEY upgrade path)",
+        gpCall(calls).init.headers["X-Api-Key"] === "DEMO_KEY" && /\(DEMO_KEY\)/.test(m.source) && m.keylessMode === false && m.notes.some((n) => /10 requests\/hour|DEMO_KEY/.test(n) && /DATA_GOV_API_KEY/.test(n)), JSON.stringify({ src: m.source, hdr: gpCall(calls).init.headers["X-Api-Key"] }));
+    });
+  });
+
+  // Sanity: the exported DEFAULT_PERDIEM_YEAR constant is used when year is omitted.
+  await withFetch(gpMock(gpBody({ rates: [gpGroup({ rate: [gpRate({ months: gpMonths(twelve) })] })] })), async (calls) => {
+    await runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam);
+    const url = new URL(gpCall(calls).url);
+    ok("45E-default year omitted ⇒ DEFAULT_PERDIEM_YEAR rides the path (the module default is honored, not a hardcoded fork)",
+      new RegExp(`/year/${DEFAULT_PERDIEM_YEAR}$`).test(url.pathname), url.pathname);
+  });
+}
+
 // §46: EPA ECHO REST source (ADR-0009) — the THIRD source on the R2 port. KEYLESS,
 // single fixed host (echodata.epa.gov) + three fixed service paths (the SSRF core).
 // Covers: SSRF (service-path allowlist + state enum + post-construction host
@@ -16746,6 +16963,7 @@ async function main() {
   await testDatagovHonesty();
   await testDatagovDocketsHonesty();
   await testDatagovCatalogHonesty();
+  await testGsaPerdiemHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
   await testFpdsHonesty();
@@ -16827,19 +17045,21 @@ async function testApiKeyStatus() {
     ok("keys-A every entry has a non-empty signupUrl (https)", r0.keys.every((k) => typeof k.signupUrl === "string" && /^https:\/\//.test(k.signupUrl)));
     // ★sources-accuracy: DATA_GOV_API_KEY must list only ACTUAL consumers (the
     // files importing ./datagovKey.js = datagov.ts[Regulations.gov+Congress.gov],
-    // govinfo.ts[GovInfo], fac.ts[FAC], datagov-catalog.ts[data.gov catalog]) and
-    // must NOT advertise a non-consumer or a non-existent tool. Regression guard
-    // for the over-claim (NPPES/CMS keyless on their own hosts; GSA per-diem was
-    // never built): reintroducing any of those ⇒ RED.
+    // govinfo.ts[GovInfo], fac.ts[FAC], datagov-catalog.ts[data.gov catalog],
+    // gsa-perdiem.ts[GSA per-diem]) and must NOT advertise a non-consumer or a
+    // non-existent tool. GSA per-diem is now a REAL consumer (ADR-0050 — the tool
+    // ships), so it is REQUIRED here; NPPES/CMS remain keyless on their own hosts and
+    // stay PROHIBITED. Regression guard: dropping per-diem, or reintroducing NPPES/CMS
+    // as a source ⇒ RED.
     const dataGovSrc = r0.keys.find((k) => k.envVar === "DATA_GOV_API_KEY").sources.join(" ");
     ok(
-      "keys-A DATA_GOV_API_KEY sources name the REAL keyed consumers (Congress.gov + GovInfo + FAC + catalog)",
-      /Congress\.gov/.test(dataGovSrc) && /GovInfo/.test(dataGovSrc) && /FAC/.test(dataGovSrc) && /catalog/i.test(dataGovSrc),
+      "keys-A DATA_GOV_API_KEY sources name the REAL keyed consumers (Congress.gov + GovInfo + FAC + catalog + GSA per-diem)",
+      /Congress\.gov/.test(dataGovSrc) && /GovInfo/.test(dataGovSrc) && /FAC/.test(dataGovSrc) && /catalog/i.test(dataGovSrc) && /per-?diem/i.test(dataGovSrc),
       dataGovSrc,
     );
     ok(
-      "keys-A ★DATA_GOV_API_KEY sources do NOT over-claim per-diem/NPPES/CMS (non-consumers of this key)",
-      !/per-?diem/i.test(dataGovSrc) && !/NPPES/i.test(dataGovSrc) && !/\bCMS\b/.test(dataGovSrc),
+      "keys-A ★DATA_GOV_API_KEY sources do NOT over-claim NPPES/CMS (non-consumers of this key — keyless on their own hosts)",
+      !/NPPES/i.test(dataGovSrc) && !/\bCMS\b/.test(dataGovSrc),
       dataGovSrc,
     );
     ok(
