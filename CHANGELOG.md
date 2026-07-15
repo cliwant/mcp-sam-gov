@@ -5,6 +5,28 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-07-15 (GSA travel per-diem — 115 → 116 tools)
+
+Additive minor release. Every 1.1.0 tool is unchanged and byte-identical; this adds one tool and completes the Wave 4 source expansion.
+
+### Added
+
+- **GSA Federal Travel Per-Diem** (`gsa_perdiem_rates`): monthly lodging + M&IE
+  meals caps by **city + state** or **zip**, for a fiscal year (`api.gsa.gov`).
+  Keyless via the shared api.data.gov key seam (DEMO_KEY; an optional
+  `DATA_GOV_API_KEY` raises the shared limit). Monthly lodging rates are returned
+  as-is (seasonal), meals as an integer USD cap; the wire string booleans
+  (`standardRate`, `isOconus`) become real booleans. A 429 (DEMO_KEY hourly cap)
+  throws an honest `rate_limited` — never an empty result, never routed around.
+
+### Changed
+
+- `api_key_status` now lists **GSA per-diem** among the `DATA_GOV_API_KEY` sources
+  (the key raises its shared rate limit).
+- Documentation: the tool catalog and counts are refreshed to **116 tools across
+  34 federal data sources** (keyless-first — only Census CBP and FRED require a
+  free key).
+
 ## [1.1.0] — 2026-07-15 (Wave 4 sources + always-on resilience + key self-service — 111 → 115 tools)
 
 Additive minor release. Every tool from 1.0.0 is unchanged and byte-identical; this adds 4 tools, turns the snapshot backstop on by default, and lands two truthfulness fixes found in a pre-release review sweep.
