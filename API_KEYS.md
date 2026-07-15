@@ -4,7 +4,7 @@
 > Regenerate with `node scripts/gen-api-keys-md.mjs`. The fault suite (§keys-doc) fails
 > if this file drifts from the registry. Live config state: call the `api_key_status` tool.
 
-**Every key below is FREE.** This server is **keyless-first**: 11 keys total, but only **4 are REQUIRED** (their source has no keyless tier and the tool throws without the key); the other **7 are OPTIONAL** (they only raise a rate limit or unlock one filter — the tools work keyless without them). You can obtain them all in one sitting and paste them in together (see *How to set* below).
+**Every key below is FREE.** This server is **keyless-first**: 12 keys total, but only **4 are REQUIRED** (their source has no keyless tier and the tool throws without the key); the other **8 are OPTIONAL** (they only raise a rate limit or unlock one filter — the tools work keyless without them). You can obtain them all in one sitting and paste them in together (see *How to set* below).
 
 ## Required keys (4) — the tool THROWS without these
 
@@ -21,7 +21,7 @@ Checklist:
 - [ ] `BEA_API_KEY` — https://apps.bea.gov/API/signup/
 - [ ] `DOL_API_KEY` — https://dataportal.dol.gov/registration
 
-## Optional keys (7) — only raise a rate limit / unlock a filter (tools work keyless without them)
+## Optional keys (8) — only raise a rate limit / unlock a filter (tools work keyless without them)
 
 | Env var | Source / tool(s) | Free signup | What it unlocks |
 |---|---|---|---|
@@ -32,6 +32,7 @@ Checklist:
 | `SOCRATA_APP_TOKEN` | Socrata (state/city open-data portals) | [https://evergreen.data.socrata.com/signup](https://evergreen.data.socrata.com/signup) | higher Socrata throttling limits |
 | `LDA_API_KEY` | US Senate LDA lobbying (lda_search_filings) | [https://lda.senate.gov/api/register/](https://lda.senate.gov/api/register/) | higher LDA API rate limits (anonymous access already works without it) |
 | `OPENFDA_API_KEY` | openFDA enforcement (openfda_enforcement) | [https://open.fda.gov/apis/authentication/](https://open.fda.gov/apis/authentication/) | higher openFDA rate limits (keyless works without it — ~1000/day) |
+| `COURTLISTENER_API_TOKEN` | CourtListener federal court opinions (courtlistener_search_opinions) | [https://www.courtlistener.com/help/api/rest/](https://www.courtlistener.com/help/api/rest/) | higher CourtListener rate limits (anonymous search works without it) |
 
 Checklist:
 - [ ] `DATA_GOV_API_KEY` — https://api.data.gov/signup/
@@ -41,6 +42,7 @@ Checklist:
 - [ ] `SOCRATA_APP_TOKEN` — https://evergreen.data.socrata.com/signup
 - [ ] `LDA_API_KEY` — https://lda.senate.gov/api/register/
 - [ ] `OPENFDA_API_KEY` — https://open.fda.gov/apis/authentication/
+- [ ] `COURTLISTENER_API_TOKEN` — https://www.courtlistener.com/help/api/rest/
 
 ## How to set (once you have the keys)
 
@@ -62,6 +64,7 @@ NVD_API_KEY=
 SOCRATA_APP_TOKEN=
 LDA_API_KEY=
 OPENFDA_API_KEY=
+COURTLISTENER_API_TOKEN=
 ```
 
 Then call `api_key_status` to confirm each shows `currentlySet: true` (the value is never echoed back). To verify a key actually *works*, call that source's own tool.

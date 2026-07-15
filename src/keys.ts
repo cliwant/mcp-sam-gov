@@ -21,7 +21,8 @@
  * (server.ts), BLS_API_KEY (bls.ts), NVD_API_KEY (nvd.ts), SOCRATA_APP_TOKEN
  * (socrata.ts), CENSUS_API_KEY (census-economic.ts), FRED_API_KEY (fred.ts),
  * BEA_API_KEY (bea.ts), DOL_API_KEY (dol.ts), LDA_API_KEY (lda.ts),
- * OPENFDA_API_KEY (openfda.ts). No invented keys, sources, or signup URLs.
+ * OPENFDA_API_KEY (openfda.ts), COURTLISTENER_API_TOKEN (courtlistener.ts).
+ * No invented keys, sources, or signup URLs.
  */
 
 import { readFileSync } from "node:fs";
@@ -44,11 +45,11 @@ export type KeyRegistryEntry = {
 };
 
 /**
- * The 11 keys the server reads — code-grounded, no inventions.
+ * The 12 keys the server reads — code-grounded, no inventions.
  *
  * REQUIRED (4): CENSUS_API_KEY, FRED_API_KEY, BEA_API_KEY, DOL_API_KEY — those sources
  * have no keyless tier, so the tool throws without them (DOL_API_KEY gates ONLY
- * dol_get_dataset; the DOL catalog, dol_list_datasets, is keyless). OPTIONAL (7):
+ * dol_get_dataset; the DOL catalog, dol_list_datasets, is keyless). OPTIONAL (8):
  * everything else works keyless; a key only raises a rate limit or unlocks a single filter.
  */
 export const KEY_REGISTRY: readonly KeyRegistryEntry[] = [
@@ -153,6 +154,17 @@ export const KEY_REGISTRY: readonly KeyRegistryEntry[] = [
     unlocks:
       "higher openFDA rate limits (keyless works without it — ~1000/day)",
     note: "Keyless by default; a free key raises the rate limit.",
+  },
+  {
+    envVar: "COURTLISTENER_API_TOKEN",
+    sources: [
+      "CourtListener federal court opinions (courtlistener_search_opinions)",
+    ],
+    required: false,
+    signupUrl: "https://www.courtlistener.com/help/api/rest/",
+    unlocks:
+      "higher CourtListener rate limits (anonymous search works without it)",
+    note: "Keyless by default (anonymous 200); a free token only raises the rate limit. Data = US federal court public records via CourtListener/Free Law Project.",
   },
 ] as const;
 

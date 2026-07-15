@@ -718,6 +718,43 @@
     }
   },
   {
+    "name": "courtlistener_search_opinions",
+    "description": "Search US FEDERAL COURT OPINIONS (case law / litigation) via CourtListener (www.courtlistener.com/api/rest/v4/search, type=o). ★PROVENANCE: the DATA is US federal court PUBLIC RECORDS, but the API is CourtListener, run by the Free Law Project (a NON-PROFIT) — this is NOT a .gov API; CourtListener republishes these records KEYLESS because the .gov primary source (PACER) is PAYWALLED. KEYLESS (anonymous access works; an optional free COURTLISTENER_API_TOKEN only raises the rate limit; get one at https://www.courtlistener.com/help/api/rest/; call api_key_status to see every source's key requirement). All inputs optional: `query` (full-text → q), `court` (a court id, ^[a-z0-9]+$ — e.g. 'uscfc' US Court of Federal Claims for contract claims/bid protests, 'cafc' Federal Circuit for contract/patent appeals, 'scotus'), `dateFiledAfter`/`dateFiledBefore` (ISO ^\\d{4}-\\d{2}-\\d{2}$ → filed_after/filed_before), `natureOfSuit` (folded into the q query — no verified dedicated filter, disclosed in notes), `cursor` (opaque continuation — pass back _meta.nextCursor), `order` (→ order_by, default 'dateFiled desc'). Returns { opinions:[{ caseName, court, courtId, dateFiled, docketNumber, natureOfSuit, status, judge, citation, absoluteUrl }] } + honest _meta. HONESTY: totalAvailable is the API's REAL `count` (the total match count for the filter) — NOT the rows on this page; pagination is an OPAQUE CURSOR (offset/nextOffset are null/meaningless — pass _meta.nextCursor back as `cursor`; nextCursor:null/hasMore:false = last page). CourtListener v4 stops counting on deep cursor pages (count:null) ⇒ totalAvailable:null is DISCLOSED, never faked as results.length. dateFiled is a date STRING; citation may be an array/object ⇒ flattened to a safe string/string[] (never fabricated); judge/natureOfSuit/docketNumber are null when absent (never ''); absoluteUrl is the full https://www.courtlistener.com link. A genuine no-match (results:[]) ⇒ honest empty (returned:0); a 400 (bad param) ⇒ invalid_input surfacing the API's message; a 429 (unauth throttle) ⇒ rate_limited THROWS (Retry-After honored, never routed around); a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-array results / a count that is neither a number nor null ⇒ schema_drift; an off-host `next` is REFUSED (SSRF). The optional token rides ONLY in the Authorization: Token header (never the URL/_meta).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Full-text query (maps to q), e.g. 'bid protest' or a party name. Matches across the opinion text/metadata."
+        },
+        "court": {
+          "type": "string",
+          "description": "A CourtListener court id (lowercase alphanumerics ^[a-z0-9]+$), e.g. 'uscfc' (US Court of Federal Claims — contract claims/bid protests), 'cafc' (Federal Circuit — contract/patent appeals), 'scotus'."
+        },
+        "dateFiledAfter": {
+          "type": "string",
+          "description": "Only opinions filed on/after this ISO date (→ filed_after), e.g. '2020-01-01'. Validated ^\\d{4}-\\d{2}-\\d{2}$."
+        },
+        "dateFiledBefore": {
+          "type": "string",
+          "description": "Only opinions filed on/before this ISO date (→ filed_before), e.g. '2024-12-31'. Validated ^\\d{4}-\\d{2}-\\d{2}$."
+        },
+        "natureOfSuit": {
+          "type": "string",
+          "description": "Nature-of-suit text — folded into the q full-text query (the v4 opinions search has no verified dedicated filter), so it matches the text anywhere in the document (disclosed in _meta.notes)."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque continuation token for the NEXT page — pass back the _meta.nextCursor from the previous response (CourtListener uses CURSOR pagination, not page/offset)."
+        },
+        "order": {
+          "type": "string",
+          "description": "Sort order (maps to order_by), default 'dateFiled desc' (most recent first). E.g. 'dateFiled asc', 'score desc'."
+        }
+      }
+    }
+  },
+  {
     "name": "cve_lookup",
     "description": "Look up NIST NVD CVE records (keyless; services.nvd.nist.gov CVE API 2.0) — exact by `cveId` (CVE-YYYY-NNNN) OR search by `keyword`/`cpeName`/`cvssV3Severity`/a publication or last-modified date range — each row JOINED with its CISA KEV (Known Exploited Vulnerabilities) status. THE B2G unlock for FedRAMP/CMMC/SBOM IT-compliance: CVSS severity AND whether CISA mandates remediation by a date, in one row. Returns { results:[{ cveId, vulnStatus, rejected, published, lastModified, description, cvssMetrics:[{version,source,type,baseScore,baseSeverity,vectorString,exploitabilityScore,impactScore}], primaryCvss:{version,baseScore,baseSeverity,type}|null, cwes, references, kev }] } + honest _meta. Optional `kevOnly` (KEV-listed rows only), `resultsPerPage` (≤2000, def 50), `startIndex`. CVSS HONESTY: every metrics key matching ^cvssMetric (V2/V30/V31/V40) is surfaced as its own cvssMetrics[] element — versions are NEVER conflated and ssvcV203/non-CVSS keys are excluded; V2 baseSeverity reads from the metric level; primaryCvss is the highest-version metric, preferring type:'Primary' but FALLING BACK to the highest Secondary (a real CNA score is never dropped), null ONLY when no CVSS exists (Rejected/Awaiting) — base scores are null-never-0. KEV HONESTY: kev is {listed:true,dateAdded,dueDate,ransomware,requiredAction,catalogVersion} | {listed:false,note} | {listed:null,status:'unavailable'}; a not-listed result carries the not-in-KEV≠safe caveat (absence is NOT a clearance); if the KEV catalog cannot load, kev.listed degrades to NULL (never false) with fieldsUnavailable:['kev'], and a kevOnly filter during that outage THROWS (a KEV-membership filter is unanswerable without the catalog). PAGINATION is from NVD's EXACT totalResults, never page length. A genuine totalResults:0 is an honest found:false; a 403/429 rate breach THROWS rate_limited with the NVD_API_KEY tier disclosure; 404/5xx/timeout/off-host-redirect THROW (never a fake-empty). An OPTIONAL free NVD_API_KEY (env; https://nvd.nist.gov/developers/request-an-api-key) lifts the rate and is sent ONLY in the apiKey header — never a URL/label/_meta/log.",
     "inputSchema": {

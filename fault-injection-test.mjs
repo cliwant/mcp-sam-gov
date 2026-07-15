@@ -185,6 +185,7 @@ import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum
 import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
 import { dolApiKey } from "./dist/dol.js";
 import { searchFilings as ldaSearchFilings, ldaAuthHeader, ldaKeyPresent, nameOf as ldaNameOf, LDA_HOST, num as ldaNum } from "./dist/lda.js";
+import { searchOpinions as clSearchOpinions, courtlistenerAuthHeader, courtlistenerTokenPresent, flattenCitation as clFlattenCitation, extractNextCursor as clExtractNextCursor, COURTLISTENER_HOST, COURTLISTENER_CURSOR_RE } from "./dist/courtlistener.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
@@ -17315,6 +17316,257 @@ async function testLdaSearchFilings() {
   ok("55e-parity lda.num === coerce.num (one shared audited impl — NO local num/str fork)", ldaNum === coerceNum, "lda num diverged from coerce.num");
 }
 
+// §55f: CourtListener federal court opinions (www.courtlistener.com/api/rest/v4/search,
+// ADR-0055 — the LITIGATION/case-law lane; KEYLESS + OPTIONAL rate-limit token). NON-
+// VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the mutation that
+// turns it RED:
+//   [★prov]    _meta.source + a note name CourtListener/Free Law Project + PACER-paywall
+//              (NOT a .gov API) ⇒ drop the disclosure ⇒ RED.
+//   [P1]       count 10595 + 2 results ⇒ totalAvailable:10595 (NOT 2); CURSOR pagination:
+//              `next` URL ⇒ nextCursor EXTRACTED (offset/nextOffset null) ⇒ set
+//              totalAvailable=results.length OR fake a numeric offset ⇒ RED.
+//   [P1 null]  count:null (deep cursor page) ⇒ totalAvailable:null + a disclosure note,
+//              NEVER results.length ⇒ RED.
+//   [P2]       results:[]⇒honest empty; 400⇒invalid_input surfaced; 503⇒upstream_unavail;
+//              429⇒rate_limited(Retry-After); 200 non-JSON⇒schema_drift ⇒ RED.
+//   [P3]       dateFiled string; citation array/object flattened; natureOfSuit/judge/
+//              docketNumber null when absent (never '') ⇒ RED.
+//   [P4]       results non-array OR count neither number-nor-null ⇒ schema_drift ⇒ RED.
+//   [K-test]   COURTLISTENER_API_TOKEN set ⇒ Authorization: Token … header ONLY, ABSENT
+//              from serialized {data,_meta} + URL + label; unset ⇒ NO auth header ⇒ RED.
+//   [SSRF]     court/date charclass (0 fetch); an OFF-HOST `next` REFUSED; fixed host.
+const CL_RE = /www\.courtlistener\.com\/api\/rest\/v4\/search/;
+const isCl = (u) => CL_RE.test(u);
+const clMock = (body, status = 200, headers = {}) => (u) => (isCl(u) ? mockResponse({ status, json: body, headers }) : failClosed()());
+const clUrl = (calls) => calls.find((x) => isCl(x.url))?.url;
+const clQuery = (calls) => new URL(clUrl(calls)).searchParams;
+const clInit = (calls) => calls.find((x) => isCl(x.url))?.init;
+// A 200 whose .json() THROWS a SyntaxError (an HTML error page parsed as JSON).
+const clNonJson = (u) => (isCl(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" }
+  : failClosed()());
+// One CourtListener v4 search result row (type=o). citation as an ARRAY of strings.
+const clOpinion = (overrides = {}) => ({
+  caseName: "Acme Corp v. United States",
+  caseNameFull: "Acme Corporation v. The United States",
+  court: "United States Court of Federal Claims",
+  court_citation_string: "Fed. Cl.",
+  court_id: "uscfc",
+  dateFiled: "2023-05-17",
+  docketNumber: "22-1234C",
+  suitNature: "Contract",
+  status: "Published",
+  judge: "Smith",
+  citation: ["165 Fed. Cl. 100", "2023 WL 123456"],
+  absolute_url: "/opinion/9999999/acme-corp-v-united-states/",
+  ...overrides,
+});
+// The cursor-paginated envelope: { count, next, previous, results }. `next` is a FULL
+// URL carrying an opaque cursor= param (NOT page/offset); null when no more.
+const clBody = (count, results, next = null) => ({ count, next, previous: null, results });
+const CL_NEXT = "https://www.courtlistener.com/api/rest/v4/search/?cursor=cD0yMDIzLTA1LTE3&court=uscfc&type=o";
+
+async function testCourtlistenerSearchOpinions() {
+  section("§55f. CourtListener federal court opinions (ADR-0055 — the litigation/case-law lane, KEYLESS + OPTIONAL rate-limit token) — ★provenance(non-.gov/PACER-paywall) + P1 count=real-total(not results.length)/CURSOR-pagination(nextCursor from `next`) + P3 date-string/citation-flatten/null-not-empty + P2 empty/400/503/429/non-JSON + P4 drift(count number-or-null) + optional-token K-test + SSRF(off-host `next` refused) (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  const priorTok = process.env.COURTLISTENER_API_TOKEN;
+  delete process.env.COURTLISTENER_API_TOKEN;
+  try {
+    // ── [P1 + ★prov + CURSOR] count 10595 (the uscfc opinion corpus) + 2 results ⇒
+    //    totalAvailable 10595 (NOT results.length 2); `next` URL ⇒ nextCursor extracted. ──
+    await withFetch(clMock(clBody(10595, [clOpinion(), clOpinion({ caseName: "Beta LLC v. United States", absolute_url: "/opinion/8888888/beta/" })], CL_NEXT)), async (calls) => {
+      const r = await runTool("courtlistener_search_opinions", { court: "uscfc" }, sam);
+      const m = buildMeta(r.meta);
+      const q = clQuery(calls);
+      ok("55f-P1 count 10595 + 2 results ⇒ returned:2 but totalAvailable:10595 (the API's REAL total, NOT results.length 2), complete:false, truncated:true ⇒ set totalAvailable = results.length ⇒ RED",
+        r.data.opinions.length === 2 && m.returned === 2 && m.totalAvailable === 10595 && m.complete === false && m.truncated === true, JSON.stringify({ n: r.data.opinions.length, ret: m.returned, ta: m.totalAvailable, c: m.complete }));
+      ok("55f-P1 ★CURSOR pagination: `next` URL ⇒ nextCursor EXTRACTED verbatim ('cD0yMDIzLTA1LTE3'), hasMore:true, offset/nextOffset null (no numeric offset) ⇒ fake a numeric offset OR read page= ⇒ RED",
+        m.nextCursor === "cD0yMDIzLTA1LTE3" && m.pagination.hasMore === true && m.pagination.offset === null && m.pagination.nextOffset === null, JSON.stringify({ nc: m.nextCursor, hm: m.pagination.hasMore, off: m.pagination.offset }));
+      ok("55f-P1 the request is to www.courtlistener.com/api/rest/v4/search over https + type=o FIXED + court=uscfc + order_by default 'dateFiled desc' ⇒ change host/path/type ⇒ RED",
+        new URL(clUrl(calls)).hostname === "www.courtlistener.com" && new URL(clUrl(calls)).protocol === "https:" && /\/api\/rest\/v4\/search/.test(clUrl(calls)) && q.get("type") === "o" && q.get("court") === "uscfc" && q.get("order_by") === "dateFiled desc", clUrl(calls));
+      // ── [★prov] the provenance disclosure is LOAD-BEARING (non-.gov + PACER-paywall). ──
+      ok("55f-prov ★_meta.source names CourtListener + Free Law Project + PACER-paywall (NOT a .gov API) AND a note names CourtListener/Free Law Project + PACER paywalled ⇒ drop/soften the provenance disclosure ⇒ RED",
+        /CourtListener/.test(m.source) && /Free Law Project/.test(m.source) && /PACER/.test(m.source) && m.notes.some((n) => /CourtListener/.test(n) && /Free Law Project/.test(n) && /PACER/.test(n) && /paywall/i.test(n)), JSON.stringify({ src: m.source }));
+      ok("55f-P1 keylessMode:true (the optional token only raises the rate limit — NOT a key-required source) + the real-total note + the keyless/Authorization note present",
+        m.keylessMode === true && m.notes.some((n) => /real `count`/.test(n)) && m.notes.some((n) => /Authorization: Token/.test(n)), JSON.stringify(m.notes.length));
+      // ── [P3] dateFiled STRING; citation ARRAY flattened; scalars surfaced. ──
+      const o0 = r.data.opinions[0];
+      ok("55f-P3 dateFiled '2023-05-17' preserved as a STRING (never coerced) + court/courtId/status/judge/natureOfSuit(suitNature) surfaced + absoluteUrl PREFIXED with the host ⇒ coerce a date or drop a field ⇒ RED",
+        o0.dateFiled === "2023-05-17" && typeof o0.dateFiled === "string" && o0.courtId === "uscfc" && o0.court === "Fed. Cl." && o0.status === "Published" && o0.judge === "Smith" && o0.natureOfSuit === "Contract" && o0.docketNumber === "22-1234C" && o0.absoluteUrl === "https://www.courtlistener.com/opinion/9999999/acme-corp-v-united-states/", JSON.stringify(o0));
+      ok("55f-P3 citation (an ARRAY) ⇒ flattened to a string[] ['165 Fed. Cl. 100','2023 WL 123456'] (never fabricated, never '[object Object]') ⇒ drop the flatten ⇒ RED",
+        JSON.stringify(o0.citation) === JSON.stringify(["165 Fed. Cl. 100", "2023 WL 123456"]), JSON.stringify(o0.citation));
+    });
+
+    // ── [P1 last page] count fits + next null ⇒ hasMore:false, nextCursor null, complete:true. ──
+    await withFetch(clMock(clBody(2, [clOpinion(), clOpinion()], null)), async () => {
+      const r = await runTool("courtlistener_search_opinions", { court: "uscfc" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55f-P1 a page with next:null (no more) ⇒ hasMore:false, nextCursor:null, totalAvailable:2, complete:true (an honest complete) ⇒ RED if next:null still claims hasMore",
+        m.totalAvailable === 2 && m.pagination.hasMore === false && m.nextCursor === null && m.complete === true, JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore, nc: m.nextCursor, c: m.complete }));
+    });
+
+    // ── [P1 null-count] count:null (deep cursor page) ⇒ totalAvailable:null + a note,
+    //    NEVER results.length (disclosed, not fabricated). ──
+    await withFetch(clMock(clBody(null, [clOpinion()], CL_NEXT)), async () => {
+      const r = await runTool("courtlistener_search_opinions", { court: "uscfc", cursor: "cD0yMDIzLTA1LTE3" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55f-P1 count:null (v4 stops counting on deep cursor pages) ⇒ totalAvailable:null (NOT results.length 1) + a disclosure note; hasMore still from `next` ⇒ fabricate a total from results.length ⇒ RED",
+        m.totalAvailable === null && m.returned === 1 && m.pagination.hasMore === true && m.notes.some((n) => /did not report a `count`/.test(n)), JSON.stringify({ ta: m.totalAvailable, ret: m.returned, hm: m.pagination.hasMore }));
+    });
+
+    // ── [P3] citation as a STRING and as an OBJECT ⇒ flattened; absent scalars ⇒ null. ──
+    await withFetch(clMock(clBody(3, [
+      clOpinion({ citation: "410 U.S. 113" }),
+      clOpinion({ citation: { cite: "347 U.S. 483", type: "official" } }),
+      clOpinion({ suitNature: null, judge: "", docketNumber: null, citation: [] }),
+    ])), async () => {
+      const r = await runTool("courtlistener_search_opinions", { query: "x" }, sam);
+      const [strCite, objCite, empties] = r.data.opinions;
+      ok("55f-P3 citation as a STRING ⇒ the string '410 U.S. 113'; as an OBJECT ⇒ its string VALUES flattened (['347 U.S. 483','official']), never '[object Object]' ⇒ String(obj) the object ⇒ RED",
+        strCite.citation === "410 U.S. 113" && JSON.stringify(objCite.citation) === JSON.stringify(["347 U.S. 483", "official"]), JSON.stringify({ s: strCite.citation, o: objCite.citation }));
+      ok("55f-P3 absent suitNature(null)/judge('')/docketNumber(null) ⇒ null (null-never-empty-string) + an EMPTY citation array ⇒ null (never a fabricated cite) ⇒ surface '' or [] ⇒ RED",
+        empties.natureOfSuit === null && empties.judge === null && empties.docketNumber === null && empties.citation === null, JSON.stringify({ nos: empties.natureOfSuit, j: empties.judge, dn: empties.docketNumber, cit: empties.citation }));
+    });
+    // ── [P3 direct] flattenCitation — array/object/string/absent, never fabricated. ──
+    ok("55f-P3 (direct flattenCitation) ['a','b']⇒['a','b'], 'x'⇒'x', {k:'v'}⇒['v'], null⇒null, []⇒null, {}⇒null ⇒ RED if it fabricates or leaks the object",
+      JSON.stringify(clFlattenCitation(["a", "b"])) === JSON.stringify(["a", "b"]) && clFlattenCitation("x") === "x" && JSON.stringify(clFlattenCitation({ k: "v" })) === JSON.stringify(["v"]) && clFlattenCitation(null) === null && clFlattenCitation([]) === null && clFlattenCitation({}) === null, JSON.stringify([clFlattenCitation(["a", "b"]), clFlattenCitation({ k: "v" })]));
+
+    // ── [filters mapping + SSRF] query→q, dates→filed_after/before, natureOfSuit folded
+    //    into q, order→order_by; special chars ride URLSearchParams (encoded). ──
+    await withFetch(clMock(clBody(0, [])), async (calls) => {
+      await runTool("courtlistener_search_opinions", { query: "bid protest", court: "cafc", dateFiledAfter: "2020-01-01", dateFiledBefore: "2024-12-31", natureOfSuit: "Contract", order: "dateFiled asc" }, sam);
+      const q = clQuery(calls);
+      ok("55f-map query+natureOfSuit fold into q ('bid protest Contract'), court→court, dates→filed_after/filed_before, order→order_by, type=o FIXED ⇒ rename a mapping ⇒ RED",
+        q.get("q") === "bid protest Contract" && q.get("court") === "cafc" && q.get("filed_after") === "2020-01-01" && q.get("filed_before") === "2024-12-31" && q.get("order_by") === "dateFiled asc" && q.get("type") === "o", clUrl(calls));
+    });
+    // natureOfSuit note (separate run so we can read _meta).
+    await withFetch(clMock(clBody(1, [clOpinion()])), async () => {
+      const r = await runTool("courtlistener_search_opinions", { natureOfSuit: "Contract" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55f-map natureOfSuit ⇒ a _meta note discloses it was applied as a full-text query term (no verified dedicated filter) + filtersApplied includes 'natureOfSuit' ⇒ drop the disclosure ⇒ RED",
+        m.notes.some((n) => /full-text query term/.test(n)) && m.filtersApplied.includes("natureOfSuit"), JSON.stringify(m.filtersApplied));
+    });
+
+    // ── [P2] a genuine empty results:[] ⇒ honest empty (returned:0, complete:true). ──
+    await withFetch(clMock(clBody(0, [], null)), async () => {
+      const r = await runTool("courtlistener_search_opinions", { query: "no-such-case-xyzzy" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55f-P2 an empty results:[] (count 0, next null) ⇒ opinions:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+        r.data.opinions.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.opinions.length, ta: m.totalAvailable }));
+    });
+
+    // ── [P2] a 400 (bad param) ⇒ invalid_input SURFACING the DRF error body. ──
+    await withFetch(clMock({ detail: "Invalid cursor" }, 400), async () => {
+      const { threw, error } = await expectThrow(() => runTool("courtlistener_search_opinions", { court: "uscfc" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55f-P2 a 400 (bad param) ⇒ invalid_input SURFACING the API's DRF message ('Invalid cursor') — NEVER a fake empty, NEVER schema_drift ⇒ read the 400 as empty ⇒ RED",
+        threw && te.kind === "invalid_input" && /Invalid cursor/.test(te.message), JSON.stringify({ kind: te?.kind, msg: te?.message?.slice(0, 90) }));
+    });
+
+    // ── [P2] a 503 ⇒ upstream_unavailable (a DOWN endpoint is NEVER a returned:0). ──
+    await withFetch(clMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("courtlistener_search_opinions", { court: "uscfc" }, sam));
+      ok("55f-P2 503 ⇒ upstream_unavailable THROW (a down CourtListener is never an empty result) ⇒ RED if it degrades to empty",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P2] a 429 ⇒ rate_limited THROW honoring Retry-After (never routed around). ──
+    await withFetch(clMock("", 429, { "Retry-After": "37" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("courtlistener_search_opinions", { court: "uscfc" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55f-P2 429 (unauth throttle) ⇒ rate_limited THROW carrying Retry-After 37s (HONORED, never routed around/silently-swallowed to an empty) ⇒ RED if 429 becomes upstream_unavailable or a fake empty",
+        threw && te.kind === "rate_limited" && te.retryAfterSeconds === 37, JSON.stringify({ kind: te?.kind, ra: te?.retryAfterSeconds }));
+    });
+
+    // ── [P2] a 200 whose body is non-JSON ⇒ schema_drift (never a fabricated empty). ──
+    await withFetch(clNonJson, async () => {
+      const { threw, error } = await expectThrow(() => runTool("courtlistener_search_opinions", { court: "uscfc" }, sam));
+      ok("55f-P2 a 200 non-JSON body (HTML error page → r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P4] results non-array ⇒ drift; count a STRING (neither number nor null) ⇒ drift. ──
+    await withFetch(clMock({ count: 5, next: null, results: "not-an-array" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("courtlistener_search_opinions", { court: "uscfc" }, sam));
+      ok("55f-P4 a 200 with results NOT an array (a string) ⇒ schema_drift (the results contract broke, never a fabricated empty) ⇒ trust a non-array ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(clMock({ count: "lots", next: null, results: [] }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("courtlistener_search_opinions", { court: "uscfc" }, sam));
+      ok("55f-P4 a 200 with count a STRING 'lots' (neither a number NOR null) ⇒ schema_drift (never coerce garbage into a total; count:null alone is the honest deep-page case) ⇒ coerce count blindly ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [SSRF] an OFF-HOST `next` ⇒ REFUSED (schema_drift), never followed/parsed. ──
+    await withFetch(clMock(clBody(50, [clOpinion()], "https://evil.example.com/api/rest/v4/search/?cursor=STEAL")), async () => {
+      const { threw, error } = await expectThrow(() => runTool("courtlistener_search_opinions", { court: "uscfc" }, sam));
+      ok("55f-ssrf an OFF-HOST `next` (evil.example.com) ⇒ schema_drift REFUSED — the cursor is NEVER extracted from a foreign host (an off-host next could steer the next page off-host) ⇒ follow any next ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift" && /off-host/i.test(toToolError(error).message), JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    // ── [SSRF direct] extractNextCursor: same-host ⇒ the cursor; off-host ⇒ throws. ──
+    ok("55f-ssrf (direct extractNextCursor) a same-host next ⇒ the cursor value; null/'' ⇒ null ⇒ RED",
+      clExtractNextCursor(CL_NEXT, "cl:test") === "cD0yMDIzLTA1LTE3" && clExtractNextCursor(null, "cl:test") === null && clExtractNextCursor("", "cl:test") === null, JSON.stringify(clExtractNextCursor(CL_NEXT, "cl:test")));
+
+    // ── [SSRF] bad court / dates / cursor ⇒ invalid_input, 0 fetch (charclass re-guard). ──
+    for (const [args, label] of [
+      [{ court: "US CFC" }, "court 'US CFC' (space — not ^[a-z0-9]+$)"],
+      [{ court: "UsCfc" }, "court 'UsCfc' (uppercase — not lowercase)"],
+      [{ court: "uscfc\n" }, "court 'uscfc\\n' (trailing newline)"],
+      [{ dateFiledAfter: "2020-1-1" }, "dateFiledAfter '2020-1-1' (not zero-padded ISO)"],
+      [{ dateFiledBefore: "not-a-date" }, "dateFiledBefore 'not-a-date'"],
+      [{ cursor: "has space" }, "cursor 'has space' (space — steering char)"],
+      [{ cursor: "a%2Fb" }, "cursor 'a%2Fb' (percent — rejected, canonical is decoded)"],
+    ]) {
+      await withFetch(failClosed(), async (calls) => {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool("courtlistener_search_opinions", args, sam));
+        ok(`55f-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch — a value never touches the fixed host) ⇒ widen the validation ⇒ RED`,
+          threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+      });
+    }
+
+    // ── [K-test] COURTLISTENER_API_TOKEN set ⇒ Authorization: Token … header ONLY;
+    //    ABSENT from the serialized {data,_meta} AND the URL. Unset ⇒ NO auth header. ──
+    const SECRET = "SECRET-CL-TOKEN-do-not-leak-xyz789";
+    process.env.COURTLISTENER_API_TOKEN = SECRET;
+    await withFetch(clMock(clBody(1, [clOpinion()])), async (calls) => {
+      const r = await runTool("courtlistener_search_opinions", { court: "uscfc" }, sam);
+      const m = buildMeta(r.meta);
+      const init = clInit(calls);
+      ok("55f-Ktest COURTLISTENER_API_TOKEN set ⇒ the fetch carries `Authorization: Token <value>` (the ONLY token carrier; keyless-first: header only) ⇒ move the token out of the header ⇒ RED",
+        init.headers.Authorization === `Token ${SECRET}`, JSON.stringify(Object.keys(init.headers)));
+      ok("55f-Ktest ★the token value is ABSENT from the serialized {data,_meta} (never in source/notes/label) ⇒ leak the token into _meta ⇒ RED",
+        !JSON.stringify({ data: r.data, _meta: m }).includes(SECRET), JSON.stringify({ leaked: JSON.stringify({ data: r.data, _meta: m }).includes(SECRET) }));
+      ok("55f-Ktest the token value is ABSENT from the request URL (it rides the header, NEVER a query param) ⇒ put the token in the URL ⇒ RED",
+        !clUrl(calls).includes(SECRET), clUrl(calls));
+      ok("55f-Ktest the _meta note discloses the token is PRESENT (a boolean fact) WITHOUT the value + keylessMode stays true (an optional token does not flip it) ⇒ RED",
+        m.notes.some((n) => /CourtListener token: present/.test(n) && !n.includes(SECRET)) && m.keylessMode === true, JSON.stringify(m.notes.find((n) => /CourtListener token/.test(n))));
+    });
+    // even on error the label is host+path only, never the token.
+    await withFetch(clMock("", 503), async () => {
+      const { error } = await expectThrow(() => runTool("courtlistener_search_opinions", { court: "uscfc" }, sam));
+      const te = toToolError(error);
+      ok("55f-Ktest token SET + 503 ⇒ error.upstreamEndpoint is host+path only 'courtlistener:/api/rest/v4/search'; the token is NOT in the error ⇒ RED",
+        te.upstreamEndpoint === "courtlistener:/api/rest/v4/search" && !JSON.stringify(te).includes(SECRET), JSON.stringify(te.upstreamEndpoint));
+    });
+    ok("55f-Ktest (direct) COURTLISTENER_API_TOKEN set ⇒ courtlistenerAuthHeader() deep-equals { Authorization: 'Token <value>' } + courtlistenerTokenPresent() true ⇒ RED",
+      JSON.stringify(courtlistenerAuthHeader()) === JSON.stringify({ Authorization: `Token ${SECRET}` }) && courtlistenerTokenPresent() === true, JSON.stringify(Object.keys(courtlistenerAuthHeader())));
+    delete process.env.COURTLISTENER_API_TOKEN;
+    await withFetch(clMock(clBody(1, [clOpinion()])), async (calls) => {
+      await runTool("courtlistener_search_opinions", { court: "uscfc" }, sam);
+      const init = clInit(calls);
+      ok("55f-Ktest COURTLISTENER_API_TOKEN UNSET ⇒ NO Authorization header on the fetch (keyless works without a token; init.headers deep-equals {}) ⇒ send an auth header when unset ⇒ RED",
+        !("Authorization" in init.headers) && JSON.stringify(init.headers) === "{}", JSON.stringify(init.headers));
+    });
+    ok("55f-Ktest (direct) COURTLISTENER_API_TOKEN unset ⇒ courtlistenerAuthHeader() deep-equals {} + courtlistenerTokenPresent() false ⇒ RED",
+      JSON.stringify(courtlistenerAuthHeader()) === "{}" && courtlistenerTokenPresent() === false, JSON.stringify(courtlistenerAuthHeader()));
+  } finally {
+    if (priorTok === undefined) delete process.env.COURTLISTENER_API_TOKEN;
+    else process.env.COURTLISTENER_API_TOKEN = priorTok;
+  }
+}
+
 // §54: shared disclosure tokenizer (src/disclosure.ts, ADR-0022) — the byte-identical
 // extraction of NSF's OR-note + ClinicalTrials' AND-note tokenizer into ONE audited
 // home, PLUS the lint guardrail against the whitespace-only recurrence adversarial
@@ -17906,6 +18158,7 @@ async function main() {
   await testBeaRegionalData();
   await testDolDataApi();
   await testLdaSearchFilings();
+  await testCourtlistenerSearchOpinions();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
   await testHonestyAuditRemediation();
@@ -18004,15 +18257,16 @@ async function testApiKeyStatus() {
     // (1) all unset.
     clearAll();
     const r0 = apiKeyStatus();
-    ok("keys-A registry has EXACTLY 11 entries", r0.keys.length === 11, String(r0.keys.length));
+    ok("keys-A registry has EXACTLY 12 entries", r0.keys.length === 12, String(r0.keys.length));
     ok(
-      "keys-A envVars are the 11 code-grounded names",
+      "keys-A envVars are the 12 code-grounded names",
       JSON.stringify([...ALL].sort()) ===
         JSON.stringify(
           [
             "BEA_API_KEY",
             "BLS_API_KEY",
             "CENSUS_API_KEY",
+            "COURTLISTENER_API_TOKEN",
             "DATA_GOV_API_KEY",
             "DOL_API_KEY",
             "FRED_API_KEY",
@@ -18057,7 +18311,12 @@ async function testApiKeyStatus() {
       JSON.stringify([...r0.requiredMissing].sort()) === JSON.stringify(["BEA_API_KEY", "CENSUS_API_KEY", "DOL_API_KEY", "FRED_API_KEY"]),
       JSON.stringify(r0.requiredMissing),
     );
-    ok("keys-A optionalMissing (all unset) has the 7 optional envVars", r0.optionalMissing.length === 7, JSON.stringify(r0.optionalMissing));
+    ok("keys-A optionalMissing (all unset) has the 8 optional envVars", r0.optionalMissing.length === 8, JSON.stringify(r0.optionalMissing));
+    ok(
+      "keys-A COURTLISTENER_API_TOKEN is present + OPTIONAL (required:false) with the courtlistener.com REST-help signup URL + a keyless-by-default note + names courtlistener_search_opinions",
+      (() => { const c = r0.keys.find((k) => k.envVar === "COURTLISTENER_API_TOKEN"); return c && c.required === false && /courtlistener\.com\/help\/api\/rest/.test(c.signupUrl) && r0.optionalMissing.includes("COURTLISTENER_API_TOKEN") && !r0.requiredMissing.includes("COURTLISTENER_API_TOKEN") && /keyless/i.test(c.note) && /courtlistener_search_opinions/.test(c.sources.join(" ")); })(),
+      JSON.stringify(r0.keys.find((k) => k.envVar === "COURTLISTENER_API_TOKEN")),
+    );
     ok(
       "keys-A OPENFDA_API_KEY is present + OPTIONAL (required:false) with the open.fda.gov auth signup URL + a keyless-by-default note",
       (() => { const o = r0.keys.find((k) => k.envVar === "OPENFDA_API_KEY"); return o && o.required === false && /open\.fda\.gov\/apis\/authentication/.test(o.signupUrl) && r0.optionalMissing.includes("OPENFDA_API_KEY") && !r0.requiredMissing.includes("OPENFDA_API_KEY") && /keyless/i.test(o.note) && /openfda_enforcement/.test(o.sources.join(" ")); })(),

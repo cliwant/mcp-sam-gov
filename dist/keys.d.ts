@@ -21,7 +21,8 @@
  * (server.ts), BLS_API_KEY (bls.ts), NVD_API_KEY (nvd.ts), SOCRATA_APP_TOKEN
  * (socrata.ts), CENSUS_API_KEY (census-economic.ts), FRED_API_KEY (fred.ts),
  * BEA_API_KEY (bea.ts), DOL_API_KEY (dol.ts), LDA_API_KEY (lda.ts),
- * OPENFDA_API_KEY (openfda.ts). No invented keys, sources, or signup URLs.
+ * OPENFDA_API_KEY (openfda.ts), COURTLISTENER_API_TOKEN (courtlistener.ts).
+ * No invented keys, sources, or signup URLs.
  */
 /** One registry entry describing a single API key the server can use. */
 export type KeyRegistryEntry = {
@@ -39,11 +40,11 @@ export type KeyRegistryEntry = {
     note: string;
 };
 /**
- * The 11 keys the server reads — code-grounded, no inventions.
+ * The 12 keys the server reads — code-grounded, no inventions.
  *
  * REQUIRED (4): CENSUS_API_KEY, FRED_API_KEY, BEA_API_KEY, DOL_API_KEY — those sources
  * have no keyless tier, so the tool throws without them (DOL_API_KEY gates ONLY
- * dol_get_dataset; the DOL catalog, dol_list_datasets, is keyless). OPTIONAL (7):
+ * dol_get_dataset; the DOL catalog, dol_list_datasets, is keyless). OPTIONAL (8):
  * everything else works keyless; a key only raises a rate limit or unlocks a single filter.
  */
 export declare const KEY_REGISTRY: readonly KeyRegistryEntry[];
