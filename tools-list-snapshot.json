@@ -2645,6 +2645,47 @@
     }
   },
   {
+    "name": "nonprofit_financials",
+    "description": "Fetch ONE US tax-exempt nonprofit's IRS Form 990 profile + FINANCIALS by EIN via ProPublica Nonprofit Explorer (projects.propublica.org/nonprofits/api/v2/organizations/{ein}.json). ★PROVENANCE: the DATA is IRS Form 990 filings (federal tax-exempt public records) but the API is ProPublica Nonprofit Explorer, run by ProPublica (a NON-PROFIT newsroom) — NOT a .gov API; ProPublica republishes these records KEYLESS because the IRS has no clean query API. KEYLESS (no key). Input: `ein` (required — the Employer Identification Number, 1..9 digits ^\\d{1,9}$, e.g. '530196605' American National Red Cross; rides the URL path). Returns { organization:{ ein, name, address, city, state, zip, nteeCode, subsectionCode, rulingDate, statusCode }, filings:[{ taxYear, formType, revenueUsd, expensesUsd, assetsUsd, liabilitiesUsd, pdfUrl }] } + honest _meta. HONESTY: the four Form 990 figures (revenueUsd/expensesUsd/assetsUsd/liabilitiesUsd, from totrevenue/totfuncexpns/totassetsend/totliabend) ride null-never-0 coercion — a genuine reported 0 stays 0, an absent figure ⇒ null (NEVER 0-faked); ein/codes are strings; rulingDate is a date string. totalAvailable = filings.length (the COMPLETE Form 990 filing set from the one detail document — no pagination). An unknown EIN (HTTP 404) ⇒ not_found (NEVER a fabricated empty org); a 4xx ⇒ invalid_input; a 429 ⇒ rate_limited THROWS; a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-object organization / non-array filings_with_data ⇒ schema_drift. Data is IRS Form 990 data via ProPublica Nonprofit Explorer, disclosed in _meta.source and a note.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ein": {
+          "type": "string",
+          "description": "The organization's EIN (Employer Identification Number), 1..9 digits, e.g. '530196605' (American National Red Cross). Validated ^\\d{1,9}$; rides the URL path."
+        }
+      },
+      "required": [
+        "ein"
+      ]
+    }
+  },
+  {
+    "name": "nonprofit_search",
+    "description": "Search US TAX-EXEMPT NONPROFITS (501(c) organizations) by IRS Form 990 data via ProPublica Nonprofit Explorer (projects.propublica.org/nonprofits/api/v2/search). ★PROVENANCE: the DATA is IRS Form 990 filings — FEDERAL tax-exempt PUBLIC RECORDS — but the API is ProPublica Nonprofit Explorer, run by ProPublica (a NON-PROFIT newsroom) — this is NOT a .gov API; ProPublica republishes these records KEYLESS because the IRS itself has no clean query API (only bulk downloads / a web UI). KEYLESS (no key of any kind). All inputs optional: `query` (full-text org name/keyword → q), `state` (2-letter code → state[id], ^[A-Za-z]{2}$), `ntee` (NTEE major category, integer 1..10 → ntee[id]), `page` (0-BASED, default 0). Returns { organizations:[{ ein, name, city, state, nteeCode, subsectionCode }] } + honest _meta. HONESTY: totalAvailable is the API's REAL total_results (the total match count for the query) — NOT the organizations on this page; pagination is page-based and 0-INDEXED (pass page=cur_page+1 when hasMore). ein/nteeCode/subsectionCode are strings (never num-coerced). A genuine no-match (organizations:[]) ⇒ honest empty (returned:0, complete:true); a 4xx ⇒ invalid_input; a 429 ⇒ rate_limited THROWS (Retry-After honored, never routed around); a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-array organizations / non-number total_results ⇒ schema_drift. Data is IRS Form 990 data via ProPublica Nonprofit Explorer, disclosed in _meta.source and a note.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Full-text query (maps to q) — an organization name or keyword, e.g. 'american red cross'. Matches across the org name/metadata."
+        },
+        "state": {
+          "type": "string",
+          "description": "Filter by a 2-letter US state/territory code (maps to state[id]), e.g. 'VA'. Validated ^[A-Za-z]{2}$."
+        },
+        "ntee": {
+          "type": "number",
+          "description": "Filter by NTEE major category, an integer 1..10 (maps to ntee[id]) — the National Taxonomy of Exempt Entities top-level group (e.g. 1 Arts, 3 Environment, 8 Health)."
+        },
+        "page": {
+          "type": "number",
+          "description": "0-BASED page number (default 0). Page with cur_page+1 from _meta.notes / when _meta.pagination.hasMore."
+        }
+      }
+    }
+  },
+  {
     "name": "nppes_lookup_provider",
     "description": "Keyless CMS/HHS NPPES NPI Registry lookup — the authoritative PUBLIC registry of every US healthcare provider (individual NPI-1 + organization NPI-2), for VA/HHS/CMS subcontractor/provider/teaming due-diligence (validate an NPI, confirm taxonomy/specialty, enumeration status, practice state, org/name match). Host npiregistry.cms.hhs.gov/api (version=2.1). Mode is inferred from `number` (no mode flag). EXACT-NPI mode (`number` given): the NPI is CMS-Luhn-validated client-side (Luhn over 80840+first-9) ⇒ a typo'd NPI is invalid_input, NEVER a fake 'does not exist'; ★the wire query carries `number` (+version) ALONE — any co-supplied filter (last_name/state/…) is DROPPED from the wire and checked CLIENT-SIDE (disclosed in data.filterMatch:{field:bool} + data.filtersDropped), because NPPES AND-combines a number with filters and a mismatch would falsely zero a real active provider into found:false. SEARCH mode: required-one of { first_name, last_name, organization_name, taxonomy_description, city, postal_code } (state + enumeration_type are REFINERS ONLY — rejected alone); a trailing '*' wildcard on a name/org field needs ≥2 leading literal chars. Returns EXACT-mode { found, provider:{ number, enumerationType, active, status, basic{…individual OR org fields, null-never-fabricated…}, taxonomies[{code,desc,primary,state,license,taxonomyGroup}], addresses[{purpose,address1,city,state,postalCode,telephone,fax,countryCode}], practiceLocations[…same, SEPARATE from addresses], identifiers[], otherNames[], endpoints[], createdEpoch, lastUpdatedEpoch }, filterMatch? } OR SEARCH-mode { providers:[…] } + honest _meta. HONESTY: active = basic.status==='A' (a deactivated/absent NPI is NOT active); epochs are ms numeric STRINGS → number|null (null-never-0); addresses[] and practiceLocations[] are kept SEPARATE (a provider can practice in a state that appears ONLY in practiceLocations); NPPES exposes NO match total, so a full page ⇒ totalAvailable is a disclosed LOWER BOUND (totalIsLowerBound) + a ~1,200-row-per-query reach cap (limit ≤ 200, skip ≤ 1,000 — OUR policy, a PER-QUERY cap only; cross-query enumeration is not architecturally prevented). A genuine {result_count:0} ⇒ honest found:false/empty; a {Errors:[…]} 200 body (no results key) ⇒ THROWS invalid_input (never a fake empty); any 4xx/5xx/timeout/off-host-redirect ⇒ THROWS; result_count !== results.length ⇒ schema_drift. ★NOT a fitness/exclusion/licensure/sanctions determination — cross-check SAM exclusions + OFAC; individual (NPI-1) records may surface personal/home addresses + phone/fax verbatim with NO enrichment. The caveat + reach-cap disclosure ride EVERY response.",
     "inputSchema": {

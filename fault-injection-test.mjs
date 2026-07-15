@@ -190,6 +190,7 @@ import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR 
 import { dolApiKey } from "./dist/dol.js";
 import { searchFilings as ldaSearchFilings, ldaAuthHeader, ldaKeyPresent, nameOf as ldaNameOf, LDA_HOST, num as ldaNum } from "./dist/lda.js";
 import { searchOpinions as clSearchOpinions, courtlistenerAuthHeader, courtlistenerTokenPresent, flattenCitation as clFlattenCitation, extractNextCursor as clExtractNextCursor, COURTLISTENER_HOST, COURTLISTENER_CURSOR_RE } from "./dist/courtlistener.js";
+import { search as npSearch, financials as npFinancials, num as npNum, NONPROFIT_HOST } from "./dist/nonprofit.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
 import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
@@ -18332,6 +18333,252 @@ async function testCourtlistenerSearchOpinions() {
   }
 }
 
+// §55g: US tax-exempt nonprofits — IRS Form 990 via ProPublica Nonprofit Explorer
+// (projects.propublica.org/nonprofits/api/v2, ADR-0060 — the nonprofit/grantee vetting
+// lane; KEYLESS). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value +
+// names the mutation that turns it RED:
+//   [★prov]  _meta.source + a note name "IRS Form 990" + "ProPublica Nonprofit Explorer"
+//            (NOT a .gov API) ⇒ drop the disclosure ⇒ RED.
+//   [P1]     search total_results 11 + 2 orgs ⇒ totalAvailable:11 (NOT 2); page-based
+//            0-indexed pagination (hasMore from cur_page+1<num_pages); financials 3
+//            filings ⇒ totalAvailable:3 ⇒ set totalAvailable=orgs.length ⇒ RED.
+//   [P2]     orgs:[]⇒honest empty; a 404 EIN⇒not_found; ★the "Unknown Organization"
+//            200-placeholder⇒not_found (never a fabricated empty org); 400⇒invalid_input;
+//            503⇒upstream_unavailable; 200 non-JSON⇒schema_drift ⇒ RED.
+//   [P3]     totrevenue 3217077611 preserved; a genuine 0⇒0; absent⇒null (never 0-faked);
+//            ein/codes strings; rulingDate a string ⇒ RED.
+//   [P4]     search organizations non-array OR total_results non-number ⇒ drift; financials
+//            organization non-object OR filings_with_data non-array ⇒ drift ⇒ RED.
+//   [SSRF]   ein ^\d{1,9}$ (0 fetch); state ^[A-Za-z]{2}$ (0 fetch); ntee 1..10 (0 fetch);
+//            q/state[id]/ntee[id] ride URLSearchParams; fixed host projects.propublica.org.
+const NP_SEARCH_RE = /projects\.propublica\.org\/nonprofits\/api\/v2\/search/;
+const NP_ORG_RE = /projects\.propublica\.org\/nonprofits\/api\/v2\/organizations/;
+const isNpSearch = (u) => NP_SEARCH_RE.test(u);
+const isNpOrg = (u) => NP_ORG_RE.test(u);
+const npSearchMock = (body, status = 200, headers = {}) => (u) => (isNpSearch(u) ? mockResponse({ status, json: body, headers }) : failClosed()());
+const npOrgMock = (body, status = 200, headers = {}) => (u) => (isNpOrg(u) ? mockResponse({ status, json: body, headers }) : failClosed()());
+const npSearchUrl = (calls) => calls.find((x) => isNpSearch(x.url))?.url;
+const npSearchQuery = (calls) => new URL(npSearchUrl(calls)).searchParams;
+const npOrgUrl = (calls) => calls.find((x) => isNpOrg(x.url))?.url;
+// A 200 whose .json() THROWS a SyntaxError (an HTML error page parsed as JSON).
+const npNonJson = (pred) => (u) => (pred(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" }
+  : failClosed()());
+// One search organizations[] row — ein as an INTEGER (ProPublica's shape), subseccd the
+// 501(c) subsection code.
+const npOrg = (overrides = {}) => ({ ein: 530196605, name: "American National Red Cross", sub_name: null, city: "Washington", state: "DC", ntee_code: "P210", subseccd: "3", score: 100, ...overrides });
+// The search envelope: { total_results, organizations, num_pages, cur_page, per_page, page_offset }.
+const npSearchBody = (total, orgs, { num_pages, cur_page = 0, per_page = 25 } = {}) => ({
+  total_results: total,
+  organizations: orgs,
+  num_pages: num_pages ?? Math.max(1, Math.ceil(total / per_page)),
+  cur_page,
+  per_page,
+  page_offset: cur_page * per_page,
+});
+// One filings_with_data[] row — the four Form 990 figures (real Red Cross 2023 values).
+const npFiling = (overrides = {}) => ({ tax_prd_yr: 2023, formtype: "0", pdf_url: "https://projects.propublica.org/nonprofits/download-filing?path=x.pdf", totrevenue: 3217077611, totfuncexpns: 2971106889, totassetsend: 4028321133, totliabend: 1008326202, ...overrides });
+// The detail envelope: { organization, filings_with_data }.
+const npOrgDetail = (org = {}, filings = []) => ({
+  organization: { ein: 530196605, name: "American National Red Cross", address: "431 18th St NW", city: "Washington", state: "DC", zipcode: "20006", ntee_code: "P210", subsection_code: "3", ruling_date: "1917-06-01", exempt_organization_status_code: "1", foundation_code: "15", ...org },
+  filings_with_data: filings,
+});
+
+async function testNonprofit() {
+  section("§55g. US tax-exempt nonprofits — IRS Form 990 via ProPublica Nonprofit Explorer (ADR-0060 — the nonprofit/grantee/subcontractor vetting lane, KEYLESS) — ★provenance(non-.gov/IRS-990/ProPublica) + P1 total_results=real-total(not orgs.length)/0-indexed-page-pagination + financials filings.length + P3 money null-not-0/real-0/ein-string + P2 empty/404/★Unknown-Organization-placeholder/400/503/non-JSON + P4 drift + SSRF(ein/state/ntee charclass + bracket params) (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── [P1 + ★prov] search total_results 11 + 2 orgs ⇒ totalAvailable 11 (NOT 2);
+  //    0-indexed page pagination (cur_page 0 of num_pages 6 ⇒ hasMore, nextOffset). ──
+  await withFetch(npSearchMock(npSearchBody(11, [npOrg(), npOrg({ ein: 111111111, name: "Red Cross Chapter" })], { num_pages: 6, cur_page: 0, per_page: 2 })), async (calls) => {
+    const r = await runTool("nonprofit_search", { query: "american red cross" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55g-P1 total_results 11 + 2 orgs ⇒ returned:2 but totalAvailable:11 (the API's REAL total, NOT organizations.length 2), complete:false, truncated:true ⇒ set totalAvailable = organizations.length ⇒ RED",
+      r.data.organizations.length === 2 && m.returned === 2 && m.totalAvailable === 11 && m.complete === false && m.truncated === true, JSON.stringify({ n: r.data.organizations.length, ret: m.returned, ta: m.totalAvailable, c: m.complete }));
+    ok("55g-P1 0-INDEXED page pagination: cur_page 0 of num_pages 6 ⇒ hasMore:true, offset:0 (page_offset), limit:2 (per_page), nextOffset:2 (=(cur_page+1)*per_page), a note surfaces page=1 ⇒ short-circuit hasMore on a full page ⇒ RED",
+      m.pagination.hasMore === true && m.pagination.offset === 0 && m.pagination.limit === 2 && m.pagination.nextOffset === 2 && m.notes.some((n) => /page=1/.test(n)), JSON.stringify(m.pagination));
+    ok("55g-P1 keylessMode:true (no key of any kind) + first org mapped { ein:'530196605' (a STRING, never num), name, city 'Washington', state 'DC', nteeCode 'P210', subsectionCode '3' } ⇒ num-coerce the ein or drop a field ⇒ RED",
+      m.keylessMode === true && JSON.stringify(r.data.organizations[0]) === JSON.stringify({ ein: "530196605", name: "American National Red Cross", city: "Washington", state: "DC", nteeCode: "P210", subsectionCode: "3" }), JSON.stringify(r.data.organizations[0]));
+    // ── [★prov] the provenance disclosure is LOAD-BEARING (IRS 990 + ProPublica; non-.gov). ──
+    ok("55g-prov ★_meta.source names 'IRS Form 990 data via ProPublica Nonprofit Explorer' + 'not a .gov API' AND a note names IRS Form 990 + ProPublica + not-a-.gov ⇒ drop/soften the provenance disclosure ⇒ RED",
+      /IRS Form 990/.test(m.source) && /ProPublica Nonprofit Explorer/.test(m.source) && /not a \.gov/i.test(m.source) && m.notes.some((n) => /IRS Form 990/.test(n) && /ProPublica/.test(n) && /NOT a \.gov/i.test(n)), JSON.stringify({ src: m.source }));
+    ok("55g-P1 the search note discloses total_results is the real total (NOT this page) + 0-indexed pagination ⇒ drop the note ⇒ RED",
+      m.notes.some((n) => /real total_results/.test(n) && /0-INDEX/i.test(n)), JSON.stringify(m.notes.length));
+    // ── [SSRF] the request is to projects.propublica.org over https, search.json path. ──
+    ok("55g-P1 request is to projects.propublica.org/nonprofits/api/v2/search.json over https ⇒ change the host/path/scheme ⇒ RED",
+      new URL(npSearchUrl(calls)).hostname === "projects.propublica.org" && new URL(npSearchUrl(calls)).protocol === "https:" && /\/nonprofits\/api\/v2\/search\.json/.test(npSearchUrl(calls)), npSearchUrl(calls));
+  });
+
+  // ── [P1 last page] total fits in one page (num_pages 1) ⇒ hasMore:false, complete:true. ──
+  await withFetch(npSearchMock(npSearchBody(2, [npOrg(), npOrg()], { num_pages: 1, cur_page: 0, per_page: 25 })), async () => {
+    const r = await runTool("nonprofit_search", { query: "x" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55g-P1 a page that EXHAUSTS the total (num_pages 1) ⇒ hasMore:false, nextOffset:null, totalAvailable:2, complete:true (an honest complete) ⇒ RED if hasMore ignores num_pages",
+      m.totalAvailable === 2 && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.complete === true, JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore, c: m.complete }));
+  });
+
+  // ── [filters mapping + SSRF] query→q, state→state[id] (bracket key), ntee→ntee[id],
+  //    page; special chars ride URLSearchParams (encoded, no host steer). ──
+  await withFetch(npSearchMock(npSearchBody(0, [])), async (calls) => {
+    await runTool("nonprofit_search", { query: "a & b / c", state: "va", ntee: 8, page: 3 }, sam);
+    const q = npSearchQuery(calls);
+    ok("55g-map query→q, state→state[id] (UPPERCASED 'VA'), ntee→ntee[id] '8', page '3' ⇒ rename a mapping OR drop the [id] bracket ⇒ RED",
+      q.get("q") === "a & b / c" && q.get("state[id]") === "VA" && q.get("ntee[id]") === "8" && q.get("page") === "3", npSearchUrl(calls));
+    ok("55g-ssrf special-char values (& / =) round-trip through URLSearchParams WITHOUT steering the host — the request stays on projects.propublica.org over https ⇒ raw string concat ⇒ RED",
+      new URL(npSearchUrl(calls)).hostname === "projects.propublica.org" && new URL(npSearchUrl(calls)).protocol === "https:", npSearchUrl(calls));
+  });
+
+  // ── [P2] a genuine empty organizations:[] ⇒ honest empty (returned:0, complete:true). ──
+  await withFetch(npSearchMock(npSearchBody(0, [])), async () => {
+    const r = await runTool("nonprofit_search", { query: "no-such-org-xyzzy" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55g-P2 an empty organizations:[] (total 0) ⇒ organizations:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+      r.data.organizations.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.organizations.length, ta: m.totalAvailable }));
+  });
+
+  // ── [P4 search] organizations non-array OR total_results non-number ⇒ schema_drift. ──
+  await withFetch(npSearchMock({ total_results: 5, organizations: "not-an-array" }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_search", { query: "x" }, sam));
+    ok("55g-P4 a 200 with organizations NOT an array (a string) ⇒ schema_drift (the results contract broke, never a fabricated empty) ⇒ trust a non-array ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(npSearchMock({ total_results: "not-a-number", organizations: [] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_search", { query: "x" }, sam));
+    ok("55g-P4 a 200 with total_results NOT a number (a string) ⇒ schema_drift (never fabricate a total from organizations.length) ⇒ coerce total_results blindly ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2 search errors] 400⇒invalid_input, 503⇒upstream_unavailable, non-JSON⇒drift. ──
+  await withFetch(npSearchMock("Bad Request", 400), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_search", { query: "x" }, sam));
+    ok("55g-P2 search 400 ⇒ invalid_input (never a fake empty) ⇒ read the 400 as empty ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(npSearchMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_search", { query: "x" }, sam));
+    ok("55g-P2 search 503 ⇒ upstream_unavailable THROW (a down endpoint is never an empty result) ⇒ RED if it degrades to empty",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(npNonJson(isNpSearch), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_search", { query: "x" }, sam));
+    ok("55g-P2 search 200 non-JSON body (HTML → r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [SSRF search] bad state / ntee ⇒ invalid_input, 0 fetch (pre-fetch re-guard). ──
+  for (const [args, label] of [
+    [{ state: "USA" }, "state 'USA' (3 letters)"],
+    [{ state: "V1" }, "state 'V1' (non-letter)"],
+    [{ ntee: 0 }, "ntee 0 (below 1)"],
+    [{ ntee: 11 }, "ntee 11 (above 10)"],
+    [{ ntee: 3.5 }, "ntee 3.5 (non-integer)"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("nonprofit_search", args, sam));
+      ok(`55g-ssrf search ${label} ⇒ invalid_input, 0 fetch (the charclass/range re-guard PRE-fetch — a value never touches the fixed host) ⇒ widen the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ── [P1 financials + P3] 3 filings ⇒ totalAvailable:3; totrevenue 3217077611 preserved,
+  //    a genuine 0 ⇒ 0, an absent figure ⇒ null (never 0-faked); ein/codes strings. ──
+  await withFetch(npOrgMock(npOrgDetail({}, [
+    npFiling(),
+    npFiling({ tax_prd_yr: 2022, totrevenue: 0 }),
+    npFiling({ tax_prd_yr: 2021, totrevenue: undefined, totassetsend: null }),
+  ])), async (calls) => {
+    const r = await runTool("nonprofit_financials", { ein: "530196605" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55g-P1 financials 3 filings ⇒ returned:3, totalAvailable:3 (the COMPLETE set from the detail doc — never a page), complete:true, hasMore:false ⇒ set totalAvailable != filings.length ⇒ RED",
+      r.data.filings.length === 3 && m.returned === 3 && m.totalAvailable === 3 && m.complete === true && m.pagination.hasMore === false, JSON.stringify({ n: r.data.filings.length, ta: m.totalAvailable, c: m.complete }));
+    ok("55g-P1 organization mapped { ein:'530196605' STRING, name, address, city, state 'DC', zip '20006', nteeCode 'P210', subsectionCode '3', rulingDate '1917-06-01' STRING, statusCode '1' } ⇒ num-coerce an id/date or drop a field ⇒ RED",
+      JSON.stringify(r.data.organization) === JSON.stringify({ ein: "530196605", name: "American National Red Cross", address: "431 18th St NW", city: "Washington", state: "DC", zip: "20006", nteeCode: "P210", subsectionCode: "3", rulingDate: "1917-06-01", statusCode: "1" }), JSON.stringify(r.data.organization));
+    ok("55g-P3 totrevenue 3217077611 ⇒ revenueUsd 3217077611 preserved + expenses/assets/liabilities parsed via num ⇒ RED if the figure is dropped/rounded",
+      r.data.filings[0].revenueUsd === 3217077611 && r.data.filings[0].expensesUsd === 2971106889 && r.data.filings[0].assetsUsd === 4028321133 && r.data.filings[0].liabilitiesUsd === 1008326202, JSON.stringify(r.data.filings[0]));
+    ok("55g-P3 a GENUINE totrevenue 0 ⇒ revenueUsd 0 (NOT null) — a real reported zero is preserved (distinct from absent) ⇒ map all falsy to null ⇒ RED",
+      r.data.filings[1].revenueUsd === 0, JSON.stringify(r.data.filings[1].revenueUsd));
+    ok("55g-P3 an ABSENT totrevenue(undefined)/totassetsend(null) ⇒ revenueUsd/assetsUsd null — NEVER 0 (the Number(null)===0 / Number(undefined)===NaN landmine) ⇒ map absent→0 ⇒ RED",
+      r.data.filings[2].revenueUsd === null && r.data.filings[2].assetsUsd === null, JSON.stringify({ rev: r.data.filings[2].revenueUsd, ast: r.data.filings[2].assetsUsd }));
+    ok("55g-P1 financials note discloses filings.length is the COMPLETE set (no pagination) + money null-never-0 + provenance ⇒ drop a note ⇒ RED",
+      m.notes.some((n) => /COMPLETE set/.test(n)) && m.notes.some((n) => /NEVER 0/.test(n)) && m.notes.some((n) => /IRS Form 990/.test(n) && /ProPublica/.test(n)), JSON.stringify(m.notes.length));
+    ok("55g-ssrf financials request is to projects.propublica.org/nonprofits/api/v2/organizations/530196605.json over https (ein rides the PATH) ⇒ change host/path ⇒ RED",
+      new URL(npOrgUrl(calls)).hostname === "projects.propublica.org" && new URL(npOrgUrl(calls)).protocol === "https:" && /\/organizations\/530196605\.json/.test(npOrgUrl(calls)), npOrgUrl(calls));
+  });
+
+  // ── [P2 financials empty] a real org with NO filings_with_data ⇒ honest empty
+  //    (organization present, filings:[], returned:0, complete:true) — NOT thrown. ──
+  await withFetch(npOrgMock(npOrgDetail({ name: "Neighbor To Neighbor Inc" }, [])), async () => {
+    const r = await runTool("nonprofit_financials", { ein: "123456789" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55g-P2 a REAL org with filings_with_data:[] ⇒ organization surfaced + filings:[], returned:0, totalAvailable:0, complete:true (honest empty, NOT not_found — the org exists) ⇒ throw on a filing-less real org ⇒ RED",
+      r.data.organization.name === "Neighbor To Neighbor Inc" && r.data.filings.length === 0 && m.returned === 0 && m.complete === true, JSON.stringify({ name: r.data.organization.name, n: r.data.filings.length }));
+  });
+
+  // ── [P2 financials 404] an unknown EIN (HTTP 404) ⇒ not_found (never a fake empty org). ──
+  await withFetch(npOrgMock({ message: "not found" }, 404), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_financials", { ein: "1" }, sam));
+    ok("55g-P2 a 404 (unknown EIN) ⇒ not_found (NEVER a fabricated empty org) ⇒ read the 404 as an empty org ⇒ RED",
+      threw && toToolError(error).kind === "not_found", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2 financials ★placeholder] ProPublica's "Unknown Organization" 200-PLACEHOLDER
+  //    (a synthetic empty org for an in-range EIN with no IRS record) ⇒ not_found. This is
+  //    the LIVE-VERIFIED behavior the ADR missed (it claimed all-404); surfacing the
+  //    placeholder verbatim would present a FABRICATED empty org as a real hit. ──
+  await withFetch(npOrgMock(npOrgDetail({ name: "Unknown Organization", ein: 999999999, address: null, city: null, state: null, zipcode: null, ntee_code: null, subsection_code: null, ruling_date: null, exempt_organization_status_code: null }, [])), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_financials", { ein: "999999999" }, sam));
+    const te = threw ? toToolError(error) : null;
+    ok("55g-P2 ★the 'Unknown Organization' 200-PLACEHOLDER (zero filings) ⇒ not_found (NEVER surfaced as a real hit named 'Unknown Organization') — the honesty crux the ADR's 404-only spec missed ⇒ return the placeholder verbatim ⇒ RED",
+      threw && te.kind === "not_found" && /Unknown Organization/.test(te.message), JSON.stringify({ kind: te?.kind, msg: te?.message?.slice(0, 90) }));
+  });
+  // A real org that HAPPENS to have zero filings but a real name is NOT swallowed (guard is
+  // gated on the exact sentinel name) — already covered by the Neighbor-To-Neighbor case above.
+
+  // ── [P4 financials] organization non-object OR filings_with_data non-array ⇒ drift. ──
+  await withFetch(npOrgMock({ organization: "not-an-object", filings_with_data: [] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_financials", { ein: "530196605" }, sam));
+    ok("55g-P4 a 200 with organization NOT an object (a string) ⇒ schema_drift (the org contract broke, never a fabricated org) ⇒ trust a non-object ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(npOrgMock({ organization: { ein: 530196605, name: "X" }, filings_with_data: "not-an-array" }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_financials", { ein: "530196605" }, sam));
+    ok("55g-P4 a 200 with filings_with_data NOT an array (a string) ⇒ schema_drift (never fabricate a filing set) ⇒ trust a non-array ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2 financials errors] 503⇒upstream_unavailable, non-JSON⇒drift. ──
+  await withFetch(npOrgMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_financials", { ein: "530196605" }, sam));
+    ok("55g-P2 financials 503 ⇒ upstream_unavailable THROW (a down endpoint is never an empty org) ⇒ RED if it degrades to empty",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(npNonJson(isNpOrg), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nonprofit_financials", { ein: "530196605" }, sam));
+    ok("55g-P2 financials 200 non-JSON body ⇒ schema_drift (never read as an empty org) ⇒ swallow the SyntaxError ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [SSRF financials] bad ein ⇒ invalid_input, 0 fetch (charclass re-guard pre-fetch). ──
+  for (const [ein, label] of [
+    ["53019660X", "ein '53019660X' (non-digit)"],
+    ["1234567890", "ein '1234567890' (10 digits)"],
+    ["530196605\n", "ein '530196605\\n' (trailing newline)"],
+    ["", "ein '' (empty)"],
+    ["../secret", "ein '../secret' (path traversal)"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("nonprofit_financials", { ein }, sam));
+      ok(`55g-ssrf financials ${label} ⇒ invalid_input, 0 fetch (the ^\\d{1,9}$ re-guard PRE-fetch — a value never touches the fixed host / path) ⇒ widen the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ── (parity) nonprofit re-exports the shared coerce.num (null-never-0) + fixed host. ──
+  ok("55g-parity nonprofit.num === coerce.num (one shared audited impl — NO local num/str fork) + NONPROFIT_HOST is the fixed projects.propublica.org", npNum === coerceNum && NONPROFIT_HOST === "projects.propublica.org", "nonprofit num/host diverged");
+}
+
 // §54: shared disclosure tokenizer (src/disclosure.ts, ADR-0022) — the byte-identical
 // extraction of NSF's OR-note + ClinicalTrials' AND-note tokenizer into ONE audited
 // home, PLUS the lint guardrail against the whitespace-only recurrence adversarial
@@ -18928,6 +19175,7 @@ async function main() {
   await testDolDataApi();
   await testLdaSearchFilings();
   await testCourtlistenerSearchOpinions();
+  await testNonprofit();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
   await testHonestyAuditRemediation();
