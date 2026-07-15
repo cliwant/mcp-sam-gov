@@ -56,6 +56,7 @@ import * as clinicaltrials from "./clinicaltrials.js";
 import * as census from "./census.js";
 import * as censusEconomic from "./census-economic.js";
 import * as fred from "./fred.js";
+import * as bea from "./bea.js";
 import * as gsaPerdiem from "./gsa-perdiem.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
@@ -3486,6 +3487,45 @@ const FredSeriesObservationsInput = z.object({
     .describe("Observation date order: 'asc' (oldest first, FRED default) or 'desc' (newest first)."),
 });
 
+// ─── BEA Regional Economic Accounts (apps.bea.gov) — the THIRD key-required source ──
+// ADR-0051. County/state/MSA GDP-by-industry (CAGDP2/SAGDP2N) + personal income
+// (CAINC1/SAINC1) — the regional/sub-national place-of-performance lane. REQUIRES a
+// free BEA_API_KEY; without it the tool throws an honest config error (the other 116
+// tools stay keyless). ★A missing/invalid key returns HTTP 200 with a
+// BEAAPI.Results.Error carrier (NOT an HTTP error), detected pre-drift. The key rides
+// UserID= ONLY. DataValue is a comma string; suppression codes ((NA)/(D)/…) → null.
+const BeaRegionalDataInput = z.object({
+  tableName: z
+    .string()
+    .regex(/^[A-Za-z0-9]{2,20}$/)
+    .describe(
+      "A BEA Regional table code (2–20 alphanumerics), e.g. 'CAGDP2' (county GDP by industry), 'SAGDP2N' (state GDP by industry), 'CAINC1'/'SAINC1' (personal income). Validated ^[A-Za-z0-9]{2,20}$. Required.",
+    ),
+  geoFips: z
+    .string()
+    .regex(/^[A-Za-z0-9]{2,10}$/)
+    .describe(
+      "The BEA GeoFips selector: 'STATE' (all states), a county FIPS like '06075', or an MSA code. Validated ^[A-Za-z0-9]{2,10}$. Required.",
+    ),
+  lineCode: z
+    .string()
+    .regex(/^([0-9]{1,4}|ALL)$/)
+    .describe(
+      "The industry/statistic line code — an integer (1–4 digits), e.g. '1', or 'ALL' for every line in the table. Validated ^([0-9]{1,4}|ALL)$. Required.",
+    ),
+  year: z
+    .string()
+    .regex(/^(\d{4}|LAST5|ALL)$/)
+    .optional()
+    .describe(
+      "The data year: a 4-digit year (e.g. '2022'), 'LAST5' (the latest 5 years, default), or 'ALL'. Validated ^(\\d{4}|LAST5|ALL)$.",
+    ),
+  frequency: z
+    .enum(["A", "Q"])
+    .optional()
+    .describe("Data frequency: 'A' (annual, default) or 'Q' (quarterly)."),
+});
+
 // ─── GSA Federal Travel Per-Diem (api.gsa.gov) — travel-cost lane ──
 // ADR-0050. Lodging + M&IE reimbursement ceilings by city/state OR zip for a year.
 // KEYLESS by default via the shared DEMO_KEY (datagovKey.ts seam); DATA_GOV_API_KEY
@@ -5022,6 +5062,21 @@ export const TOOLS: ToolDef[] = [
       "Fetch a FRED series' time series of date/value observations (FRED /fred/series/observations; api.stlouisfed.org). ★REQUIRES a free FRED_API_KEY (FRED has NO keyless tier — without it this tool THROWS an honest config error; get one at https://fred.stlouisfed.org/docs/api/api_key.html). Input: `seriesId` (required, e.g. 'GDP', 'CPIAUCSL', 'UNRATE', 'DGS10', 'PPIACO'; discover with fred_search_series), optional `startDate`/`endDate` (YYYY-MM-DD), `limit` (default 100, max 100000), `offset`, `sortOrder` (asc|desc). Returns { observations:[{ date, value }] } + honest _meta. ★MISSING-VALUE HONESTY (the crux): FRED encodes a missing observation as the literal '.', which maps to value:null (missing) — NEVER 0; a genuine reported 0 is preserved as 0. HONESTY: totalAvailable is FRED's EXACT `count` (offset pagination via hasMore/nextOffset — never fabricated); a 400 (bad seriesId / missing key) ⇒ invalid_input CARRYING FRED's error_message (never a fake empty); a genuine empty ⇒ honest empty; a 5xx ⇒ THROWS; a 200 non-JSON / non-array `observations` ⇒ schema_drift. seriesId is charclass-validated (^[A-Za-z0-9._-]+$) and dates are YYYY-MM-DD; the key rides ONLY in the &api_key= query param.",
     inputSchema: FredSeriesObservationsInput,
     handler: (input) => fred.seriesObservations(input),
+  }),
+  // ━━━ BEA Regional Economic Accounts (apps.bea.gov) — regional GDP/income (1) ━━━ ADR-0051
+  // ★The server's THIRD KEY-REQUIRED source: the BEA Data API has NO keyless tier, so
+  // WITHOUT a BEA_API_KEY this tool throws an honest invalid_input config error (the
+  // other 116 tools stay keyless). County/state/MSA GDP-by-industry + personal income —
+  // the regional place-of-performance lane. ★The P2 crux: a missing/invalid key returns
+  // HTTP 200 carrying BEAAPI.Results.Error (NOT an HTTP error status), which is detected
+  // BEFORE the Data-array drift check and surfaced as invalid_input (never a fake empty).
+  // DataValue is a comma-formatted string; suppression codes ((NA)/(D)/(NM)/(L)/*) → null.
+  defineTool({
+    name: "bea_regional_data",
+    description:
+      "Regional (county / state / MSA) economic data — GDP by industry and personal income — from the US Bureau of Economic Analysis (BEA) Regional Economic Accounts (apps.bea.gov/api/data, dataset 'Regional'). ★REQUIRES a free BEA_API_KEY: the BEA Data API has NO keyless tier, so without the key this tool THROWS an honest config error (get one at https://apps.bea.gov/API/signup/; Census, FRED, and BEA are the only key-required sources — every other tool is keyless). Input: `tableName` (required, e.g. 'CAGDP2' county GDP by industry, 'SAGDP2N' state GDP, 'CAINC1'/'SAINC1' personal income), `geoFips` (required — 'STATE' for all states, a county FIPS like '06075', or an MSA code), `lineCode` (required — an integer industry line like '1', or 'ALL'), optional `year` ('LAST5' default, a 4-digit year, or 'ALL'), `frequency` ('A' annual default, or 'Q'). Returns { rows:[{ geoFips, geoName, timePeriod, lineCode, dataValue, unitOfMeasure, unitMult, noteRef }], notes:[{ noteRef, noteText }] } + honest _meta. ★HONESTY (the crux): a missing/invalid key — or ANY bad parameter — returns HTTP 200 carrying an Error object (NOT an HTTP error status); this is detected and surfaced as invalid_input carrying BEA's APIErrorDescription — NEVER a fake empty. dataValue is parsed from BEA's comma-formatted string ('1,234,567'→1234567); BEA suppression/not-available codes ((NA)/(D)/(NM)/(L)/*) map to null — NEVER 0 (a genuine 0 stays 0). unitMult (a power-of-10 multiplier) and unitOfMeasure are reported ALONGSIDE the raw dataValue — the value is NOT multiplied in (apply unitMult yourself). BEA returns the COMPLETE set for the filter (no pagination) ⇒ totalAvailable = the row count, complete:true; a genuine empty Data:[] ⇒ honest empty (returned:0); a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The key rides ONLY in the UserID= query param — never logged or echoed.",
+    inputSchema: BeaRegionalDataInput,
+    handler: (input) => bea.regionalData(input),
   }),
   // ━━━ GSA Federal Travel Per-Diem (api.gsa.gov) — travel-cost lane (1) ━━━ ADR-0050
   // The lodging + M&IE reimbursement ceilings the federal government pays for official
