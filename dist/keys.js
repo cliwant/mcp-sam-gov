@@ -3,7 +3,7 @@
  *
  * Why this exists
  * ----------------
- * The server rides 31 federal sources. MOST are fully keyless. But the set of
+ * The server rides dozens of federal data sources. MOST are fully keyless. But the set of
  * *optional* keys (raise a rate limit, unlock one filter) plus the four *required*
  * keys (Census business-patterns, FRED, BEA Regional, DOL data) has grown to the point where a user — or
  * the AI driving the server — cannot tell, without reading source code:
