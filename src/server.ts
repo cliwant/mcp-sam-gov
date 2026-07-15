@@ -71,6 +71,7 @@ import * as cms from "./cms.js";
 import * as fac from "./fac.js";
 import * as usitc from "./usitc.js";
 import * as openfda from "./openfda.js";
+import * as openfdaDevice from "./openfda-device.js";
 import { fetchAttachmentText } from "./attachments.js";
 import * as keys from "./keys.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
@@ -3560,6 +3561,70 @@ const OpenfdaEnforcementInput = z.object({
     .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
 });
 
+// ─── openFDA 510(k) device clearances (api.fda.gov) — KEYLESS + OPTIONAL rate-limit key ──
+// ADR-0056. FDA premarket-notification (510(k)) device clearances — SAME source/envelope/
+// crux as openfda_enforcement (structured filters ONLY — the tool assembles + escapes the
+// search= string, injection-safe). totalAvailable = meta.results.total (P1); a no-match
+// query (openFDA HTTP 404 NOT_FOUND) ⇒ an honest empty (P2). An OPTIONAL OPENFDA_API_KEY
+// only raises the rate limit (keyless works ~1000/day).
+const OpenfdaDeviceClearancesInput = z.object({
+  applicant: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Applicant / manufacturer name filter (→ applicant), e.g. 'medtronic'. Matched as an escaped Lucene phrase.",
+    ),
+  deviceName: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Device name filter (→ device_name), e.g. 'catheter'. Matched as an escaped Lucene phrase.",
+    ),
+  productCode: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "FDA product code filter (→ product_code), e.g. 'DXN'. Matched as an escaped Lucene phrase.",
+    ),
+  clearanceType: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "510(k) clearance type filter (→ clearance_type), e.g. 'Traditional', 'Special', 'Abbreviated'. Matched as an escaped Lucene phrase.",
+    ),
+  kNumber: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "510(k) clearance number (K-number) filter (→ k_number), e.g. 'K123456'. Matched as an escaped Lucene phrase.",
+    ),
+  state: z
+    .string()
+    .regex(/^[A-Za-z]{2}$/)
+    .optional()
+    .describe(
+      "2-letter US state/territory postal code filter (→ state), e.g. 'CA'. Validated ^[A-Za-z]{2}$.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe("Max clearance records to return (default 25, max 100). Offset-paginated via skip."),
+  skip: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+});
+
 // ─── BEA Regional Economic Accounts (apps.bea.gov) — the THIRD key-required source ──
 // ADR-0051. County/state/MSA GDP-by-industry (CAGDP2/SAGDP2N) + personal income
 // (CAINC1/SAINC1) — the regional/sub-national place-of-performance lane. REQUIRES a
@@ -5335,6 +5400,21 @@ export const TOOLS: ToolDef[] = [
       "Search openFDA recall/enforcement records — drug/device/food product recalls with the recalling firm, product, reason, FDA classification (Class I/II/III), status, and geography (openFDA /{category}/enforcement.json; api.fda.gov). KEYLESS (an OPTIONAL free OPENFDA_API_KEY only RAISES the rate limit — keyless works at ~1000 requests/day; it NEVER throws for a missing key; get one at https://open.fda.gov/apis/authentication/; call api_key_status to see every source's key requirement). Input: `category` (drug|device|food, default drug), and STRUCTURED filters — `firm` (→recalling_firm), `product` (→product_description), `reason` (→reason_for_recall), `classification` (Class I|II|III), `status` (e.g. Ongoing/Terminated/Completed), `state` (2-letter, e.g. 'CA') — the tool safely assembles + escapes these into the openFDA search= Lucene string (NO raw passthrough — injection-safe), plus `limit` (1..100, default 25) and `skip` (offset ≥0). Returns { recalls:[{ recallingFirm, productDescription, reasonForRecall, classification, status, state, city, recallInitiationDate, recallNumber, voluntaryMandated, distributionPattern }] } + honest _meta. HONESTY: totalAvailable is openFDA's EXACT meta.results.total (skip/limit pagination via hasMore/nextOffset — never results.length); every scalar (dates included, recall_initiation_date is a YYYYMMDD string) is null-never-empty-string. ★A no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an HONEST EMPTY (returned:0, totalAvailable:0), NOT an error; a 400 syntax error ⇒ invalid_input surfacing openFDA's message; a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The optional key rides ONLY the &api_key= query param — never logged or echoed.",
     inputSchema: OpenfdaEnforcementInput,
     handler: (input) => openfda.enforcement(input),
+  }),
+  // ━━━ openFDA 510(k) device clearances (api.fda.gov) — medical-device regulatory (1) ━━━ ADR-0056
+  // KEYLESS with an OPTIONAL OPENFDA_API_KEY (raises the rate limit; keyless works
+  // ~1000/day — never throws for a missing key). SAME source/envelope/crux as
+  // openfda_enforcement (reuses openfda.ts's fetchOpenfda/readOpenfdaError/luceneQuote).
+  // Structured filters ONLY (no raw Lucene passthrough — the tool assembles + escapes the
+  // search= string, injection-safe). ★P1: totalAvailable = meta.results.total (EXACT,
+  // ~175507). ★P2 crux: a no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an honest
+  // empty, never a throw. The optional key rides &api_key= ONLY.
+  defineTool({
+    name: "openfda_device_clearances",
+    description:
+      "Search openFDA 510(k) DEVICE CLEARANCES — the FDA's premarket-notification (510(k)) clearances for medical devices, with the applicant/manufacturer, device name, clearance number (K-number), decision (date + description), clearance type, product code, advisory committee, and geography (openFDA /device/510k.json; api.fda.gov). KEYLESS (an OPTIONAL free OPENFDA_API_KEY only RAISES the rate limit — keyless works at ~1000 requests/day; it NEVER throws for a missing key; get one at https://open.fda.gov/apis/authentication/; call api_key_status to see every source's key requirement). Input: STRUCTURED filters — `applicant` (→applicant), `deviceName` (→device_name), `productCode` (→product_code), `clearanceType` (→clearance_type, e.g. Traditional/Special/Abbreviated), `kNumber` (→k_number, e.g. 'K123456'), `state` (2-letter, e.g. 'CA') — the tool safely assembles + escapes these into the openFDA search= Lucene string (NO raw passthrough — injection-safe), plus `limit` (1..100, default 25) and `skip` (offset ≥0). Returns { clearances:[{ applicant, deviceName, kNumber, decisionDate, decisionDescription, clearanceType, productCode, advisoryCommittee, state }] } + honest _meta. HONESTY: totalAvailable is openFDA's EXACT meta.results.total (skip/limit pagination via hasMore/nextOffset — never results.length); every scalar (dates included, decision_date is a YYYY-MM-DD string) is null-never-empty-string. ★A no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an HONEST EMPTY (returned:0, totalAvailable:0), NOT an error; a 400 syntax error ⇒ invalid_input surfacing openFDA's message; a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The optional key rides ONLY the &api_key= query param — never logged or echoed.",
+    inputSchema: OpenfdaDeviceClearancesInput,
+    handler: (input) => openfdaDevice.deviceClearances(input),
   }),
   // ━━━ BEA Regional Economic Accounts (apps.bea.gov) — regional GDP/income (1) ━━━ ADR-0051
   // ★The server's THIRD KEY-REQUIRED source: the BEA Data API has NO keyless tier, so

@@ -193,7 +193,7 @@ export function buildSearch(f: OpenfdaFilters): string {
  * retryable upstream_unavailable; a redirect TypeError ⇒ schema_drift (never a
  * fake-empty). `label` is host+path only.
  */
-async function fetchOpenfda(url: string, label: string): Promise<Response> {
+export async function fetchOpenfda(url: string, label: string): Promise<Response> {
   const built = new URL(url);
   if (built.hostname !== OPENFDA_HOST || built.protocol !== "https:") {
     throw new ToolErrorCarrier({
@@ -237,7 +237,7 @@ async function fetchOpenfda(url: string, label: string): Promise<Response> {
 }
 
 /** Best-effort read of an openFDA error body `{error:{code,message}}`. null on any failure. */
-async function readOpenfdaError(
+export async function readOpenfdaError(
   res: Response,
 ): Promise<{ code: string | null; message: string | null }> {
   try {

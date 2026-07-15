@@ -100,6 +100,23 @@ export type OpenfdaFilters = {
  * clause → field is FIXED here; a caller can never inject a raw field:value.
  */
 export declare function buildSearch(f: OpenfdaFilters): string;
+/**
+ * A SINGLE classified `fetch` to api.fda.gov (NOT the shared getJson — we must
+ * READ a 404 body to distinguish a NOT_FOUND no-match from a real outage; see the
+ * ★P2 crux in the caller). Builds the URL on the FIXED host from `params`, asserts
+ * the constructed URL cannot have been steered off-host (belt-and-suspenders), and
+ * sets `redirect:"error"` (fail closed on any off-host 3xx — a redirect could
+ * carry the api_key away). Returns the raw Response for the caller to classify. A
+ * timeout/abort ⇒ non-retryable upstream_unavailable; a network TypeError ⇒
+ * retryable upstream_unavailable; a redirect TypeError ⇒ schema_drift (never a
+ * fake-empty). `label` is host+path only.
+ */
+export declare function fetchOpenfda(url: string, label: string): Promise<Response>;
+/** Best-effort read of an openFDA error body `{error:{code,message}}`. null on any failure. */
+export declare function readOpenfdaError(res: Response): Promise<{
+    code: string | null;
+    message: string | null;
+}>;
 export type OpenfdaEnforcementArgs = OpenfdaFilters & {
     category?: string;
     limit?: number;
