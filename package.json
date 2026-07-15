@@ -79,6 +79,7 @@
     "test:edge": "node edge-case-test.mjs",
     "test:fault": "node fault-injection-test.mjs",
     "test:snapshot": "node registry-snapshot-test.mjs",
+    "gen:keys": "node scripts/gen-api-keys-md.mjs",
     "lint:invariants": "node lint-invariants.mjs",
     "coverage": "c8 node fault-injection-test.mjs",
     "perf": "node --expose-gc perf-test.mjs",
