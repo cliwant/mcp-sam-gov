@@ -6368,21 +6368,37 @@ async function testSearchSubawardsMapping() {
     if (isAwardPage(u)) {
       // A3 GUARD: the request MUST ask for "NAICS" (valid), never "Sub-Award NAICS"
       // (invalid → silent null), and must set subawards:true.
+      // DRIFT GUARD (2026-07-15): the request MUST also ask for "Sub-Awardee Name" —
+      // USAspending renamed the subawardee field and now returns the legacy
+      // "Sub-Award Recipient" as ALWAYS null. Without requesting the new field, every
+      // subRecipient silently drops to null.
       const body = JSON.parse(init.body);
       ok("36 request uses subawards:true + the VALID 'NAICS' field (A3: never 'Sub-Award NAICS')",
         body.subawards === true && body.fields.includes("NAICS") && !body.fields.includes("Sub-Award NAICS"),
         JSON.stringify({ sub: body.subawards, fields: body.fields }));
+      ok("36 DRIFT: request asks for the CURRENT 'Sub-Awardee Name' field (upstream renamed; legacy 'Sub-Award Recipient' now always null)",
+        body.fields.includes("Sub-Awardee Name"),
+        JSON.stringify({ fields: body.fields }));
+      // Row S1 mirrors LIVE (2026-07-15): the subawardee is in "Sub-Awardee Name";
+      // the legacy "Sub-Award Recipient" is echoed as null. Row S2 is a legacy-only
+      // shape (name only in the old field) proving the fallback still resolves.
       return mockResponse({ status: 200, json: { results: [
-        { "Sub-Award ID": "SUB1", "Sub-Award Recipient": "ACME SUBCONTRACTOR LLC", "Sub-Award Amount": 50000, "Sub-Award Date": "2025-03-01", NAICS: { code: "541512", description: "COMPUTER SYSTEMS DESIGN SERVICES" }, prime_award_generated_internal_id: "CONT_AWD_PRIME1" },
+        { "Sub-Award ID": "SUB1", "Sub-Awardee Name": "LEIDOS, INC.", "Sub-Award Recipient": null, "Sub-Award Amount": 50000, "Sub-Award Date": "2025-03-01", NAICS: { code: "541512", description: "COMPUTER SYSTEMS DESIGN SERVICES" }, prime_award_generated_internal_id: "CONT_AWD_PRIME1" },
+        { "Sub-Award ID": "SUB2", "Sub-Award Recipient": "ACME SUBCONTRACTOR LLC", "Sub-Award Amount": 25000, "Sub-Award Date": "2025-02-01", NAICS: { code: "541512", description: "COMPUTER SYSTEMS DESIGN SERVICES" }, prime_award_generated_internal_id: "CONT_AWD_PRIME2" },
       ], page_metadata: { hasNext: true } } });
     }
     return failClosed()();
   }, async () => {
-    const res = await searchSubawards({ agency: "Department of Defense", limit: 1 });
+    const res = await searchSubawards({ agency: "Department of Defense", limit: 2 });
     const s0 = res.data.subawards[0];
+    const s1 = res.data.subawards[1];
     ok("36 maps subaward row (subAwardId/subRecipient/amount/actionDate/primeAwardId)",
-      s0.subAwardId === "SUB1" && s0.subRecipient === "ACME SUBCONTRACTOR LLC" && s0.amount === 50000 && s0.actionDate === "2025-03-01" && s0.primeAwardId === "CONT_AWD_PRIME1",
+      s0.subAwardId === "SUB1" && s0.subRecipient === "LEIDOS, INC." && s0.amount === 50000 && s0.actionDate === "2025-03-01" && s0.primeAwardId === "CONT_AWD_PRIME1",
       JSON.stringify(s0));
+    ok("36 DRIFT: subRecipient reads the CURRENT 'Sub-Awardee Name' even when legacy 'Sub-Award Recipient' is null (reading only the legacy field ⇒ null ⇒ RED)",
+      s0.subRecipient === "LEIDOS, INC.", JSON.stringify({ subRecipient: s0.subRecipient }));
+    ok("36 DRIFT fallback: legacy-only row (name in 'Sub-Award Recipient', no 'Sub-Awardee Name') still resolves via fallback",
+      s1.subRecipient === "ACME SUBCONTRACTOR LLC", JSON.stringify({ subRecipient: s1.subRecipient }));
     ok("36 A3: naicsCode/naicsDescription mapped from the NAICS{code,description} field (not silently null)",
       s0.naicsCode === "541512" && s0.naicsDescription === "COMPUTER SYSTEMS DESIGN SERVICES", JSON.stringify({ c: s0.naicsCode, d: s0.naicsDescription }));
     ok("36 count-honesty: totalAvailable = SUM of spending_by_award_count buckets (2,209,649) — the REAL uncapped total, NOT the 1 returned row",
