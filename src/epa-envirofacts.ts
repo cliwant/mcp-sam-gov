@@ -175,7 +175,16 @@ export type EpaTriFacilitiesArgs = {
 
 /** Validate + encode ONE user path-segment value (facilityName / county). */
 function validateName(value: string, field: string): string {
-  if (value.length > NAME_MAX || !NAME_RE.test(value) || value.includes("..")) {
+  // Reject `..` (path traversal) AND a lone `.` — both are URL dot-segments that
+  // WHATWG `URL` silently COLLAPSES, which would drop the CONTAINING value from the
+  // path, slide the next literal into its place, and leave `_meta.filtersApplied`
+  // claiming a filter the wire request no longer carries (a false-filtersApplied bug).
+  if (
+    value.length > NAME_MAX ||
+    !NAME_RE.test(value) ||
+    value.includes("..") ||
+    value === "."
+  ) {
     throw new ToolErrorCarrier({
       kind: "invalid_input",
       retryable: false,
@@ -326,11 +335,18 @@ export async function triFacilities(
   const notes: string[] = [CLOSED_NOTE, NOMINAL_NOTE];
   if (countFailed) notes.push(COUNT_FALLBACK_NOTE);
 
+  // When the total is UNKNOWN (count sub-query degraded) AND this is not the first
+  // page, we cannot claim the response is the ENTIRE result set — rows 0..offset-1
+  // are absent and no total confirms coverage. Force truncated so buildMeta never
+  // derives complete:true on a partial last page fetched at offset>0 with null total.
+  const cannotProveComplete = totalAvailable === null && offset > 0;
+
   const meta: Partial<ResponseMeta> = {
     source: `${EPA_HOST} EPA Envirofacts /efservice/${EPA_TABLE} (TRI facilities; keyless)`,
     keylessMode: true,
     returned,
     totalAvailable,
+    ...(cannotProveComplete ? { truncated: true } : {}),
     filtersApplied,
     filtersDropped: [],
     fieldsUnavailable: [],
