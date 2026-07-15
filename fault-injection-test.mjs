@@ -183,6 +183,7 @@ import { searchSeries as fredSearchSeries, seriesObservations as fredObservation
 import { enforcement as openfdaEnforcement, openfdaApiKey, buildSearch as openfdaBuildSearch, luceneQuote as openfdaQuote, OPENFDA_HOST } from "./dist/openfda.js";
 import { deviceClearances as openfdaDeviceClearances, buildDeviceSearch as openfdaBuildDeviceSearch } from "./dist/openfda-device.js";
 import { recalls as nhtsaRecalls, complaints as nhtsaComplaints, NHTSA_HOST } from "./dist/nhtsa.js";
+import { recalls as cpscRecalls, CPSC_HOST } from "./dist/cpsc.js";
 import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum } from "./dist/bea.js";
 import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
 import { dolApiKey } from "./dist/dol.js";
@@ -17293,6 +17294,154 @@ async function testNhtsaVehicleSafety() {
     NHTSA_HOST === "api.nhtsa.gov", NHTSA_HOST);
 }
 
+// §58-cpsc: CPSC consumer-product recalls — cpsc_recalls (www.saferproducts.gov,
+// ADR-0058 — the KEYLESS consumer-goods / import product-safety vetting lane).
+// NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the mutation
+// that turns it RED:
+//   [P1]  a bare array of 3 ⇒ totalAvailable:3, complete:true + the no-pagination note
+//         ⇒ fabricate a total ⇒ RED.
+//   [P2]  [] ⇒ honest empty (returned:0, complete:true); 400 ⇒ invalid_input;
+//         503 ⇒ upstream_unavailable; a non-array body / 200 non-JSON ⇒ schema_drift.
+//   [P3]  Products[].Name flattened; Hazards[].Name extracted as descriptions;
+//         NumberOfUnits string preserved; an empty Manufacturers {} skipped (not
+//         fabricated); ManufacturerCountries[].Country flattened; dates as strings.
+//   [default-window] NO filter ⇒ a disclosing note + a bounded RecallDateStart default
+//         (NOT a silent full fetch).
+//   [SSRF] a bad date / recallNumber rejected (0 fetch); fixed host www.saferproducts.gov.
+const CPSC_RE = /www\.saferproducts\.gov\/RestWebServices\/Recall/;
+const isCpsc = (u) => CPSC_RE.test(u);
+const cpscMock = (body, status = 200) => (u) => (isCpsc(u) ? mockResponse({ status, json: body }) : failClosed()());
+const cpscUrl = (calls) => calls.find((x) => isCpsc(x.url))?.url;
+const cpscNonJson = (u) => (isCpsc(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" }
+  : failClosed()());
+// One realistic recall row (bare-array element). Products/Hazards/Injuries/Retailers/
+// ManufacturerCountries are nested arrays; Manufacturers is an EMPTY [] here.
+const cpscRecallRow = (over = {}) => ({
+  RecallID: 12345,
+  RecallNumber: "25088",
+  RecallDate: "2025-01-08T00:00:00",
+  Description: "",
+  URL: "https://www.cpsc.gov/Recalls/2025/example",
+  Title: "Multi-Purpose Children's Helmets Recalled Due to Risk of Head Injury",
+  ConsumerContact: "Wemfg toll-free",
+  LastPublishDate: "2025-01-08T00:00:00",
+  Products: [{ Name: "Wemfg Children's Multi-Purpose Bike Helmets", Description: "", Model: "", Type: "", NumberOfUnits: "About 6,500" }],
+  Manufacturers: [],
+  Retailers: [{ Name: "Amazon.com", CompanyID: "" }],
+  Importers: [{ Name: "Wemfg" }],
+  Injuries: [{ Name: "None reported" }],
+  Hazards: [{ Name: "The helmets do not comply with the impact requirements, posing a risk of head injury.", HazardType: "", HazardTypeID: "" }],
+  Remedies: [{ Name: "Consumers should immediately stop using the recalled helmets and contact Wemfg for a full refund." }],
+  ManufacturerCountries: [{ Country: "China" }],
+  ...over,
+});
+
+async function testCpscRecalls() {
+  section("§58-cpsc. CPSC consumer-product recalls (ADR-0058 — KEYLESS goods/import supplier vetting) — bare-array totalAvailable=length P1 + honest-empty/4xx/5xx/drift P2 + nested-flatten/NumberOfUnits-string/skip-empty P3 + default-window disclosure + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── [P1] a bare array of 3 ⇒ returned:3, totalAvailable:3, complete:true + the note. ──
+  await withFetch(cpscMock([cpscRecallRow(), cpscRecallRow({ RecallNumber: "25089" }), cpscRecallRow({ RecallNumber: "25090" })]), async (calls) => {
+    const r = await runTool("cpsc_recalls", { dateStart: "2025-01-01", dateEnd: "2025-01-15" }, sam);
+    const m = buildMeta(r.meta);
+    const q = new URL(cpscUrl(calls)).searchParams;
+    ok("58-cpsc the request is to www.saferproducts.gov/RestWebServices/Recall over https (fixed host) + format=json + the date filters in the query ⇒ steer the host/path ⇒ RED",
+      new URL(cpscUrl(calls)).hostname === "www.saferproducts.gov" && new URL(cpscUrl(calls)).protocol === "https:" && q.get("format") === "json" && q.get("RecallDateStart") === "2025-01-01" && q.get("RecallDateEnd") === "2025-01-15", cpscUrl(calls));
+    ok("58-cpsc-P1 a bare array of 3 ⇒ returned:3, totalAvailable:3 (= the array length, the complete set), complete:true (no pagination/no count field) ⇒ fabricate a total ⇒ RED",
+      r.data.recalls.length === 3 && m.returned === 3 && m.totalAvailable === 3 && m.complete === true, JSON.stringify({ n: r.data.recalls.length, ta: m.totalAvailable, c: m.complete }));
+    ok("58-cpsc-P1 the no-pagination/no-total-count disclosure note is present ⇒ drop the caveat ⇒ RED",
+      m.notes.some((n) => /no server pagination|no.*total-count|complete matching set/i.test(n)), JSON.stringify(m.notes));
+    ok("58-cpsc keyless: keylessMode true + a keyless note (no API key at all) ⇒ claim a key ⇒ RED",
+      m.keylessMode === true && m.notes.some((n) => /keyless/i.test(n)) && q.get("api_key") === null, JSON.stringify({ keyless: m.keylessMode, api_key: q.get("api_key") }));
+  });
+
+  // ── [P3] nested-flatten + NumberOfUnits string + skip-empty Manufacturers + dates as strings. ──
+  await withFetch(cpscMock([cpscRecallRow()]), async () => {
+    const r = await runTool("cpsc_recalls", { recallNumber: "25088" }, sam);
+    const row = r.data.recalls[0];
+    ok("58-cpsc-P3 Products[].Name flattened to a string[] (['Wemfg...Helmets']) + Hazards[].Name extracted as the hazard DESCRIPTION + Retailers/Injuries flattened + ManufacturerCountries[].Country (NOT .Name) flattened to ['China'] ⇒ mis-extract a field ⇒ RED",
+      Array.isArray(row.products) && row.products.length === 1 && row.products[0].startsWith("Wemfg") &&
+      Array.isArray(row.hazards) && row.hazards[0].includes("risk of head injury") &&
+      row.retailers[0] === "Amazon.com" && row.injuries[0] === "None reported" &&
+      row.manufacturerCountries.length === 1 && row.manufacturerCountries[0] === "China", JSON.stringify({ products: row.products, hazards: row.hazards, countries: row.manufacturerCountries }));
+    ok("58-cpsc-P3 ★NumberOfUnits is FREE TEXT preserved as the STRING 'About 6,500' (never numerically coerced) + recallNumber/title/url surfaced + RecallDate kept as the STRING (never date-coerced) ⇒ coerce NumberOfUnits/date ⇒ RED",
+      row.numberOfUnits === "About 6,500" && typeof row.numberOfUnits === "string" && row.recallNumber === "25088" && row.title.startsWith("Multi-Purpose") && typeof row.recallDate === "string" && row.recallDate === "2025-01-08T00:00:00", JSON.stringify({ nou: row.numberOfUnits, rn: row.recallNumber, date: row.recallDate }));
+    ok("58-cpsc-P3 ★an EMPTY Manufacturers [] ⇒ manufacturers:[] (an honest 'none listed', NEVER a fabricated entry) + a '' Description ⇒ null (null-never-empty-string) ⇒ fabricate a manufacturer or surface '' ⇒ RED",
+      Array.isArray(row.manufacturers) && row.manufacturers.length === 0 && row.description === null, JSON.stringify({ mans: row.manufacturers, desc: row.description }));
+  });
+
+  // ── [P3] an empty {} object inside a nested array is SKIPPED, not fabricated. ──
+  await withFetch(cpscMock([cpscRecallRow({ Manufacturers: [{}, { Name: "Real Mfg Co." }, { Name: "" }] })]), async () => {
+    const r = await runTool("cpsc_recalls", { recallNumber: "25088" }, sam);
+    const row = r.data.recalls[0];
+    ok("58-cpsc-P3 ★an empty {} object (and a '' Name) inside Manufacturers is SKIPPED ⇒ manufacturers:['Real Mfg Co.'] (only the real one; never a null/empty fabricated entry) ⇒ push a blank entry ⇒ RED",
+      row.manufacturers.length === 1 && row.manufacturers[0] === "Real Mfg Co.", JSON.stringify(row.manufacturers));
+  });
+
+  // ── [default-window] NO filter ⇒ a bounded RecallDateStart default + a disclosing note. ──
+  await withFetch(cpscMock([cpscRecallRow()]), async (calls) => {
+    const r = await runTool("cpsc_recalls", {}, sam);
+    const m = buildMeta(r.meta);
+    const q = new URL(cpscUrl(calls)).searchParams;
+    ok("58-cpsc-default-window NO filter ⇒ a bounded RecallDateStart is set on the query (a 4-digit-year YYYY-MM-DD default, NOT a silent whole-dataset fetch) ⇒ omit the default bound ⇒ RED",
+      typeof q.get("RecallDateStart") === "string" && /^\d{4}-\d{2}-\d{2}$/.test(q.get("RecallDateStart")) && q.get("RecallDateEnd") === null, JSON.stringify({ start: q.get("RecallDateStart") }));
+    ok("58-cpsc-default-window a note DISCLOSES the default window (the bound is documented, not silent) ⇒ apply it silently ⇒ RED",
+      m.notes.some((n) => /default recent window|default.*window|~90 days/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── [P2] [] ⇒ HONEST EMPTY (returned:0, complete:true), NOT an error. ──
+  await withFetch(cpscMock([]), async () => {
+    const r = await runTool("cpsc_recalls", { recallNumber: "nomatch-99" }, sam);
+    const m = buildMeta(r.meta);
+    ok("58-cpsc-P2 an empty array [] ⇒ recalls:[], returned:0, totalAvailable:0, complete:true — an HONEST EMPTY, NOT an error ⇒ throw on empty ⇒ RED",
+      r.data.recalls.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.recalls.length, ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // ── [P2] 400 ⇒ invalid_input; 503 ⇒ upstream_unavailable; 200 non-JSON ⇒ drift. ──
+  await withFetch(cpscMock("Bad request", 400), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cpsc_recalls", { recallNumber: "25088" }, sam));
+    ok("58-cpsc-P2 a 400 ⇒ invalid_input THROW (a caller-fixable request, never a fake-empty)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cpscMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cpsc_recalls", { recallNumber: "25088" }, sam));
+    ok("58-cpsc-P2 a 503 ⇒ upstream_unavailable THROW (a down CPSC is never an empty result)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cpscNonJson, async () => {
+    const { threw, error } = await expectThrow(() => runTool("cpsc_recalls", { recallNumber: "25088" }, sam));
+    ok("58-cpsc-P2 a 200 non-JSON body (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P4] a non-array top-level body ⇒ schema_drift (never a fabricated empty). ──
+  await withFetch(cpscMock({ error: "not an array" }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cpsc_recalls", { recallNumber: "25088" }, sam));
+    ok("58-cpsc-P4 a non-array top-level body (an object) ⇒ schema_drift ⇒ trust a non-array ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [SSRF] a bad date / recallNumber ⇒ invalid_input, 0 fetch (the regex/charclass re-guard PRE-fetch). ──
+  for (const [args, label] of [
+    [{ dateStart: "2025/01/01" }, "dateStart '2025/01/01' (wrong separator)"],
+    [{ dateStart: "01-01-2025" }, "dateStart '01-01-2025' (not YYYY-MM-DD)"],
+    [{ recallNumber: "../etc" }, "recallNumber '../etc' (path-traversal chars)"],
+    [{ recallNumber: "25 088" }, "recallNumber '25 088' (space)"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("cpsc_recalls", args, sam));
+      ok(`58-cpsc-ssrf ${label} ⇒ invalid_input, 0 fetch (the regex/charclass re-guard PRE-fetch — a value never touches the fixed host/path) ⇒ widen the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ── [direct] the module CPSC_HOST is the fixed literal (non-vacuity of the fixed-host idiom). ──
+  ok("58-cpsc (non-vacuity) CPSC_HOST is the fixed literal 'www.saferproducts.gov' (the SSRF fixed host)",
+    CPSC_HOST === "www.saferproducts.gov", CPSC_HOST);
+}
+
 // §55d: BEA Regional Economic Accounts (apps.bea.gov/api/data, ADR-0051, Wave-4
 // source #3 — regional GDP/income AND the server's THIRD key-required source).
 // NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the
@@ -18577,6 +18726,7 @@ async function main() {
   await testOpenfdaEnforcement();
   await testOpenfdaDeviceClearances();
   await testNhtsaVehicleSafety();
+  await testCpscRecalls();
   await testBeaRegionalData();
   await testDolDataApi();
   await testLdaSearchFilings();
