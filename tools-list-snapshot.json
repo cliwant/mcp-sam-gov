@@ -2222,6 +2222,32 @@
     }
   },
   {
+    "name": "gsa_perdiem_rates",
+    "description": "Look up GSA Federal Travel PER-DIEM rates — the max lodging + Meals & Incidental Expenses (M&IE) reimbursement ceilings for official U.S. government travel (api.gsa.gov /travel/perdiem/v2, keyed — DATA_GOV_API_KEY or the shared DEMO_KEY). Input: EITHER `city` (e.g. 'Washington') + `state` (2-letter, e.g. 'DC') OR `zip` (5-digit) — supplying BOTH, or NEITHER, ⇒ invalid_input with 0 fetch; optional `year` (default '2025'). Returns { rates:[{ city, county, state, zip, year, isOconus, standardRate, mealsUsd, monthlyLodgingUsd:[{ month (1-12), monthName, lodgingUsd }] }] } + honest _meta. HONESTY: lodgingUsd (the API's monthly `value`) is the MAX nightly lodging ceiling for that month — it VARIES SEASONALLY (hence a per-month array), and mealsUsd is the daily M&IE ceiling; both are integer US dollars, null-when-withheld (NEVER 0 — a genuine 0 is preserved). standardRate/isOconus are booleans coerced from the API's string 'true'/'false' (an unrecognized value ⇒ null, never a fabricated false); the months array is preserved AS-IS (never padded to 12). The API returns the COMPLETE rate set (no pagination) ⇒ totalAvailable = the row count, complete:true. A genuine no-match (rates:[]/rate:[]) ⇒ honest empty (returned:0); the API's `errors` field non-null ⇒ invalid_input carrying the message (never a fake empty); a 429 (DEMO_KEY ~10 req/hr, hit quickly) ⇒ rate_limited THROWS; a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON ⇒ schema_drift. DEMO_KEY ~10 req/hr shared ceiling — set DATA_GOV_API_KEY (free at api.data.gov/signup) for 1000/hr. The key rides ONLY in the X-Api-Key header (never the URL/_meta).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "city": {
+          "type": "string",
+          "description": "The city name (e.g. 'Washington', 'San Francisco'). Requires `state`. Validated ^[A-Za-z .'\\-]{1,60}$. Use EITHER (city + state) OR zip — not both."
+        },
+        "state": {
+          "type": "string",
+          "description": "The 2-letter state/territory code (e.g. 'DC', 'CA'). Required with `city`. Validated ^[A-Za-z]{2}$."
+        },
+        "zip": {
+          "type": "string",
+          "description": "A 5-digit ZIP code (e.g. '20001'). The alternative lookup mode to city+state. Validated ^\\d{5}$. Use EITHER zip OR (city + state) — not both."
+        },
+        "year": {
+          "type": "string",
+          "description": "The per-diem fiscal year (default '2025'). Validated ^\\d{4}$ (it rides in the request path)."
+        }
+      },
+      "description": "Look up GSA per-diem rates by EITHER (city + state) OR zip. Supplying both, or neither, ⇒ invalid_input."
+    }
+  },
+  {
     "name": "hts_lookup",
     "description": "Look up US import-tariff classification + duty rates from the USITC Harmonized Tariff Schedule (keyless; hts.usitc.gov/reststop/search) — the IMPORT-TARIFF / supply-chain PRICE lane a product-reseller / supply-chain bidder needs to price a hardware or commodity contract (extends the THIN Price lane with a NON-labor cost input, a sibling of gsa_benchmark_labor_rates). A single `query` serves BOTH modes: a KEYWORD (e.g. 'laptop', 'cotton shirt') OR an HTS number (e.g. '8471.30' / '8471.30.01.00') — both ride the `keyword=` search. Returns { query, lines:[{ htsno, statisticalSuffix, indent, description, units, columnOneGeneral, specialPreferential, columnTwo, additionalDuties, footnotes, quotaQuantity, effectivePeriod, status, isChapter99 }] } + honest _meta. ★DUTY-RATE HONESTY (the crux): columnOneGeneral (Column-1 General), specialPreferential (Special/preferential/FTA), and columnTwo (Column-2) are AUTHORITATIVE VERBATIM TEXT surfaced as strings — 'Free', a percentage ('35%'), a specific rate ('0.47¢/kg'), a compound/range, or null — NEVER coerced to a number (a coerced 0/NaN would fabricate a false 'duty-free'); an empty Special ('') → null = NO special-program rate published (NEVER read as Free). ★HIERARCHY (M1): a lookup returns rows across levels; the rate is stated ONCE at a shallower level (usually the 6/8-digit subheading) and inherits DOWNWARD to the blank statistical-suffix lines — to find a specific line's rate, read UP to the nearest ANCESTOR line (shallower indent, same htsno prefix) with a non-empty rate; a blank deepest line is NOT no/unknown duty. ★ADDITIONAL DUTIES (S1): the per-line `additionalDuties` is frequently null even when Section 301/232 duties apply — the real additional duty rides the Chapter-99 rows (isChapter99:true, htsno beginning '99') returned alongside the base line + the footnotes; they STACK on the base rate. ★COMPLETENESS (M2): the endpoint returns the FULL match array with NO server-side total and NO working pagination (offset is IGNORED) → totalAvailable is the EXACT served array length and paging is CLIENT-SIDE; there is no fixed cap (a single-char/common fragment can return 10,000–16,000+ rows / several MB), so `query` must be ≥3 non-whitespace chars (a 1–2 char query is rejected invalid_input before the fetch). `limit` (≤200, def 50), `offset`. A no-match ⇒ honest empty; a 404/5xx/timeout/non-array/HTML(→schema_drift) ⇒ THROWS (never a fake empty); a transient 400 on the validated query ⇒ upstream_unavailable (retryable). NOT a binding CBP classification ruling and NOT a landed-cost quote — the duty owed depends on country of origin + trade program + Section 301/232 / Chapter-99 additional duties + footnotes; confirm via CBP (CROSS / eRulings). The not-a-ruling caveat rides EVERY response.",
     "inputSchema": {
