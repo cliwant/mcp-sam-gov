@@ -6349,6 +6349,58 @@ async function testAgencyDetailTools() {
   });
 }
 
+// §35u: runTool UNKNOWN-KEY loud-fail (dogfooding 2026-07-15). Every tool's Zod
+// input schema is non-strict, so a misspelled/unsupported top-level key used to be
+// SILENTLY stripped — the tool then ran as if that filter were never supplied and
+// returned an authoritative-looking WRONG answer (e.g. a whole-corpus scan) with no
+// error. runTool now rejects unknown top-level keys as invalid_input, naming the
+// unknown key(s) AND listing the valid ones, with ZERO fetch (the guard runs before
+// parse/handler). NON-VACUITY: (a) reverting the guard ⇒ the bogus-key call resolves
+// silently ⇒ the throw assertions go RED; (b) the guard must NOT be over-broad — a
+// call using ONLY valid keys still reaches the handler (asserted via a real 200).
+async function testUnknownKeyRejection() {
+  section("35u. runTool unknown-key loud-fail — misspelled/unsupported input key ⇒ invalid_input (names key + lists valid), 0 fetch; valid-only call still runs");
+  const sam = new SamGovClient({});
+
+  // (a) The real-world foot-gun from dogfooding: `naicsCode` instead of the tool's
+  // actual `ncode` on sam_search_opportunities — a wrong-key NAICS silently dropped,
+  // turning a narrowed search into a whole-board scan. Now it fails loud.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("sam_search_opportunities", { naicsCode: "541512" }, sam));
+    const msg = threw ? toToolError(error).message : "";
+    ok("35u sam_search_opportunities {naicsCode} (should be 'ncode') ⇒ invalid_input, 0 fetch, message NAMES 'naicsCode' AND LISTS valid keys (ncode)",
+      threw && toToolError(error).kind === "invalid_input" && /naicsCode/.test(msg) && /ncode/.test(msg) && calls.length === before,
+      JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before, msg }));
+  });
+
+  // (b) `keyword` instead of `query` on sam_search_opportunities (the exact
+  // dogfooding case) — a total silent-drop → 46k-record whole-corpus scan topped by
+  // "CIRCUIT BREAKER". Now loud. (NB: grants_search DOES declare `keyword` — the
+  // foot-gun is tool-specific, which is exactly why per-tool key lists matter.)
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("sam_search_opportunities", { keyword: "nursing home" }, sam));
+    ok("35u sam_search_opportunities {keyword} (should be 'query') ⇒ invalid_input, 0 fetch, message NAMES 'keyword'",
+      threw && toToolError(error).kind === "invalid_input" && /keyword/.test(toToolError(error).message) && calls.length === before,
+      JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // (c) NON-VACUITY / not-over-broad: a call with ONLY valid keys still reaches the
+  // handler and returns real data. The `offset` gap-fix (SamSearchInput) is exercised
+  // here too — `offset` is now a DECLARED key, so it must NOT be rejected.
+  await withFetch((u) => {
+    if (/api\.sam\.gov|sam\.gov\/prod|\/prod\/opportunities|opportunities\/v/i.test(String(u)) || /sam/i.test(String(u))) {
+      return mockResponse({ status: 200, json: { totalRecords: 0, _embedded: {}, page: { totalElements: 0 } } });
+    }
+    return mockResponse({ status: 200, json: { totalRecords: 0 } });
+  }, async () => {
+    const { threw } = await expectThrow(() => runTool("sam_search_opportunities", { query: "widgets", ncode: "541512", offset: 0, limit: 5 }, sam));
+    ok("35u valid-only call (query/ncode/offset/limit — incl. the newly-declared 'offset') is NOT rejected — the guard is precise, not over-broad (a throw here ⇒ RED)",
+      !threw, JSON.stringify({ threw }));
+  });
+}
+
 // §36: usas_search_subawards — field mapping (A3 fix) + count-honesty. This tool
 // was live-smoke only (no offline guard). Locks in TWO real invariants: (1) the A3
 // fix — subaward NAICS is read from the "NAICS" field, NOT the invalid "Sub-Award
@@ -13925,16 +13977,24 @@ async function testNihHonesty() {
     });
   }
 
-  // ── (h) filtersApplied honesty + agencyIcCodes never sent/applied. ──
+  // ── (h) filtersApplied honesty + an unsupported filter fails LOUD. ──
   await withFetch(nihMock(nihBody(200, nihRows(50))), async (calls) => {
-    // Pass a spurious agencyIcCodes (Zod strips unknown keys); it must NEVER be built into the body NOR listed in filtersApplied.
-    const r = await runTool("nih_reporter_search_projects", { fiscalYears: [2023], orgStates: ["CA"], orgNames: ["MIT"], agencyIcCodes: ["DK"] }, sam);
+    // Only the SHIPPED, live-confirmed filters (fiscalYears/orgStates/orgNames).
+    const r = await runTool("nih_reporter_search_projects", { fiscalYears: [2023], orgStates: ["CA"], orgNames: ["MIT"] }, sam);
     const m = buildMeta(r.meta);
     ok("51h filtersApplied lists EXACTLY the shipped, live-confirmed-narrowing filters actually sent (fiscalYears, orgStates, orgNames) — a shipped filter appears; a not-sent one never does",
       JSON.stringify([...m.filtersApplied].sort()) === JSON.stringify(["fiscalYears", "orgNames", "orgStates"]), JSON.stringify(m.filtersApplied));
-    const parsed = JSON.parse(calls.find((x) => isNih(x.url)).init.body);
-    ok("51h agencyIcCodes (M1 silent-drop) is NEVER built into the POST body (no agency_ic_codes key) NOR listed in filtersApplied — a filter that no-ops upstream is never presented as applied",
-      !("agency_ic_codes" in parsed.criteria) && !m.filtersApplied.includes("agencyIcCodes"), JSON.stringify(Object.keys(parsed.criteria)));
+  });
+  // Unknown-key LOUD-fail: a spurious `agencyIcCodes` (NIH has no such tool filter)
+  // used to be silently stripped and could read as "no funding"; runTool now
+  // rejects it as invalid_input naming the key, with ZERO fetch. Reverting the
+  // runTool unknown-key guard ⇒ it succeeds silently ⇒ RED.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("nih_reporter_search_projects", { fiscalYears: [2023], agencyIcCodes: ["DK"] }, sam));
+    ok("51h UNKNOWN key agencyIcCodes ⇒ invalid_input (names the key + lists valid keys), 0 fetch — a no-op filter fails LOUD, never silently scans as if unfiltered",
+      threw && toToolError(error).kind === "invalid_input" && /agencyIcCodes/.test(toToolError(error).message) && calls.length === before,
+      JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
   });
   // Disclose-not-refuse: an unscoped query is NOT refused — first page + exact total + narrow note.
   await withFetch(nihMock(nihBody(85109, nihRows(50))), async () => {
@@ -14227,17 +14287,29 @@ async function testNsfHonesty() {
 
   // ── filtersApplied honesty + SSRF query building + uppercase-normalize UEIs. ──
   await withFetch(nsfMock(nsfBody(3396, nsfRows(25))), async (calls) => {
-    // Pass a lowercase UEI + a spurious agency/printFields (Zod strips unknowns).
-    const r = await runTool("nsf_search_awards", { keyword: "robotics", awardeeStateCode: "MD", ueiNumber: "ftmtdmbr29c7", parentUeiNumber: "gs4pnktrnkl3", pdPIName: "Bell", agency: "NASA", printFields: "id" }, sam);
+    // Only SHIPPED filters + a lowercase UEI (to prove uppercase-normalization).
+    const r = await runTool("nsf_search_awards", { keyword: "robotics", awardeeStateCode: "MD", ueiNumber: "ftmtdmbr29c7", parentUeiNumber: "gs4pnktrnkl3", pdPIName: "Bell" }, sam);
     const m = buildMeta(r.meta);
-    ok("52-filters filtersApplied lists EXACTLY the shipped, live-confirmed-narrowing filters actually sent (keyword, awardeeStateCode, awardeeName?, ueiNumber, parentUeiNumber, pdPIName) — a no-op filter (agency/printFields) NEVER appears (fault (m))",
+    ok("52-filters filtersApplied lists EXACTLY the shipped, live-confirmed-narrowing filters actually sent (keyword, awardeeStateCode, awardeeName?, ueiNumber, parentUeiNumber, pdPIName)",
       JSON.stringify([...m.filtersApplied].sort()) === JSON.stringify(["awardeeStateCode", "keyword", "parentUeiNumber", "pdPIName", "ueiNumber"]), JSON.stringify(m.filtersApplied));
     const q = nsfQuery(calls);
-    ok("52-ssrf the query is MODULE-BUILT via URLSearchParams to api.nsf.gov ONLY, whitelisted keys — agency/printFields NEVER built into the query (agency = NSF-only-corpus zeros-out foot-gun; printFields = proven no-op)",
-      q.get("agency") === null && q.get("printFields") === null && calls.every((c) => !isNsf(c.url) || new URL(c.url).hostname === "api.nsf.gov"), JSON.stringify([...q.keys()]));
+    ok("52-ssrf the query is MODULE-BUILT via URLSearchParams to api.nsf.gov ONLY, whitelisted keys",
+      calls.every((c) => !isNsf(c.url) || new URL(c.url).hostname === "api.nsf.gov"), JSON.stringify([...q.keys()]));
     ok("52-ssrf ueiNumber + parentUeiNumber UPPERCASE-NORMALIZED before sending (a stable exact match — UEIs are uppercase alnum) ⇒ query carries FTMTDMBR29C7 / GS4PNKTRNKL3",
       q.get("ueiNumber") === "FTMTDMBR29C7" && q.get("parentUeiNumber") === "GS4PNKTRNKL3", JSON.stringify({ uei: q.get("ueiNumber"), puei: q.get("parentUeiNumber") }));
     ok("52-ssrf redirect:'error' on the getJson call (fail-closed on any off-host 3xx; body never read)", calls.find((x) => isNsf(x.url)).init.redirect === "error", JSON.stringify(calls.find((x) => isNsf(x.url))?.init?.redirect));
+  });
+  // Unknown-key LOUD-fail: a spurious `agency`/`printFields` (agency = NSF-only-corpus
+  // zeros-out foot-gun; printFields = proven no-op) used to be silently stripped;
+  // runTool now rejects them as invalid_input naming the keys, ZERO fetch. Reverting
+  // the runTool unknown-key guard ⇒ it succeeds silently (no-op filter presented as
+  // honored by omission) ⇒ RED.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("nsf_search_awards", { keyword: "robotics", agency: "NASA", printFields: "id" }, sam));
+    ok("52-filters UNKNOWN keys agency/printFields ⇒ invalid_input (names the keys + lists valid keys), 0 fetch — a no-op filter fails LOUD, never silently scans the NSF-only corpus as if applied",
+      threw && toToolError(error).kind === "invalid_input" && /agency/.test(toToolError(error).message) && /printFields/.test(toToolError(error).message) && calls.length === before,
+      JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
   });
 
   // ── state-enum + date-format guards ⇒ invalid_input, 0 fetch (silent foot-guns). ──
@@ -19978,6 +20050,7 @@ async function main() {
   await testLookupOrgOutageHonesty();
   await testRecipientProfileNotFound();
   await testAgencyDetailTools();
+  await testUnknownKeyRejection();
   await testSearchSubawardsMapping();
   await testTeamingMostRecentAwardDate();
   await testNaicsHierarchy();
