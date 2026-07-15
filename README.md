@@ -4,7 +4,7 @@
 
 ### **$4 trillion of public federal data, one `npm install` away.**
 
-The most comprehensive **keyless-first** MCP server for US federal contracting + spending + regulation + partner vetting. **116 tools across 34 federal data sources** — keyless-first: only Census business-patterns and FRED need a free key; the other 32 sources need none. Works today, in any AI agent.
+The most comprehensive **keyless-first** MCP server for US federal contracting + spending + regulation + partner vetting. **120 tools across 37 federal data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 33 sources need none. Works today, in any AI agent.
 
 [![npm](https://img.shields.io/npm/v/@cliwant/mcp-sam-gov?color=cb3837&label=%40cliwant%2Fmcp-sam-gov&logo=npm)](https://www.npmjs.com/package/@cliwant/mcp-sam-gov)
 [![mcp-registry](https://img.shields.io/badge/MCP%20Registry-active-2ea44f?logo=anthropic)](https://registry.modelcontextprotocol.io/v0/servers?search=cliwant)
@@ -50,7 +50,7 @@ The most comprehensive **keyless-first** MCP server for US federal contracting +
 |---|---|
 | GovWin: $30K-$100K/yr per seat | Free, MIT license |
 | API key registration → wait 24h → quota tier shopping | `npm install` → working in 60s |
-| 5+ separate vendor APIs / scrapers | 1 unified surface, 116 tools across 34 sources |
+| 5+ separate vendor APIs / scrapers | 1 unified surface, 120 tools across 37 sources |
 | LLMs hallucinate NAICS codes / agency names | Anti-hallucination autocomplete guards built-in |
 | Brittle scraping breaks weekly | Daily live smoke test ([badge above](#)) |
 | Procurement officer → IT ticket → 3-week wait | Claude Desktop double-click install |
@@ -68,13 +68,14 @@ The federal data this wraps is **public domain**. There is no good reason it sho
 | 🕵️ **Entity & partner vetting** | "Screen this firm: OFAC sanctions, SAM exclusions, single-audit findings, bank health, EPA compliance" | OFAC, SAM, FAC, FDIC, EPA ECHO |
 | 📈 **Financial disclosure (SEC)** | "Pull this public company's revenue trend and latest 10-K filings" | SEC EDGAR |
 | ⚖️ **Regulatory & legislative** | "What VA cybersecurity rules were published this quarter? Any open Regulations.gov dockets?" | Federal Register, Regulations.gov, eCFR, FAR/DFARS, Congress.gov, GovInfo |
-| 💲 **Pricing, labor & fiscal** | "GSA CALC labor-rate band for a systems analyst; SCA wage determination for this county; CPI escalation; per-diem cap for a trip" | GSA CALC, SAM WDs, BLS, US Census CBP, FRED, US Treasury, GSA per-diem |
+| 💲 **Pricing, labor & fiscal** | "GSA CALC labor-rate band for a systems analyst; SCA wage determination for this county; CPI escalation; per-diem cap for a trip; regional GDP by industry; DOL wage-hour enforcement history" | GSA CALC, SAM WDs, BLS, US Census CBP, FRED, BEA, US Treasury, GSA per-diem, US DOL |
+| 🏛 **Lobbying & influence** | "Who lobbies the VA on cybersecurity, and how much do they spend?" | US Senate LDA |
 | 🏥 **Health & research funding** | "NIH/NSF grants on this topic; recruiting clinical trials; industry payments to this physician" | NIH RePORTER, NSF, ClinicalTrials.gov, CMS Open Payments, NPPES |
 | 🛡 **Cyber compliance** | "Is this CVE on the CISA KEV must-patch list?" | NVD, CISA KEV |
 | 🌐 **Trade, geo & disaster** | "HTS tariff for this product; Census tract for this address; FEMA declarations in this state" | USITC HTS, US Census, FEMA, Socrata, CKAN |
 | 🎓 **Grants & datasets** | "Cybersecurity grants posted in the last 30 days; discover federal open datasets" | Grants.gov, data.gov |
 
-**116 tools across 34 federal data sources — keyless-first: only Census business-patterns and FRED need a free key; the other 32 sources need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
+**120 tools across 37 federal data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 33 sources need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
 
 ---
 
@@ -101,7 +102,7 @@ If you already use Claude Code (the CLI):
 /plugin install cliwant/mcp-sam-gov
 ```
 
-This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 116 tools.
+This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 120 tools.
 
 ### 🔵 Path 3 — Manual install for any MCP host (Codex, Cursor, Continue, Gemini)
 
@@ -169,7 +170,7 @@ Then point your host config at the absolute path:
 
 (Or skip this entirely — use Path 1's `.mcpb` and it auto-configures.)
 
-Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (116 tools)".
+Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (120 tools)".
 
 ### Claude Code
 
@@ -342,14 +343,17 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 
 ### Keys & higher limits — the full inventory
 
-**Most tools are keyless.** Only **Census** (`census_business_patterns`) and **FRED** (`fred_search_series`, `fred_series_observations`) *require* a key — those sources have no keyless tier, so the tool throws without one. The other five keys are *optional*: they only raise a rate limit or unlock a single filter. **Every key below is free.**
+**Most tools are keyless.** Four sources *require* a free key — **Census** (`census_business_patterns`), **FRED** (`fred_search_series`, `fred_series_observations`), **BEA** (`bea_regional_data`), and **DOL's data endpoint** (`dol_get_dataset`) — those sources have no keyless tier, so the tool throws without one. (DOL's catalog `dol_list_datasets` is keyless.) The other keys are *optional*: they only raise a rate limit or unlock a single filter. **Every key below is free.**
 
 | Env var | Required? | What it unlocks | Free signup |
 |---|---|---|---|
 | `CENSUS_API_KEY` | **Required** | `census_business_patterns` (no keyless tier — throws without it) | [api.census.gov/data/key_signup.html](https://api.census.gov/data/key_signup.html) |
 | `FRED_API_KEY` | **Required** | the 2 FRED tools (no keyless tier — throw without it) | [fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html) |
+| `BEA_API_KEY` | **Required** | `bea_regional_data` (BEA Regional; no keyless tier — throws without it) | [apps.bea.gov/API/signup](https://apps.bea.gov/API/signup/) |
+| `DOL_API_KEY` | **Required for data** | `dol_get_dataset` (DOL enforcement records via `X-API-KEY`; the `dol_list_datasets` catalog is keyless) | [dol.gov/developer](https://dol.gov/developer) |
 | `DATA_GOV_API_KEY` | Optional | higher limits on all api.data.gov sources (Regulations.gov, FAC, NPPES, CMS, data.gov catalog, GSA per-diem) — lifts the shared `DEMO_KEY` cap | [api.data.gov/signup](https://api.data.gov/signup/) |
 | `SAM_GOV_API_KEY` | Optional | authenticated SAM.gov v2 search + the organization-name filter | [open.gsa.gov/api/get-opportunities-public-api](https://open.gsa.gov/api/get-opportunities-public-api/) |
+| `LDA_API_KEY` | Optional | higher rate limit on `lda_search_filings` (Senate LDA lobbying; keyless by default) | [lda.senate.gov/api/register](https://lda.senate.gov/api/register/) |
 | `BLS_API_KEY` | Optional | the BLS v2 tier (~500 queries/day vs keyless ~25/day) | [data.bls.gov/registrationEngine](https://data.bls.gov/registrationEngine/) |
 | `NVD_API_KEY` | Optional | a higher NVD rate limit (`cve_lookup`) | [nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key) |
 | `SOCRATA_APP_TOKEN` | Optional | higher Socrata throttling limits | [evergreen.data.socrata.com/signup](https://evergreen.data.socrata.com/signup) |
@@ -370,9 +374,9 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 
 ---
 
-## Tool catalog (116 tools)
+## Tool catalog (120 tools)
 
-Grouped by workflow. Keyless-first — most tools need no key; Census business-patterns and FRED require a free key, and a handful of others gain higher limits from an optional free key (noted above). Descriptions are condensed — each tool's own `inputSchema` carries the full contract and honesty caveats.
+Grouped by workflow. Keyless-first — most tools need no key; Census business-patterns, FRED, BEA, and DOL's data endpoint require a free key, and a handful of others gain higher limits from an optional free key (noted above). Descriptions are condensed — each tool's own `inputSchema` carries the full contract and honesty caveats.
 
 <details>
 <summary><b>Opportunities & solicitations — SAM.gov + Grants.gov (10 tools)</b></summary>
@@ -479,7 +483,7 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 </details>
 
 <details>
-<summary><b>Pricing, labor & fiscal — GSA CALC · SAM WDs · BLS · Census CBP · FRED · US Treasury · GSA per-diem (14 tools)</b></summary>
+<summary><b>Pricing, labor & fiscal — GSA CALC · SAM WDs · BLS · Census CBP · FRED · BEA · US Treasury · GSA per-diem (15 tools)</b></summary>
 
 - `gsa_benchmark_labor_rates` — GSA CALC awarded ceiling-rate market band for a labor category (a distribution, not one price)
 - `sam_search_wage_determinations` — find SCA / Davis-Bacon wage determinations for a locality
@@ -491,6 +495,7 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 - `treasury_avg_interest_rates` — average interest rate the Treasury pays by security type
 - `treasury_monthly_statement` — Monthly Treasury Statement: receipts, outlays, deficit/surplus by month
 - `treasury_query_dataset` — escape-hatch query over 5 confirmed Treasury Fiscal Data datasets
+- `bea_regional_data` — GDP / personal income by industry × geography (BEA Regional; requires free BEA_API_KEY)
 - `census_business_patterns` — establishments / employment / annual payroll by NAICS × geography (Census CBP; requires free CENSUS_API_KEY)
 - `fred_search_series` — search the FRED macroeconomic series catalog (GDP/CPI/rates/unemployment; requires free FRED_API_KEY)
 - `fred_series_observations` — time-series observations for a FRED series (missing values → null; requires free FRED_API_KEY)
@@ -547,6 +552,19 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 <summary><b>Small business — SBA (1 tool)</b></summary>
 
 - `sba_size_standard` — SBA small-business size standard for a 6-digit NAICS (set-aside eligibility gate)
+</details>
+
+<details>
+<summary><b>Labor compliance — US DOL (2 tools)</b></summary>
+
+- `dol_list_datasets` — browse DOL enforcement/compliance datasets (WHD, OFCCP, …) — keyless catalog
+- `dol_get_dataset` — fetch DOL enforcement records (WHD wage-hour / OFCCP; requires free DOL_API_KEY)
+</details>
+
+<details>
+<summary><b>Lobbying & influence — US Senate LDA (1 tool)</b></summary>
+
+- `lda_search_filings` — Senate lobbying filings: who lobbies which agency, on what issue, for how much (keyless)
 </details>
 
 <details>

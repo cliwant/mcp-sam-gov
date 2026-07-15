@@ -5,6 +5,37 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-07-15 (Wave 5: BEA + Senate lobbying + DOL enforcement — 116 → 120 tools)
+
+Additive minor release. Every 1.2.0 tool is unchanged and byte-identical; this adds 4 tools across 3 new sources, extending market-sizing, influence, and labor-compliance coverage.
+
+### Added — new sources (+4 tools, 34 → 37 sources)
+
+- **BEA Regional Economic Accounts** (`bea_regional_data`): GDP / personal income by
+  **industry × geography** (`apps.bea.gov`, dataset=Regional). Completes the
+  market-sizing triad — BLS QCEW + Census CBP + **BEA regional GDP**. **Key-required**
+  (free BEA_API_KEY): comma-formatted values are parsed, and BEA's suppression
+  sentinels (`(D)/(NA)/(NM)/(L)/*`) map to `null` (never a fake `0`). An invalid key
+  (a `200` carrying `Results.Error`) throws an honest `invalid_input`, never an empty.
+- **US Senate LDA lobbying** (`lda_search_filings`): who lobbies which federal agency,
+  on what issue, for how much (`lda.senate.gov`). The pre-RFP influence/competition
+  signal. **Keyless** (an optional free LDA_API_KEY only raises the rate limit).
+  `income`/`expenses` stay `null` when unreported (never `0`); `totalAvailable` is the
+  API's real count, not the page length.
+- **US DOL enforcement / compliance** — a hybrid pair: **`dol_list_datasets`**
+  (keyless dataset catalog, 42 datasets incl. WHD Enforcement) and
+  **`dol_get_dataset`** (WHD wage-hour / OFCCP records; **key-required**, free
+  DOL_API_KEY sent only in the `X-API-KEY` header). Labor-compliance vetting of
+  partners and competitors — the complement to the server's wage-determination tools.
+
+### Changed
+
+- `api_key_status` now tracks **10 keys**: 4 sources need a free key (Census, FRED,
+  BEA, and DOL's data endpoint), the other 33 sources remain keyless. Registry
+  descriptions and counts updated accordingly.
+- Documentation refreshed to **120 tools across 37 federal data sources**
+  (keyless-first — 4 sources require a free key).
+
 ## [1.2.0] — 2026-07-15 (GSA travel per-diem — 115 → 116 tools)
 
 Additive minor release. Every 1.1.0 tool is unchanged and byte-identical; this adds one tool and completes the Wave 4 source expansion.
