@@ -2461,6 +2461,58 @@
     }
   },
   {
+    "name": "nhtsa_complaints",
+    "description": "Look up NHTSA consumer COMPLAINTS for a specific vehicle — owner-filed safety complaints with the affected component, crash/fire flags, injury/death counts, and incident/filing dates (NHTSA /complaints/complaintsByVehicle; api.nhtsa.gov). KEYLESS — no API key is required or accepted. Input: `make` (required, e.g. 'honda'), `model` (required, e.g. 'accord'), `modelYear` (required, 4-digit, e.g. '2020'). Returns { complaints:[{ odiNumber, manufacturer, component, summary, crash, fire, numberOfInjuries, numberOfDeaths, dateOfIncident, dateComplaintFiled }] } + honest _meta. ★PRIVACY: the NHTSA complaint VIN (an individual-vehicle identifier) is INTENTIONALLY EXCLUDED from the output — the B2G signal is the manufacturer/component/crash/fire/injury/death safety history, not the VIN. HONESTY: totalAvailable is NHTSA's EXACT count and NHTSA returns the COMPLETE set for the vehicle (no pagination) ⇒ complete:true; a no-match ⇒ an HONEST EMPTY (returned:0), NOT an error; crash/fire preserved as booleans (never a fabricated false); numberOfInjuries/numberOfDeaths via numeric coercion (a genuine 0 stays 0, NEVER null-for-0); dates are strings; a 4xx ⇒ invalid_input; a 5xx/timeout ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. Fixed host api.nhtsa.gov (SSRF-guarded); make/model are letters/digits/space/hyphen only and modelYear is ^\\d{4}$.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "make": {
+          "type": "string",
+          "description": "Vehicle make (required), e.g. 'honda', 'ford'. Letters/digits/space/hyphen only (^[A-Za-z0-9 -]+$)."
+        },
+        "model": {
+          "type": "string",
+          "description": "Vehicle model (required), e.g. 'accord', 'f-150'. Letters/digits/space/hyphen only (^[A-Za-z0-9 -]+$)."
+        },
+        "modelYear": {
+          "type": "string",
+          "description": "4-digit model year (required), e.g. '2020'. Validated ^\\d{4}$."
+        }
+      },
+      "required": [
+        "make",
+        "model",
+        "modelYear"
+      ]
+    }
+  },
+  {
+    "name": "nhtsa_recalls",
+    "description": "Look up NHTSA vehicle safety RECALLS for a specific vehicle — the manufacturer's recall campaigns with the affected component, the safety consequence, the remedy, and 'do not drive'/'park outside'/over-the-air-update flags (NHTSA /recalls/recallsByVehicle; api.nhtsa.gov). KEYLESS — no API key is required or accepted. Input: `make` (required, e.g. 'honda'), `model` (required, e.g. 'accord'), `modelYear` (required, 4-digit, e.g. '2020'). Returns { recalls:[{ campaignNumber, manufacturer, component, summary, consequence, remedy, reportReceivedDate, parkIt, parkOutside, overTheAirUpdate }] } + honest _meta. HONESTY: totalAvailable is NHTSA's EXACT Count and NHTSA returns the COMPLETE set for the vehicle (no pagination) ⇒ complete:true; a no-match (Count 0 / a bad make/model) ⇒ an HONEST EMPTY (returned:0), NOT an error; a 4xx ⇒ invalid_input; a 5xx/timeout ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The park-it/park-outside/over-the-air-update flags are preserved as booleans (never a fabricated false); dates are strings; every scalar is null-never-empty-string. Fixed host api.nhtsa.gov (SSRF-guarded); make/model are letters/digits/space/hyphen only and modelYear is ^\\d{4}$.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "make": {
+          "type": "string",
+          "description": "Vehicle make (required), e.g. 'honda', 'ford'. Letters/digits/space/hyphen only (^[A-Za-z0-9 -]+$)."
+        },
+        "model": {
+          "type": "string",
+          "description": "Vehicle model (required), e.g. 'accord', 'f-150'. Letters/digits/space/hyphen only (^[A-Za-z0-9 -]+$)."
+        },
+        "modelYear": {
+          "type": "string",
+          "description": "4-digit model year (required), e.g. '2020'. Validated ^\\d{4}$."
+        }
+      },
+      "required": [
+        "make",
+        "model",
+        "modelYear"
+      ]
+    }
+  },
+  {
     "name": "nih_reporter_search_projects",
     "description": "Search awarded NIH RePORTER research-GRANT projects (keyless; api.reporter.nih.gov v2, POST/JSON — the FIRST non-GET getJson-port consumer) — the NEW federal research-funding recipient-enrichment axis (who receives NIH research money, by organization / state, joinable to SAM/USAspending via primary_uei). Structured, LIVE-CONFIRMED-narrowing criteria ONLY, AND-combined in a module-built body (NO raw passthrough): orgStates (UPPERCASE 2-letter USPS enum — the SSRF + silent-zero guard; a lowercase/unknown code silently returns zeros), orgNames (≤512 each, ≤20), fiscalYears (int array 1985..currentYear+1, ≤20), limit (1..500, def 50), offset (0..14,999, def 0). Returns { projects:[{ projectNum, projectTitle, fiscalYear, awardAmount, organization:{ name, state, primaryUei, primaryDuns, ueis, duns }, principalInvestigators, contactPiName, fundingIc }] } + honest _meta. HONESTY: (M2) records are RESEARCH GRANTS, NOT procurement contracts — primary_uei joins to SAM/USAspending recipients but the award nature differs (disclosed in every _meta.notes); totalAvailable = the EXACT meta.total (NEVER the page size, NEVER a lower bound); NIH caps keyless retrieval at the first 15,000 records (offset 0..14,999) — offset ≥ 15,000 ⇒ invalid_input, and past the window the count stays exact while records are UNREACHABLE (disclosed in a note; nextOffset is never a dead-end). Disclose-not-refuse: an unscoped query still returns the first page + the exact total + a narrow-your-criteria note. agencyIcCodes is intentionally NOT a filter (NIH silently drops it — it would be a false 'applied'). Genuine-empty (total:0) ⇒ complete:true/total:0; an outage/5xx/timeout THROWS; a 400 (bad offset/limit/type) ⇒ invalid_input; a 200 body that isn't {meta,results} or a non-numeric meta.total ⇒ schema_drift (never a fake empty). awardAmount is number|null (a real $0 award is 0, an absent amount is null).",
     "inputSchema": {
