@@ -15882,12 +15882,27 @@ async function testCensusBusinessPatterns() {
         real.annualPayrollUsd === 500000 && real.establishments === 1234 && real.employees === 56789, JSON.stringify(real));
     });
 
-    // ── [P2] a 302 at the wire (missing/invalid key → Missing-Key page) ⇒ invalid_input
-    //    (never a fake-empty). ──
+    // ── [P2/KEY] an invalid key → a wire 302 to the Census 'Missing Key' page.
+    //    census fetches with redirect:"manual", so undici returns an OPAQUE-REDIRECT
+    //    (type "opaqueredirect", status 0) — NOT a 302 Response and NOT a thrown
+    //    TypeError. This mock reproduces that REAL shape (the prior `cbpMock([],302)`
+    //    tested a fiction: a 302 Response never reaches the code under redirect:
+    //    "manual"/"error"). ⇒ invalid_input naming CENSUS_API_KEY, never a fake-empty. ──
+    const cbpOpaqueRedirect = (u) => (isCbp(u)
+      ? { type: "opaqueredirect", ok: false, status: 0, headers: { get: () => null }, json: async () => { throw new SyntaxError("opaque"); }, text: async () => "" }
+      : failClosed()());
+    await withFetch(cbpOpaqueRedirect, async () => {
+      const { threw, error } = await expectThrow(() => runTool("census_business_patterns", { geography: "state" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55b-P2 an invalid key ⇒ redirect:\"manual\" opaque-redirect (type 'opaqueredirect', status 0 — the REAL undici shape for the live 302 to /data/missing_key.html) ⇒ invalid_input THROW naming CENSUS_API_KEY ⇒ read the opaque-redirect as ok/empty ⇒ RED",
+        threw && te.kind === "invalid_input" && /CENSUS_API_KEY/.test(te.message), JSON.stringify({ kind: te?.kind, type: "opaqueredirect" }));
+    });
+    // Defensive: a raw 3xx status (should undici ever surface the status instead of an
+    // opaque-redirect) is ALSO classified as the key error, not an outage/empty.
     await withFetch(cbpMock([], 302), async () => {
       const { threw, error } = await expectThrow(() => runTool("census_business_patterns", { geography: "state" }, sam));
       const te = threw ? toToolError(error) : null;
-      ok("55b-P2 a 302 (an invalid key redirected to the Census 'Missing Key' page) ⇒ invalid_input THROW naming CENSUS_API_KEY (reclassified from the 3xx; NEVER read the redirect as an empty result) ⇒ swallow the 302 as empty ⇒ RED",
+      ok("55b-P2 a raw 302 status ⇒ invalid_input naming CENSUS_API_KEY (redirect range 300–399 ⇒ key error, NOT upstream_unavailable, NOT empty)",
         threw && te.kind === "invalid_input" && /CENSUS_API_KEY/.test(te.message), JSON.stringify({ kind: te?.kind }));
     });
 
