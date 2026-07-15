@@ -58,6 +58,7 @@ import * as censusEconomic from "./census-economic.js";
 import * as epaEnvirofacts from "./epa-envirofacts.js";
 import * as cmsUtilization from "./cms-utilization.js";
 import * as cmsHospital from "./cms-hospital.js";
+import * as cmsFacility from "./cms-facility.js";
 import * as fred from "./fred.js";
 import * as bea from "./bea.js";
 import * as gsaPerdiem from "./gsa-perdiem.js";
@@ -3593,6 +3594,51 @@ const CmsHospitalCompareInput = z
     path: ["state"],
   });
 
+// ─── CMS Facility Directory (data.cms.gov provider-data, ADR-0063) — KEYLESS ──
+// A four-dataset facility directory generalizing cms_hospital_compare beyond
+// hospitals. `facilityType` is a Zod ENUM that indexes a MODULE-CONSTANT map to a
+// VETTED dataset id (nursing_home → 4pq5-n9py, home_health → 6jpm-sxkc, hospice →
+// yc9t-dgbk, dialysis → 23ew-n7w9) — the user value never enters the URL path. A
+// SINGLE request: the response's top-level `count` is the EXACT per-filter total
+// (P1). Filters ride as DKAN conditions[] triples via URLSearchParams. name/address/
+// ownership columns vary per dataset → coalesced (null if none).
+const CmsFacilityDirectoryInput = z.object({
+  facilityType: z
+    .enum(["nursing_home", "home_health", "hospice", "dialysis"])
+    .describe(
+      "REQUIRED — which CMS provider-data dataset to search: 'nursing_home' (~14,695), 'home_health' (~12,460), 'hospice' (~6,852), or 'dialysis' (~7,490). Selects the dataset id via a constant map (the value never enters the URL path).",
+    ),
+  state: z
+    .string()
+    .regex(/^[A-Za-z]{2}$/)
+    .optional()
+    .describe(
+      "An optional 2-letter US state/territory code (→ state, EXACT match), e.g. 'VA', 'TX'. Validated ^[A-Za-z]{2}$.",
+    ),
+  facilityName: z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z0-9 &.,()/'-]+$/)
+    .optional()
+    .describe(
+      "An optional facility-name fragment (case-insensitive SUBSTRING/contains match against the dataset's primary-name column). Allowed: letters/digits/space/& . , ( ) / ' - (≤100 chars).",
+    ),
+  size: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe("Max facility rows to return (1–100, default 25). Offset-paginated."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+});
+
 // ─── FRED (Federal Reserve Economic Data) — the SECOND key-required source ──
 // ADR-0048. Macro context (GDP/CPI/rates/unemployment/PPI). REQUIRES a free
 // FRED_API_KEY; without it both tools throw an honest config error (the other 112
@@ -5673,6 +5719,20 @@ export const TOOLS: ToolDef[] = [
       "Look up Medicare-certified hospitals by US state and/or facility-name fragment — location, type, ownership, emergency-services flag, and CMS star rating (CMS Hospital Compare 'Hospital General Information', keyless; data.cms.gov provider-data datastore-query API, ~5,432 hospitals). A healthcare-facility directory / market-map lane (WHERE hospitals are and HOW CMS rates them). Input: `state` (2-letter, EXACT) OR `facilityName` (a name fragment, case-insensitive substring/contains match) — at least ONE is REQUIRED (an all-empty query is refused; hospitalType alone is NOT enough to scope); optional `hospitalType` (substring, e.g. 'Acute', 'Critical Access'), `size` (1–100, default 25), `offset`. Returns { hospitals:[{ facilityId, facilityName, address, city, state, zip, county, phone, hospitalType, ownership, emergencyServices, overallRating }] } + honest _meta. ★HONESTY: totalAvailable is the response's EXACT top-level `count` for the filter set (VA=96), NEVER the returned-rows length; offset/size pagination (hasMore = offset+returned < count). overallRating is CMS's 1–5 star rating as a number; 'Not Available'/blank/non-numeric ⇒ null (NEVER 0). emergencyServices normalizes 'Yes'⇒true / 'No'⇒false / else null (never a fabricated false). IDs/names/addresses are null-never-empty-string. A genuine no-match ⇒ honest empty (returned:0); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array body or one missing count/results ⇒ schema_drift. Filters are applied SERVER-SIDE (AND-combined) — nothing is silently dropped. This is a summary star rating, NOT a clinical-quality or fitness determination. KEYLESS — no key is sent.",
     inputSchema: CmsHospitalCompareInput,
     handler: (input) => cmsHospital.hospitalCompare(input),
+  }),
+  // ━━━ CMS Facility Directory — 4 provider-data datasets (1) ━━━ ADR-0063
+  // KEYLESS (data.cms.gov /provider-data/api/1/datastore/query/{datasetId}). A
+  // generalization of cms_hospital_compare beyond hospitals: facilityType (a Zod
+  // enum) indexes a CONSTANT map to a VETTED dataset id — the user value never enters
+  // the path (the load-bearing SSRF guard). A SINGLE request: the response's top-level
+  // `count` is the EXACT per-filter total (P1). name/address/ownership columns vary
+  // per dataset → coalesced (null if none — never empty-string, never fabricated).
+  defineTool({
+    name: "cms_facility_directory",
+    description:
+      "Look up Medicare/Medicaid-certified healthcare FACILITIES by type — nursing homes, home health agencies, hospices, or dialysis facilities — with their name, address, city, state, zip, and ownership (CMS provider-data, keyless; data.cms.gov datastore-query API, four datasets). A healthcare-facility directory / market-map lane that generalizes cms_hospital_compare beyond hospitals. Input: `facilityType` (REQUIRED enum — 'nursing_home' ~14,695 / 'home_health' ~12,460 / 'hospice' ~6,852 / 'dialysis' ~7,490; selects the dataset id via a constant map, the value never enters the URL path), optional `state` (2-letter, EXACT), `facilityName` (a name fragment, case-insensitive substring/contains match against the dataset's primary-name column), `size` (1–100, default 25), `offset`. Returns { facilities:[{ name, address, city, state, zip, facilityType, ownership }] } + honest _meta. ★HONESTY: totalAvailable is the response's EXACT top-level `count` for the filter set, NEVER the returned-rows length; offset/size pagination (hasMore = offset+returned < count). name/address/ownership column names DIFFER across the four datasets, so each is COALESCED over per-dataset candidates (name: provider_name/facility_name/legal_business_name; address: address/provider_address/address_line_1; ownership: ownership_type/type_of_ownership/profit_or_nonprofit) — a field absent in the chosen dataset is null (unknown), NEVER an empty string and NEVER fabricated. facilityType is echoed on each row. A genuine no-match ⇒ honest empty (returned:0); an invalid facilityType ⇒ invalid_input (blocked by the enum); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array body or one missing count/results ⇒ schema_drift. Filters are applied SERVER-SIDE (AND-combined) — nothing is silently dropped. This is a facility directory, NOT a clinical-quality or fitness determination. KEYLESS — no key is sent.",
+    inputSchema: CmsFacilityDirectoryInput,
+    handler: (input) => cmsFacility.facilityDirectory(input),
   }),
   // ━━━ FRED (Federal Reserve Economic Data) — macro context (2) ━━━ ADR-0048
   // ★The server's SECOND KEY-REQUIRED source: FRED has NO keyless tier, so WITHOUT
