@@ -180,6 +180,7 @@ import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-in
 import { readFileSync as censusReadFile } from "node:fs";
 import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num as cbpNum } from "./dist/census-economic.js";
 import { triFacilities as epaTriFacilities, normalizeClosed as epaNormalizeClosed, num as epaNum, str as epaStr } from "./dist/epa-envirofacts.js";
+import { providerServices as cmsProviderServices, joinProviderName as cmsJoinName, num as cmsUtilNum, str as cmsUtilStr } from "./dist/cms-utilization.js";
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { enforcement as openfdaEnforcement, openfdaApiKey, buildSearch as openfdaBuildSearch, luceneQuote as openfdaQuote, OPENFDA_HOST } from "./dist/openfda.js";
 import { deviceClearances as openfdaDeviceClearances, buildDeviceSearch as openfdaBuildDeviceSearch } from "./dist/openfda-device.js";
@@ -16407,6 +16408,208 @@ async function testEpaTriFacilities() {
     epaNormalizeClosed("1") === true && epaNormalizeClosed("0") === false && epaNormalizeClosed("Y") === true && epaNormalizeClosed("N") === false && epaNormalizeClosed("MAYBE") === null && epaNormalizeClosed("") === null, "normalizeClosed diverged");
 }
 
+// §55e2: CMS Medicare provider-service utilization (data.cms.gov /data-api/v1/dataset/{uuid},
+// ADR-0061 — the healthcare-market lane; KEYLESS; the TWO-REQUEST stats-count-total
+// pattern + URLSearchParams filter-value SSRF). NON-VACUOUS, OFFLINE, deterministic.
+// Each assertion pins a value + names the mutation that turns it RED:
+//   [P1]     stats { data:{ found_rows:278254 } } + a 2-row slice ⇒ totalAvailable 278254
+//            (NOT the slice length 2), hasMore; stats FAILS ⇒ totalAvailable:null + a
+//            disclosing note (NEVER length-faked); stats runs BEFORE data.
+//   [P2]     empty slice ⇒ honest empty (returned:0); 400 ⇒ invalid_input; 503 ⇒
+//            upstream_unavailable; non-array / non-JSON 200 ⇒ schema_drift.
+//   [P3]     Avg_Mdcr_Pymt_Amt "60.82"→60.82, Tot_Srvcs "36"→36, a real 0→0, absent→null;
+//            NPI a string; providerName = Last_Org + First joined ("Last, First" / org).
+//   [input]  all-empty (no npi/state) ⇒ invalid_input, 0 fetch; providerType/hcpcs-only too.
+//   [SSRF]   npi/state/hcpcs regex re-guard; a providerType value rides ENCODED via
+//            URLSearchParams (space→+, &→%26); fixed-host assert.
+const CMS_UTIL_RE = /data\.cms\.gov\/data-api\/v1\/dataset\//;
+const isCmsUtil = (u) => CMS_UTIL_RE.test(u);
+const isCmsStats = (u) => /\/data-viewer\/stats\?/.test(u) && isCmsUtil(u);
+const isCmsData = (u) => /\/data\?/.test(u) && isCmsUtil(u) && !/data-viewer/.test(u);
+const cmsStatsUrl = (calls) => calls.find((x) => isCmsStats(x.url))?.url;
+const cmsDataUrl = (calls) => calls.find((x) => isCmsData(x.url))?.url;
+// A combined stats+data mock: routes by URL. `found` is the stats found_rows; a
+// `statsBody` overrides the whole stats JSON (for the missing-field case); `data` is
+// the slice array; `statsStatus`/`dataStatus` force an HTTP status for fault cases.
+const cmsUtilMock = ({ found = 278254, statsStatus = 200, statsBody, data = [], dataStatus = 200 } = {}) => (u) => {
+  if (isCmsStats(u)) return mockResponse({ status: statsStatus, json: statsBody ?? { meta: { success: true }, data: { found_rows: found, total_rows: 9781673 } } });
+  if (isCmsData(u)) return mockResponse({ status: dataStatus, json: data });
+  return failClosed()();
+};
+// A live-shaped provider-service row (numeric-STRING aggregate values).
+const cmsSvc = (over = {}) => ({
+  Rndrng_NPI: "1003001983",
+  Rndrng_Prvdr_Last_Org_Name: "Saddhra",
+  Rndrng_Prvdr_First_Name: "Rorie",
+  Rndrng_Prvdr_Crdntls: "PT",
+  Rndrng_Prvdr_Type: "Physical Therapist in Private Practice",
+  Rndrng_Prvdr_City: "Vinton",
+  Rndrng_Prvdr_State_Abrvtn: "VA",
+  Rndrng_Prvdr_Zip5: "24179",
+  HCPCS_Cd: "97110",
+  HCPCS_Desc: "Therapy procedure using exercise, each 15 minutes",
+  Tot_Benes: "17",
+  Tot_Srvcs: "544",
+  Avg_Sbmtd_Chrg: "35.21",
+  Avg_Mdcr_Alowd_Amt: "21.159375",
+  Avg_Mdcr_Pymt_Amt: "16.562150735",
+  ...over,
+});
+// A 200 data slice whose .json() THROWS a SyntaxError (an HTML error page); the stats
+// sub-query still resolves so we isolate the DATA-body drift path.
+const cmsDataNonJson = (u) => {
+  if (isCmsStats(u)) return mockResponse({ status: 200, json: { data: { found_rows: 5, total_rows: 9781673 } } });
+  if (isCmsData(u)) return { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html/>" };
+  return failClosed()();
+};
+
+async function testCmsProviderServices() {
+  section("§55e2. CMS Medicare provider-service utilization (ADR-0061, KEYLESS — the healthcare-market lane on the getJson GET port) — TWO-request stats-count P1 (totalAvailable=found_rows, never slice length; stats-fail→null+note) + honest empty vs 400/503/drift P2 + numeric-string→number P3 + npi-OR-state input-guard + URLSearchParams filter-value SSRF (charclass+encode, host-pin) (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── [P1] stats found_rows 278254 + a 2-row slice ⇒ totalAvailable 278254 (the
+  //    stats total, NOT the slice length 2), returned:2, hasMore, complete:false.
+  //    Stats runs FIRST, then data — both to data.cms.gov over https. ──
+  await withFetch(cmsUtilMock({ found: 278254, data: [cmsSvc(), cmsSvc({ Rndrng_NPI: "1013025915", Rndrng_Prvdr_Last_Org_Name: "Lee", Rndrng_Prvdr_First_Name: "Yong" })] }), async (calls) => {
+    const r = await runTool("cms_medicare_provider_services", { state: "VA", size: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e2-P1 stats found_rows 278254 + 2-row slice ⇒ returned:2 but totalAvailable:278254 (the EXACT stats total, NOT the slice length 2), truncated:true, complete:false ⇒ set totalAvailable=services.length ⇒ RED",
+      r.data.services.length === 2 && m.returned === 2 && m.totalAvailable === 278254 && m.truncated === true && m.complete === false, JSON.stringify({ n: r.data.services.length, ta: m.totalAvailable, t: m.truncated }));
+    ok("55e2-P1 hasMore:true (offset 0 + returned 2 < 278254), nextOffset:2, offset:0, limit:2 ⇒ compute hasMore off the slice alone ⇒ RED",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.pagination.offset === 0 && m.pagination.limit === 2, JSON.stringify(m.pagination));
+    ok("55e2-P1 TWO requests: a /data-viewer/stats sub-query AND a /data?size=&offset= slice, BOTH to data.cms.gov over https, both carrying filter[Rndrng_Prvdr_State_Abrvtn]=VA ⇒ drop the stats sub-query ⇒ RED",
+      cmsStatsUrl(calls) !== undefined && cmsDataUrl(calls) !== undefined && new URL(cmsStatsUrl(calls)).hostname === "data.cms.gov" && new URL(cmsStatsUrl(calls)).protocol === "https:" && /size=2/.test(cmsDataUrl(calls)) && /offset=0/.test(cmsDataUrl(calls)) && /filter%5BRndrng_Prvdr_State_Abrvtn%5D=VA/.test(cmsDataUrl(calls)) && /filter%5BRndrng_Prvdr_State_Abrvtn%5D=VA/.test(cmsStatsUrl(calls)), JSON.stringify({ stats: cmsStatsUrl(calls), data: cmsDataUrl(calls) }));
+    ok("55e2-P1 keylessMode:true (no key sent) + the annual-vintage + aggregate-only notes present",
+      m.keylessMode === true && m.notes.some((n) => /ANNUAL VINTAGE|dataset/i.test(n)) && m.notes.some((n) => /AGGREGATE|no patient identifiers/i.test(n)), JSON.stringify(m.notes.length));
+  });
+
+  // ── [P1] stats sub-query FAILS (503) but the data slice SUCCEEDS ⇒ totalAvailable:
+  //    null + a disclosing note (NEVER the slice length), data still returned. ──
+  await withFetch(cmsUtilMock({ statsStatus: 503, data: [cmsSvc(), cmsSvc()] }), async (calls) => {
+    const r = await runTool("cms_medicare_provider_services", { state: "VA", size: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e2-P1 stats sub-query 503 (fails) but data OK ⇒ totalAvailable:null (NOT the slice length 2 — never length-faked) + a disclosing note, and the 2 services STILL return ⇒ fall back to services.length ⇒ RED",
+      r.data.services.length === 2 && m.returned === 2 && m.totalAvailable === null && m.notes.some((n) => /count sub-query/i.test(n) && /null/.test(n)), JSON.stringify({ n: r.data.services.length, ta: m.totalAvailable }));
+    ok("55e2-P1 a stats failure does NOT throw (the data request is authoritative) — the stats fetch was attempted then swallowed", cmsStatsUrl(calls) !== undefined && cmsDataUrl(calls) !== undefined, JSON.stringify({ stats: !!cmsStatsUrl(calls), data: !!cmsDataUrl(calls) }));
+  });
+
+  // ── [P4] a stats body MISSING found_rows ⇒ totalAvailable:null (handled, not a
+  //    crash, not a fake), data still returns. ──
+  await withFetch(cmsUtilMock({ statsBody: { meta: { success: true }, data: { total_rows: 9781673 } }, data: [cmsSvc()] }), async () => {
+    const r = await runTool("cms_medicare_provider_services", { state: "VA", size: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e2-P4 a stats body { data:{ total_rows } } missing found_rows ⇒ totalAvailable:null + the fallback note (handled, never a crash, never faked) ⇒ read total_rows (9.78M) as the filter total ⇒ RED",
+      r.data.services.length === 1 && m.totalAvailable === null && m.notes.some((n) => /count sub-query/i.test(n)), JSON.stringify({ ta: m.totalAvailable }));
+  });
+
+  // ── [P2] an empty data slice + stats found_rows 0 ⇒ honest empty (returned:0,
+  //    totalAvailable:0, complete:true — a genuine no-match, NOT thrown, NOT drift). ──
+  await withFetch(cmsUtilMock({ found: 0, data: [] }), async () => {
+    const r = await runTool("cms_medicare_provider_services", { npi: "1999999984", size: 25 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e2-P2 an empty slice + stats 0 ⇒ services:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+      r.data.services.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.services.length, ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // ── [P2] a 400 on the DATA request ⇒ invalid_input (never a fake empty). ──
+  await withFetch(cmsUtilMock({ found: 5, data: {}, dataStatus: 400 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_medicare_provider_services", { state: "VA" }, sam));
+    ok("55e2-P2 400 on the data slice ⇒ invalid_input THROW (a bad request is never an empty result) ⇒ swallow as empty ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2] a 503 on the DATA request ⇒ upstream_unavailable (a DOWN endpoint is
+  //    NEVER a returned:0). ──
+  await withFetch(cmsUtilMock({ found: 5, data: "", dataStatus: 503 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_medicare_provider_services", { state: "VA" }, sam));
+    ok("55e2-P2 503 on the data slice ⇒ upstream_unavailable THROW (a down CMS endpoint is never an empty result) ⇒ read empty ⇒ RED",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P4] a 200 data body that is not an array (an object) ⇒ schema_drift. ──
+  await withFetch(cmsUtilMock({ found: 5, data: { error: "not an array" } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_medicare_provider_services", { state: "VA" }, sam));
+    ok("55e2-P4 a 200 data body that is not a JSON array (an object) ⇒ schema_drift (the array contract broke; never a fabricated empty) ⇒ read {} as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2] a 200 data body that is non-JSON (r.json() SyntaxError) ⇒ schema_drift. ──
+  await withFetch(cmsDataNonJson, async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_medicare_provider_services", { state: "VA" }, sam));
+    ok("55e2-P2 a 200 whose data body is non-JSON (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P3] numeric-STRING coercion: "60.82"→60.82, "36"→36, a real "0"→0 (NEVER
+  //    null), absent→null (NEVER 0); NPI stays a string; providerName joins. ──
+  await withFetch(cmsUtilMock({ found: 3, data: [
+    cmsSvc({ Avg_Mdcr_Pymt_Amt: "60.82", Tot_Srvcs: "36", Avg_Sbmtd_Chrg: "0", Tot_Benes: undefined }),
+    cmsSvc({ Rndrng_Prvdr_Last_Org_Name: "QUARLES PETROLEUM INC", Rndrng_Prvdr_First_Name: "" }),
+    cmsSvc({ Rndrng_Prvdr_Last_Org_Name: "", Rndrng_Prvdr_First_Name: "Rorie" }),
+  ] }), async () => {
+    const r = await runTool("cms_medicare_provider_services", { state: "VA", size: 3 }, sam);
+    const [a, b, c] = r.data.services;
+    ok("55e2-P3 Avg_Mdcr_Pymt_Amt '60.82' ⇒ 60.82 (number) AND Tot_Srvcs '36' ⇒ 36 (numeric string parsed) ⇒ pass the raw string through ⇒ RED",
+      a.avgMedicarePayment === 60.82 && a.totalServices === 36, JSON.stringify({ pay: a.avgMedicarePayment, srv: a.totalServices }));
+    ok("55e2-P3 a real '0' (Avg_Sbmtd_Chrg) ⇒ 0 (preserved, NEVER null) AND an ABSENT Tot_Benes ⇒ null (NEVER 0-faked) — the data-absence-as-zero forbidden class ⇒ RED",
+      a.avgSubmittedCharge === 0 && a.totalBeneficiaries === null, JSON.stringify({ chg: a.avgSubmittedCharge, ben: a.totalBeneficiaries }));
+    ok("55e2-P3 NPI is a STRING (leading-digit structure survives) not a number", typeof a.npi === "string" && a.npi === "1003001983", JSON.stringify(a.npi));
+    ok("55e2-P3 providerName: individual ⇒ 'Last, First' ('Saddhra, Rorie'); org (First '') ⇒ the org name alone ('QUARLES PETROLEUM INC'); last '' + first only ⇒ 'Rorie' ⇒ fabricate a '' or drop a name ⇒ RED",
+      a.providerName === "Saddhra, Rorie" && b.providerName === "QUARLES PETROLEUM INC" && c.providerName === "Rorie", JSON.stringify([a.providerName, b.providerName, c.providerName]));
+  });
+
+  // ── [input-guard] an all-empty query (no npi, no state) ⇒ invalid_input, 0 fetch
+  //    (never scan the whole 9.78M-row table). ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cms_medicare_provider_services", { size: 10 }, sam));
+    ok("55e2-input an all-empty query (no npi/state) ⇒ invalid_input, 0 fetch (never scan the entire 9.78M-row utilization table) ⇒ allow an unscoped scan ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // A providerType/hcpcs-ONLY query is likewise refused (npi OR state is required).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("cms_medicare_provider_services", { providerType: "Family Practice", hcpcsCode: "97110" }, sam));
+    ok("55e2-input a providerType/hcpcs-ONLY query ⇒ invalid_input, 0 fetch (those alone can't scope; npi OR state is required) ⇒ let providerType/hcpcs alone through ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── [SSRF] a bad npi / state / hcpcs charclass ⇒ the re-guard rejects PRE-fetch
+  //    (invalid_input, 0 fetch — a value never touches the fixed host). ──
+  for (const [args, label] of [
+    [{ npi: "12345" }, "npi '12345' (not 10 digits)"],
+    [{ npi: "abcdefghij" }, "npi 'abcdefghij' (non-digit)"],
+    [{ state: "ABC" }, "state 'ABC' (3 letters)"],
+    [{ state: "V1" }, "state 'V1' (a digit)"],
+    [{ state: "VA", hcpcsCode: "97110$" }, "hcpcsCode '97110$' (non-alphanumeric)"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("cms_medicare_provider_services", args, sam));
+      ok(`55e2-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch) ⇒ widen the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ── [SSRF] a providerType VALUE with a space / '&' rides ENCODED via URLSearchParams
+  //    (space→'+', &→%26, bracket key→%5B/%5D) — so it can never break out into the
+  //    path or inject a parameter. Assert both the stats + data URLs host-pinned +
+  //    encoded. ──
+  await withFetch(cmsUtilMock({ found: 6, data: [cmsSvc()] }), async (calls) => {
+    await runTool("cms_medicare_provider_services", { state: "VA", providerType: "Family & Practice" }, sam);
+    const su = cmsStatsUrl(calls), du = cmsDataUrl(calls);
+    ok("55e2-ssrf providerType 'Family & Practice' rides ENCODED via URLSearchParams (filter%5BRndrng_Prvdr_Type%5D=Family+%26+Practice) on BOTH the stats + data URLs, host-pinned to data.cms.gov, with no raw space/'&' ⇒ hand-concatenate the filter (raw space/& in the URL) ⇒ RED",
+      su.includes("filter%5BRndrng_Prvdr_Type%5D=Family+%26+Practice") && du.includes("filter%5BRndrng_Prvdr_Type%5D=Family+%26+Practice") && !/ /.test(du) && new URL(du).hostname === "data.cms.gov", JSON.stringify({ data: du }));
+  });
+
+  // ── [parity] cms-utilization re-exports the shared coerce.num / coerce.str
+  //    (null-never-0 / null-never-empty-string) — NO local fork. ──
+  ok("55e2-parity cms-utilization.num === coerce.num AND str === coerce.str (one shared audited impl — NO local num/str fork)", cmsUtilNum === coerceNum && cmsUtilStr === coerceStr, "cms-utilization coerce diverged from coerce.js");
+  // ── [parity] the exported joinProviderName is the honest mapping (direct-unit). ──
+  ok("55e2-parity (non-vacuity) joinProviderName('Saddhra','Rorie')==='Saddhra, Rorie'; ('QUARLES PETROLEUM INC','')==='QUARLES PETROLEUM INC'; ('','Rorie')==='Rorie'; ('','')===null; (null,null)===null",
+    cmsJoinName("Saddhra", "Rorie") === "Saddhra, Rorie" && cmsJoinName("QUARLES PETROLEUM INC", "") === "QUARLES PETROLEUM INC" && cmsJoinName("", "Rorie") === "Rorie" && cmsJoinName("", "") === null && cmsJoinName(null, null) === null, "joinProviderName diverged");
+}
+
 // §55f: US DOL Data API v4 (apiprod.dol.gov, ADR-0053 — the labor-enforcement lane
 // with a DELIBERATE key split: dol_list_datasets KEYLESS + dol_get_dataset the 4th
 // REQUIRED key). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value +
@@ -19166,6 +19369,7 @@ async function main() {
   await testCensusHonesty();
   await testCensusBusinessPatterns();
   await testEpaTriFacilities();
+  await testCmsProviderServices();
   await testFredHonesty();
   await testOpenfdaEnforcement();
   await testOpenfdaDeviceClearances();
