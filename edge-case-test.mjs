@@ -651,9 +651,15 @@ const cases = [
       const totalNull = m.totalAvailable === null;
       // With limit 3 against a broad filter the endpoint has more → truncated.
       const truncatedOk = m.truncated === true && m.complete === false;
-      // Pagination must advertise more and a truthful nextOffset.
+      // Pagination advertises more (hasMore:true) but nextOffset is NULL by design:
+      // these spending_by_category/* endpoints report no grand total AND all six callers
+      // post page:1 with no offset/page input, so the ranked-below-`limit` categories are
+      // reachable ONLY by raising `limit` (≤50) or narrowing filters — NOT by offset
+      // paging. Emitting `returned` as nextOffset (the earlier expectation) made an agent
+      // re-fetch the SAME top-N forever, so the tool honestly emits null. hasMore stays
+      // true (more DO exist); nextOffset:null says "not via offset paging".
       const pg = m.pagination ?? {};
-      const pagOk = pg.hasMore === true && pg.limit === 3 && pg.nextOffset === returned;
+      const pagOk = pg.hasMore === true && pg.limit === 3 && pg.nextOffset === null;
       // A truncation note must be present (AI-actionable caveat).
       const noted = Array.isArray(m.notes) && m.notes.length >= 1;
       return totalNull && truncatedOk && pagOk && noted && returned <= 3;
