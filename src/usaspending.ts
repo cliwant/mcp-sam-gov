@@ -686,6 +686,7 @@ export async function searchSubawards(args: {
     results?: {
       "Sub-Award ID"?: string;
       "Sub-Award Recipient"?: string;
+      "Sub-Awardee Name"?: string;
       "Sub-Award Amount"?: number;
       "Sub-Award Date"?: string;
       NAICS?: { code?: string; description?: string };
@@ -705,6 +706,13 @@ export async function searchSubawards(args: {
       filters,
       fields: [
         "Sub-Award ID",
+        // DRIFT FIX (dogfooding 2026-07-15): USAspending's spending_by_award now
+        // returns the subawardee under "Sub-Awardee Name"; the legacy
+        // "Sub-Award Recipient" field is still echoed but is ALWAYS null. Request
+        // BOTH and prefer the live one (the endpoint echoes an unknown field as
+        // null, so requesting both is safe). Without this, every subRecipient was
+        // silently null — the supply-chain/teaming lane could not name any sub.
+        "Sub-Awardee Name",
         "Sub-Award Recipient",
         "Sub-Award Amount",
         "Sub-Award Date",
@@ -720,13 +728,13 @@ export async function searchSubawards(args: {
   const data = {
     subawards: results.map((r) => ({
       subAwardId: r["Sub-Award ID"] ?? "",
-      // minor m2 (W3-1 honesty): an ABSENT Sub-Award Recipient → null, NOT a
-      // fabricated "(name redacted)". The old sentinel asserted a specific PRIVACY
-      // reason on ANY nullish value (schema gap / null echo / genuine redaction
-      // alike) — internally inconsistent with the null-never-fabricate discipline
-      // this same function applies to `amount` below. Honest null; the caller
-      // reads absence, not an invented redaction cause.
-      subRecipient: r["Sub-Award Recipient"] ?? null,
+      // The subawardee name — read from the CURRENT field "Sub-Awardee Name",
+      // falling back to the legacy "Sub-Award Recipient" (now always null upstream).
+      // A genuinely absent name in BOTH ⇒ null (honest absence, never a fabricated
+      // "(name redacted)" — consistent with the null-never-fabricate discipline
+      // `amount` uses below).
+      subRecipient:
+        r["Sub-Awardee Name"] ?? r["Sub-Award Recipient"] ?? null,
       // F2 (P3 null-never-0): an ABSENT Sub-Award Amount → null, NEVER a
       // fabricated $0. A genuine 0 still survives (`??` fires only on null).
       amount: r["Sub-Award Amount"] ?? null,
