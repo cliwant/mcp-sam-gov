@@ -182,6 +182,7 @@ import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num
 import { triFacilities as epaTriFacilities, normalizeClosed as epaNormalizeClosed, num as epaNum, str as epaStr } from "./dist/epa-envirofacts.js";
 import { providerServices as cmsProviderServices, joinProviderName as cmsJoinName, num as cmsUtilNum, str as cmsUtilStr } from "./dist/cms-utilization.js";
 import { hospitalCompare as cmsHospitalCompare, emergencyBool as cmsEmergencyBool, num as cmsHospNum, str as cmsHospStr } from "./dist/cms-hospital.js";
+import { facilityDirectory as cmsFacilityDirectory, coalesceField as cmsCoalesceField, str as cmsFacStr } from "./dist/cms-facility.js";
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { enforcement as openfdaEnforcement, openfdaApiKey, buildSearch as openfdaBuildSearch, luceneQuote as openfdaQuote, OPENFDA_HOST } from "./dist/openfda.js";
 import { deviceClearances as openfdaDeviceClearances, buildDeviceSearch as openfdaBuildDeviceSearch } from "./dist/openfda-device.js";
@@ -16790,6 +16791,186 @@ async function testCmsHospitalCompare() {
     cmsEmergencyBool("Yes") === true && cmsEmergencyBool("No") === false && cmsEmergencyBool("yes") === true && cmsEmergencyBool("") === null && cmsEmergencyBool(null) === null && cmsEmergencyBool("Maybe") === null, "emergencyBool diverged");
 }
 
+// §55e3b: CMS Facility Directory across FOUR provider-data datasets (data.cms.gov
+// /provider-data/api/1/datastore/query/{datasetId}, ADR-0063 — the multi-dataset
+// facility directory generalizing cms_hospital_compare; KEYLESS; the ONE-REQUEST
+// top-level-count P1 + facilityType→CONSTANT-id-MAP SSRF + per-dataset field
+// coalescing). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value +
+// names the mutation that turns it RED:
+//   [P1]     response { count:14695 } + a 2-row slice ⇒ totalAvailable 14695 (NOT the
+//            slice length 2), hasMore; each facilityType maps to its CORRECT dataset
+//            id in the fetched URL path.
+//   [P2]     results:[] ⇒ honest empty (returned:0); 400 ⇒ invalid_input; 503 ⇒
+//            upstream_unavailable; non-array / non-JSON / missing-count 200 ⇒ schema_drift.
+//   [P3]     name coalesce: only facility_name ⇒ name populated; only provider_name ⇒
+//            populated; none ⇒ null; address absent ⇒ null (NOT ""); ownership coalesce.
+//   [SSRF]   facilityType (a constant-map KEY) → a VETTED id in the path — the USER
+//            value NEVER enters the path; an invalid facilityType ⇒ invalid_input, 0
+//            fetch; state regex re-guard; a facilityName VALUE rides ENCODED via
+//            URLSearchParams (space→+, &→%26, bracket key→%5B/%5D); fixed-host assert.
+const CMS_FAC_RE = /data\.cms\.gov\/provider-data\/api\/1\/datastore\/query\//;
+const isCmsFac = (u) => CMS_FAC_RE.test(u);
+const cmsFacUrl = (calls) => calls.find((x) => isCmsFac(x.url))?.url;
+// Extract the dataset id from the path (…/datastore/query/{id}/0?…) — proves the
+// facilityType→id map put the RIGHT vetted id in the path.
+const cmsFacDatasetId = (u) => (u && u.match(/\/datastore\/query\/([^/]+)\/0/) || [])[1];
+const cmsFacMock = ({ count = 14695, results = [], status = 200, body } = {}) => (u) => {
+  if (isCmsFac(u)) return mockResponse({ status, json: body ?? { count, results, schema: {}, query: {} } });
+  return failClosed()();
+};
+// A 200 body whose .json() THROWS a SyntaxError (an HTML error page) — non-JSON drift.
+const cmsFacNonJson = (u) => {
+  if (isCmsFac(u)) return { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html/>" };
+  return failClosed()();
+};
+
+async function testCmsFacilityDirectory() {
+  section("§55e3b. CMS Facility Directory — 4 provider-data datasets (ADR-0063, KEYLESS — the multi-dataset facility directory generalizing cms_hospital_compare) — ONE-request top-level-count P1 (totalAvailable=count, never slice length) + facilityType→CONSTANT-id-MAP SSRF (user value NEVER in the path) + per-dataset name/address/ownership coalescing (null-never-empty) + honest empty vs 400/503/drift P2 (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── [P1] count 14695 + a 2-row slice ⇒ totalAvailable 14695 (the response count,
+  //    NOT the slice length 2), returned:2, hasMore, complete:false. ONE request to
+  //    data.cms.gov over https carrying limit=2, offset=0 + conditions[0] state VA. ──
+  await withFetch(cmsFacMock({ count: 14695, results: [
+    { provider_name: "SOUTH ROANOKE NURSING", provider_address: "3823 FRANKLIN RD", citytown: "ROANOKE", state: "VA", zip_code: "24014", ownership_type: "For profit - Corporation" },
+    { provider_name: "GEORGE WASHINGTON HEALTH", provider_address: "1510 COLLINGWOOD ROAD", citytown: "ALEXANDRIA", state: "VA", zip_code: "22308", ownership_type: "Government" },
+  ] }), async (calls) => {
+    const r = await runTool("cms_facility_directory", { facilityType: "nursing_home", state: "VA", size: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e3b-P1 count 14695 + 2-row slice ⇒ returned:2 but totalAvailable:14695 (the EXACT top-level count, NOT the slice length 2), truncated:true, complete:false ⇒ set totalAvailable=facilities.length ⇒ RED",
+      r.data.facilities.length === 2 && m.returned === 2 && m.totalAvailable === 14695 && m.truncated === true && m.complete === false, JSON.stringify({ n: r.data.facilities.length, ta: m.totalAvailable, t: m.truncated }));
+    ok("55e3b-P1 hasMore:true (offset 0 + returned 2 < 14695), nextOffset:2, offset:0, limit:2 ⇒ compute hasMore off the slice alone ⇒ RED",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.pagination.offset === 0 && m.pagination.limit === 2, JSON.stringify(m.pagination));
+    ok("55e3b-P1 ONE request to data.cms.gov over https carrying limit=2, offset=0 AND conditions[0] state VA with the exact operator '=' (encoded %3D) ⇒ drop/mangle the condition ⇒ RED",
+      cmsFacUrl(calls) !== undefined && new URL(cmsFacUrl(calls)).hostname === "data.cms.gov" && new URL(cmsFacUrl(calls)).protocol === "https:" && /limit=2/.test(cmsFacUrl(calls)) && /offset=0/.test(cmsFacUrl(calls)) && /conditions%5B0%5D%5Bproperty%5D=state/.test(cmsFacUrl(calls)) && /conditions%5B0%5D%5Bvalue%5D=VA/.test(cmsFacUrl(calls)) && /conditions%5B0%5D%5Boperator%5D=%3D/.test(cmsFacUrl(calls)), JSON.stringify({ url: cmsFacUrl(calls) }));
+    ok("55e3b-P1 keylessMode:true + facilityType echoed on each row + the dataset + coalesce + filter notes present",
+      m.keylessMode === true && r.data.facilities.every((f) => f.facilityType === "nursing_home") && m.notes.some((n) => /4pq5-n9py|Nursing Home/i.test(n)) && m.notes.some((n) => /COALESCED|coalesced/i.test(n)) && m.notes.some((n) => /SERVER-SIDE|contains/i.test(n)), JSON.stringify(m.notes.length));
+  });
+
+  // ── [SSRF/P1] each facilityType maps to its CORRECT vetted dataset id in the path;
+  //    the USER value never appears there — only one of four compile-time ids can. ──
+  const EXPECT_ID = { nursing_home: "4pq5-n9py", home_health: "6jpm-sxkc", hospice: "yc9t-dgbk", dialysis: "23ew-n7w9" };
+  for (const [ft, id] of Object.entries(EXPECT_ID)) {
+    await withFetch(cmsFacMock({ count: 1, results: [{ facility_name: "X", state: "VA" }] }), async (calls) => {
+      await runTool("cms_facility_directory", { facilityType: ft, state: "VA", size: 1 }, sam);
+      const u = cmsFacUrl(calls);
+      ok(`55e3b-ssrf facilityType '${ft}' ⇒ the VETTED dataset id '${id}' is spliced into the path (…/datastore/query/${id}/0), the user string never in the path ⇒ route to the wrong/attacker id ⇒ RED`,
+        cmsFacDatasetId(u) === id && new URL(u).hostname === "data.cms.gov" && !u.includes(ft), JSON.stringify({ id: cmsFacDatasetId(u), url: u }));
+    });
+  }
+
+  // ── [P2] an empty results slice + count 0 ⇒ honest empty (returned:0,
+  //    totalAvailable:0, complete:true — a genuine no-match, NOT thrown, NOT drift). ──
+  await withFetch(cmsFacMock({ count: 0, results: [] }), async () => {
+    const r = await runTool("cms_facility_directory", { facilityType: "dialysis", state: "ZZ" }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e3b-P2 an empty results slice + count 0 ⇒ facilities:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+      r.data.facilities.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.facilities.length, ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // ── [P2] a 400 ⇒ invalid_input; a 503 ⇒ upstream_unavailable (never a fake empty). ──
+  await withFetch(cmsFacMock({ status: 400, body: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_facility_directory", { facilityType: "hospice", state: "VA" }, sam));
+    ok("55e3b-P2 400 ⇒ invalid_input THROW (a bad request is never an empty result) ⇒ swallow as empty ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cmsFacMock({ status: 503, body: "" }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_facility_directory", { facilityType: "hospice", state: "VA" }, sam));
+    ok("55e3b-P2 503 ⇒ upstream_unavailable THROW (a down CMS endpoint is never an empty result) ⇒ read empty ⇒ RED",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P4] a 200 body whose `results` is not an array ⇒ schema_drift; a body MISSING
+  //    `count` ⇒ schema_drift (never length-fake); a non-JSON body ⇒ schema_drift. ──
+  await withFetch(cmsFacMock({ body: { count: 5, results: { error: "not an array" } } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_facility_directory", { facilityType: "nursing_home", state: "VA" }, sam));
+    ok("55e3b-P4 a 200 body whose results is not a JSON array ⇒ schema_drift (the array contract broke; never a fabricated empty) ⇒ read {} as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cmsFacMock({ body: { results: [{ facility_name: "X" }] } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_facility_directory", { facilityType: "nursing_home", state: "VA" }, sam));
+    ok("55e3b-P4 a 200 body MISSING the top-level `count` ⇒ schema_drift (the total contract broke; never length-fake the total from results) ⇒ read results.length as the total ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(cmsFacNonJson, async () => {
+    const { threw, error } = await expectThrow(() => runTool("cms_facility_directory", { facilityType: "nursing_home", state: "VA" }, sam));
+    ok("55e3b-P2 a 200 whose body is non-JSON (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P3] per-dataset field coalescing: a row with ONLY facility_name ⇒ name
+  //    populated; ONLY provider_name ⇒ populated; a row with NEITHER ⇒ name:null; an
+  //    address absent ⇒ null (NOT ""); ownership coalesced across the candidate order. ──
+  await withFetch(cmsFacMock({ count: 3, results: [
+    { facility_name: "AGAVE HOSPICE", address_line_1: "4050 EAST GREENWAY", citytown: "PHOENIX", state: "AZ", zip_code: "85032", ownership_type: "For-Profit" },
+    { provider_name: "PROVIDENCE HOME HEALTH", address: "4001 DALE STREET", citytown: "ANCHORAGE", state: "AK", zip_code: "99508", type_of_ownership: "PROPRIETARY" },
+    { legal_business_name: "", citytown: "NOWHERE", state: "AK", zip_code: "00000", profit_or_nonprofit: "Non-profit" },
+  ] }), async () => {
+    const r = await runTool("cms_facility_directory", { facilityType: "hospice", state: "AZ", size: 3 }, sam);
+    const [a, b, c] = r.data.facilities;
+    ok("55e3b-P3 a row with ONLY facility_name ⇒ name coalesces to it AND address coalesces to address_line_1 (per-dataset variance) ⇒ hardcode a single column name ⇒ RED",
+      a.name === "AGAVE HOSPICE" && a.address === "4050 EAST GREENWAY" && a.ownership === "For-Profit", JSON.stringify(a));
+    ok("55e3b-P3 a row with ONLY provider_name ⇒ name coalesces to it AND address coalesces to `address` AND ownership to type_of_ownership ⇒ probe the wrong column ⇒ RED",
+      b.name === "PROVIDENCE HOME HEALTH" && b.address === "4001 DALE STREET" && b.ownership === "PROPRIETARY", JSON.stringify(b));
+    ok("55e3b-P3 a row with NO name column (legal_business_name='' only) ⇒ name:null (NEVER '') AND address absent ⇒ null (NOT '') — null-never-empty; ownership still coalesces to profit_or_nonprofit ⇒ emit '' ⇒ RED",
+      c.name === null && c.address === null && c.ownership === "Non-profit", JSON.stringify(c));
+    ok("55e3b-P3 facilityType is echoed verbatim on each row (the caller's chosen lane) ⇒ drop/miswire the echo ⇒ RED",
+      a.facilityType === "hospice" && b.facilityType === "hospice" && c.facilityType === "hospice", JSON.stringify({ a: a.facilityType }));
+  });
+
+  // ── [SSRF/input] an invalid facilityType on a DIRECT handler call (bypassing the
+  //    server Zod enum) ⇒ invalid_input, 0 fetch — the re-guard resolves the constant
+  //    map and refuses an unknown key (no id can be routed for it). ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => cmsFacilityDirectory({ facilityType: "../etc/passwd", state: "VA" }));
+    ok("55e3b-ssrf an invalid facilityType ('../etc/passwd') on a DIRECT call ⇒ invalid_input, 0 fetch (the constant-map re-guard refuses an unknown key; the user value can never reach the path) ⇒ splice the raw value into the path ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // A missing facilityType (direct call) ⇒ invalid_input, 0 fetch.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => cmsFacilityDirectory({ state: "VA" }));
+    ok("55e3b-ssrf a MISSING facilityType on a DIRECT call ⇒ invalid_input, 0 fetch (no dataset can be resolved) ⇒ default to some dataset ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── [SSRF] a bad state charclass / facilityName char ⇒ the re-guard rejects
+  //    PRE-fetch (invalid_input, 0 fetch — a value never touches the fixed host). ──
+  for (const [args, label] of [
+    [{ facilityType: "nursing_home", state: "ABC" }, "state 'ABC' (3 letters)"],
+    [{ facilityType: "nursing_home", state: "V1" }, "state 'V1' (a digit)"],
+    [{ facilityType: "dialysis", facilityName: "children$" }, "facilityName 'children$' (non-allowed char)"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => cmsFacilityDirectory(args));
+      ok(`55e3b-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch) ⇒ widen the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ── [SSRF] a facilityName VALUE with a space / '&' rides ENCODED via URLSearchParams
+  //    against the dataset's OWN name column (facility_name for dialysis) — so it can
+  //    never break out of the path. Host-pinned to data.cms.gov. ──
+  await withFetch(cmsFacMock({ count: 1, results: [{ facility_name: "X", state: "VA" }] }), async (calls) => {
+    await runTool("cms_facility_directory", { facilityType: "dialysis", facilityName: "Johnson & Children" }, sam);
+    const u = cmsFacUrl(calls);
+    ok("55e3b-ssrf facilityName 'Johnson & Children' rides ENCODED via URLSearchParams (conditions%5B…%5D%5Bvalue%5D=Johnson+%26+Children) against the dialysis name column `facility_name` with the contains operator, host-pinned, no raw space/'&' ⇒ hand-concatenate / target the wrong column ⇒ RED",
+      u.includes("%5Bvalue%5D=Johnson+%26+Children") && /%5Bproperty%5D=facility_name/.test(u) && /%5Boperator%5D=contains/.test(u) && !/ /.test(u) && new URL(u).hostname === "data.cms.gov", JSON.stringify({ url: u }));
+  });
+
+  // ── [parity] cms-facility re-exports the shared coerce.str (null-never-empty) —
+  //    NO local fork. And coalesceField is the honest first-non-null mapping. ──
+  ok("55e3b-parity cms-facility.str === coerce.str (one shared audited impl — NO local str fork)", cmsFacStr === coerceStr, "cms-facility coerce diverged from coerce.js");
+  ok("55e3b-parity (non-vacuity) coalesceField picks the FIRST non-null over the order; '' / whitespace / 'null' skip; null if none",
+    cmsCoalesceField({ provider_name: "P", facility_name: "F" }, ["provider_name", "facility_name"]) === "P" &&
+    cmsCoalesceField({ provider_name: "  ", facility_name: "F" }, ["provider_name", "facility_name"]) === "F" &&
+    cmsCoalesceField({ facility_name: "F" }, ["provider_name", "facility_name"]) === "F" &&
+    cmsCoalesceField({ a: "", b: "null" }, ["a", "b"]) === null &&
+    cmsCoalesceField({}, ["provider_name", "facility_name"]) === null, "coalesceField diverged");
+}
+
 // §55f: US DOL Data API v4 (apiprod.dol.gov, ADR-0053 — the labor-enforcement lane
 // with a DELIBERATE key split: dol_list_datasets KEYLESS + dol_get_dataset the 4th
 // REQUIRED key). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value +
@@ -19551,6 +19732,7 @@ async function main() {
   await testEpaTriFacilities();
   await testCmsProviderServices();
   await testCmsHospitalCompare();
+  await testCmsFacilityDirectory();
   await testFredHonesty();
   await testOpenfdaEnforcement();
   await testOpenfdaDeviceClearances();
