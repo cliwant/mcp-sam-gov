@@ -4523,11 +4523,11 @@
   },
   {
     "name": "usas_search_subawards",
-    "description": "Enumerate subcontracts on prime awards. Use for 'who teams with Leidos at DISA' or 'show small-business subs on Accenture's DHS contracts' — surfaces the prime/sub network for teaming-map artifacts.",
+    "description": "Enumerate federal subawards (subcontracts), optionally filtered by SUBAWARDEE name. Use for 'where does Leidos appear as a SUBcontractor, and under which primes' — surfaces the prime/sub network for teaming-map artifacts. NOTE: subRecipientName matches the SUB-recipient, NOT the prime (the keyless spending_by_award subaward view has no prime-name filter); to see the subs UNDER a specific prime, resolve that prime's awards first (usas_search_awards → usas_get_award_detail) and read their sub network. Each row carries subRecipient (the subawardee), amount, actionDate, the prime award id, and the prime award's NAICS.",
     "inputSchema": {
       "type": "object",
       "properties": {
-        "primeRecipientName": {
+        "subRecipientName": {
           "type": "string"
         },
         "agency": {

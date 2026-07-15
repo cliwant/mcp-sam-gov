@@ -672,15 +672,18 @@ export async function searchAwardsByRecipient(args: {
 // ─── Subaward enumeration ─────────────────────────────────────────
 
 export async function searchSubawards(args: {
-  primeRecipientName?: string;
+  subRecipientName?: string;
   agency?: string;
   naics?: string;
   fiscalYear?: number;
   limit?: number;
 }) {
   const filters = buildFilters(args);
-  if (args.primeRecipientName) {
-    filters.recipient_search_text = [args.primeRecipientName];
+  // recipient_search_text on a subawards spending_by_award search matches the
+  // SUBAWARDEE name (live-verified 2026-07-16), so this param is subRecipientName —
+  // NOT a prime filter (the old `primeRecipientName` name was inverted).
+  if (args.subRecipientName) {
+    filters.recipient_search_text = [args.subRecipientName];
   }
   type Resp = {
     results?: {
