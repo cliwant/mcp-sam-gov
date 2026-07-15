@@ -182,16 +182,32 @@ export async function getDocument(documentNumber) {
 export async function listAgencies(args) {
     return memoize(`fedreg:agencies:${args.perPage ?? 100}`, async () => {
         const json = await fetchJson(`${FED_REG}/agencies.json?per_page=${args.perPage ?? 100}`);
-        return {
-            agencies: (json ?? []).map((a) => ({
-                id: a.id ?? 0,
-                name: a.name ?? "",
-                shortName: a.short_name,
-                slug: a.slug ?? "",
-                description: a.description ?? "",
-                parentId: a.parent_id,
-            })),
-        };
+        const agencies = (json ?? []).map((a) => ({
+            id: a.id ?? 0,
+            name: a.name ?? "",
+            shortName: a.short_name,
+            slug: a.slug ?? "",
+            description: a.description ?? "",
+            parentId: a.parent_id,
+        }));
+        // Carry the honesty envelope every other tool has (dogfooding 2026-07-15: this
+        // list tool previously returned a bare {agencies} with no _meta). The
+        // agencies.json endpoint returns the COMPLETE canonical agency set in one
+        // response and IGNORES per_page upstream (live-verified 2026-07-15: per_page
+        // 10/100/1000 all return the full 472) — so the count IS the total, perPage is
+        // not honored, and complete derives true.
+        return withMeta({ agencies }, {
+            source: "federalregister.gov/api/v1 (agencies.json)",
+            keylessMode: true,
+            returned: agencies.length,
+            totalAvailable: agencies.length,
+            truncated: false,
+            filtersApplied: [],
+            filtersDropped: [],
+            notes: [
+                "Complete canonical list of all Federal Register agencies — the endpoint returns every agency in a single response and IGNORES the perPage argument upstream (the full set is always returned).",
+            ],
+        });
     });
 }
 // ─────────────────────────────────────────────────────────────────────────────

@@ -71,7 +71,7 @@ export declare function getDocument(documentNumber: string): Promise<{
 }>;
 export declare function listAgencies(args: {
     perPage?: number;
-}): Promise<{
+}): Promise<import("./meta.js").MetaBundle<{
     agencies: {
         id: number;
         name: string;
@@ -80,7 +80,7 @@ export declare function listAgencies(args: {
         description: string;
         parentId: number | null | undefined;
     }[];
-}>;
+}>>;
 /**
  * The mandatory pre-publication caveat — rides `_meta.notes` on EVERY response.
  * A public-inspection doc is FILED, not PUBLISHED: no final FR citation/page yet,
