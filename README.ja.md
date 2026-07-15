@@ -1,7 +1,7 @@
 # @cliwant/mcp-sam-gov
 
 > **最も包括的なキーレス連邦データ MCP サーバー。**
-> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · FEMA ほか **34 の連邦データソース、116 ツール。** キーレス優先 — Census business-patterns と FRED のみ無料キーが必要で、残り 32 ソースはキー不要。
+> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA ほか **37 の連邦データソース、120 ツール。** キーレス優先 — Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 33 ソースはキー不要。
 > API キー不要、登録不要、サインアップ不要。Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI、すべての MCP ホスト対応。
 
 [English README](./README.md) · [한국어 README](./README.ko.md)
@@ -19,13 +19,14 @@
 | 🕵️ **パートナー・企業の検証** | "この企業をスクリーニング: OFAC 制裁・SAM 除外・単一監査指摘・銀行健全性・EPA 遵守" | OFAC, SAM, FAC, FDIC, EPA ECHO |
 | 📈 **財務開示 (SEC)** | "この上場企業の売上推移 + 最新 10-K" | SEC EDGAR |
 | ⚖️ **規制・立法** | "今四半期の VA サイバーセキュリティ規則? 進行中の Regulations.gov docket?" | Federal Register, Regulations.gov, eCFR, FAR/DFARS, Congress.gov, GovInfo |
-| 💲 **価格・労務・財政** | "GSA CALC 労務単価バンド、この郡の SCA 賃金決定、CPI エスカレーション、出張 per-diem 上限" | GSA CALC, SAM WD, BLS, US Census CBP, FRED, US Treasury, GSA per-diem |
+| 💲 **価格・労務・財政** | "GSA CALC 労務単価バンド、この郡の SCA 賃金決定、CPI エスカレーション、出張 per-diem 上限、地域の産業別 GDP、DOL 賃金・労働執行履歴" | GSA CALC, SAM WD, BLS, US Census CBP, FRED, BEA, US Treasury, GSA per-diem, US DOL |
+| 🏛 **ロビー・影響力** | "誰が VA にサイバーセキュリティでロビーし、いくら支出しているか?" | US Senate LDA |
 | 🏥 **医療・研究資金** | "このテーマの NIH/NSF grant、募集中の臨床試験、この医師への業界支払" | NIH RePORTER, NSF, ClinicalTrials, CMS, NPPES |
 | 🛡 **サイバー遵守** | "この CVE は CISA KEV 必須パッチ一覧にあるか?" | NVD, CISA KEV |
 | 🌐 **貿易・地理・災害** | "この品目の HTS 関税、この住所の Census tract、この州の FEMA 宣言" | USITC HTS, Census, FEMA, Socrata, CKAN |
 | 🎓 **grant・データセット** | "過去 30 日のサイバーセキュリティ grant、連邦オープンデータセット発見" | Grants.gov, data.gov |
 
-**34 の連邦データソース、合計 116 ツール — キーレス優先: Census business-patterns と FRED のみ無料キーが必要で、残り 32 ソースはキー不要。** (初期の 52 ツール版でおおよそ p50 ~0.25s / p95 ~0.8s を計測 — ソースや上流負荷で変動する近似値であり保証値ではありません。)
+**37 の連邦データソース、合計 120 ツール — キーレス優先: Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 33 ソースはキー不要。** (初期の 52 ツール版でおおよそ p50 ~0.25s / p95 ~0.8s を計測 — ソースや上流負荷で変動する近似値であり保証値ではありません。)
 
 ---
 
@@ -52,7 +53,7 @@ Claude Code (CLI) を既に使用している場合：
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP サーバー + Claude が 116 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
+MCP サーバー + Claude が 120 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
 
 ### 🔵 パス 3 — Codex / Cursor / Continue / Gemini 等の手動インストール
 
@@ -162,24 +163,28 @@ npm install --omit=dev
 
 一部のソース(Congress.gov, GovInfo, Regulations.gov, FAC, NPPES, data.gov v4 カタログ)は共有 **api.data.gov** ゲートウェイを利用します。既定では公開 `DEMO_KEY` で **キーレス**動作(低い共有時間あたりクォータ)。`DATA_GOV_API_KEY` を設定すると上限が大幅に緩和されます。[api.data.gov/signup](https://api.data.gov/signup) で即時無料発行(待ちなし)。1 つのキーがすべての api.data.gov / api.gsa.gov ソースで通用します。BLS ソースも任意の無料 `BLS_API_KEY` で日次クォータを引き上げられます。
 
+キーが*必須*のソースは 4 つだけです — **Census**(`census_business_patterns`)、**FRED**(2 つの FRED ツール)、**BEA**(`bea_regional_data`)、**DOL データエンドポイント**(`dol_get_dataset`; カタログ `dol_list_datasets` はキーレス)。いずれも無料で、キー一覧の全容(必須/任意・登録 URL)は [英語 README のキーセクション](./README.md#keys--higher-limits--the-full-inventory) を正とします。
+
 ---
 
-## ツールカタログ (116)
+## ツールカタログ (120)
 
-ワークフロー別グループ。キーレス優先 — 大半はキー不要、Census business-patterns と FRED は無料キーが必要。全 per-tool 一覧と入力 schema・誠実性 caveat の原文は [英語 README のカタログセクション](./README.md#tool-catalog-116-tools) を正とします。
+ワークフロー別グループ。キーレス優先 — 大半はキー不要、Census business-patterns · FRED · BEA · DOL データエンドポイントは無料キーが必要。全 per-tool 一覧と入力 schema・誠実性 caveat の原文は [英語 README のカタログセクション](./README.md#tool-catalog-120-tools) を正とします。
 
 - **案件 + ソリシテーション — SAM.gov + Grants.gov (10)**: `sam_search_opportunities` `sam_search_shaping` `sam_get_opportunity` `sam_fetch_description` `sam_fetch_attachment_text` `sam_attachment_url` `sam_lookup_organization` `sam_lookup_notice_fields` `grants_search` `grants_get_opportunity`
 - **spending・受注・競合 — USAspending + FPDS + GAO (29)**: `usas_search_awards` `usas_search_individual_awards` `usas_get_award_detail` `usas_search_awards_by_recipient` `usas_search_subawards` `usas_search_recompetes` `usas_search_expiring_contracts`(deprecated) `usas_analyze_incumbent` `usas_search_teaming_partners` `usas_spending_over_time` `usas_search_agency_spending` `usas_search_subagency_spending` `usas_search_psc_spending` `usas_search_cfda_spending` `usas_search_state_spending` `usas_search_federal_account_spending` `usas_search_recipients` `usas_get_recipient_profile` `usas_get_agency_profile` `usas_get_agency_awards_summary` `usas_get_agency_budget_function` `usas_list_toptier_agencies` `usas_lookup_agency` `usas_autocomplete_naics` `usas_autocomplete_recipient` `usas_naics_hierarchy` `usas_glossary` `fpds_search_awards` `gao_protest_lookup`
 - **パートナー・企業の検証 — OFAC · SAM · FAC · FDIC · EPA (14)**: `ofac_screen_entity` `sam_check_exclusions` `sam_integrity_lookup` `fac_search_audits` `fac_get_findings` `fdic_search_institutions` `fdic_institution_financials` `fdic_risk_ratios` `fdic_institution_history` `fdic_branch_deposits` `fdic_bank_failures` `fdic_industry_summary` `echo_search_facilities` `echo_facility_report`
 - **財務開示 — SEC EDGAR (8)**: `edgar_lookup_cik` `edgar_company_filings` `edgar_company_facts` `edgar_company_concept` `edgar_xbrl_frames` `edgar_full_text_search` `edgar_filing_index` `edgar_daily_filing_index`
 - **規制・立法 — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (18)**: `fed_register_search_documents` `fed_register_get_document` `fed_register_public_inspection` `fed_register_list_agencies` `regulations_search_dockets` `regulations_search_documents` `regulations_search_comments` `regulations_get_docket` `ecfr_search` `ecfr_list_titles` `far_clause_lookup` `far_search` `far_compliance_matrix` `congress_search_bills` `congress_get_bill` `govinfo_search_packages` `govinfo_get_package` `govinfo_list_collections`
-- **価格・労務・財政 — GSA CALC · SAM WD · BLS · Census CBP · FRED · Treasury · GSA per-diem (14)**: `gsa_benchmark_labor_rates` `sam_search_wage_determinations` `sam_get_wage_rates` `bls_timeseries` `bls_oews_wages` `bls_qcew` `treasury_debt_to_penny` `treasury_avg_interest_rates` `treasury_monthly_statement` `treasury_query_dataset` `census_business_patterns`(無料 CENSUS_API_KEY 必要) `fred_search_series`(無料 FRED_API_KEY 必要) `fred_series_observations`(無料 FRED_API_KEY 必要) `gsa_perdiem_rates`(DEMO_KEY キーレス)
+- **価格・労務・財政 — GSA CALC · SAM WD · BLS · Census CBP · FRED · BEA · Treasury · GSA per-diem (15)**: `gsa_benchmark_labor_rates` `sam_search_wage_determinations` `sam_get_wage_rates` `bls_timeseries` `bls_oews_wages` `bls_qcew` `treasury_debt_to_penny` `treasury_avg_interest_rates` `treasury_monthly_statement` `treasury_query_dataset` `bea_regional_data`(無料 BEA_API_KEY 必要) `census_business_patterns`(無料 CENSUS_API_KEY 必要) `fred_search_series`(無料 FRED_API_KEY 必要) `fred_series_observations`(無料 FRED_API_KEY 必要) `gsa_perdiem_rates`(DEMO_KEY キーレス)
 - **医療・研究資金 — NIH · NSF · ClinicalTrials · CMS · NPPES (9)**: `nih_reporter_search_projects` `nsf_search_awards` `nsf_get_award` `clinicaltrials_search_studies` `clinicaltrials_get_study` `clinicaltrials_facet_counts` `cms_search_datasets` `cms_query_dataset` `nppes_lookup_provider`
 - **サイバー遵守 — NVD + CISA KEV (2)**: `cve_lookup` `cisa_kev_lookup`
 - **貿易・関税 — USITC (1)**: `hts_lookup`
 - **地理・災害・州/市オープンデータ — Census · FEMA · Socrata · CKAN (8)**: `census_geocode_address` `census_geographies_by_coordinates` `fema_disaster_declarations` `fema_search_public_assistance` `socrata_discover_datasets` `socrata_query` `ckan_discover_datasets` `ckan_query`
 - **データセット発見 — data.gov (1)**: `datagov_search_datasets`
 - **中小企業 — SBA (1)**: `sba_size_standard`
+- **労務コンプライアンス — US DOL (2)**: `dol_list_datasets`(DOL 執行・遵守データセットのカタログ閲覧 — WHD, OFCCP 等、キーレス) `dol_get_dataset`(DOL 執行記録の取得 — WHD 賃金・労働 / OFCCP; 無料 DOL_API_KEY 必要)
+- **ロビー・影響力 — US Senate LDA (1)**: `lda_search_filings`(上院ロビー届出: 誰がどの機関に、どの争点で、いくら費やすか; キーレス)
 - **サーバーユーティリティ — キー探索 (1)**: `api_key_status`(各ソースに必要なキー・required/optional・登録 URL・現在の設定有無を列挙; 値は表示しない)
 
 ---
