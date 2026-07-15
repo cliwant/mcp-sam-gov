@@ -12,7 +12,7 @@
  *   • `dol_get_dataset` (KEY-REQUIRED, DOL_API_KEY) — GET
  *     /v4/get/{agency}/{endpoint}/json?… . The DATA endpoint has NO keyless tier, so
  *     with NO `DOL_API_KEY` this tool THROWS an invalid_input config error BEFORE any
- *     fetch (0 network call; the message names DOL_API_KEY + dol.gov/developer).
+ *     fetch (0 network call; the message names DOL_API_KEY + dataportal.dol.gov/registration).
  *   So DOL is the 4th REQUIRED key — but ONLY for the data tool; the catalog tool
  *   (and every other tool on the server) stays keyless.
  *
@@ -44,7 +44,7 @@
  *
  * ★HONESTY (ADR-0053 P1–P4 + KEY + SSRF):
  *   [KEY]  dol_get_dataset with NO DOL_API_KEY ⇒ invalid_input THROW pre-fetch (0
- *          fetch); the message names DOL_API_KEY + dol.gov/developer. The key rides the
+ *          fetch); the message names DOL_API_KEY + dataportal.dol.gov/registration. The key rides the
  *          `X-API-KEY` HEADER ONLY — NEVER the URL / label / _meta / notes / a log (the
  *          K-test). dol_list_datasets is keyless (no key read, no header).
  *   [P1]   catalog: totalAvailable = meta.total_count (the API's real catalog total)
@@ -95,7 +95,7 @@ const DEFAULT_GET_LIMIT = 10;
 const MAX_GET_LIMIT = 100;
 const DEFAULT_LIST_LIMIT = 25;
 // ─── Honesty notes ────────────────────────────────────────────────
-const KEY_REQUIRED_NOTE = "dol_get_dataset REQUIRES a free DOL_API_KEY (the DOL data endpoint has no keyless tier; the CATALOG — dol_list_datasets — and agency list are keyless). Get a key at https://dol.gov/developer. The key is sent ONLY in the X-API-KEY request header and is NEVER logged, echoed, or placed in this response.";
+const KEY_REQUIRED_NOTE = "dol_get_dataset REQUIRES a free DOL_API_KEY (the DOL data endpoint has no keyless tier; the CATALOG — dol_list_datasets — and agency list are keyless). Get a key at https://dataportal.dol.gov/registration. The key is sent ONLY in the X-API-KEY request header and is NEVER logged, echoed, or placed in this response.";
 const DATA_ENVELOPE_NOTE = "The DOL data-record envelope is key-gated and could not be verified live, so records are returned VERBATIM (each dataset has its own enforcement schema — field names and values are preserved as-is; a value is NOT coerced, so a genuine 0 stays 0 and a missing field stays null).";
 const DATA_NO_TOTAL_NOTE = "totalAvailable is null: the DOL data endpoint reports no match count in a form this tool could verify. Page with limit/offset — when a full page is returned hasMore is true (page forward to confirm); an empty next page means the end. `returned` is NEVER passed off as the total.";
 const CATALOG_ENDPOINT_NOTE = "Feed a row's `apiUrl` (the dataset endpoint) plus its `agencyAbbr` into dol_get_dataset to fetch that dataset's records. agency/query filtering here is CLIENT-SIDE (the DOL catalog API does not filter server-side).";
@@ -241,7 +241,7 @@ export async function getDataset(args) {
         throw new ToolErrorCarrier({
             kind: "invalid_input",
             retryable: false,
-            message: "The DOL data endpoint requires a free DOL_API_KEY (the dataset CATALOG, dol_list_datasets, is keyless). Get one at https://dol.gov/developer and set DOL_API_KEY.",
+            message: "The DOL data endpoint requires a free DOL_API_KEY (the dataset CATALOG, dol_list_datasets, is keyless). Get one at https://dataportal.dol.gov/registration and set DOL_API_KEY.",
             upstreamEndpoint: label,
         });
     }
@@ -321,7 +321,7 @@ export async function getDataset(args) {
                 throw new ToolErrorCarrier({
                     kind: "invalid_input",
                     retryable: false,
-                    message: "DOL rejected the request as unauthorized (HTTP 401/403) — DOL_API_KEY is missing or invalid. Check the key (free at https://dol.gov/developer).",
+                    message: "DOL rejected the request as unauthorized (HTTP 401/403) — DOL_API_KEY is missing or invalid. Check the key (free at https://dataportal.dol.gov/registration).",
                     upstreamStatus: status,
                     upstreamEndpoint: label,
                 });
