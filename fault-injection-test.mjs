@@ -16382,6 +16382,11 @@ async function testEpaTriFacilities() {
     [{ facilityName: "AC/ME" }, "facilityName 'AC/ME' (a '/' path separator)"],
     [{ facilityName: "../etc/passwd" }, "facilityName '../etc/passwd' (path traversal)"],
     [{ facilityName: "boeing", county: "FAIR..FAX" }, "county 'FAIR..FAX' (embedded '..')"],
+    // ★F1 regression: a lone '.' passes the charclass + the `..` check + encodeURIComponent
+    // unchanged, but WHATWG URL COLLAPSES the './' segment — dropping the CONTAINING value
+    // and leaving a false _meta.filtersApplied. Must be rejected pre-fetch (0 fetch).
+    [{ facilityName: "." }, "facilityName '.' (a lone dot-segment URL would collapse ⇒ false filtersApplied)"],
+    [{ state: "VA", county: "." }, "county '.' (a lone dot-segment)"],
     [{ state: "ABC" }, "state 'ABC' (3 letters)"],
     [{ state: "V1" }, "state 'V1' (a digit)"],
   ]) {
@@ -16401,6 +16406,26 @@ async function testEpaTriFacilities() {
     const cu = epaCountUrl(calls), du = epaDataUrl(calls);
     ok("55e-ssrf facilityName 'SUN CHEMICAL & INK' is percent-encoded in the PATH (space→%20, &→%26) on BOTH the count + data URLs, host-pinned to data.epa.gov, after /facility_name/CONTAINING/ ⇒ drop encodeURIComponent (raw space/& in the path) ⇒ RED",
       cu.includes("/facility_name/CONTAINING/SUN%20CHEMICAL%20%26%20INK/") && du.includes("/facility_name/CONTAINING/SUN%20CHEMICAL%20%26%20INK/") && !/ /.test(du) && new URL(du).hostname === "data.epa.gov", JSON.stringify({ data: du }));
+  });
+
+  // ── ★F2 regression [P1/complete]: count sub-query FAILS (totalAvailable:null) AND
+  //    offset>0 with a partial last page (returned<limit ⇒ hasMore:false). buildMeta
+  //    must NOT derive complete:true — rows 0..offset-1 are absent and no total
+  //    confirms coverage. The tool forces truncated:true in this case. ──
+  await withFetch(epaMock({ countStatus: 500, data: [epaFac(), epaFac()] }), async () => {
+    // count:500 → the count mock returns HTTP 500 (stats fails) ⇒ totalAvailable:null.
+    const r = await runTool("epa_tri_facilities", { state: "VA", limit: 5, offset: 20 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e-F2 count-fail (totalAvailable:null) + offset>0 + partial page (2<5) ⇒ complete !== true (truncated:true; NEVER claim the ENTIRE set while rows 0..offset-1 are absent) ⇒ let complete default to true ⇒ RED",
+      m.totalAvailable === null && m.truncated === true && m.complete !== true, JSON.stringify({ total: m.totalAvailable, truncated: m.truncated, complete: m.complete }));
+  });
+  // Non-vacuity: at offset 0 with count-fail + partial page, complete MAY be true
+  // (we DID see everything from the start) — the guard is offset-specific.
+  await withFetch(epaMock({ countStatus: 500, data: [epaFac(), epaFac()] }), async () => {
+    const r = await runTool("epa_tri_facilities", { state: "VA", limit: 5, offset: 0 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e-F2 (non-vacuity) count-fail + offset:0 + partial page ⇒ the truncated-force does NOT fire (guard is offset>0-specific) ⇒ force truncated at offset 0 too ⇒ over-broad",
+      m.totalAvailable === null && m.truncated !== true, JSON.stringify({ truncated: m.truncated }));
   });
 
   // ── [parity] epa-envirofacts re-exports the shared coerce.num / coerce.str
