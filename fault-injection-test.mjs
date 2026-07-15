@@ -180,6 +180,7 @@ import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-in
 import { readFileSync as censusReadFile } from "node:fs";
 import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num as cbpNum } from "./dist/census-economic.js";
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
+import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum } from "./dist/bea.js";
 import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
@@ -16397,6 +16398,203 @@ async function testFredHonesty() {
   ok("55c-parity fred.num === coerce.num (one shared audited impl — NO local num/str; fredValue's '.'→null map is a WRAPPER around it, not a fork)", fredNum === coerceNum, "fred num diverged from coerce.num");
 }
 
+// §55d: BEA Regional Economic Accounts (apps.bea.gov/api/data, ADR-0051, Wave-4
+// source #3 — regional GDP/income AND the server's THIRD key-required source).
+// NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the
+// mutation that turns it RED:
+//   [KEY]      unset BEA_API_KEY ⇒ invalid_input THROW pre-fetch (0 fetch), message
+//              names BEA_API_KEY; with the key set it fetches (proves the throw is
+//              CONDITIONAL) ⇒ remove the pre-fetch guard ⇒ RED.
+//   [K-test]   the built URL carries UserID=<value>; the key is ABSENT from the
+//              serialized {data,_meta} ⇒ leak the key into _meta/source/notes ⇒ RED.
+//   [P1]       Data with 3 rows ⇒ returned:3, totalAvailable:3, complete:true ⇒
+//              fabricate totalAvailable ⇒ RED.
+//   [★P2]      ★the crux: HTTP 200 carrying BEAAPI.Results.Error (APIErrorCode 4) ⇒
+//              invalid_input SURFACING the description, NOT an empty; Data:[] ⇒ honest
+//              empty; 503 ⇒ upstream_unavailable; 200 non-JSON ⇒ schema_drift.
+//   [★P3]      DataValue "(D)" ⇒ null (NOT 0); "1,234,567" ⇒ 1234567 (comma-strip);
+//              a real "0" ⇒ 0; UNIT_MULT reported as unitMult, NOT multiplied in.
+//   [SSRF]     tableName '../' / geoFips bad-char / lineCode '99999' / year '20x' /
+//              frequency 'M' ⇒ invalid_input, 0 fetch.
+const BEA_RE = /apps\.bea\.gov\/api\/data/;
+const isBea = (u) => BEA_RE.test(u);
+const beaMock = (body, status = 200) => (u) => (isBea(u) ? mockResponse({ status, json: body }) : failClosed()());
+const beaUrl = (calls) => calls.find((x) => isBea(x.url))?.url;
+const beaQuery = (calls) => new URL(beaUrl(calls)).searchParams;
+// A 200 whose .json() THROWS a SyntaxError (an HTML error page parsed as JSON).
+const beaNonJson = (u) => (isBea(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" }
+  : failClosed()());
+// A BEA Data row (the GetData row shape).
+const beaDataRow = (geoFips, geoName, timePeriod, code, dataValue, clUnit, unitMult, noteRef) =>
+  ({ Code: code, GeoFips: geoFips, GeoName: geoName, TimePeriod: timePeriod, CL_UNIT: clUnit, UNIT_MULT: unitMult, DataValue: dataValue, NoteRef: noteRef });
+// A BEA GetData SUCCESS body (BEAAPI.Results.Data + Notes).
+const beaSuccess = (rows, notes = []) =>
+  ({ BEAAPI: { Request: { RequestParam: [] }, Results: { Statistic: "Gross Domestic Product (GDP) by County", UnitOfMeasure: "Thousands of dollars", Dimensions: [{ Name: "GeoFips", DataType: "string", IsValue: "0" }], Data: rows, Notes: notes } } });
+// ★The P2-crux ERROR body: HTTP 200 carrying BEAAPI.Results.Error (NOT an HTTP error).
+const beaError = (code, desc) =>
+  ({ BEAAPI: { Request: { RequestParam: [] }, Results: { Error: { APIErrorCode: code, APIErrorDescription: desc } } } });
+
+/** Run `fn` with BEA_API_KEY set to `val` (or deleted if undefined), restore after. */
+async function withBeaKey(val, fn) {
+  const orig = process.env.BEA_API_KEY;
+  if (val === undefined) delete process.env.BEA_API_KEY;
+  else process.env.BEA_API_KEY = val;
+  try {
+    return await fn();
+  } finally {
+    if (orig === undefined) delete process.env.BEA_API_KEY;
+    else process.env.BEA_API_KEY = orig;
+  }
+}
+
+async function testBeaRegionalData() {
+  section("§55d. BEA Regional Economic Accounts (ADR-0051, Wave-4 source #3 — regional GDP/income AND the THIRD key-required source) — no-key THROW + K-test + ★200-Results.Error P2 crux + comma/sentinel→null P3 + honest empty vs error/503/drift + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  const KEY = "test-bea-key-SECRET-xyz789";
+
+  // ── [KEY] no BEA_API_KEY ⇒ invalid_input THROW *before any fetch* (0 fetch); the
+  //    message names BEA_API_KEY. This is the THIRD key-REQUIRED source. ──
+  await withBeaKey(undefined, async () => {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "STATE", lineCode: "1" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55d-key UNSET BEA_API_KEY ⇒ invalid_input THROW BEFORE any fetch (0 fetch) + the message NAMES BEA_API_KEY (honest key-required config error, never a fake-empty/keyless-pretend) ⇒ remove the pre-fetch key guard ⇒ RED",
+        threw && te.kind === "invalid_input" && /BEA_API_KEY/.test(te.message) && calls.length === before, JSON.stringify({ kind: te?.kind, added: calls.length - before, msg: te?.message?.slice(0, 60) }));
+    });
+    ok("55d-key (non-vacuity) beaApiKey() returns undefined when unset ⇒ the guard reads env, not a constant", beaApiKey() === undefined, JSON.stringify(beaApiKey()));
+  });
+
+  await withBeaKey(KEY, async () => {
+    // ── [KEY non-vacuity] WITH the key set, the SAME call FETCHES + [K-test] the key
+    //    rides UserID= ONLY and never leaks into the serialized {data,_meta}. ──
+    await withFetch(beaMock(beaSuccess([beaDataRow("06000", "California", "2022", "CAGDP2-1", "3,598,103", "Thousands of dollars", "3", "1")])), async (calls) => {
+      const r = await runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "STATE", lineCode: "1", year: "2022" }, sam);
+      const m = buildMeta(r.meta);
+      const q = beaQuery(calls);
+      ok("55d-key WITH BEA_API_KEY set the same request FETCHES (does NOT throw the key error) ⇒ the pre-fetch throw is CONDITIONAL on the missing key, not unconditional",
+        r.data.rows.length === 1 && beaUrl(calls) !== undefined, JSON.stringify({ rows: r.data.rows.length }));
+      ok("55d-Ktest the built URL carries UserID=<value> (the ONLY key carrier) + the fixed method/datasetname/ResultFormat ⇒ move the key out of UserID= ⇒ RED",
+        q.get("UserID") === KEY && q.get("method") === "GetData" && q.get("datasetname") === "Regional" && q.get("ResultFormat") === "json", JSON.stringify({ userId: q.get("UserID") === KEY, method: q.get("method") }));
+      ok("55d-key the request is to apps.bea.gov/api/data over https (fixed host) + TableName=CAGDP2 + GeoFips=STATE + LineCode=1 + Year=2022 + Frequency=A (default)",
+        new URL(beaUrl(calls)).hostname === "apps.bea.gov" && new URL(beaUrl(calls)).protocol === "https:" && q.get("TableName") === "CAGDP2" && q.get("GeoFips") === "STATE" && q.get("LineCode") === "1" && q.get("Year") === "2022" && q.get("Frequency") === "A", beaUrl(calls));
+      const serialized = JSON.stringify({ data: r.data, _meta: m });
+      ok("55d-Ktest the key value is ABSENT from the serialized {data,_meta} (never in source/notes/label — the K-test) ⇒ leak the key into _meta.source or a note ⇒ RED",
+        !serialized.includes(KEY) && m.source.includes("BEA_API_KEY") && m.keylessMode === false, JSON.stringify({ leaked: serialized.includes(KEY), source: m.source }));
+    });
+
+    // ── [P1] 3 Data rows ⇒ returned:3, totalAvailable:3, complete:true (BEA returns
+    //    the complete set for the filter — no pagination). Rows map by field name;
+    //    geoFips/lineCode stay STRINGS. ──
+    await withFetch(beaMock(beaSuccess([
+      beaDataRow("06000", "California", "2022", "CAGDP2-1", "3,598,103", "Thousands of dollars", "3", "1"),
+      beaDataRow("48000", "Texas", "2022", "CAGDP2-1", "2,402,915", "Thousands of dollars", "3", "1"),
+      beaDataRow("36000", "New York", "2022", "CAGDP2-1", "2,053,180", "Thousands of dollars", "3", "1"),
+    ], [{ NoteRef: "1", NoteText: "All statistics are in current dollars unless otherwise noted." }])), async () => {
+      const r = await runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "STATE", lineCode: "1" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55d-P1 3 data rows ⇒ rows.length 3, returned:3, totalAvailable:3 (the ACTUAL row count), complete:true, truncated:false ⇒ fabricate totalAvailable ⇒ RED",
+        r.data.rows.length === 3 && m.returned === 3 && m.totalAvailable === 3 && m.complete === true && m.truncated === false, JSON.stringify({ n: r.data.rows.length, ret: m.returned, ta: m.totalAvailable, c: m.complete }));
+      ok("55d-P1 row maps by FIELD NAME: geoFips/geoName/timePeriod/lineCode are STRINGS ('06000' survives, lineCode from Code), dataValue is a NUMBER ⇒ positional-mis-read or num-coerce a code ⇒ RED",
+        r.data.rows[0].geoFips === "06000" && typeof r.data.rows[0].geoFips === "string" && r.data.rows[0].geoName === "California" && r.data.rows[0].timePeriod === "2022" && r.data.rows[0].lineCode === "CAGDP2-1" && typeof r.data.rows[0].lineCode === "string" && r.data.rows[0].dataValue === 3598103, JSON.stringify(r.data.rows[0]));
+      ok("55d-P1 keylessMode:false (KEYED — the third key-required source) + the required honesty notes (key-required + comma/sentinel→null + unitMult-not-multiplied + no-pagination) are all present + BEA Notes summarized into data.notes",
+        m.keylessMode === false && m.notes.some((n) => /BEA_API_KEY/.test(n)) && m.notes.some((n) => /suppress|not-available|\(NA\)|\(D\)/i.test(n) && /null/.test(n)) && m.notes.some((n) => /unitMult/.test(n) && /NOT multiplied|not multiplied/i.test(n)) && m.notes.some((n) => /no server-side pagination/i.test(n)) && r.data.notes.length === 1 && r.data.notes[0].noteRef === "1", JSON.stringify({ notes: m.notes.length, dataNotes: r.data.notes.length }));
+    });
+
+    // ── [★P3] the crux: DataValue "(D)" ⇒ null (NOT 0); "1,234,567" ⇒ 1234567
+    //    (comma-strip); a real "0" ⇒ 0; UNIT_MULT reported as unitMult, NOT applied. ──
+    await withFetch(beaMock(beaSuccess([
+      beaDataRow("06075", "San Francisco County, CA", "2022", "CAGDP2-1", "(D)", "Thousands of dollars", "3", "1"),
+      beaDataRow("06001", "Alameda County, CA", "2022", "CAGDP2-1", "1,234,567", "Thousands of dollars", "3", ""),
+      beaDataRow("06003", "Alpine County, CA", "2022", "CAGDP2-1", "0", "Thousands of dollars", "3", ""),
+      beaDataRow("06005", "Amador County, CA", "2022", "CAGDP2-1", "(NA)", "Thousands of dollars", "3", ""),
+    ])), async () => {
+      const r = await runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "COUNTY", lineCode: "1" }, sam);
+      const [supp, real, zero, na] = r.data.rows;
+      ok("55d-P3 DataValue '(D)' (disclosure-suppressed) ⇒ dataValue null (withheld — NOT 0, NOT the string '(D)') ⇒ remove the sentinel→null map (or num('(D)') alone works but a naive Number('(D)')||0 ⇒ 0) ⇒ RED",
+        supp.dataValue === null, JSON.stringify(supp.dataValue));
+      ok("55d-P3 DataValue '1,234,567' ⇒ 1234567 (STRIP the thousands commas THEN num — without the strip, Number('1,234,567') is NaN⇒null, losing the value) ⇒ drop the comma-strip ⇒ RED",
+        real.dataValue === 1234567, JSON.stringify(real.dataValue));
+      ok("55d-P3 a GENUINE '0' ⇒ 0 (NOT null) — a real reported zero is preserved, distinct from a suppression code ⇒ map all falsy/non-truthy to null ⇒ RED",
+        zero.dataValue === 0, JSON.stringify(zero.dataValue));
+      ok("55d-P3 DataValue '(NA)' (not available) ⇒ null (a second suppression sentinel) ⇒ RED if only '(D)' is handled",
+        na.dataValue === null, JSON.stringify(na.dataValue));
+      ok("55d-P3 UNIT_MULT '3' ⇒ unitMult 3 (reported) + CL_UNIT ⇒ unitOfMeasure — and the RAW dataValue is surfaced UNMULTIPLIED (1234567, NOT 1234567×10^3) ⇒ multiply dataValue by 10^unitMult ⇒ RED",
+        real.unitMult === 3 && real.unitOfMeasure === "Thousands of dollars" && real.dataValue === 1234567, JSON.stringify({ unitMult: real.unitMult, uom: real.unitOfMeasure, dv: real.dataValue }));
+    });
+    ok("55d-P3 (direct beaDataValue) '(D)'⇒null, '(NA)'⇒null, '*'⇒null, '1,234,567'⇒1234567, '0'⇒0, ''⇒null (wraps coerce.num after comma-strip) ⇒ drop the sentinel/comma handling ⇒ RED",
+      beaDataValue("(D)") === null && beaDataValue("(NA)") === null && beaDataValue("*") === null && beaDataValue("1,234,567") === 1234567 && beaDataValue("0") === 0 && beaDataValue("") === null, JSON.stringify([beaDataValue("(D)"), beaDataValue("1,234,567"), beaDataValue("0")]));
+
+    // ── [★P2] THE CRUX: a missing/invalid key returns HTTP 200 carrying
+    //    BEAAPI.Results.Error (NOT an HTTP error status). Detected BEFORE the
+    //    Data-array drift check ⇒ invalid_input SURFACING the APIErrorDescription
+    //    (+ code), NEVER read as an empty result. ──
+    await withFetch(beaMock(beaError("4", "This UserId is not active. Please activate it and try again.")), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "STATE", lineCode: "1" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55d-P2 ★HTTP 200 + BEAAPI.Results.Error (APIErrorCode 4, 'UserId is not active') ⇒ invalid_input SURFACING the APIErrorDescription (+ code) — NEVER an empty result, NEVER schema_drift ⇒ read the 200 as ok/empty OR check the Data-array before the Error ⇒ RED",
+        threw && te.kind === "invalid_input" && /not active/.test(te.message) && /4/.test(te.message) && calls.length > before, JSON.stringify({ kind: te?.kind, msg: te?.message?.slice(0, 80) }));
+    });
+
+    // ── [P2] a genuine empty Data array ⇒ honest empty (returned:0, complete:true),
+    //    NOT thrown, NOT drift (an empty Data IS a valid contract). ──
+    await withFetch(beaMock(beaSuccess([])), async () => {
+      const r = await runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "99999", lineCode: "1" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55d-P2 an empty Data:[] ⇒ rows:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+        r.data.rows.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.rows.length, ta: m.totalAvailable }));
+    });
+
+    // ── [P2] a 503 ⇒ upstream_unavailable (a DOWN endpoint is NEVER a returned:0). ──
+    await withFetch(beaMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "STATE", lineCode: "1" }, sam));
+      ok("55d-P2 503 ⇒ upstream_unavailable THROW (a down BEA API is never an empty result; distinct from the 200-Error key error and the honest empty)",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P4] a 200 whose body is missing BEAAPI/Results, or Data non-array, or
+    //    non-JSON ⇒ schema_drift (never a fabricated empty). ──
+    await withFetch(beaMock({ notBea: true }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "STATE", lineCode: "1" }, sam));
+      ok("55d-P4 a 200 body missing the BEAAPI envelope ⇒ schema_drift (never a fabricated empty) ⇒ read {} as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(beaMock({ BEAAPI: { Results: { Data: "not-an-array" } } }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "STATE", lineCode: "1" }, sam));
+      ok("55d-P4 a 200 with BEAAPI.Results.Data NOT an array (a string) ⇒ schema_drift (the Data contract broke) ⇒ trust a non-array ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(beaNonJson, async () => {
+      const { threw, error } = await expectThrow(() => runTool("bea_regional_data", { tableName: "CAGDP2", geoFips: "STATE", lineCode: "1" }, sam));
+      ok("55d-P2 a 200 whose body is non-JSON (an HTML error page → r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [SSRF] a bad tableName/geoFips/lineCode/year/frequency ⇒ invalid_input, 0
+    //    fetch (the charclass/enum re-guard PRE-fetch — a value never touches the
+    //    fixed host/query). ──
+    for (const [args, label] of [
+      [{ tableName: "../etc/passwd", geoFips: "STATE", lineCode: "1" }, "tableName '../etc/passwd'"],
+      [{ tableName: "CAGDP2", geoFips: "ST ATE", lineCode: "1" }, "geoFips 'ST ATE' (space)"],
+      [{ tableName: "CAGDP2", geoFips: "STATE", lineCode: "99999" }, "lineCode '99999' (5 digits, not ALL)"],
+      [{ tableName: "CAGDP2", geoFips: "STATE", lineCode: "1", year: "20x" }, "year '20x'"],
+      [{ tableName: "CAGDP2", geoFips: "STATE", lineCode: "1", frequency: "M" }, "frequency 'M'"],
+    ]) {
+      await withFetch(failClosed(), async (calls) => {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool("bea_regional_data", args, sam));
+        ok(`55d-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass/enum re-guard PRE-fetch — a value never touches the fixed host) ⇒ widen the validation ⇒ RED`,
+          threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+      });
+    }
+  });
+
+  // ── (parity) bea re-exports the shared coerce.num (null-never-0). ──
+  ok("55d-parity bea.num === coerce.num (one shared audited impl — NO local num/str; beaDataValue's comma/sentinel→null map is a WRAPPER around it, not a fork)", beaNum === coerceNum, "bea num diverged from coerce.num");
+}
+
 // §54: shared disclosure tokenizer (src/disclosure.ts, ADR-0022) — the byte-identical
 // extraction of NSF's OR-note + ClinicalTrials' AND-note tokenizer into ONE audited
 // home, PLUS the lint guardrail against the whitespace-only recurrence adversarial
@@ -16984,6 +17182,7 @@ async function main() {
   await testCensusHonesty();
   await testCensusBusinessPatterns();
   await testFredHonesty();
+  await testBeaRegionalData();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
   await testHonestyAuditRemediation();
@@ -17008,10 +17207,10 @@ async function main() {
 // §keys-A: apiKeyStatus() — the CONFIG-discovery surface. OFFLINE (no fetch): it
 // reads process.env only. Two invariants under test:
 //   (1) with every key env UNSET → all currentlySet:false, requiredMissing is
-//       EXACTLY [CENSUS_API_KEY, FRED_API_KEY] (the 2 keyless-less sources), the
-//       registry has 7 entries with the right `required` flags + a non-empty
-//       signupUrl each; setting CENSUS_API_KEY flips its bool and drops it from
-//       requiredMissing.
+//       EXACTLY [BEA_API_KEY, CENSUS_API_KEY, FRED_API_KEY] (the 3 keyless-less
+//       sources), the registry has 8 entries with the right `required` flags + a
+//       non-empty signupUrl each; setting CENSUS_API_KEY flips its bool and drops
+//       it from requiredMissing.
 //   (2) ★K-TEST: the key VALUE is NEVER in the serialized output — only the bool.
 async function testApiKeyStatus() {
   section("§keys-A apiKeyStatus() — required/optional discovery + VALUE never leaks");
@@ -17024,12 +17223,13 @@ async function testApiKeyStatus() {
     // (1) all unset.
     clearAll();
     const r0 = apiKeyStatus();
-    ok("keys-A registry has EXACTLY 7 entries", r0.keys.length === 7, String(r0.keys.length));
+    ok("keys-A registry has EXACTLY 8 entries", r0.keys.length === 8, String(r0.keys.length));
     ok(
-      "keys-A envVars are the 7 code-grounded names",
+      "keys-A envVars are the 8 code-grounded names",
       JSON.stringify([...ALL].sort()) ===
         JSON.stringify(
           [
+            "BEA_API_KEY",
             "BLS_API_KEY",
             "CENSUS_API_KEY",
             "DATA_GOV_API_KEY",
@@ -17063,14 +17263,14 @@ async function testApiKeyStatus() {
       dataGovSrc,
     );
     ok(
-      "keys-A exactly CENSUS_API_KEY + FRED_API_KEY are required:true",
+      "keys-A exactly BEA_API_KEY + CENSUS_API_KEY + FRED_API_KEY are required:true",
       JSON.stringify(r0.keys.filter((k) => k.required).map((k) => k.envVar).sort()) ===
-        JSON.stringify(["CENSUS_API_KEY", "FRED_API_KEY"]),
+        JSON.stringify(["BEA_API_KEY", "CENSUS_API_KEY", "FRED_API_KEY"]),
       JSON.stringify(r0.keys.filter((k) => k.required).map((k) => k.envVar)),
     );
     ok(
-      "keys-A requiredMissing (all unset) === [CENSUS_API_KEY, FRED_API_KEY]",
-      JSON.stringify([...r0.requiredMissing].sort()) === JSON.stringify(["CENSUS_API_KEY", "FRED_API_KEY"]),
+      "keys-A requiredMissing (all unset) === [BEA_API_KEY, CENSUS_API_KEY, FRED_API_KEY]",
+      JSON.stringify([...r0.requiredMissing].sort()) === JSON.stringify(["BEA_API_KEY", "CENSUS_API_KEY", "FRED_API_KEY"]),
       JSON.stringify(r0.requiredMissing),
     );
     ok("keys-A optionalMissing (all unset) has the 5 optional envVars", r0.optionalMissing.length === 5, JSON.stringify(r0.optionalMissing));
