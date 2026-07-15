@@ -56,6 +56,7 @@ import * as clinicaltrials from "./clinicaltrials.js";
 import * as census from "./census.js";
 import * as censusEconomic from "./census-economic.js";
 import * as fred from "./fred.js";
+import * as gsaPerdiem from "./gsa-perdiem.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
@@ -3485,6 +3486,45 @@ const FredSeriesObservationsInput = z.object({
     .describe("Observation date order: 'asc' (oldest first, FRED default) or 'desc' (newest first)."),
 });
 
+// ─── GSA Federal Travel Per-Diem (api.gsa.gov) — travel-cost lane ──
+// ADR-0050. Lodging + M&IE reimbursement ceilings by city/state OR zip for a year.
+// KEYLESS by default via the shared DEMO_KEY (datagovKey.ts seam); DATA_GOV_API_KEY
+// lifts the rate. EITHER (city+state) OR zip — both/neither ⇒ invalid_input, 0 fetch.
+const GsaPerdiemRatesInput = z
+  .object({
+    city: z
+      .string()
+      .regex(/^[A-Za-z .'\-]{1,60}$/)
+      .optional()
+      .describe(
+        "The city name (e.g. 'Washington', 'San Francisco'). Requires `state`. Validated ^[A-Za-z .'\\-]{1,60}$. Use EITHER (city + state) OR zip — not both.",
+      ),
+    state: z
+      .string()
+      .regex(/^[A-Za-z]{2}$/)
+      .optional()
+      .describe(
+        "The 2-letter state/territory code (e.g. 'DC', 'CA'). Required with `city`. Validated ^[A-Za-z]{2}$.",
+      ),
+    zip: z
+      .string()
+      .regex(/^\d{5}$/)
+      .optional()
+      .describe(
+        "A 5-digit ZIP code (e.g. '20001'). The alternative lookup mode to city+state. Validated ^\\d{5}$. Use EITHER zip OR (city + state) — not both.",
+      ),
+    year: z
+      .string()
+      .regex(/^\d{4}$/)
+      .optional()
+      .describe(
+        "The per-diem fiscal year (default '2025'). Validated ^\\d{4}$ (it rides in the request path).",
+      ),
+  })
+  .describe(
+    "Look up GSA per-diem rates by EITHER (city + state) OR zip. Supplying both, or neither, ⇒ invalid_input.",
+  );
+
 // api_key_status takes no input — it is a pure status query over process.env.
 const ApiKeyStatusInput = z.object({});
 
@@ -4982,6 +5022,20 @@ export const TOOLS: ToolDef[] = [
       "Fetch a FRED series' time series of date/value observations (FRED /fred/series/observations; api.stlouisfed.org). ★REQUIRES a free FRED_API_KEY (FRED has NO keyless tier — without it this tool THROWS an honest config error; get one at https://fred.stlouisfed.org/docs/api/api_key.html). Input: `seriesId` (required, e.g. 'GDP', 'CPIAUCSL', 'UNRATE', 'DGS10', 'PPIACO'; discover with fred_search_series), optional `startDate`/`endDate` (YYYY-MM-DD), `limit` (default 100, max 100000), `offset`, `sortOrder` (asc|desc). Returns { observations:[{ date, value }] } + honest _meta. ★MISSING-VALUE HONESTY (the crux): FRED encodes a missing observation as the literal '.', which maps to value:null (missing) — NEVER 0; a genuine reported 0 is preserved as 0. HONESTY: totalAvailable is FRED's EXACT `count` (offset pagination via hasMore/nextOffset — never fabricated); a 400 (bad seriesId / missing key) ⇒ invalid_input CARRYING FRED's error_message (never a fake empty); a genuine empty ⇒ honest empty; a 5xx ⇒ THROWS; a 200 non-JSON / non-array `observations` ⇒ schema_drift. seriesId is charclass-validated (^[A-Za-z0-9._-]+$) and dates are YYYY-MM-DD; the key rides ONLY in the &api_key= query param.",
     inputSchema: FredSeriesObservationsInput,
     handler: (input) => fred.seriesObservations(input),
+  }),
+  // ━━━ GSA Federal Travel Per-Diem (api.gsa.gov) — travel-cost lane (1) ━━━ ADR-0050
+  // The lodging + M&IE reimbursement ceilings the federal government pays for official
+  // travel, by city/state OR zip for a year. SAME host (api.gsa.gov) + SAME api.data.gov
+  // key seam (datagovKey.ts, X-Api-Key header) as datagov_search_datasets — KEYLESS by
+  // default via the shared DEMO_KEY, keylessMode:false. EITHER (city+state) OR zip; both
+  // or neither ⇒ invalid_input, 0 fetch. `value` (monthly lodging) / `meals` are null-
+  // never-0; standardRate/isOconus are STRING booleans coerced to real booleans.
+  defineTool({
+    name: "gsa_perdiem_rates",
+    description:
+      "Look up GSA Federal Travel PER-DIEM rates — the max lodging + Meals & Incidental Expenses (M&IE) reimbursement ceilings for official U.S. government travel (api.gsa.gov /travel/perdiem/v2, keyed — DATA_GOV_API_KEY or the shared DEMO_KEY). Input: EITHER `city` (e.g. 'Washington') + `state` (2-letter, e.g. 'DC') OR `zip` (5-digit) — supplying BOTH, or NEITHER, ⇒ invalid_input with 0 fetch; optional `year` (default '2025'). Returns { rates:[{ city, county, state, zip, year, isOconus, standardRate, mealsUsd, monthlyLodgingUsd:[{ month (1-12), monthName, lodgingUsd }] }] } + honest _meta. HONESTY: lodgingUsd (the API's monthly `value`) is the MAX nightly lodging ceiling for that month — it VARIES SEASONALLY (hence a per-month array), and mealsUsd is the daily M&IE ceiling; both are integer US dollars, null-when-withheld (NEVER 0 — a genuine 0 is preserved). standardRate/isOconus are booleans coerced from the API's string 'true'/'false' (an unrecognized value ⇒ null, never a fabricated false); the months array is preserved AS-IS (never padded to 12). The API returns the COMPLETE rate set (no pagination) ⇒ totalAvailable = the row count, complete:true. A genuine no-match (rates:[]/rate:[]) ⇒ honest empty (returned:0); the API's `errors` field non-null ⇒ invalid_input carrying the message (never a fake empty); a 429 (DEMO_KEY ~10 req/hr, hit quickly) ⇒ rate_limited THROWS; a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON ⇒ schema_drift. DEMO_KEY ~10 req/hr shared ceiling — set DATA_GOV_API_KEY (free at api.data.gov/signup) for 1000/hr. The key rides ONLY in the X-Api-Key header (never the URL/_meta).",
+    inputSchema: GsaPerdiemRatesInput,
+    handler: (input) => gsaPerdiem.perdiemRates(input),
   }),
   // ━━━ Self-service key discovery (1) ━━━
   // KEYLESS. A local status query — reads process.env (+ any .env auto-loaded at

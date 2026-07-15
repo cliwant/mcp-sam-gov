@@ -53,7 +53,7 @@ export const KEY_REGISTRY: readonly KeyRegistryEntry[] = [
   {
     envVar: "DATA_GOV_API_KEY",
     sources: [
-      "api.data.gov keyed sources: Regulations.gov, Congress.gov, GovInfo, Federal Audit Clearinghouse (FAC), data.gov catalog",
+      "api.data.gov keyed sources: Regulations.gov, Congress.gov, GovInfo, Federal Audit Clearinghouse (FAC), data.gov catalog, GSA per-diem",
     ],
     required: false,
     signupUrl: "https://api.data.gov/signup/",
