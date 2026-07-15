@@ -182,6 +182,7 @@ import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum } from "./dist/bea.js";
 import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
+import { dolApiKey } from "./dist/dol.js";
 import { searchFilings as ldaSearchFilings, ldaAuthHeader, ldaKeyPresent, nameOf as ldaNameOf, LDA_HOST, num as ldaNum } from "./dist/lda.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
@@ -16200,6 +16201,269 @@ async function testCensusBusinessPatterns() {
   ok("55b-parity census-economic.num === coerce.num (one shared audited impl — NO local num/str; the sentinel→null map is a WRAPPER around it, not a fork)", cbpNum === coerceNum, "cbp num diverged from coerce.num");
 }
 
+// §55f: US DOL Data API v4 (apiprod.dol.gov, ADR-0053 — the labor-enforcement lane
+// with a DELIBERATE key split: dol_list_datasets KEYLESS + dol_get_dataset the 4th
+// REQUIRED key). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value +
+// names the mutation that turns it RED:
+//   [catalog]  keyless; datasets parsed by field; agency + query CLIENT-SIDE filters;
+//              P1 totalAvailable = meta.total_count (unfiltered) / filtered-set size;
+//              offset pagination; non-array/non-JSON ⇒ drift; 5xx ⇒ THROW.
+//   [KEY]      dol_get_dataset unset DOL_API_KEY ⇒ invalid_input THROW pre-fetch
+//              (0 fetch), message names DOL_API_KEY; set ⇒ the X-API-KEY HEADER carries
+//              it (K-test: the SECRET is ABSENT from the serialized {data,_meta} AND the
+//              URL, present ONLY in the header).
+//   [P1]       data: a real count field ⇒ totalAvailable=count; NONE ⇒ null (never
+//              `returned`). [P3] records VERBATIM: null→null, real 0→0, field names kept.
+//   [P2]       401/403 ⇒ invalid_input(key); empty ⇒ honest empty; 503 ⇒
+//              upstream_unavailable; 429 ⇒ rate_limited; non-JSON ⇒ schema_drift.
+//   [P4]       envelope defensive (bare array / {data} / {results}); no row array ⇒
+//              drift; a non-object record ⇒ drift.
+//   [SSRF]     agency/table '../' reject + fixed host; filterField/filterValue pairing.
+const isDolDatasets = (u) => /apiprod\.dol\.gov\/v4\/datasets/.test(u);
+const isDolGet = (u) => /apiprod\.dol\.gov\/v4\/get\//.test(u);
+const dolDatasetsMock = (body, status = 200) => (u) => (isDolDatasets(u) ? mockResponse({ status, json: body }) : failClosed()());
+const dolGetMock = (body, status = 200) => (u) => (isDolGet(u) ? mockResponse({ status, json: body }) : failClosed()());
+const dolDatasetsUrl = (calls) => calls.find((x) => isDolDatasets(x.url))?.url;
+const dolGetCall = (calls) => calls.find((x) => isDolGet(x.url));
+// A catalog entry as the live /v4/datasets returns it (nested agency{name,abbr}).
+const dolEntry = (name, tablename, apiUrl, abbr, agencyName, cat, desc = "d") => ({
+  id: 1, name, tablename, api_url: apiUrl, description: desc, frequency: "Static",
+  dataset_type: 1, agency: { name: agencyName, abbr }, category_name: cat, category: { name: cat },
+});
+const dolCatalog = (entries, totalCount = entries.length) => ({
+  datasets: entries,
+  meta: { current_page: 1, next_page: null, prev_page: null, total_pages: 1, total_count: totalCount },
+});
+// A 200 whose .json() THROWS a SyntaxError (an HTML error page parsed as JSON).
+const dolNonJson = (matcher) => (u) => (matcher(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html/>" }
+  : failClosed()());
+
+/** Run `fn` with DOL_API_KEY set to `val` (or deleted if undefined), restore after. */
+async function withDolKey(val, fn) {
+  const orig = process.env.DOL_API_KEY;
+  if (val === undefined) delete process.env.DOL_API_KEY;
+  else process.env.DOL_API_KEY = val;
+  try {
+    return await fn();
+  } finally {
+    if (orig === undefined) delete process.env.DOL_API_KEY;
+    else process.env.DOL_API_KEY = orig;
+  }
+}
+
+async function testDolDataApi() {
+  section("§55f. US DOL Data API v4 (ADR-0053 — labor enforcement; catalog KEYLESS + data KEY-REQUIRED split) — catalog parse/client-filter/P1 + no-key THROW + X-API-KEY K-test + verbatim records + defensive envelope + honest empty/401/503/429/drift + SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  const KEY = "test-dol-key-abc123";
+
+  // ═══ dol_list_datasets (KEYLESS) ═══
+  const CAT = dolCatalog([
+    dolEntry("Child Labor Report", "ILAB_child", "Child_Labor_Report", "ILAB", "Bureau of International Labor Affairs", "Child Labor"),
+    dolEntry("WHD Wage Violations", "WHD_whisard", "WHD_Whisard", "WHD", "Wage and Hour Division", "Wage"),
+    dolEntry("OSHA Inspections", "OSHA_insp", "OSHA_Inspection", "OSHA", "Occupational Safety and Health Administration", "Safety"),
+  ], 3);
+
+  // ── [catalog] KEYLESS parse: fields mapped (name/tablename/apiUrl/agency/agencyAbbr/
+  //    datasetType/category), fetched WITHOUT any key/header, P1 totalAvailable = the
+  //    catalog's real total_count (unfiltered), keylessMode:true. ──
+  await withDolKey(undefined, async () => {
+    await withFetch(dolDatasetsMock(CAT), async (calls) => {
+      const r = await runTool("dol_list_datasets", {}, sam);
+      const m = buildMeta(r.meta);
+      const call = calls.find((x) => isDolDatasets(x.url));
+      ok("55f-list KEYLESS: 3 datasets parsed by field (apiUrl='Child_Labor_Report', agencyAbbr='ILAB', datasetType:1, category='Child Labor'); no X-API-KEY header sent (catalog is keyless) ⇒ send a key header ⇒ RED",
+        r.data.datasets.length === 3 && r.data.datasets[0].apiUrl === "Child_Labor_Report" && r.data.datasets[0].agencyAbbr === "ILAB" && r.data.datasets[0].tablename === "ILAB_child" && r.data.datasets[0].datasetType === 1 && r.data.datasets[0].category === "Child Labor" && !(call?.init?.headers && call.init.headers["X-API-KEY"]), JSON.stringify({ n: r.data.datasets.length, hdr: call?.init?.headers?.["X-API-KEY"] }));
+      ok("55f-list P1 unfiltered ⇒ totalAvailable = meta.total_count (3, the API's REAL catalog total), keylessMode:true, complete:true, fetched on apiprod.dol.gov/v4/datasets over https with a large limit ⇒ fake the total / send a key ⇒ RED",
+        m.totalAvailable === 3 && m.keylessMode === true && m.complete === true && new URL(dolDatasetsUrl(calls)).hostname === "apiprod.dol.gov" && new URL(dolDatasetsUrl(calls)).protocol === "https:" && /\/v4\/datasets/.test(dolDatasetsUrl(calls)), JSON.stringify({ ta: m.totalAvailable, keyless: m.keylessMode }));
+    });
+
+    // ── [catalog client-filter] agency='WHD' ⇒ only the WHD row (CLIENT-SIDE — the
+    //    catalog API does not filter server-side; the fetch is still the whole catalog). ──
+    await withFetch(dolDatasetsMock(CAT), async () => {
+      const r = await runTool("dol_list_datasets", { agency: "WHD" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55f-list agency='WHD' ⇒ CLIENT-SIDE filter to the 1 WHD row; totalAvailable:1 (the EXACT filtered-set size — the whole catalog was fetched), filtersApplied names agency ⇒ pass agency to the server / count the unfiltered total ⇒ RED",
+        r.data.datasets.length === 1 && r.data.datasets[0].agencyAbbr === "WHD" && m.totalAvailable === 1 && m.filtersApplied.some((f) => /agency:WHD/.test(f)), JSON.stringify({ n: r.data.datasets.length, ta: m.totalAvailable }));
+    });
+
+    // ── [catalog client-filter] query substring over name/description/category. ──
+    await withFetch(dolDatasetsMock(CAT), async () => {
+      const r = await runTool("dol_list_datasets", { query: "inspection" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55f-list query='inspection' ⇒ substring match on 'OSHA Inspection' (via apiUrl/category text) ⇒ 1 row, totalAvailable:1 ⇒ drop the client-side substring filter ⇒ RED",
+        r.data.datasets.length === 1 && r.data.datasets[0].agencyAbbr === "OSHA" && m.totalAvailable === 1, JSON.stringify({ n: r.data.datasets.length, ta: m.totalAvailable }));
+    });
+
+    // ── [catalog pagination] limit/offset slice over the filtered set. ──
+    await withFetch(dolDatasetsMock(CAT), async () => {
+      const r = await runTool("dol_list_datasets", { limit: 2, offset: 0 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55f-list limit=2 over 3 ⇒ returned:2, totalAvailable:3, hasMore:true, nextOffset:2, truncated:true, complete:false ⇒ ignore limit / fake nextOffset ⇒ RED",
+        r.data.datasets.length === 2 && m.returned === 2 && m.totalAvailable === 3 && m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.truncated === true && m.complete === false, JSON.stringify({ ret: m.returned, pg: m.pagination }));
+    });
+
+    // ── [catalog P4] non-array datasets ⇒ schema_drift; a 200 non-JSON ⇒ schema_drift;
+    //    a 503 ⇒ upstream_unavailable (never a fabricated empty). ──
+    await withFetch(dolDatasetsMock({ datasets: "nope", meta: {} }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("dol_list_datasets", {}, sam));
+      ok("55f-list P4 non-array `datasets` ⇒ schema_drift (never a fabricated empty) ⇒ read a string as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(dolNonJson(isDolDatasets), async () => {
+      const { threw, error } = await expectThrow(() => runTool("dol_list_datasets", {}, sam));
+      ok("55f-list P4 a 200 non-JSON body ⇒ schema_drift ⇒ swallow the SyntaxError as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(dolDatasetsMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("dol_list_datasets", {}, sam));
+      ok("55f-list P2 503 ⇒ upstream_unavailable THROW (a down catalog is never an empty result)",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+  });
+
+  // ═══ dol_get_dataset (KEY-REQUIRED) ═══
+  // ── [KEY] no DOL_API_KEY ⇒ invalid_input THROW *before any fetch* (0 fetch); the
+  //    message names DOL_API_KEY. This is the 4th key-REQUIRED source (data-only). ──
+  await withDolKey(undefined, async () => {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", { agency: "ILAB", table: "Child_Labor_Report" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55f-key UNSET DOL_API_KEY ⇒ invalid_input THROW BEFORE any fetch (0 fetch) + the message NAMES DOL_API_KEY (honest key-required config error, never a fake-empty/keyless-pretend) ⇒ remove the pre-fetch key guard ⇒ RED",
+        threw && te.kind === "invalid_input" && /DOL_API_KEY/.test(te.message) && calls.length === before, JSON.stringify({ kind: te?.kind, added: calls.length - before, msg: te?.message?.slice(0, 60) }));
+    });
+    ok("55f-key (non-vacuity) dolApiKey() returns undefined when unset ⇒ the guard reads env, not a constant", dolApiKey() === undefined, JSON.stringify(dolApiKey()));
+  });
+
+  // ── [KEY non-vacuity + K-test] WITH the key set, the SAME call FETCHES; the key rides
+  //    the X-API-KEY HEADER ONLY (ABSENT from the serialized {data,_meta} AND the URL). ──
+  await withDolKey(KEY, async () => {
+    await withFetch(dolGetMock({ data: [{ employer: "ACME", penalty: 0, cases: null }] }), async (calls) => {
+      const r = await runTool("dol_get_dataset", { agency: "ILAB", table: "Child_Labor_Report", limit: 5 }, sam);
+      const m = buildMeta(r.meta);
+      const call = dolGetCall(calls);
+      ok("55f-key WITH DOL_API_KEY set the same request FETCHES (does NOT throw the key error) ⇒ the pre-fetch throw is CONDITIONAL on the missing key, not unconditional",
+        r.data.records.length === 1 && call !== undefined, JSON.stringify({ n: r.data.records.length }));
+      ok("55f-Ktest the key rides the X-API-KEY HEADER ONLY (the sole carrier) — never the URL query ⇒ move the key to the query / drop the header ⇒ RED",
+        call?.init?.headers?.["X-API-KEY"] === KEY && !call.url.includes(KEY) && !/api[-_]?key=/i.test(call.url), JSON.stringify({ hdr: call?.init?.headers?.["X-API-KEY"], url: call?.url }));
+      const serialized = JSON.stringify({ data: r.data, _meta: m });
+      ok("55f-Ktest the key value is ABSENT from the serialized {data,_meta} (never in source/notes/label — the K-test); keylessMode:false; source names the DOL_API_KEY MODE ⇒ leak the key anywhere but the header ⇒ RED",
+        !serialized.includes(KEY) && m.keylessMode === false && m.source.includes("DOL_API_KEY"), JSON.stringify({ leaked: serialized.includes(KEY), source: m.source }));
+      ok("55f-key the request is the QUERY-STYLE route apiprod.dol.gov/v4/get/ILAB/Child_Labor_Report/json (format is a PATH segment; agency+endpoint ride the PATH) over https + limit/offset in the query + redirect:'error'",
+        new URL(call.url).hostname === "apiprod.dol.gov" && new URL(call.url).protocol === "https:" && new URL(call.url).pathname === "/v4/get/ILAB/Child_Labor_Report/json" && new URL(call.url).searchParams.get("limit") === "5" && new URL(call.url).searchParams.get("offset") === "0" && call.init.redirect === "error", call.url);
+      // [P3] records VERBATIM: a genuine 0 stays 0, a null stays null, field names kept.
+      ok("55f-P3 records surfaced VERBATIM: penalty 0 ⇒ 0 (a genuine zero preserved, NOT null), cases null ⇒ null (NOT 0), field names ('employer'/'penalty'/'cases') preserved ⇒ coerce/rename/drop a field ⇒ RED",
+        r.data.records[0].employer === "ACME" && r.data.records[0].penalty === 0 && r.data.records[0].cases === null && Object.keys(r.data.records[0]).sort().join(",") === "cases,employer,penalty", JSON.stringify(r.data.records[0]));
+      // [P1] no count field ⇒ totalAvailable null (an honest unknown — never `returned`).
+      ok("55f-P1 the {data:[…]} envelope carries NO count field ⇒ totalAvailable:null (an HONEST unknown — NEVER returned faked as the total) + a no-total disclosure note ⇒ set totalAvailable=returned ⇒ RED",
+        m.totalAvailable === null && m.notes.some((n) => /totalAvailable is null/.test(n)), JSON.stringify({ ta: m.totalAvailable }));
+      ok("55f-notes the key-required + verbatim-envelope notes are present (DOL_API_KEY + VERBATIM)",
+        m.notes.some((n) => /DOL_API_KEY/.test(n)) && m.notes.some((n) => /VERBATIM/i.test(n)), JSON.stringify(m.notes.length));
+    });
+
+    // ── [P4 defensive envelope] a bare array [...] and a {results:[...]} shape both
+    //    resolve to records (the envelope is key-gated/unverified — accept both forms). ──
+    await withFetch(dolGetMock([{ a: 1 }, { a: 2 }]), async () => {
+      const r = await runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam);
+      ok("55f-P4 a BARE array body ⇒ records:[{a:1},{a:2}] (the defensive envelope accepts a top-level array) ⇒ require an object wrapper ⇒ RED",
+        r.data.records.length === 2 && r.data.records[0].a === 1, JSON.stringify(r.data.records));
+    });
+    await withFetch(dolGetMock({ results: [{ b: 7 }], total_count: 42 }), async () => {
+      const r = await runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55f-P1 a {results:[…], total_count:42} envelope ⇒ records from `results` AND totalAvailable=42 (a REAL count field IS honored when present) ⇒ ignore results/total_count ⇒ RED",
+        r.data.records.length === 1 && r.data.records[0].b === 7 && m.totalAvailable === 42 && m.pagination.hasMore === true, JSON.stringify({ n: r.data.records.length, ta: m.totalAvailable }));
+    });
+
+    // ── [P2] empty rows ⇒ honest empty (returned:0, complete:true), NOT thrown/drift. ──
+    await withFetch(dolGetMock({ data: [] }), async () => {
+      const r = await runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55f-P2 an empty {data:[]} ⇒ records:[], returned:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+        r.data.records.length === 0 && m.returned === 0 && m.complete === true, JSON.stringify({ n: r.data.records.length }));
+    });
+
+    // ── [P2/KEY] 401 and 403 (missing/invalid key — DOL app 401 or AWS gateway 403) ⇒
+    //    invalid_input carrying the DOL_API_KEY guidance (never empty/outage). ──
+    for (const status of [401, 403]) {
+      await withFetch(dolGetMock({ message: "unauthorized" }, status), async () => {
+        const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam));
+        const te = threw ? toToolError(error) : null;
+        ok(`55f-P2 HTTP ${status} (missing/invalid key) ⇒ invalid_input NAMING DOL_API_KEY (a key problem, NOT upstream_unavailable, NOT empty) ⇒ pass the raw ${status} through / read as empty ⇒ RED`,
+          threw && te.kind === "invalid_input" && /DOL_API_KEY/.test(te.message), JSON.stringify({ kind: te?.kind, msg: te?.message?.slice(0, 50) }));
+      });
+    }
+
+    // ── [P2] 400 ⇒ invalid_input; 503 ⇒ upstream_unavailable; 429 ⇒ rate_limited;
+    //    200 non-JSON ⇒ schema_drift. ──
+    await withFetch(dolGetMock({ message: "bad request" }, 400), async () => {
+      const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam));
+      ok("55f-P2 400 ⇒ invalid_input (a bad request is a caller error, never an empty)",
+        threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(dolGetMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam));
+      ok("55f-P2 503 ⇒ upstream_unavailable THROW (a down data endpoint is never an empty result)",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch((u) => (isDolGet(u) ? mockResponse({ status: 429, json: {}, headers: { "retry-after": "42" } }) : failClosed()()), async () => {
+      const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55f-P2 429 ⇒ rate_limited THROW (Retry-After honored, never routed around) ⇒ swallow as empty ⇒ RED",
+        threw && te.kind === "rate_limited" && te.retryable === true, JSON.stringify({ kind: te?.kind }));
+    });
+    await withFetch(dolNonJson(isDolGet), async () => {
+      const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam));
+      ok("55f-P2 a 200 non-JSON body ⇒ schema_drift (never read as an empty result)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P4] a 200 body with NO row array (an object w/o data/results) ⇒ drift; a row
+    //    that is not a JSON object ⇒ drift (never a fabricated empty). ──
+    await withFetch(dolGetMock({ message: "ok but no rows" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam));
+      ok("55f-P4 a 200 object carrying NO row array (no bare array / data / results) ⇒ schema_drift ⇒ read {} as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(dolGetMock({ data: [42, "nope"] }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard" }, sam));
+      ok("55f-P4 a data array whose element is NOT a JSON object (a number/string) ⇒ schema_drift ⇒ trust a scalar row ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [SSRF] agency/table with path-steering chars ⇒ invalid_input, 0 fetch. ──
+    for (const [args, label] of [
+      [{ agency: "../etc", table: "WHD_Whisard" }, "agency '../etc'"],
+      [{ agency: "WHD", table: "../../secret" }, "table '../../secret'"],
+      [{ agency: "WHD/x", table: "WHD_Whisard" }, "agency 'WHD/x' (slash)"],
+    ]) {
+      await withFetch(failClosed(), async (calls) => {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", args, sam));
+        ok(`55f-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch — a value never touches the fixed host/path) ⇒ widen the validation ⇒ RED`,
+          threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+      });
+    }
+
+    // ── [filter pairing] filterField without filterValue ⇒ invalid_input, 0 fetch. ──
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard", filterField: "state" }, sam));
+      ok("55f-filter filterField without filterValue ⇒ invalid_input, 0 fetch (the pair is required together — never a half-applied filter) ⇒ drop the pairing guard ⇒ RED",
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+    // filterField+filterValue TOGETHER ⇒ a DOL filter_object rides the query (encoded).
+    await withFetch(dolGetMock({ data: [{ x: 1 }] }), async (calls) => {
+      await runTool("dol_get_dataset", { agency: "WHD", table: "WHD_Whisard", filterField: "state", filterValue: "CA" }, sam);
+      const q = new URL(dolGetCall(calls).url).searchParams;
+      const fo = q.get("filter_object");
+      ok("55f-filter filterField='state'+filterValue='CA' ⇒ a filter_object {field:'state',operator:'eq',value:'CA'} rides the query (URLSearchParams-encoded, not raw) ⇒ drop the filter / raw-concat ⇒ RED",
+        fo !== null && JSON.parse(fo).field === "state" && JSON.parse(fo).value === "CA" && JSON.parse(fo).operator === "eq", JSON.stringify(fo));
+    });
+  });
+}
+
 // §55c: FRED (Federal Reserve Economic Data, api.stlouisfed.org/fred, ADR-0048,
 // Wave-4 source #2 — the MACRO-context lane AND the server's SECOND key-required
 // source). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names
@@ -17430,6 +17694,7 @@ async function main() {
   await testCensusBusinessPatterns();
   await testFredHonesty();
   await testBeaRegionalData();
+  await testDolDataApi();
   await testLdaSearchFilings();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
@@ -17455,10 +17720,10 @@ async function main() {
 // §keys-A: apiKeyStatus() — the CONFIG-discovery surface. OFFLINE (no fetch): it
 // reads process.env only. Two invariants under test:
 //   (1) with every key env UNSET → all currentlySet:false, requiredMissing is
-//       EXACTLY [BEA_API_KEY, CENSUS_API_KEY, FRED_API_KEY] (the 3 keyless-less
-//       sources), the registry has 8 entries with the right `required` flags + a
-//       non-empty signupUrl each; setting CENSUS_API_KEY flips its bool and drops
-//       it from requiredMissing.
+//       EXACTLY [BEA_API_KEY, CENSUS_API_KEY, DOL_API_KEY, FRED_API_KEY] (the 4
+//       keyless-less sources — DOL_API_KEY gates ONLY dol_get_dataset), the registry
+//       has 10 entries with the right `required` flags + a non-empty signupUrl each;
+//       setting CENSUS_API_KEY flips its bool and drops it from requiredMissing.
 //   (2) ★K-TEST: the key VALUE is NEVER in the serialized output — only the bool.
 async function testApiKeyStatus() {
   section("§keys-A apiKeyStatus() — required/optional discovery + VALUE never leaks");
@@ -17471,9 +17736,9 @@ async function testApiKeyStatus() {
     // (1) all unset.
     clearAll();
     const r0 = apiKeyStatus();
-    ok("keys-A registry has EXACTLY 9 entries", r0.keys.length === 9, String(r0.keys.length));
+    ok("keys-A registry has EXACTLY 10 entries", r0.keys.length === 10, String(r0.keys.length));
     ok(
-      "keys-A envVars are the 9 code-grounded names",
+      "keys-A envVars are the 10 code-grounded names",
       JSON.stringify([...ALL].sort()) ===
         JSON.stringify(
           [
@@ -17481,6 +17746,7 @@ async function testApiKeyStatus() {
             "BLS_API_KEY",
             "CENSUS_API_KEY",
             "DATA_GOV_API_KEY",
+            "DOL_API_KEY",
             "FRED_API_KEY",
             "LDA_API_KEY",
             "NVD_API_KEY",
@@ -17512,17 +17778,22 @@ async function testApiKeyStatus() {
       dataGovSrc,
     );
     ok(
-      "keys-A exactly BEA_API_KEY + CENSUS_API_KEY + FRED_API_KEY are required:true",
+      "keys-A exactly BEA_API_KEY + CENSUS_API_KEY + DOL_API_KEY + FRED_API_KEY are required:true",
       JSON.stringify(r0.keys.filter((k) => k.required).map((k) => k.envVar).sort()) ===
-        JSON.stringify(["BEA_API_KEY", "CENSUS_API_KEY", "FRED_API_KEY"]),
+        JSON.stringify(["BEA_API_KEY", "CENSUS_API_KEY", "DOL_API_KEY", "FRED_API_KEY"]),
       JSON.stringify(r0.keys.filter((k) => k.required).map((k) => k.envVar)),
     );
     ok(
-      "keys-A requiredMissing (all unset) === [BEA_API_KEY, CENSUS_API_KEY, FRED_API_KEY]",
-      JSON.stringify([...r0.requiredMissing].sort()) === JSON.stringify(["BEA_API_KEY", "CENSUS_API_KEY", "FRED_API_KEY"]),
+      "keys-A requiredMissing (all unset) === [BEA_API_KEY, CENSUS_API_KEY, DOL_API_KEY, FRED_API_KEY]",
+      JSON.stringify([...r0.requiredMissing].sort()) === JSON.stringify(["BEA_API_KEY", "CENSUS_API_KEY", "DOL_API_KEY", "FRED_API_KEY"]),
       JSON.stringify(r0.requiredMissing),
     );
     ok("keys-A optionalMissing (all unset) has the 6 optional envVars", r0.optionalMissing.length === 6, JSON.stringify(r0.optionalMissing));
+    ok(
+      "keys-A DOL_API_KEY is present + REQUIRED (required:true) with the dol.gov/developer signup URL, and its note discloses the catalog-keyless split",
+      (() => { const d = r0.keys.find((k) => k.envVar === "DOL_API_KEY"); return d && d.required === true && /dol\.gov\/developer/.test(d.signupUrl) && r0.requiredMissing.includes("DOL_API_KEY") && !r0.optionalMissing.includes("DOL_API_KEY") && /keyless/i.test(d.note) && /dol_list_datasets/.test(d.note); })(),
+      JSON.stringify(r0.keys.find((k) => k.envVar === "DOL_API_KEY")),
+    );
     ok("keys-A LDA_API_KEY is present + OPTIONAL (required:false) with the register signup URL", (() => { const l = r0.keys.find((k) => k.envVar === "LDA_API_KEY"); return l && l.required === false && /lda\.senate\.gov\/api\/register/.test(l.signupUrl) && r0.optionalMissing.includes("LDA_API_KEY") && !r0.requiredMissing.includes("LDA_API_KEY"); })(), JSON.stringify(r0.keys.find((k) => k.envVar === "LDA_API_KEY")));
     ok("keys-A allKeysFree:true", r0.allKeysFree === true);
 
