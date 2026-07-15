@@ -156,6 +156,17 @@ function categoryAggregateMeta(opts) {
     if (truncated) {
         notes.push(`Capped at the top ${opts.limit} categories by amount; more categories may exist. This endpoint reports no grand total, so the true number of categories is unknown (totalAvailable is null, NOT the returned count). These extra categories are NOT page-reachable — all six callers post page:1 with NO offset/page input (nextOffset is null). Raise limit (up to 50) or narrow filters to see the rest.`);
     }
+    // Confidently-wrong-empty guard (dogfooding 2026-07-16): a SET agency filter that
+    // yields ZERO rows is ambiguous — a genuine zero OR a NAME that didn't match the
+    // exact canonical toptier name (an abbreviation / mis-case / partial / typo
+    // silently matches nothing on this NAME filter, so "$0" reads as authoritative
+    // when the name simply missed). Disclose the ambiguity. (A numeric CODE is already
+    // loud-failed by awardingAgencyFilter; this catches the wrong-NAME residual.)
+    const agencyFilterSet = Array.isArray(opts.filters?.agencies) &&
+        ((opts.filters.agencies?.length ?? 0) > 0);
+    if (agencyFilterSet && opts.returned === 0) {
+        notes.push(`The agency filter matched NO records. This filter requires the EXACT canonical toptier agency NAME (e.g. "Department of Veterans Affairs"): an abbreviation, mis-cased, partial, or mistyped name silently matches nothing here. Verify the exact name via usas_list_toptier_agencies or usas_lookup_agency. If the name is correct, this is a genuine zero for this slice.`);
+    }
     if (opts.extraNotes)
         notes.push(...opts.extraNotes);
     return {
@@ -1351,6 +1362,16 @@ export async function spendingOverTime(args) {
     // that rather than assert a completeness we can't prove for those granularities.
     if (group !== "fiscal_year") {
         notes.push(`Completeness for group='${group}': this endpoint returns no pagination envelope, and no-truncation is verified only for fiscal_year granularity — a very long ${group} series could in principle be capped server-side without a signal. Confirm the span (${spanStart ?? "?"} … ${spanEnd ?? "?"}) covers your expected range.`);
+    }
+    // Confidently-wrong-empty guard (dogfooding 2026-07-16): a SET agency filter that
+    // yields an ALL-ZERO timeline is ambiguous — a genuine zero OR a NAME that missed
+    // the exact canonical toptier name (an abbreviation / mis-case / typo silently
+    // matches nothing, producing a false "$0 every period" that reads as authoritative
+    // "this agency never spent on X"). Disclose it. (A numeric CODE is already
+    // loud-failed by awardingAgencyFilter; this catches the wrong-NAME residual.)
+    if (args.agency &&
+        (timeline.length === 0 || timeline.every((t) => t.total === 0))) {
+        notes.push(`The agency filter produced an ALL-ZERO timeline. This filter requires the EXACT canonical toptier agency NAME (e.g. "Department of Veterans Affairs"): an abbreviation, mis-cased, partial, or mistyped name silently matches nothing, yielding a false "$0 in every period". Verify the exact name via usas_list_toptier_agencies or usas_lookup_agency. If the name is correct, the agency genuinely had no CONTRACT obligations in this span.`);
     }
     return withMeta({ group: json.group ?? group, timeline }, {
         source: SPENDING_OVER_TIME_SOURCE,

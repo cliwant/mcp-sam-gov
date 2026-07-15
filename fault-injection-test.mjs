@@ -5760,6 +5760,30 @@ async function testSubAgencyAwardsNull() {
         res.data.subAgencies.length === 1 && res.data.subAgencies[0].name === "Department of the Army", JSON.stringify(res.data.subAgencies.map((s) => s.name)));
     },
   );
+  // WRONG-NAME empty disclosure (dogfooding 2026-07-16): a canonical-looking but
+  // non-matching NAME (abbreviation / mis-case / typo) passes the numeric guard,
+  // reaches the endpoint, and returns ZERO rows — a confidently-wrong empty. The
+  // categoryAggregateMeta helper now DISCLOSES that the empty may be a name-mismatch
+  // (not authoritative "$0"). NON-VACUITY: agency-set + empty ⇒ note present; a
+  // NAME with real rows ⇒ NO such note (the disclosure is empty-only).
+  await withFetch(
+    (u) => (/spending_by_category\/awarding_subagency/.test(u) ? mockResponse({ status: 200, json: { results: [], page_metadata: { hasNext: false } } }) : failClosed()()),
+    async () => {
+      const res = await searchSubAgencySpending({ agency: "Veterans Affairs", fiscalYear: 2024 }); // wrong (non-canonical) name → empty
+      ok("27-name agency SET + ZERO rows ⇒ a note discloses the empty may be a name-mismatch (exact canonical toptier NAME required; verify via usas_lookup_agency) — NOT a bare authoritative $0 — drop the guard ⇒ RED",
+        res.data.subAgencies.length === 0 && (res.meta.notes || []).some((n) => /EXACT canonical toptier agency NAME/.test(n) && /usas_lookup_agency|list_toptier/.test(n)),
+        JSON.stringify(res.meta.notes));
+    },
+  );
+  await withFetch(
+    (u) => (/spending_by_category\/awarding_subagency/.test(u) ? mockResponse({ status: 200, json: { results: [{ name: "Department of the Army", amount: 5e9 }], page_metadata: { hasNext: false } } }) : failClosed()()),
+    async () => {
+      const res = await searchSubAgencySpending({ agency: "Department of Defense", fiscalYear: 2024 }); // real rows
+      ok("27-name agency SET + NON-empty ⇒ NO name-mismatch note (the disclosure is empty-only; firing it when rows exist ⇒ RED)",
+        res.data.subAgencies.length === 1 && !(res.meta.notes || []).some((n) => /EXACT canonical toptier agency NAME/.test(n)),
+        JSON.stringify(res.meta.notes));
+    },
+  );
 }
 
 // far_clause_lookup future/uncodified asOfDate (found via C63 dogfood: a real agent
@@ -6196,6 +6220,19 @@ async function testSpendingOverTimeContractScope() {
     ok("32 empty series ⇒ timeline [], totalAvailable 0, truncated false, generic 0-is-genuine note (no crash)",
       res.data.timeline.length === 0 && res.meta.totalAvailable === 0 && res.meta.truncated === false &&
       res.meta.notes.some((n) => /genuine zero for CONTRACT obligations/.test(n)), JSON.stringify({ n: res.data.timeline.length, ta: res.meta.totalAvailable }));
+    // WRONG-NAME disclosure (dogfooding 2026-07-16): agency SET + all-zero (here,
+    // empty) timeline ⇒ a note discloses the ALL-ZERO may be a name-mismatch (exact
+    // canonical toptier NAME required), so a false "$0 every period" is never read as
+    // authoritative. NON-VACUITY: drop the spendingOverTime guard ⇒ no such note ⇒ RED.
+    ok("32-name agency SET + all-zero/empty timeline ⇒ name-mismatch disclosure note (exact canonical NAME required; verify via usas_lookup_agency)",
+      res.meta.notes.some((n) => /EXACT canonical toptier agency NAME/.test(n) && /usas_lookup_agency|list_toptier/.test(n)), JSON.stringify(res.meta.notes));
+  });
+  // NON-VACUITY: agency SET + a NON-zero timeline ⇒ NO name-mismatch note (the
+  // disclosure is all-zero-only; firing it on real spending ⇒ RED).
+  await withFetch((u) => (/spending_over_time/.test(u) ? mockResponse({ status: 200, json: { group: "fiscal_year", results: [{ time_period: { fiscal_year: "2024" }, aggregated_amount: 5e9, Contract_Obligations: 5e9 }] } }) : failClosed()()), async () => {
+    const res = await spendingOverTime({ agency: "Department of Defense" });
+    ok("32-name agency SET + NON-zero timeline ⇒ NO name-mismatch note (disclosure is all-zero-only, not over-broad)",
+      res.data.timeline[0].total === 5e9 && !res.meta.notes.some((n) => /EXACT canonical toptier agency NAME/.test(n)), JSON.stringify(res.meta.notes));
   });
 }
 
