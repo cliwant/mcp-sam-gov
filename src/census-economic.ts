@@ -18,12 +18,15 @@
  * post-construction `new URL().hostname` assertion + `redirect:"error"`) and does
  * NOT touch census_geocode.
  *
- * Zero fetch/coercion/error/meta code of its own: it REUSES `getJson`
- * (+ redirect:"error"), `driftError`, `num` (coerce.ts, null-never-0),
- * `withMeta`/`buildMeta`. The optional-key leak discipline is MIRRORED from
- * datagatekey.ts/bls.ts — but here the key is REQUIRED and rides ONLY in the
- * `&key=` query param, NOWHERE else (never the label, `_meta.source`, notes, or a
- * log — the K-test).
+ * Coercion/meta code is REUSED (`driftError`, `errorFromResponse`, `num`
+ * coerce.ts null-never-0, `withMeta`/`buildMeta`). The ONE bespoke bit is the
+ * fetch: a single `fetch(redirect:"manual")` (NOT the shared getJson) so a
+ * missing/invalid-key 302 surfaces as an INSPECTABLE opaque-redirect → honest
+ * invalid_input, instead of undici's redirect:"error" TypeError that
+ * fetchWithRetry would mask as a retryable outage (see the fetch block). The
+ * optional-key leak discipline is MIRRORED from datagovKey.ts/bls.ts — but here
+ * the key is REQUIRED and rides ONLY in the `&key=` query param, NOWHERE else
+ * (never the label, `_meta.source`, notes, or a log — the K-test).
  *
  *   GET https://api.census.gov/data/{year}/cbp
  *       ?get=NAME,NAICS2017_LABEL,ESTAB,EMP,PAYANN,GEO_ID
@@ -37,9 +40,10 @@
  *
  * ★ HONESTY (ADR-0047 P1–P5):
  *   [KEY]  no key ⇒ invalid_input THROW pre-fetch (0 fetch); the message names
- *          CENSUS_API_KEY + the free-signup URL. A 302 at the wire (missing/invalid
- *          key redirected to the Missing-Key page) ⇒ reclassified to invalid_input
- *          "check CENSUS_API_KEY" (never a fake-empty).
+ *          CENSUS_API_KEY + the free-signup URL. A wire 302 (a key that IS set but is
+ *          invalid → the Missing-Key page) is caught via redirect:"manual" as an
+ *          opaque-redirect ⇒ invalid_input "check CENSUS_API_KEY" (never a
+ *          fake-empty, never a masked outage).
  *   [P1]   CBP returns the COMPLETE geography set for the filter (no server
  *          pagination) ⇒ totalAvailable = the row count, complete:true. NEVER
  *          fabricated (RED if totalAvailable = header-length or invented).
@@ -58,8 +62,8 @@
  *          predicate VALUES ride in URLSearchParams. The key rides `&key=` ONLY.
  */
 
-import { ToolErrorCarrier } from "./errors.js";
-import { getJson, driftError } from "./datasource.js";
+import { ToolErrorCarrier, errorFromResponse } from "./errors.js";
+import { driftError } from "./datasource.js";
 import { num, str } from "./coerce.js";
 import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
 
@@ -248,32 +252,74 @@ export async function businessPatterns(
     });
   }
 
-  // ── Fetch (redirect:"error" — a missing/invalid key 302-redirects to the
-  //    Missing-Key page; we fail closed and reclassify to invalid_input). A 200
-  //    non-JSON body ⇒ getJson's r.json() throws SyntaxError ⇒ schema_drift. The
-  //    429/5xx/404/400 taxonomy propagates unchanged. ──
-  let body: unknown;
+  // ── Fetch with redirect:"manual" — the KEY-ERROR DETECTION crux. A missing or
+  //    invalid key makes the Census Data API 302-redirect to its "Missing Key" page
+  //    (live-verified: `HTTP 302` + `Location: /data/missing_key.html` +
+  //    `X-DataWebAPI-KeyError: 1`). We must NOT use redirect:"error" via getJson
+  //    here: undici rejects an "error"-mode redirect with a TypeError that the
+  //    shared fetchWithRetry catch reclassifies to a *retryable upstream_unavailable*
+  //    — masking a key-config error as a transient outage. redirect:"manual" instead
+  //    yields an INSPECTABLE opaque-redirect (type "opaqueredirect", status 0), so
+  //    the missing/invalid key surfaces as an honest invalid_input. This is a
+  //    SINGLE classified attempt (no auto-retry): a transient 5xx THROWS
+  //    upstream_unavailable — re-invoke the tool to retry. The 5xx/404/400 taxonomy
+  //    is delegated to the shared errors.ts `errorFromResponse`; a 200 non-JSON body
+  //    ⇒ r.json() SyntaxError ⇒ schema_drift. The redirect is NEVER followed, so no
+  //    off-host hop can occur (a stronger SSRF posture than redirect:"error"). ──
+  let res: Response;
   try {
-    body = await getJson<unknown>(built.toString(), {
-      label: CENSUS_DATA_LABEL,
-      redirect: "error",
+    res = await fetch(built.toString(), {
+      redirect: "manual",
+      signal: AbortSignal.timeout(15_000),
     });
   } catch (e) {
-    if (e instanceof ToolErrorCarrier) {
-      // A 3xx redirect at the wire (missing/invalid key → Census Missing-Key page)
-      // ⇒ reclassify to an honest key-config error (never a fake-empty).
-      const st = e.toolError.upstreamStatus;
-      if (st !== undefined && st >= 300 && st < 400) {
-        throw new ToolErrorCarrier({
-          kind: "invalid_input",
-          retryable: false,
-          message:
-            "Census Data API redirected the request (HTTP 3xx to the 'Missing Key' page) — CENSUS_API_KEY is missing or invalid. Check the key at https://api.census.gov/data/key_signup.html.",
-          upstreamEndpoint: CENSUS_DATA_LABEL,
-        });
-      }
-      throw e; // 5xx → upstream_unavailable, 404 → not_found, 400 → invalid_input …
+    // Timeout/abort ⇒ non-retryable (the same aborted signal would re-reject);
+    // a genuine network TypeError ⇒ retryable upstream_unavailable. NEVER empty.
+    if (
+      e instanceof Error &&
+      (e.name === "TimeoutError" || e.name === "AbortError")
+    ) {
+      throw new ToolErrorCarrier({
+        kind: "upstream_unavailable",
+        message: `Request to ${CENSUS_DATA_LABEL} timed out.`,
+        retryable: false,
+        upstreamEndpoint: CENSUS_DATA_LABEL,
+      });
     }
+    throw new ToolErrorCarrier({
+      kind: "upstream_unavailable",
+      message: `Network error reaching ${CENSUS_DATA_LABEL}: ${e instanceof Error ? e.message : String(e)}`,
+      retryable: true,
+      retryAfterSeconds: 30,
+      upstreamEndpoint: CENSUS_DATA_LABEL,
+    });
+  }
+
+  // [KEY] A redirect (opaque-redirect via redirect:"manual", or a raw 3xx status) ⇒
+  // the missing/invalid-key "Missing Key" page ⇒ an honest key-config error, NEVER
+  // a fake-empty (swallowing this as empty ⇒ RED in the fault suite).
+  if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      retryable: false,
+      message:
+        "Census Data API redirected the request to its 'Missing Key' page — CENSUS_API_KEY is missing or invalid. Get or check a free key at https://api.census.gov/data/key_signup.html.",
+      upstreamEndpoint: CENSUS_DATA_LABEL,
+    });
+  }
+
+  // [P2] 404/429/5xx/4xx ⇒ the shared errors.ts taxonomy (a DOWN service is NEVER
+  // an empty result; 400 → invalid_input, 5xx → upstream_unavailable, …).
+  if (!res.ok) {
+    throw new ToolErrorCarrier(errorFromResponse(res, CENSUS_DATA_LABEL));
+  }
+
+  // [P4] 200 ⇒ parse JSON; a non-JSON body (an HTML error page at 200) makes
+  // r.json() throw a SyntaxError ⇒ schema_drift (never read as an empty result).
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch (e) {
     if (e instanceof SyntaxError) {
       throw driftError(
         CENSUS_DATA_LABEL,
