@@ -1,7 +1,7 @@
 # @cliwant/mcp-sam-gov
 
 > **最も包括的なキーレス連邦データ MCP サーバー。**
-> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA ほか **37 の連邦データソース、120 ツール。** キーレス優先 — Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 33 ソースはキー不要。
+> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) ほか **44 の連邦データソース、134 ツール。** キーレス優先 — Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 40 ソースはキー不要。
 > API キー不要、登録不要、サインアップ不要。Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI、すべての MCP ホスト対応。
 
 [English README](./README.md) · [한국어 README](./README.ko.md)
@@ -16,7 +16,11 @@
 |---|---|---|
 | 🔍 **案件 + ソリシテーション** | "今月締切の NAICS 541512 SAM.gov 案件 — SOW・担当者・添付まで" | SAM.gov, Grants.gov |
 | 💰 **spending・受注・競合** | "VA の Booz Allen 昨年度受注、DoD PSC カテゴリ Top 10" | USAspending, FPDS, GAO |
-| 🕵️ **パートナー・企業の検証** | "この企業をスクリーニング: OFAC 制裁・SAM 除外・単一監査指摘・銀行健全性・EPA 遵守" | OFAC, SAM, FAC, FDIC, EPA ECHO |
+| 🕵️ **パートナー・企業の検証** | "この企業をスクリーニング: OFAC 制裁・SAM 除外・単一監査指摘・銀行健全性・EPA 遵守+有害物質排出" | OFAC, SAM, FAC, FDIC, EPA ECHO, EPA Envirofacts |
+| 🛒 **製品安全・リコール** | "このサプライヤー製品に FDA/NHTSA/CPSC のリコール・執行はあるか?" | openFDA, NHTSA, CPSC |
+| ⚖️ **訴訟・裁判所** | "この請負業者に関する連邦請求裁判所の入札異議・連邦巡回控訴裁判所の判例" | CourtListener (Free Law Project) |
+| 🏢 **非営利ベンダー** | "下請け前にこの非営利団体の IRS-990 財務を確認" | IRS 990 (ProPublica 経由) |
+| 🏥 **医療提供者・施設** | "この provider の Medicare 利用・支払、病院品質評価、取消リスト該当有無" | CMS (data.cms.gov) |
 | 📈 **財務開示 (SEC)** | "この上場企業の売上推移 + 最新 10-K" | SEC EDGAR |
 | ⚖️ **規制・立法** | "今四半期の VA サイバーセキュリティ規則? 進行中の Regulations.gov docket?" | Federal Register, Regulations.gov, eCFR, FAR/DFARS, Congress.gov, GovInfo |
 | 💲 **価格・労務・財政** | "GSA CALC 労務単価バンド、この郡の SCA 賃金決定、CPI エスカレーション、出張 per-diem 上限、地域の産業別 GDP、DOL 賃金・労働執行履歴" | GSA CALC, SAM WD, BLS, US Census CBP, FRED, BEA, US Treasury, GSA per-diem, US DOL |
@@ -26,7 +30,7 @@
 | 🌐 **貿易・地理・災害** | "この品目の HTS 関税、この住所の Census tract、この州の FEMA 宣言" | USITC HTS, Census, FEMA, Socrata, CKAN |
 | 🎓 **grant・データセット** | "過去 30 日のサイバーセキュリティ grant、連邦オープンデータセット発見" | Grants.gov, data.gov |
 
-**37 の連邦データソース、合計 120 ツール — キーレス優先: Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 33 ソースはキー不要。** (初期の 52 ツール版でおおよそ p50 ~0.25s / p95 ~0.8s を計測 — ソースや上流負荷で変動する近似値であり保証値ではありません。)
+**44 の連邦データソース、合計 134 ツール — キーレス優先: Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 40 ソースはキー不要。** (初期の 52 ツール版でおおよそ p50 ~0.25s / p95 ~0.8s を計測 — ソースや上流負荷で変動する近似値であり保証値ではありません。)
 
 ---
 
@@ -53,7 +57,7 @@ Claude Code (CLI) を既に使用している場合：
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP サーバー + Claude が 120 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
+MCP サーバー + Claude が 134 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
 
 ### 🔵 パス 3 — Codex / Cursor / Continue / Gemini 等の手動インストール
 
@@ -167,17 +171,21 @@ npm install --omit=dev
 
 ---
 
-## ツールカタログ (120)
+## ツールカタログ (134)
 
-ワークフロー別グループ。キーレス優先 — 大半はキー不要、Census business-patterns · FRED · BEA · DOL データエンドポイントは無料キーが必要。全 per-tool 一覧と入力 schema・誠実性 caveat の原文は [英語 README のカタログセクション](./README.md#tool-catalog-120-tools) を正とします。
+ワークフロー別グループ。キーレス優先 — 大半はキー不要、Census business-patterns · FRED · BEA · DOL データエンドポイントは無料キーが必要。全 per-tool 一覧と入力 schema・誠実性 caveat の原文は [英語 README のカタログセクション](./README.md#tool-catalog-134-tools) を正とします。
 
 - **案件 + ソリシテーション — SAM.gov + Grants.gov (10)**: `sam_search_opportunities` `sam_search_shaping` `sam_get_opportunity` `sam_fetch_description` `sam_fetch_attachment_text` `sam_attachment_url` `sam_lookup_organization` `sam_lookup_notice_fields` `grants_search` `grants_get_opportunity`
 - **spending・受注・競合 — USAspending + FPDS + GAO (29)**: `usas_search_awards` `usas_search_individual_awards` `usas_get_award_detail` `usas_search_awards_by_recipient` `usas_search_subawards` `usas_search_recompetes` `usas_search_expiring_contracts`(deprecated) `usas_analyze_incumbent` `usas_search_teaming_partners` `usas_spending_over_time` `usas_search_agency_spending` `usas_search_subagency_spending` `usas_search_psc_spending` `usas_search_cfda_spending` `usas_search_state_spending` `usas_search_federal_account_spending` `usas_search_recipients` `usas_get_recipient_profile` `usas_get_agency_profile` `usas_get_agency_awards_summary` `usas_get_agency_budget_function` `usas_list_toptier_agencies` `usas_lookup_agency` `usas_autocomplete_naics` `usas_autocomplete_recipient` `usas_naics_hierarchy` `usas_glossary` `fpds_search_awards` `gao_protest_lookup`
-- **パートナー・企業の検証 — OFAC · SAM · FAC · FDIC · EPA (14)**: `ofac_screen_entity` `sam_check_exclusions` `sam_integrity_lookup` `fac_search_audits` `fac_get_findings` `fdic_search_institutions` `fdic_institution_financials` `fdic_risk_ratios` `fdic_institution_history` `fdic_branch_deposits` `fdic_bank_failures` `fdic_industry_summary` `echo_search_facilities` `echo_facility_report`
+- **パートナー・企業の検証 — OFAC · SAM · FAC · FDIC · EPA (15)**: `ofac_screen_entity` `sam_check_exclusions` `sam_integrity_lookup` `fac_search_audits` `fac_get_findings` `fdic_search_institutions` `fdic_institution_financials` `fdic_risk_ratios` `fdic_institution_history` `fdic_branch_deposits` `fdic_bank_failures` `fdic_industry_summary` `echo_search_facilities` `echo_facility_report` `epa_tri_facilities`(EPA Envirofacts TRI 有害物質排出施設 — 環境/ESG 検証)
+- **製品安全・リコール — openFDA · NHTSA · CPSC (5)**: `openfda_enforcement`(FDA 医薬品・医療機器・食品のリコール・執行) `openfda_device_clearances`(FDA 510(k) 医療機器承認) `nhtsa_recalls`(NHTSA 車両リコール) `nhtsa_complaints`(NHTSA 車両安全苦情) `cpsc_recalls`(CPSC 消費者製品リコール)
+- **訴訟・裁判所 — CourtListener (1)**: `courtlistener_search_opinions`(米連邦裁判所の判例 — 連邦請求裁判所の契約請求/入札異議、連邦巡回控訴裁判所; CourtListener/Free Law Project 経由、明示)
+- **非営利ベンダー — IRS 990 via ProPublica (2)**: `nonprofit_search`(IRS-990 非営利検索 by 名称/州/NTEE) `nonprofit_financials`(IRS-990 非営利財務 by EIN) — ProPublica Nonprofit Explorer 経由(明示)
 - **財務開示 — SEC EDGAR (8)**: `edgar_lookup_cik` `edgar_company_filings` `edgar_company_facts` `edgar_company_concept` `edgar_xbrl_frames` `edgar_full_text_search` `edgar_filing_index` `edgar_daily_filing_index`
 - **規制・立法 — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (18)**: `fed_register_search_documents` `fed_register_get_document` `fed_register_public_inspection` `fed_register_list_agencies` `regulations_search_dockets` `regulations_search_documents` `regulations_search_comments` `regulations_get_docket` `ecfr_search` `ecfr_list_titles` `far_clause_lookup` `far_search` `far_compliance_matrix` `congress_search_bills` `congress_get_bill` `govinfo_search_packages` `govinfo_get_package` `govinfo_list_collections`
 - **価格・労務・財政 — GSA CALC · SAM WD · BLS · Census CBP · FRED · BEA · Treasury · GSA per-diem (15)**: `gsa_benchmark_labor_rates` `sam_search_wage_determinations` `sam_get_wage_rates` `bls_timeseries` `bls_oews_wages` `bls_qcew` `treasury_debt_to_penny` `treasury_avg_interest_rates` `treasury_monthly_statement` `treasury_query_dataset` `bea_regional_data`(無料 BEA_API_KEY 必要) `census_business_patterns`(無料 CENSUS_API_KEY 必要) `fred_search_series`(無料 FRED_API_KEY 必要) `fred_series_observations`(無料 FRED_API_KEY 必要) `gsa_perdiem_rates`(DEMO_KEY キーレス)
 - **医療・研究資金 — NIH · NSF · ClinicalTrials · CMS · NPPES (9)**: `nih_reporter_search_projects` `nsf_search_awards` `nsf_get_award` `clinicaltrials_search_studies` `clinicaltrials_get_study` `clinicaltrials_facet_counts` `cms_search_datasets` `cms_query_dataset` `nppes_lookup_provider`
+- **医療提供者・施設 — CMS (5)**: `cms_medicare_provider_services`(Medicare provider 利用・支払 — 医療市場規模) `cms_hospital_compare`(CMS 病院品質評価) `cms_facility_directory`(介護施設/在宅医療/ホスピス/透析施設ディレクトリ) `cms_dmepos_suppliers`(DMEPOS 医療機器サプライヤーディレクトリ + Medicare 支出) `cms_revoked_providers`(Medicare 取消/除外リスト — 遵守検証)
 - **サイバー遵守 — NVD + CISA KEV (2)**: `cve_lookup` `cisa_kev_lookup`
 - **貿易・関税 — USITC (1)**: `hts_lookup`
 - **地理・災害・州/市オープンデータ — Census · FEMA · Socrata · CKAN (8)**: `census_geocode_address` `census_geographies_by_coordinates` `fema_disaster_declarations` `fema_search_public_assistance` `socrata_discover_datasets` `socrata_query` `ckan_discover_datasets` `ckan_query`

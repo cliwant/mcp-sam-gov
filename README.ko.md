@@ -1,7 +1,7 @@
 # @cliwant/mcp-sam-gov
 
 > **가장 포괄적인 keyless 연방 데이터 MCP 서버.**
-> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA 외 **37개 연방 데이터 소스, 120개 도구.** keyless 우선 — Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 33개 소스는 키가 필요 없습니다.
+> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) 외 **44개 연방 데이터 소스, 134개 도구.** keyless 우선 — Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 40개 소스는 키가 필요 없습니다.
 > API 키 / 등록 / 가입 불필요. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
 
 [English README](./README.md) · [日本語 README](./README.ja.md)
@@ -16,7 +16,11 @@
 |---|---|---|
 | 🔍 **입찰 + 솔리시테이션** | "이번 달 마감되는 NAICS 541512 SAM.gov 입찰 — SOW·담당자·첨부까지" | SAM.gov, Grants.gov |
 | 💰 **spending·수주·경쟁** | "VA 에서 Booz Allen 작년 수주, DoD PSC 카테고리 top 10" | USAspending, FPDS, GAO |
-| 🕵️ **파트너·기업 검증** | "이 업체 스크리닝: OFAC 제재·SAM 배제·단일감사 지적·은행 건전성·EPA 준수" | OFAC, SAM, FAC, FDIC, EPA ECHO |
+| 🕵️ **파트너·기업 검증** | "이 업체 스크리닝: OFAC 제재·SAM 배제·단일감사 지적·은행 건전성·EPA 준수+독성물질 배출" | OFAC, SAM, FAC, FDIC, EPA ECHO, EPA Envirofacts |
+| 🛒 **제품 안전·리콜** | "이 공급업체 제품에 FDA/NHTSA/CPSC 리콜·집행 있나?" | openFDA, NHTSA, CPSC |
+| ⚖️ **소송·법원** | "이 계약자 관련 연방청구법원 입찰 이의제기·연방순회항소법원 판례" | CourtListener (Free Law Project) |
+| 🏢 **비영리 벤더** | "하청 전 이 비영리단체 IRS-990 재무 확인" | IRS 990 (ProPublica 경유) |
+| 🏥 **의료 제공자·시설** | "이 provider Medicare 이용·지급, 병원 품질 등급, 취소 목록 여부" | CMS (data.cms.gov) |
 | 📈 **재무 공시 (SEC)** | "이 상장사 매출 추이 + 최신 10-K" | SEC EDGAR |
 | ⚖️ **규정·입법** | "이번 분기 VA 사이버보안 규정? 열려있는 Regulations.gov docket?" | Federal Register, Regulations.gov, eCFR, FAR/DFARS, Congress.gov, GovInfo |
 | 💲 **가격·노무·재정** | "GSA CALC 노무 단가 밴드, 이 카운티 SCA 임금결정, CPI 에스컬레이션, 출장 per-diem 상한, 지역 산업별 GDP, DOL 임금·근로 집행 이력" | GSA CALC, SAM WD, BLS, US Census CBP, FRED, BEA, US Treasury, GSA per-diem, US DOL |
@@ -26,7 +30,7 @@
 | 🌐 **무역·지리·재난** | "이 품목 HTS 관세, 이 주소 Census tract, 이 주의 FEMA 선포" | USITC HTS, Census, FEMA, Socrata, CKAN |
 | 🎓 **grant·데이터셋** | "최근 30일 사이버보안 grant, 연방 오픈 데이터셋 발굴" | Grants.gov, data.gov |
 
-**37개 연방 데이터 소스, 총 120개 도구 — keyless 우선: Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 33개 소스는 키가 필요 없습니다.** (초기 52-도구 빌드 기준 대략 p50 ~0.25s / p95 ~0.8s 측정 — 소스·업스트림 부하에 따라 변동하는 근사치이며 보장값이 아님.)
+**44개 연방 데이터 소스, 총 134개 도구 — keyless 우선: Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 40개 소스는 키가 필요 없습니다.** (초기 52-도구 빌드 기준 대략 p50 ~0.25s / p95 ~0.8s 측정 — 소스·업스트림 부하에 따라 변동하는 근사치이며 보장값이 아님.)
 
 ---
 
@@ -53,7 +57,7 @@ PowerShell, npm 등 필요 없음.
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP 서버 + Claude 가 120개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
+MCP 서버 + Claude 가 134개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
 
 ### 🔵 경로 3 — Codex / Cursor / Continue / Gemini 등 수동 설치
 
@@ -167,17 +171,21 @@ npm install --omit=dev
 
 ---
 
-## 도구 카탈로그 (120개)
+## 도구 카탈로그 (134개)
 
-워크플로별 그룹. keyless 우선 — 대부분 키가 필요 없고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트는 무료 키가 필요합니다. 전체 per-tool 목록과 입력 schema·정직성 caveat 원문은 [영문 README 의 카탈로그 섹션](./README.md#tool-catalog-120-tools)을 기준으로 하세요.
+워크플로별 그룹. keyless 우선 — 대부분 키가 필요 없고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트는 무료 키가 필요합니다. 전체 per-tool 목록과 입력 schema·정직성 caveat 원문은 [영문 README 의 카탈로그 섹션](./README.md#tool-catalog-134-tools)을 기준으로 하세요.
 
 - **입찰 + 솔리시테이션 — SAM.gov + Grants.gov (10)**: `sam_search_opportunities` `sam_search_shaping` `sam_get_opportunity` `sam_fetch_description` `sam_fetch_attachment_text` `sam_attachment_url` `sam_lookup_organization` `sam_lookup_notice_fields` `grants_search` `grants_get_opportunity`
 - **spending·수주·경쟁 — USAspending + FPDS + GAO (29)**: `usas_search_awards` `usas_search_individual_awards` `usas_get_award_detail` `usas_search_awards_by_recipient` `usas_search_subawards` `usas_search_recompetes` `usas_search_expiring_contracts`(deprecated) `usas_analyze_incumbent` `usas_search_teaming_partners` `usas_spending_over_time` `usas_search_agency_spending` `usas_search_subagency_spending` `usas_search_psc_spending` `usas_search_cfda_spending` `usas_search_state_spending` `usas_search_federal_account_spending` `usas_search_recipients` `usas_get_recipient_profile` `usas_get_agency_profile` `usas_get_agency_awards_summary` `usas_get_agency_budget_function` `usas_list_toptier_agencies` `usas_lookup_agency` `usas_autocomplete_naics` `usas_autocomplete_recipient` `usas_naics_hierarchy` `usas_glossary` `fpds_search_awards` `gao_protest_lookup`
-- **파트너·기업 검증 — OFAC · SAM · FAC · FDIC · EPA (14)**: `ofac_screen_entity` `sam_check_exclusions` `sam_integrity_lookup` `fac_search_audits` `fac_get_findings` `fdic_search_institutions` `fdic_institution_financials` `fdic_risk_ratios` `fdic_institution_history` `fdic_branch_deposits` `fdic_bank_failures` `fdic_industry_summary` `echo_search_facilities` `echo_facility_report`
+- **파트너·기업 검증 — OFAC · SAM · FAC · FDIC · EPA (15)**: `ofac_screen_entity` `sam_check_exclusions` `sam_integrity_lookup` `fac_search_audits` `fac_get_findings` `fdic_search_institutions` `fdic_institution_financials` `fdic_risk_ratios` `fdic_institution_history` `fdic_branch_deposits` `fdic_bank_failures` `fdic_industry_summary` `echo_search_facilities` `echo_facility_report` `epa_tri_facilities`(EPA Envirofacts TRI 독성물질 배출 시설 — 환경/ESG 검증)
+- **제품 안전·리콜 — openFDA · NHTSA · CPSC (5)**: `openfda_enforcement`(FDA 의약품·의료기기·식품 리콜·집행) `openfda_device_clearances`(FDA 510(k) 의료기기 승인) `nhtsa_recalls`(NHTSA 차량 리콜) `nhtsa_complaints`(NHTSA 차량 안전 불만) `cpsc_recalls`(CPSC 소비자 제품 리콜)
+- **소송·법원 — CourtListener (1)**: `courtlistener_search_opinions`(미 연방 법원 판례 — 연방청구법원 계약 청구/입찰 이의, 연방순회항소법원; CourtListener/Free Law Project 경유, 명시)
+- **비영리 벤더 — IRS 990 via ProPublica (2)**: `nonprofit_search`(IRS-990 비영리 검색 by 이름/주/NTEE) `nonprofit_financials`(IRS-990 비영리 재무 by EIN) — ProPublica Nonprofit Explorer 경유(명시)
 - **재무 공시 — SEC EDGAR (8)**: `edgar_lookup_cik` `edgar_company_filings` `edgar_company_facts` `edgar_company_concept` `edgar_xbrl_frames` `edgar_full_text_search` `edgar_filing_index` `edgar_daily_filing_index`
 - **규정·입법 — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (18)**: `fed_register_search_documents` `fed_register_get_document` `fed_register_public_inspection` `fed_register_list_agencies` `regulations_search_dockets` `regulations_search_documents` `regulations_search_comments` `regulations_get_docket` `ecfr_search` `ecfr_list_titles` `far_clause_lookup` `far_search` `far_compliance_matrix` `congress_search_bills` `congress_get_bill` `govinfo_search_packages` `govinfo_get_package` `govinfo_list_collections`
 - **가격·노무·재정 — GSA CALC · SAM WD · BLS · Census CBP · FRED · BEA · Treasury · GSA per-diem (15)**: `gsa_benchmark_labor_rates` `sam_search_wage_determinations` `sam_get_wage_rates` `bls_timeseries` `bls_oews_wages` `bls_qcew` `treasury_debt_to_penny` `treasury_avg_interest_rates` `treasury_monthly_statement` `treasury_query_dataset` `bea_regional_data`(무료 BEA_API_KEY 필요) `census_business_patterns`(무료 CENSUS_API_KEY 필요) `fred_search_series`(무료 FRED_API_KEY 필요) `fred_series_observations`(무료 FRED_API_KEY 필요) `gsa_perdiem_rates`(DEMO_KEY keyless)
 - **보건·연구 자금 — NIH · NSF · ClinicalTrials · CMS · NPPES (9)**: `nih_reporter_search_projects` `nsf_search_awards` `nsf_get_award` `clinicaltrials_search_studies` `clinicaltrials_get_study` `clinicaltrials_facet_counts` `cms_search_datasets` `cms_query_dataset` `nppes_lookup_provider`
+- **의료 제공자·시설 — CMS (5)**: `cms_medicare_provider_services`(Medicare provider 이용·지급 — 의료 시장규모) `cms_hospital_compare`(CMS 병원 품질 등급) `cms_facility_directory`(요양원/재택의료/호스피스/투석 시설 디렉터리) `cms_dmepos_suppliers`(DMEPOS 의료기기 공급자 디렉터리 + Medicare 지출) `cms_revoked_providers`(Medicare 취소/배제 목록 — 준수 검증)
 - **사이버 준수 — NVD + CISA KEV (2)**: `cve_lookup` `cisa_kev_lookup`
 - **무역·관세 — USITC (1)**: `hts_lookup`
 - **지리·재난·주/시 오픈데이터 — Census · FEMA · Socrata · CKAN (8)**: `census_geocode_address` `census_geographies_by_coordinates` `fema_disaster_declarations` `fema_search_public_assistance` `socrata_discover_datasets` `socrata_query` `ckan_discover_datasets` `ckan_query`
