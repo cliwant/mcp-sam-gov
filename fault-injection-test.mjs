@@ -17959,6 +17959,30 @@ async function testOpenfdaEnforcement() {
         row.city === null && row.state === null && row.reasonForRecall === null, JSON.stringify({ city: row.city, state: row.state, reason: row.reasonForRecall }));
     });
 
+    // ── [CATEGORY-DEFAULT honesty, dogfooding 2026-07-16] category defaults to
+    //    'drug'. A DEVICE-intent caller who OMITS category silently searches the
+    //    drug dataset (e.g. "pacemaker" → 1 drug recall vs 197 device recalls). The
+    //    default must be VISIBLE: (a) filtersApplied echoes `category:drug`, (b) a
+    //    note names the default + points to device/food. An EXPLICIT category must
+    //    NOT trigger the note (non-vacuity — the warning is for the default only). ──
+    await withFetch(openfdaMock(openfdaBody(1, [openfdaRecallRow()])), async (calls) => {
+      const r = await runTool("openfda_enforcement", { product: "pacemaker" }, sam); // NO category
+      const m = buildMeta(r.meta);
+      ok("55-openfda-CATDEF omitted category ⇒ hits /drug/enforcement (the default) — the endpoint selector defaulted",
+        /\/drug\/enforcement\.json/.test(openfdaUrl(calls)), openfdaUrl(calls));
+      ok("55-openfda-CATDEF filtersApplied ECHOES 'category:drug' (the drug/device/food choice is visible, not invisible) — omit the category echo ⇒ RED",
+        m.filtersApplied.includes("category:drug"), JSON.stringify(m.filtersApplied));
+      ok("55-openfda-CATDEF a DEFAULTED category ⇒ a note names the default + points to category:'device'/'food' (a device-intent caller is not silently misled) — drop the note ⇒ RED",
+        m.notes.some((n) => /DEFAULTED to 'drug'/.test(n) && /category:'device'/.test(n)), JSON.stringify(m.notes.filter((n) => /DEFAULTED/.test(n))));
+    });
+    await withFetch(openfdaMock(openfdaBody(197, [openfdaRecallRow()])), async (calls) => {
+      const r = await runTool("openfda_enforcement", { category: "device", product: "pacemaker" }, sam); // EXPLICIT
+      const m = buildMeta(r.meta);
+      ok("55-openfda-CATDEF EXPLICIT category:'device' ⇒ hits /device/enforcement + filtersApplied echoes 'category:device' + NO defaulted-category note (the warning is default-only; firing it on an explicit choice ⇒ RED)",
+        /\/device\/enforcement\.json/.test(openfdaUrl(calls)) && m.filtersApplied.includes("category:device") && !m.notes.some((n) => /DEFAULTED to 'drug'/.test(n)),
+        JSON.stringify({ url: /\/device\//.test(openfdaUrl(calls)), fa: m.filtersApplied, hasNote: m.notes.some((n) => /DEFAULTED/.test(n)) }));
+    });
+
     // ── [P1] a skip-page: skip 25 + total 17793 ⇒ pagination.offset:25. ──
     await withFetch(openfdaMock(openfdaBody(17793, [openfdaRecallRow()], 25, 25)), async (calls) => {
       const r = await runTool("openfda_enforcement", { category: "drug", firm: "pfizer", skip: 25, limit: 25 }, sam);
