@@ -156,7 +156,9 @@ async function title48Currency(): Promise<{
   latestAmendedOn: string | null;
 }> {
   return memoize("far:title48-currency", async () => {
-    const { titles } = await listTitles();
+    // listTitles now returns a MetaBundle (honesty envelope); the titles live on
+    // `.data.titles`.
+    const { titles } = (await listTitles()).data;
     const t48 = titles.find((t) => t.number === 48);
     return {
       upToDateAsOf: t48?.upToDateAsOf ?? null,

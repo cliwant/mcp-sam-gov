@@ -12,7 +12,7 @@
  *
  * Both keyless. Documented at https://www.ecfr.gov/developers/.
  */
-export declare function listTitles(): Promise<{
+export declare function listTitles(): Promise<import("./meta.js").MetaBundle<{
     titles: {
         number: number;
         name: string;
@@ -21,7 +21,7 @@ export declare function listTitles(): Promise<{
         upToDateAsOf: string | undefined;
         reserved: boolean;
     }[];
-}>;
+}>>;
 export declare function search(args: {
     query: string;
     titleNumber?: number;

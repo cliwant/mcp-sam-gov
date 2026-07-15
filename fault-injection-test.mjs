@@ -4466,12 +4466,19 @@ async function testFederalRegisterHonesty() {
     ] }) : failClosed()()),
     async () => {
       const r = await fedRegListAgencies({ perPage: 92 });
-      const a0 = r.agencies[0];
-      const a1 = r.agencies[1];
+      const a0 = r.data.agencies[0];
+      const a1 = r.data.agencies[1];
       ok("fedreg [W3-9] list_agencies 200 ⇒ maps id/name/slug/shortName (index 0 = EPA/145/environmental-protection-agency)",
-        r.agencies.length === 2 && a0.id === 145 && a0.name === "Environmental Protection Agency" && a0.slug === "environmental-protection-agency" && a0.shortName === "EPA", JSON.stringify(a0));
+        r.data.agencies.length === 2 && a0.id === 145 && a0.name === "Environmental Protection Agency" && a0.slug === "environmental-protection-agency" && a0.shortName === "EPA", JSON.stringify(a0));
       ok("fedreg [W3-9] list_agencies ⇒ null parent_id PRESERVED as parentId:null (top-level, NOT coerced to 0); real parent_id 731 verbatim (map via `?? 0` ⇒ RED)",
         a0.parentId === null && a1.parentId === 731, JSON.stringify([a0.parentId, a1.parentId]));
+      // Honesty envelope (dogfooding 2026-07-15): this list tool now carries _meta —
+      // a complete canonical list ⇒ totalAvailable === count, complete:true,
+      // truncated:false. Stripping the withMeta wrap ⇒ r.meta undefined ⇒ RED.
+      const magy = buildMeta(r.meta);
+      ok("fedreg [W3-9] list_agencies carries the honesty envelope: _meta present, totalAvailable === returned count, complete:true, truncated:false",
+        magy.totalAvailable === 2 && magy.returned === 2 && magy.complete === true && magy.truncated === false,
+        JSON.stringify({ ta: magy.totalAvailable, ret: magy.returned, c: magy.complete, t: magy.truncated }));
     },
   );
 }
@@ -20643,8 +20650,16 @@ async function testRegistryDispatchHonesty() {
   ] } }) : failClosed()()), async () => {
     const res = await runTool("ecfr_list_titles", {}, sam);
     ok("39 ecfr_list_titles (runTool) ⇒ maps titles + a RESERVED title is surfaced as reserved:true (honest flag, not dropped/faked)",
-      res.titles.length === 2 && res.titles[0].number === 48 && res.titles[0].reserved === false && res.titles[1].reserved === true,
-      JSON.stringify(res.titles.map((t) => [t.number, t.reserved])));
+      res.data.titles.length === 2 && res.data.titles[0].number === 48 && res.data.titles[0].reserved === false && res.data.titles[1].reserved === true,
+      JSON.stringify(res.data.titles.map((t) => [t.number, t.reserved])));
+    // Honesty envelope (dogfooding 2026-07-15): this list tool now carries _meta
+    // like every other tool — a complete canonical list ⇒ totalAvailable === count,
+    // complete:true, truncated:false. Stripping the withMeta wrap ⇒ res.meta
+    // undefined ⇒ RED.
+    const m39 = buildMeta(res.meta);
+    ok("39 ecfr_list_titles carries the honesty envelope: _meta present, totalAvailable === returned count, complete:true, truncated:false",
+      m39.totalAvailable === 2 && m39.returned === 2 && m39.complete === true && m39.truncated === false,
+      JSON.stringify({ ta: m39.totalAvailable, ret: m39.returned, c: m39.complete, t: m39.truncated }));
   });
 
   // ── grants_search — a 503 throws (never a fake "no grants"); a genuine hitCount:0 is

@@ -52,16 +52,33 @@ export async function listTitles() {
       }[];
     };
     const json = await fetchJson<Resp>(`${ECFR}/versioner/v1/titles.json`);
-    return {
-      titles: (json.titles ?? []).map((t) => ({
-        number: t.number ?? 0,
-        name: t.name ?? "",
-        latestAmendedOn: t.latest_amended_on,
-        latestIssueDate: t.latest_issue_date,
-        upToDateAsOf: t.up_to_date_as_of,
-        reserved: !!t.reserved,
-      })),
-    };
+    const titles = (json.titles ?? []).map((t) => ({
+      number: t.number ?? 0,
+      name: t.name ?? "",
+      latestAmendedOn: t.latest_amended_on,
+      latestIssueDate: t.latest_issue_date,
+      upToDateAsOf: t.up_to_date_as_of,
+      reserved: !!t.reserved,
+    }));
+    // Carry the honesty envelope every other tool has (dogfooding 2026-07-15: this
+    // list tool previously returned a bare {titles} with no _meta). The titles
+    // endpoint returns the COMPLETE canonical CFR title set in one response — no
+    // pagination, no filter — so the count IS the total and complete derives true.
+    return withMeta(
+      { titles },
+      {
+        source: "ecfr.gov/api (versioner/v1/titles)",
+        keylessMode: true,
+        returned: titles.length,
+        totalAvailable: titles.length,
+        truncated: false,
+        filtersApplied: [],
+        filtersDropped: [],
+        notes: [
+          "Complete canonical list of all CFR titles — the endpoint returns every title in a single response (no pagination or filtering).",
+        ],
+      },
+    );
   });
 }
 
