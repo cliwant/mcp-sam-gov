@@ -753,6 +753,37 @@ async function testGetAwardDetail() {
     },
   );
 
+  // 429-then-abort ⇒ the rate_limited cause is PRESERVED, never masked as a
+  // generic "timed out" (dogfooding 2026-07-16, govinfo DEMO_KEY). attempt 1 gets a
+  // real 429 (rate-limited, no Retry-After ⇒ default wait); during that retry-after
+  // wait getJson's AbortSignal fires, so attempt 2's fetch hits an aborted signal ⇒
+  // a TimeoutError. The surfaced error must stay rate_limited (the true cause +
+  // retryable + remedy), NOT the downstream timeout. NON-VACUITY: reverting the
+  // lastErr-preservation ⇒ kind flips to upstream_unavailable "timed out" ⇒ RED.
+  await withFetch((_u, _init, calls) => {
+    if (calls.length === 1) return mockResponse({ status: 429 });
+    const e = new Error("The operation was aborted due to timeout");
+    e.name = "TimeoutError";
+    throw e;
+  }, async () => {
+    const { threw, error } = await expectThrow(() => fetchWithRetry("https://x.test/y", {}, "test:endpoint"));
+    ok("fetchWithRetry 429-then-abort ⇒ rate_limited PRESERVED (not masked as 'timed out'), retryable:true (revert lastErr-preservation ⇒ RED)",
+      threw && toToolError(error).kind === "rate_limited" && toToolError(error).retryable === true,
+      JSON.stringify(toToolError(error)));
+  });
+  // Non-vacuity companion: a PURE timeout (NO prior 429) still surfaces as
+  // upstream_unavailable "timed out" — the fix is scoped to the rate-limited case.
+  await withFetch(() => {
+    const e = new Error("The operation was aborted due to timeout");
+    e.name = "TimeoutError";
+    throw e;
+  }, async () => {
+    const { threw, error } = await expectThrow(() => fetchWithRetry("https://x.test/y", {}, "test:endpoint"));
+    ok("fetchWithRetry PURE timeout (no prior 429) ⇒ upstream_unavailable 'timed out' (backward-compatible — fix does not over-reach)",
+      threw && toToolError(error).kind === "upstream_unavailable" && /timed out/.test(toToolError(error).message),
+      JSON.stringify(toToolError(error)));
+  });
+
   // Network fault (fetch rejects) ⇒ throws upstream_unavailable retryable,
   // NOT a masked {ok:true,data:null} / silent null.
   await withFetch(
