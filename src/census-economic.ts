@@ -8,7 +8,7 @@
  *   its keyless tier — a request WITHOUT a key is 302-redirected to a "Missing
  *   Key" HTML page. So, honestly: with NO `CENSUS_API_KEY` this tool THROWS an
  *   `invalid_input` config error BEFORE any fetch (never a fake-empty, never a
- *   keyless-pretend). The other 111 tools stay keyless — this key is scoped to
+ *   keyless-pretend). The other tools stay keyless — this key is scoped to
  *   this one source. (Contrast the OPTIONAL keys of datagov/bls/nvd, which lift a
  *   tier but are not required.)
  *
@@ -82,10 +82,16 @@ const NAICS_RE = /^\d{2,6}$/; // 2–6 digit NAICS-2017 sector/code
 const STATE_FIPS_RE = /^\d{2}$/; // 2-digit state FIPS
 const GEOGRAPHIES = new Set(["us", "state", "county"]);
 
-// The Census suppression/withhold sentinel floor. Census encodes a suppressed or
-// unavailable cell as a large NEGATIVE value (-999999999 / -888888888 /
-// -666666666 …). Establishment/employment/payroll counts are non-negative, so any
-// value at/below this floor is a sentinel, NOT data.
+// DEFENSIVE large-negative sentinel floor. Some Census products (ACS/SAIPE) encode a
+// withheld/unavailable cell as a large NEGATIVE jam value (-999999999 / -888888888 /
+// -666666666 …); establishment/employment/payroll counts are non-negative, so any
+// value at/below this floor is a sentinel, NOT data → mapped to null.
+// ★HONESTY CAVEAT: CBP itself does NOT primarily use these jam values — modern CBP
+// uses NOISE INFUSION (EMP_N noise-range columns) + suppression FLAGS (EMP_N_F …),
+// which this tool does NOT currently request or interpret (it surfaces values as
+// reported). So this floor is a conservative cross-product guard, not CBP's confirmed
+// mechanism; a keyed live verification of CBP's exact withheld-cell encoding is pending
+// (no CENSUS_API_KEY was available at build time). See SUPPRESSED_NOTE.
 const CENSUS_SENTINEL_FLOOR = -100000000;
 
 const DEFAULT_YEAR = "2022"; // the latest confirmed CBP vintage (ADR-0047)
@@ -96,7 +102,7 @@ const KEY_REQUIRED_NOTE =
 const PAYROLL_UNITS_NOTE =
   "annualPayrollUsd is ANNUAL payroll in US dollars, converted from the Census PAYANN field's $1,000 units (×1000). establishments and employees are integer counts (as-of the reference year).";
 const SUPPRESSED_NOTE =
-  "Census suppresses cells for confidentiality/reliability using large negative sentinels (e.g. -999999999); such values are mapped to null (withheld) — NEVER a negative number and NEVER 0. A genuine 0 is preserved as 0.";
+  "Disclosure protection: any large-negative jam sentinel (e.g. -999999999) is mapped to null (withheld) — NEVER a negative number and NEVER 0; a genuine 0 is preserved as 0. NOTE: modern CBP applies NOISE INFUSION (perturbed values) plus suppression flag columns (e.g. EMP_N_F) rather than jam sentinels; this tool surfaces values as reported and does not currently interpret suppression flags, so a flagged/noise-infused cell is returned as its reported number — treat exact small counts as approximate.";
 const NO_PAGINATION_NOTE =
   "CBP returns the COMPLETE set of geographies matching the filter (no server-side pagination); totalAvailable equals the number of rows returned. Narrow with naics / geography to reduce the row count.";
 

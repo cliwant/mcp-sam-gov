@@ -16094,7 +16094,11 @@ async function testCensusBusinessPatterns() {
     ])), async () => {
       const r = await runTool("census_business_patterns", { naics: "5415", geography: "county", state: "06" }, sam);
       const [supp, zero, real] = r.data.rows;
-      ok("55b-sentinel ESTAB/EMP/PAYANN -999999999/-888888888/-666666666 (Census suppression sentinels) ⇒ establishments/employees/annualPayrollUsd ALL null (withheld — NOT a negative number, NOT 0) ⇒ remove the sentinel→null map (num() alone returns -999999999) ⇒ RED",
+      // NOTE (honesty): this asserts the DEFENSIVE jam-sentinel → null mapping (censusNum's
+      // large-negative guard). It is a cross-Census-product guard (ACS/SAIPE convention), NOT
+      // a claim that CBP emits these exact values — modern CBP uses noise-infusion + flag
+      // columns (see SUPPRESSED_NOTE). This test pins censusNum's behavior, not CBP's wire shape.
+      ok("55b-sentinel ESTAB/EMP/PAYANN -999999999/-888888888/-666666666 (large-negative jam sentinels) ⇒ establishments/employees/annualPayrollUsd ALL null (withheld — NOT a negative number, NOT 0) ⇒ remove the sentinel→null map (num() alone returns -999999999) ⇒ RED",
         supp.establishments === null && supp.employees === null && supp.annualPayrollUsd === null, JSON.stringify(supp));
       ok("55b-sentinel a GENUINE 0 (ESTAB '0') ⇒ 0 (NOT null) — the sentinel floor is -100000000, so a real zero is preserved (distinguishes 'withheld' from 'genuinely zero') ⇒ map all ≤0 to null ⇒ RED",
         zero.establishments === 0 && zero.employees === 0 && zero.annualPayrollUsd === 0, JSON.stringify(zero));
@@ -17702,6 +17706,7 @@ async function main() {
   await testW31UsasHonesty();
   await testApiKeyStatus();
   await testLoadDotEnv();
+  await testToolDescriptionDrift();
 
   // Prove the harness bites.
   await selfCheck();
@@ -17715,6 +17720,36 @@ async function main() {
   globalThis.fetch = REAL_FETCH;
   globalThis.setTimeout = REAL_SET_TIMEOUT;
   process.exit(FAIL === 0 ? 0 : 1);
+}
+
+// §desc-drift: tool DESCRIPTION honesty-drift guard. This session (and the prior one)
+// repeatedly found key-required tool descriptions that hardcoded a cross-tool key-set
+// ("Census and FRED are the only key-required sources") or an absolute keyless tool count
+// ("the other 112 tools stay keyless") — both DRIFT every time a tool or a key is added,
+// producing a confidently-wrong description. The durable fix is to NOT enumerate the
+// cross-tool set/count in any single tool's description (defer to api_key_status). This
+// guard makes the drift class fail loudly: NO tool description may hardcode an absolute
+// tool count, and no key-required tool description may claim a specific "only N sources
+// need a key". NON-VACUOUS: reintroducing either pattern ⇒ RED.
+async function testToolDescriptionDrift() {
+  section("§desc-drift tool descriptions must not hardcode a drifting tool-count / cross-tool key-set");
+  const descs = TOOLS.map((t) => ({ name: t.name, d: String(t.description || "") }));
+  // (1) no "other <NN> tools" / "<NN> tools stay keyless" absolute count in any description.
+  const countOffenders = descs.filter((t) => /\b\d{2,3}\s+tools?\b/i.test(t.d) && /keyless|stay|other/i.test(t.d));
+  ok(
+    "desc-drift NO tool description hardcodes an absolute keyless tool-count (e.g. 'the other 112 tools stay keyless') — it drifts as tools are added ⇒ reintroduce ⇒ RED",
+    countOffenders.length === 0,
+    JSON.stringify(countOffenders.map((t) => t.name)),
+  );
+  // (2) no description claims a specific closed cross-tool key-required set.
+  const setOffenders = descs.filter((t) => /are the only key-required sources|every other tool is keyless/i.test(t.d));
+  ok(
+    "desc-drift NO description claims a closed 'X are the only key-required sources — every other tool is keyless' set (drifts when a key is added; defer to api_key_status) ⇒ reintroduce ⇒ RED",
+    setOffenders.length === 0,
+    JSON.stringify(setOffenders.map((t) => t.name)),
+  );
+  // (3) non-vacuity: the guard actually inspects real, non-empty descriptions.
+  ok("desc-drift (non-vacuity) scanned ≥100 non-empty tool descriptions", descs.filter((t) => t.d.length > 40).length >= 100, String(descs.length));
 }
 
 // §keys-A: apiKeyStatus() — the CONFIG-discovery surface. OFFLINE (no fetch): it
