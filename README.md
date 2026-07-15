@@ -4,7 +4,7 @@
 
 ### **$4 trillion of public federal data, one `npm install` away.**
 
-The most comprehensive **keyless-first** MCP server for US federal contracting + spending + regulation + partner vetting. **120 tools across 37 federal data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 33 sources need none. Works today, in any AI agent.
+The most comprehensive **keyless-first** MCP server for US federal contracting + spending + regulation + partner vetting. **134 tools across 44 federal data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 40 sources need none. Works today, in any AI agent.
 
 [![npm](https://img.shields.io/npm/v/@cliwant/mcp-sam-gov?color=cb3837&label=%40cliwant%2Fmcp-sam-gov&logo=npm)](https://www.npmjs.com/package/@cliwant/mcp-sam-gov)
 [![mcp-registry](https://img.shields.io/badge/MCP%20Registry-active-2ea44f?logo=anthropic)](https://registry.modelcontextprotocol.io/v0/servers?search=cliwant)
@@ -50,7 +50,7 @@ The most comprehensive **keyless-first** MCP server for US federal contracting +
 |---|---|
 | GovWin: $30K-$100K/yr per seat | Free, MIT license |
 | API key registration → wait 24h → quota tier shopping | `npm install` → working in 60s |
-| 5+ separate vendor APIs / scrapers | 1 unified surface, 120 tools across 37 sources |
+| 5+ separate vendor APIs / scrapers | 1 unified surface, 134 tools across 44 sources |
 | LLMs hallucinate NAICS codes / agency names | Anti-hallucination autocomplete guards built-in |
 | Brittle scraping breaks weekly | Daily live smoke test ([badge above](#)) |
 | Procurement officer → IT ticket → 3-week wait | Claude Desktop double-click install |
@@ -65,7 +65,11 @@ The federal data this wraps is **public domain**. There is no good reason it sho
 |---|---|---|
 | 🔍 **Opportunities & solicitations** | "Find SAM.gov solicitations under NAICS 541512 closing this month" — read the SOW, POCs, attachments | SAM.gov, Grants.gov |
 | 💰 **Spending, awards & competition** | "Show me Booz Allen wins at VA last fiscal year; top 10 PSC categories at DoD" | USAspending, FPDS, GAO |
-| 🕵️ **Entity & partner vetting** | "Screen this firm: OFAC sanctions, SAM exclusions, single-audit findings, bank health, EPA compliance" | OFAC, SAM, FAC, FDIC, EPA ECHO |
+| 🕵️ **Entity & partner vetting** | "Screen this firm: OFAC sanctions, SAM exclusions, single-audit findings, bank health, EPA compliance + toxics-release" | OFAC, SAM, FAC, FDIC, EPA ECHO, EPA Envirofacts |
+| 🛒 **Product safety & recalls** | "Any FDA/NHTSA/CPSC recalls or enforcement against this supplier's products?" | openFDA, NHTSA, CPSC |
+| ⚖️ **Litigation & courts** | "Any Court of Federal Claims bid protests or Federal Circuit opinions involving this contractor?" | CourtListener (Free Law Project) |
+| 🏢 **Nonprofit vendors** | "Pull this nonprofit's IRS-990 financials before we subcontract to it" | IRS 990 (via ProPublica) |
+| 🏥 **Healthcare providers & facilities** | "Medicare utilization & payments for this provider; hospital quality ratings; is this provider on the revocation list?" | CMS (data.cms.gov) |
 | 📈 **Financial disclosure (SEC)** | "Pull this public company's revenue trend and latest 10-K filings" | SEC EDGAR |
 | ⚖️ **Regulatory & legislative** | "What VA cybersecurity rules were published this quarter? Any open Regulations.gov dockets?" | Federal Register, Regulations.gov, eCFR, FAR/DFARS, Congress.gov, GovInfo |
 | 💲 **Pricing, labor & fiscal** | "GSA CALC labor-rate band for a systems analyst; SCA wage determination for this county; CPI escalation; per-diem cap for a trip; regional GDP by industry; DOL wage-hour enforcement history" | GSA CALC, SAM WDs, BLS, US Census CBP, FRED, BEA, US Treasury, GSA per-diem, US DOL |
@@ -75,7 +79,7 @@ The federal data this wraps is **public domain**. There is no good reason it sho
 | 🌐 **Trade, geo & disaster** | "HTS tariff for this product; Census tract for this address; FEMA declarations in this state" | USITC HTS, US Census, FEMA, Socrata, CKAN |
 | 🎓 **Grants & datasets** | "Cybersecurity grants posted in the last 30 days; discover federal open datasets" | Grants.gov, data.gov |
 
-**120 tools across 37 federal data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 33 sources need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
+**134 tools across 44 federal data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 40 sources need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
 
 ---
 
@@ -102,7 +106,7 @@ If you already use Claude Code (the CLI):
 /plugin install cliwant/mcp-sam-gov
 ```
 
-This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 120 tools.
+This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 134 tools.
 
 ### 🔵 Path 3 — Manual install for any MCP host (Codex, Cursor, Continue, Gemini)
 
@@ -170,7 +174,7 @@ Then point your host config at the absolute path:
 
 (Or skip this entirely — use Path 1's `.mcpb` and it auto-configures.)
 
-Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (120 tools)".
+Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (134 tools)".
 
 ### Claude Code
 
@@ -356,6 +360,8 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 | `LDA_API_KEY` | Optional | higher rate limit on `lda_search_filings` (Senate LDA lobbying; keyless by default) | [lda.senate.gov/api/register](https://lda.senate.gov/api/register/) |
 | `BLS_API_KEY` | Optional | the BLS v2 tier (~500 queries/day vs keyless ~25/day) | [data.bls.gov/registrationEngine](https://data.bls.gov/registrationEngine/) |
 | `NVD_API_KEY` | Optional | a higher NVD rate limit (`cve_lookup`) | [nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key) |
+| `OPENFDA_API_KEY` | Optional | higher openFDA rate limit (`openfda_enforcement`, `openfda_device_clearances`; both work keyless) | [open.fda.gov/apis/authentication](https://open.fda.gov/apis/authentication/) |
+| `COURTLISTENER_API_TOKEN` | Optional | higher CourtListener rate limit (`courtlistener_search_opinions`; works keyless) | [courtlistener.com/help/api/rest](https://www.courtlistener.com/help/api/rest/) |
 | `SOCRATA_APP_TOKEN` | Optional | higher Socrata throttling limits | [evergreen.data.socrata.com/signup](https://evergreen.data.socrata.com/signup) |
 
 **Two ways to set any key** — pick one:
@@ -374,7 +380,7 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 
 ---
 
-## Tool catalog (120 tools)
+## Tool catalog (134 tools)
 
 Grouped by workflow. Keyless-first — most tools need no key; Census business-patterns, FRED, BEA, and DOL's data endpoint require a free key, and a handful of others gain higher limits from an optional free key (noted above). Descriptions are condensed — each tool's own `inputSchema` carries the full contract and honesty caveats.
 
@@ -428,7 +434,7 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 </details>
 
 <details>
-<summary><b>Entity & partner vetting — OFAC · SAM · FAC · FDIC · EPA (14 tools)</b></summary>
+<summary><b>Entity & partner vetting — OFAC · SAM · FAC · FDIC · EPA (15 tools)</b></summary>
 
 - `ofac_screen_entity` — keyless OFAC denied-party / sanctions screening
 - `sam_check_exclusions` — keyless SAM debarment/exclusion screening by name and/or UEI/CAGE
@@ -444,6 +450,30 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 - `fdic_industry_summary` — industry & state banking-sector annual aggregates
 - `echo_search_facilities` — search EPA-regulated facilities by state with compliance/enforcement screening
 - `echo_facility_report` — EPA ECHO Detailed Facility Report for one facility (by FRS RegistryID)
+- `epa_tri_facilities` — EPA Envirofacts TRI (Toxics Release Inventory) facilities by state/industry (environmental / ESG vetting)
+</details>
+
+<details>
+<summary><b>Product safety & recalls — openFDA · NHTSA · CPSC (5 tools)</b></summary>
+
+- `openfda_enforcement` — FDA drug / device / food recalls & enforcement actions (product-safety supplier vetting)
+- `openfda_device_clearances` — FDA 510(k) medical-device clearances (device-maker capability check)
+- `nhtsa_recalls` — NHTSA vehicle recalls by make / model / year
+- `nhtsa_complaints` — NHTSA vehicle safety complaints by make / model / year
+- `cpsc_recalls` — CPSC consumer-product recalls (product supplier vetting)
+</details>
+
+<details>
+<summary><b>Litigation & courts — CourtListener (1 tool)</b></summary>
+
+- `courtlistener_search_opinions` — US federal court opinions (COFC contract claims / bid protests, Federal Circuit) — data via CourtListener / Free Law Project (disclosed)
+</details>
+
+<details>
+<summary><b>Nonprofit vendors — IRS 990 via ProPublica (2 tools)</b></summary>
+
+- `nonprofit_search` — IRS-990 nonprofit search by name / state / NTEE — via ProPublica Nonprofit Explorer (disclosed)
+- `nonprofit_financials` — IRS-990 nonprofit financials by EIN — via ProPublica Nonprofit Explorer (disclosed)
 </details>
 
 <details>
@@ -514,6 +544,16 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 - `cms_search_datasets` — discover CMS Open Payments (Sunshine Act) datasets
 - `cms_query_dataset` — query a CMS Open Payments datastore distribution (industry→physician payments)
 - `nppes_lookup_provider` — CMS/HHS NPPES NPI Registry provider lookup
+</details>
+
+<details>
+<summary><b>Healthcare providers & facilities — CMS (5 tools)</b></summary>
+
+- `cms_medicare_provider_services` — Medicare provider utilization & payments (healthcare market sizing)
+- `cms_hospital_compare` — CMS Hospital Compare quality ratings
+- `cms_facility_directory` — CMS nursing-home / home-health / hospice / dialysis facility directories
+- `cms_dmepos_suppliers` — CMS DMEPOS (durable medical equipment) supplier directory + Medicare spend
+- `cms_revoked_providers` — CMS Medicare revocation / exclusion list (provider compliance vetting)
 </details>
 
 <details>
