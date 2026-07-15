@@ -179,6 +179,7 @@ import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordin
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
 import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num as cbpNum } from "./dist/census-economic.js";
+import { triFacilities as epaTriFacilities, normalizeClosed as epaNormalizeClosed, num as epaNum, str as epaStr } from "./dist/epa-envirofacts.js";
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { enforcement as openfdaEnforcement, openfdaApiKey, buildSearch as openfdaBuildSearch, luceneQuote as openfdaQuote, OPENFDA_HOST } from "./dist/openfda.js";
 import { deviceClearances as openfdaDeviceClearances, buildDeviceSearch as openfdaBuildDeviceSearch } from "./dist/openfda-device.js";
@@ -16210,6 +16211,201 @@ async function testCensusBusinessPatterns() {
   ok("55b-parity census-economic.num === coerce.num (one shared audited impl — NO local num/str; the sentinel→null map is a WRAPPER around it, not a fork)", cbpNum === coerceNum, "cbp num diverged from coerce.num");
 }
 
+// §55e: EPA Envirofacts TRI facilities (data.epa.gov /efservice/tri_facility, ADR-0059
+// — the environmental-footprint lane; KEYLESS; the PATH-SEGMENT SSRF + TWO-REQUEST
+// count-total pattern). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a
+// value + names the mutation that turns it RED:
+//   [P1]       count [{TOTALQUERYRESULTS:1247}] + a 2-row slice ⇒ totalAvailable 1247
+//              (NOT the slice length 2), hasMore; count FAILS ⇒ totalAvailable:null +
+//              a disclosing note (NEVER length-faked); count runs BEFORE data.
+//   [P2]       empty slice ⇒ honest empty (returned:0); 400 ⇒ invalid_input; 503 ⇒
+//              upstream_unavailable; non-array / non-JSON 200 ⇒ schema_drift.
+//   [P3]       fac_closed_ind "0"/"N"→false, "1"/"Y"→true, unknown→null (never a
+//              fabricated false); addresses as strings; ""→null (null-never-empty).
+//   [input]    all-empty query ⇒ invalid_input, 0 fetch.
+//   [SSRF]     facilityName with '/' or '..' rejected; state regex; fixed-host assert;
+//              a space/'&' value is percent-encoded in the PATH segment.
+const EPA_RE = /data\.epa\.gov\/efservice\/tri_facility/;
+const isEpa = (u) => EPA_RE.test(u);
+const isEpaCount = (u) => /\/count\/JSON$/.test(u) && isEpa(u);
+const isEpaData = (u) => /\/rows\/\d+:\d+\/JSON$/.test(u) && isEpa(u);
+const epaCountUrl = (calls) => calls.find((x) => isEpaCount(x.url))?.url;
+const epaDataUrl = (calls) => calls.find((x) => isEpaData(x.url))?.url;
+// A combined count+data mock: routes by URL tail. `count`/`data` are the JSON
+// bodies; `countStatus`/`dataStatus` force an HTTP status for the fault cases.
+const epaMock = ({ count = [{ TOTALQUERYRESULTS: 1247 }], countStatus = 200, data = [], dataStatus = 200 } = {}) => (u) => {
+  if (isEpaCount(u)) return mockResponse({ status: countStatus, json: count });
+  if (isEpaData(u)) return mockResponse({ status: dataStatus, json: data });
+  return failClosed()();
+};
+// A live-shaped tri_facility row (numeric-string fac_closed_ind "0" = active).
+const epaFac = (over = {}) => ({
+  tri_facility_id: "20109HNSNP7816B",
+  facility_name: "HANSON PIPE & PRODUCTS INC",
+  street_address: "7816 BETHLEHEM RD",
+  city_name: "MANASSAS",
+  county_name: "PRINCE WILLIAM",
+  state_abbr: "VA",
+  zip_code: "20109",
+  region: "3",
+  fac_closed_ind: "0",
+  ...over,
+});
+// A 200 data slice whose .json() THROWS a SyntaxError (an HTML error page); the count
+// sub-query still resolves normally so we isolate the DATA-body drift path.
+const epaDataNonJson = (u) => {
+  if (isEpaCount(u)) return mockResponse({ status: 200, json: [{ TOTALQUERYRESULTS: 5 }] });
+  if (isEpaData(u)) return { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html/>" };
+  return failClosed()();
+};
+
+async function testEpaTriFacilities() {
+  section("§55e. EPA Envirofacts TRI facilities (ADR-0059, KEYLESS — the environmental-footprint lane on the getJson GET port) — TWO-request count-total P1 (totalAvailable=TOTALQUERYRESULTS, never slice length; count-fail→null+note) + honest empty vs 400/503/drift P2 + fac_closed_ind→bool P3 + input-guard + PATH-SEGMENT SSRF (charclass+encode, host-pin) (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+
+  // ── [P1] count 1247 + a 2-row slice ⇒ totalAvailable 1247 (the count-query total,
+  //    NOT the slice length 2), returned:2, hasMore, complete:false. Count runs
+  //    FIRST, then data — both to data.epa.gov over https. ──
+  await withFetch(epaMock({ count: [{ TOTALQUERYRESULTS: 1247 }], data: [epaFac(), epaFac({ tri_facility_id: "X2", facility_name: "QUARLES PETROLEUM INC" })] }), async (calls) => {
+    const r = await runTool("epa_tri_facilities", { state: "VA", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e-P1 count [{TOTALQUERYRESULTS:1247}] + 2-row slice ⇒ returned:2 but totalAvailable:1247 (the EXACT count-query total, NOT the slice length 2), truncated:true, complete:false ⇒ set totalAvailable=facilities.length ⇒ RED",
+      r.data.facilities.length === 2 && m.returned === 2 && m.totalAvailable === 1247 && m.truncated === true && m.complete === false, JSON.stringify({ n: r.data.facilities.length, ta: m.totalAvailable, t: m.truncated }));
+    ok("55e-P1 hasMore:true (offset 0 + returned 2 < 1247), nextOffset:2 ⇒ compute hasMore off the slice alone ⇒ RED",
+      m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.pagination.offset === 0 && m.pagination.limit === 2, JSON.stringify(m.pagination));
+    ok("55e-P1 TWO requests: a /count/JSON sub-query AND a /rows/0:1/JSON slice, BOTH to data.epa.gov over https (offset 0, limit 2 ⇒ inclusive end 1) ⇒ drop the count sub-query ⇒ RED",
+      epaCountUrl(calls) !== undefined && epaDataUrl(calls) !== undefined && new URL(epaCountUrl(calls)).hostname === "data.epa.gov" && new URL(epaCountUrl(calls)).protocol === "https:" && /\/rows\/0:1\/JSON$/.test(epaDataUrl(calls)) && /\/state_abbr\/VA\//.test(epaDataUrl(calls)), JSON.stringify({ count: epaCountUrl(calls), data: epaDataUrl(calls) }));
+    ok("55e-P1 keylessMode:true (no key sent) + the closed-normalization + nominal-screen notes present",
+      m.keylessMode === true && m.notes.some((n) => /fac_closed_ind/.test(n)) && m.notes.some((n) => /TRI.*REPORTING|nominal/i.test(n)), JSON.stringify(m.notes.length));
+  });
+
+  // ── [P1] count sub-query FAILS (503) but the data slice SUCCEEDS ⇒ totalAvailable:
+  //    null + a disclosing note (NEVER the slice length), data still returned. ──
+  await withFetch(epaMock({ countStatus: 503, data: [epaFac(), epaFac()] }), async (calls) => {
+    const r = await runTool("epa_tri_facilities", { state: "VA", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e-P1 count sub-query 503 (fails) but data OK ⇒ totalAvailable:null (NOT the slice length 2 — never length-faked) + a disclosing note, and the 2 facilities STILL return ⇒ fall back to facilities.length ⇒ RED",
+      r.data.facilities.length === 2 && m.returned === 2 && m.totalAvailable === null && m.notes.some((n) => /count sub-query/i.test(n) && /null/.test(n)), JSON.stringify({ n: r.data.facilities.length, ta: m.totalAvailable }));
+    ok("55e-P1 a count failure does NOT throw (the data request is authoritative) — the count fetch was attempted then swallowed", epaCountUrl(calls) !== undefined && epaDataUrl(calls) !== undefined, JSON.stringify({ count: !!epaCountUrl(calls), data: !!epaDataUrl(calls) }));
+  });
+
+  // ── [P4] a count body MISSING TOTALQUERYRESULTS ⇒ totalAvailable:null (handled,
+  //    not a crash, not a fake), data still returns. ──
+  await withFetch(epaMock({ count: [{ SOMETHING_ELSE: 9 }], data: [epaFac()] }), async () => {
+    const r = await runTool("epa_tri_facilities", { state: "VA", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e-P4 a count body [{SOMETHING_ELSE:9}] missing TOTALQUERYRESULTS ⇒ totalAvailable:null + the fallback note (handled, never a crash, never faked) ⇒ read a wrong field as the total ⇒ RED",
+      r.data.facilities.length === 1 && m.totalAvailable === null && m.notes.some((n) => /count sub-query/i.test(n)), JSON.stringify({ ta: m.totalAvailable }));
+  });
+
+  // ── [P2] an empty data slice ⇒ honest empty (returned:0); count 0 ⇒ totalAvailable
+  //    0, complete:true (a genuine no-match, NOT thrown, NOT drift). ──
+  await withFetch(epaMock({ count: [{ TOTALQUERYRESULTS: 0 }], data: [] }), async () => {
+    const r = await runTool("epa_tri_facilities", { state: "VA", facilityName: "zzzznomatch", limit: 25 }, sam);
+    const m = buildMeta(r.meta);
+    ok("55e-P2 an empty slice + count 0 ⇒ facilities:[], returned:0, totalAvailable:0, complete:true (an honest genuine-empty, NOT thrown, NOT drift) ⇒ throw/drift on a valid empty ⇒ RED",
+      r.data.facilities.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.facilities.length, ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // ── [P2] a 400 on the DATA request ⇒ invalid_input (never a fake empty). ──
+  await withFetch(epaMock({ count: [{ TOTALQUERYRESULTS: 5 }], data: {}, dataStatus: 400 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("epa_tri_facilities", { state: "VA" }, sam));
+    ok("55e-P2 400 on the data slice ⇒ invalid_input THROW (a bad request is never an empty result) ⇒ swallow as empty ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2] a 503 on the DATA request ⇒ upstream_unavailable (a DOWN endpoint is
+  //    NEVER a returned:0). ──
+  await withFetch(epaMock({ count: [{ TOTALQUERYRESULTS: 5 }], data: "", dataStatus: 503 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("epa_tri_facilities", { state: "VA" }, sam));
+    ok("55e-P2 503 on the data slice ⇒ upstream_unavailable THROW (a down EPA endpoint is never an empty result) ⇒ read empty ⇒ RED",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2/P4] a 200 data body that is not an array (an object) ⇒ schema_drift. ──
+  await withFetch(epaMock({ count: [{ TOTALQUERYRESULTS: 5 }], data: { error: "not an array" } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("epa_tri_facilities", { state: "VA" }, sam));
+    ok("55e-P4 a 200 data body that is not a JSON array (an object) ⇒ schema_drift (the array contract broke; never a fabricated empty) ⇒ read {} as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P2] a 200 data body that is non-JSON (r.json() SyntaxError) ⇒ schema_drift. ──
+  await withFetch(epaDataNonJson, async () => {
+    const { threw, error } = await expectThrow(() => runTool("epa_tri_facilities", { state: "VA" }, sam));
+    ok("55e-P2 a 200 whose data body is non-JSON (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── [P3] fac_closed_ind normalization: "0"/"N"→false, "1"/"Y"→true, unknown→null
+  //    (NEVER a fabricated false); addresses are strings; ""→null (null-never-empty). ──
+  await withFetch(epaMock({ count: [{ TOTALQUERYRESULTS: 5 }], data: [
+    epaFac({ fac_closed_ind: "0" }),
+    epaFac({ fac_closed_ind: "1" }),
+    epaFac({ fac_closed_ind: "N" }),
+    epaFac({ fac_closed_ind: "Y" }),
+    epaFac({ fac_closed_ind: "MAYBE", street_address: "" }),
+  ] }), async () => {
+    const r = await runTool("epa_tri_facilities", { state: "VA", limit: 5 }, sam);
+    const [a, b, c, d, e] = r.data.facilities;
+    ok("55e-P3 fac_closed_ind '0'/'N' ⇒ closed:false; '1'/'Y' ⇒ closed:true (both encodings normalized) ⇒ hardcode one encoding ⇒ RED",
+      a.closed === false && b.closed === true && c.closed === false && d.closed === true, JSON.stringify([a.closed, b.closed, c.closed, d.closed]));
+    ok("55e-P3 an UNRECOGNIZED fac_closed_ind ('MAYBE') ⇒ closed:null (unknown — NEVER a fabricated false) ⇒ default unknown to false ⇒ RED",
+      e.closed === null, JSON.stringify(e.closed));
+    ok("55e-P3 addresses/names are strings and an EMPTY street_address '' ⇒ null (null-never-empty-string) + fields mapped (facilityName/city/zip/region) ⇒ pass '' through ⇒ RED",
+      e.streetAddress === null && a.facilityName === "HANSON PIPE & PRODUCTS INC" && typeof a.zip === "string" && a.zip === "20109" && a.region === "3" && a.city === "MANASSAS", JSON.stringify({ addr: e.streetAddress, name: a.facilityName, zip: a.zip }));
+  });
+
+  // ── [input-guard] an all-empty query (no state, no facilityName) ⇒ invalid_input,
+  //    0 fetch (never scan the whole national table). ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("epa_tri_facilities", { limit: 10 }, sam));
+    ok("55e-input an all-empty query (no state/facilityName) ⇒ invalid_input, 0 fetch (never scan the entire national TRI table) ⇒ allow an unscoped scan ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // A county-ONLY query is likewise refused (the guard requires state OR facilityName).
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("epa_tri_facilities", { county: "FAIRFAX" }, sam));
+    ok("55e-input a county-ONLY query ⇒ invalid_input, 0 fetch (county is an ADDITIONAL filter; state OR facilityName is required) ⇒ let county alone through ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+
+  // ── [SSRF] a facilityName with '/' or '..', a bad state, ride as PATH SEGMENTS ⇒
+  //    the charclass re-guard rejects PRE-fetch (invalid_input, 0 fetch). ──
+  for (const [args, label] of [
+    [{ facilityName: "AC/ME" }, "facilityName 'AC/ME' (a '/' path separator)"],
+    [{ facilityName: "../etc/passwd" }, "facilityName '../etc/passwd' (path traversal)"],
+    [{ facilityName: "boeing", county: "FAIR..FAX" }, "county 'FAIR..FAX' (embedded '..')"],
+    [{ state: "ABC" }, "state 'ABC' (3 letters)"],
+    [{ state: "V1" }, "state 'V1' (a digit)"],
+  ]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("epa_tri_facilities", args, sam));
+      ok(`55e-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch — a value never touches the fixed host/path) ⇒ widen the validation ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+
+  // ── [SSRF] a valid value with a SPACE / '&' is percent-encoded in the PATH segment
+  //    (space→%20, &→%26) — so it can never break out of its segment or inject a
+  //    query. Assert both the count + data URLs are host-pinned + encoded. ──
+  await withFetch(epaMock({ count: [{ TOTALQUERYRESULTS: 6 }], data: [epaFac()] }), async (calls) => {
+    await runTool("epa_tri_facilities", { state: "VA", facilityName: "SUN CHEMICAL & INK" }, sam);
+    const cu = epaCountUrl(calls), du = epaDataUrl(calls);
+    ok("55e-ssrf facilityName 'SUN CHEMICAL & INK' is percent-encoded in the PATH (space→%20, &→%26) on BOTH the count + data URLs, host-pinned to data.epa.gov, after /facility_name/CONTAINING/ ⇒ drop encodeURIComponent (raw space/& in the path) ⇒ RED",
+      cu.includes("/facility_name/CONTAINING/SUN%20CHEMICAL%20%26%20INK/") && du.includes("/facility_name/CONTAINING/SUN%20CHEMICAL%20%26%20INK/") && !/ /.test(du) && new URL(du).hostname === "data.epa.gov", JSON.stringify({ data: du }));
+  });
+
+  // ── [parity] epa-envirofacts re-exports the shared coerce.num / coerce.str
+  //    (null-never-0 / null-never-empty-string) — NO local fork. ──
+  ok("55e-parity epa-envirofacts.num === coerce.num AND str === coerce.str (one shared audited impl — NO local num/str fork)", epaNum === coerceNum && epaStr === coerceStr, "epa coerce diverged from coerce.js");
+  // ── [parity] the exported normalizeClosed is the honest mapping (direct-unit). ──
+  ok("55e-parity (non-vacuity) normalizeClosed('1')===true, '0'===false, 'Y'===true, 'N'===false, 'MAYBE'===null, ''===null",
+    epaNormalizeClosed("1") === true && epaNormalizeClosed("0") === false && epaNormalizeClosed("Y") === true && epaNormalizeClosed("N") === false && epaNormalizeClosed("MAYBE") === null && epaNormalizeClosed("") === null, "normalizeClosed diverged");
+}
+
 // §55f: US DOL Data API v4 (apiprod.dol.gov, ADR-0053 — the labor-enforcement lane
 // with a DELIBERATE key split: dol_list_datasets KEYLESS + dol_get_dataset the 4th
 // REQUIRED key). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value +
@@ -18722,6 +18918,7 @@ async function main() {
   await testClinicaltrialsFacetHonesty();
   await testCensusHonesty();
   await testCensusBusinessPatterns();
+  await testEpaTriFacilities();
   await testFredHonesty();
   await testOpenfdaEnforcement();
   await testOpenfdaDeviceClearances();

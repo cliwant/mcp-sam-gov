@@ -55,6 +55,7 @@ import * as nsf from "./nsf.js";
 import * as clinicaltrials from "./clinicaltrials.js";
 import * as census from "./census.js";
 import * as censusEconomic from "./census-economic.js";
+import * as epaEnvirofacts from "./epa-envirofacts.js";
 import * as fred from "./fred.js";
 import * as bea from "./bea.js";
 import * as gsaPerdiem from "./gsa-perdiem.js";
@@ -3432,6 +3433,56 @@ const CensusBusinessPatternsInput = z.object({
     ),
 });
 
+// ─── EPA Envirofacts TRI facilities (ADR-0059) — keyless, PATH-segment SSRF ──
+// data.epa.gov /efservice/tri_facility. Two requests: a count sub-query for the
+// EXACT total (P1) + the data slice. All user values ride as PATH SEGMENTS, so each
+// is charclass-validated + encodeURIComponent-encoded (the load-bearing SSRF guard).
+const EpaTriFacilitiesInput = z
+  .object({
+    state: z
+      .string()
+      .regex(/^[A-Za-z]{2}$/)
+      .optional()
+      .describe(
+        "A 2-letter US state/territory code, e.g. 'VA', 'CA', 'PR' (→ state_abbr; case-insensitive). Provide at least this OR `facilityName`. Validated ^[A-Za-z]{2}$ (it rides in the request path).",
+      ),
+    facilityName: z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Za-z0-9 &.\-]+$/)
+      .optional()
+      .describe(
+        "A partial facility-name match (→ facility_name/CONTAINING/…; case-insensitive), e.g. 'chemical', 'boeing'. Provide at least this OR `state`. Allowed: letters/digits/space/& - . (≤100 chars); '/' and '..' rejected (path-injection guard).",
+      ),
+    county: z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Za-z0-9 &.\-]+$/)
+      .optional()
+      .describe(
+        "A partial county-name match (→ county_name/CONTAINING/…), e.g. 'FAIRFAX'. Optional additional filter; same charclass as facilityName.",
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Max facilities to return (1–100, default 25). Offset-paginated."),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+  })
+  .refine((v) => v.state !== undefined || v.facilityName !== undefined, {
+    message: "Provide at least `state` or `facilityName` (an all-empty query would scan the whole national TRI table and is refused).",
+    path: ["state"],
+  });
+
 // ─── FRED (Federal Reserve Economic Data) — the SECOND key-required source ──
 // ADR-0048. Macro context (GDP/CPI/rates/unemployment/PPI). REQUIRES a free
 // FRED_API_KEY; without it both tools throw an honest config error (the other 112
@@ -5430,6 +5481,18 @@ export const TOOLS: ToolDef[] = [
       "Market sizing by NAICS × geography — establishments, employment, and annual payroll from the US Census County Business Patterns (CBP) API (api.census.gov/data/{year}/cbp). ★REQUIRES a free CENSUS_API_KEY: the Census Data API has NO keyless tier, so without the key this tool THROWS an honest config error (get one at https://api.census.gov/data/key_signup.html; call api_key_status to see every source's key requirement). Input: optional `naics` (2–6 digit NAICS-2017, e.g. '5415'; omit to aggregate all sectors), `geography` (us|state|county, default us; county REQUIRES `state`), `state` (2-digit FIPS, e.g. '06'), `year` (default '2022'), optional `limit` (client-side top-N; CBP has no server pagination). Returns { rows:[{ name, geoId, naicsCode, naicsLabel, establishments, employees, annualPayrollUsd, state }] } + honest _meta. HONESTY: establishments/employees are integer counts and annualPayrollUsd is annual US dollars (×1000 from the source's $1,000-unit PAYANN); large-negative suppression sentinels map to null — NEVER a negative number and NEVER 0 (a genuine 0 stays 0; note CBP primarily uses noise-infusion + suppression flags, surfaced as reported — see the tool's suppression note); geoId/naicsCode/state are STRINGS (leading zeros survive). CBP returns the COMPLETE geography set for the filter (no pagination) ⇒ totalAvailable = the row count, complete:true. A missing/invalid key ⇒ invalid_input (a 302 to the Missing-Key page); a header-only body ⇒ honest empty (returned:0); a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The key rides ONLY in the &key= query param — never logged or echoed.",
     inputSchema: CensusBusinessPatternsInput,
     handler: (input) => censusEconomic.businessPatterns(input),
+  }),
+  // ━━━ EPA Envirofacts TRI facilities — environmental footprint (1) ━━━ ADR-0059
+  // KEYLESS (data.epa.gov /efservice/tri_facility). ★Two requests: a count
+  // sub-query yields the EXACT total (P1 — TOTALQUERYRESULTS, e.g. VA=1247), then
+  // the data slice. All user values ride as PATH SEGMENTS → each is
+  // charclass-validated + encodeURIComponent-encoded (the load-bearing SSRF guard).
+  defineTool({
+    name: "epa_tri_facilities",
+    description:
+      "Look up EPA Toxics Release Inventory (TRI) reporting facilities by state / facility-name / county — an environmental-footprint / place-of-performance screen (EPA Envirofacts, keyless; data.epa.gov/efservice/tri_facility). Input: `state` (2-letter, e.g. 'VA'), `facilityName` (partial match, e.g. 'chemical'), `county` (partial match) — provide at least `state` OR `facilityName` (an all-empty query is refused); optional `limit` (1–100, default 25), `offset`. Returns { facilities:[{ triFacilityId, facilityName, streetAddress, city, county, state, zip, region, closed }] } + honest _meta. ★HONESTY: totalAvailable is the EXACT count from a SEPARATE count sub-query (…/count/JSON → TOTALQUERYRESULTS), NEVER the returned-rows length; if that count fails, totalAvailable is null + a disclosing note (never length-faked). offset/limit pagination (hasMore = offset+returned < total). `closed` normalizes fac_closed_ind ('0'/'N'→false, '1'/'Y'→true, unrecognized→null — never a fabricated false); addresses/names are null-never-empty-string. A genuine no-match ⇒ honest empty (returned:0); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array/non-JSON ⇒ schema_drift. These are nominal TRI reporters, NOT a compliance/enforcement determination. KEYLESS — no key is sent.",
+    inputSchema: EpaTriFacilitiesInput,
+    handler: (input) => epaEnvirofacts.triFacilities(input),
   }),
   // ━━━ FRED (Federal Reserve Economic Data) — macro context (2) ━━━ ADR-0048
   // ★The server's SECOND KEY-REQUIRED source: FRED has NO keyless tier, so WITHOUT
