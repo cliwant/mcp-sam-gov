@@ -50,6 +50,7 @@ import * as bea from "./bea.js";
 import * as gsaPerdiem from "./gsa-perdiem.js";
 import * as dol from "./dol.js";
 import * as lda from "./lda.js";
+import * as courtlistener from "./courtlistener.js";
 import * as fema from "./fema.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
@@ -3121,6 +3122,52 @@ const LdaSearchFilingsInput = z.object({
         .default(25)
         .describe("Filings per page, 1..25 (the LDA API caps at 25), default 25."),
 });
+// ─── US federal court opinions (www.courtlistener.com) — the litigation lane ──
+// ADR-0055. Federal court decisions (opinions) — the judicial signal no contract/
+// spending/lobbying source carries (e.g. uscfc bid-protest / contract-claim opinions).
+// ★PROVENANCE: CourtListener (Free Law Project, a non-profit), NOT a .gov API —
+// PACER (the .gov source) is paywalled. KEYLESS (anonymous 200); an optional free
+// COURTLISTENER_API_TOKEN only raises the rate limit, riding the Authorization: Token
+// … header ONLY (the lda/socrata app-token lineage). `count` is the REAL total —
+// never results.length; CURSOR pagination (nextCursor extracted from `next`). court/
+// dates charclass-guarded; all filter VALUES ride URLSearchParams; type=o is FIXED.
+const CourtlistenerSearchOpinionsInput = z.object({
+    query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Full-text query (maps to q), e.g. 'bid protest' or a party name. Matches across the opinion text/metadata."),
+    court: z
+        .string()
+        .regex(/^[a-z0-9]+$/)
+        .optional()
+        .describe("A CourtListener court id (lowercase alphanumerics ^[a-z0-9]+$), e.g. 'uscfc' (US Court of Federal Claims — contract claims/bid protests), 'cafc' (Federal Circuit — contract/patent appeals), 'scotus'."),
+    dateFiledAfter: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe("Only opinions filed on/after this ISO date (→ filed_after), e.g. '2020-01-01'. Validated ^\\d{4}-\\d{2}-\\d{2}$."),
+    dateFiledBefore: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe("Only opinions filed on/before this ISO date (→ filed_before), e.g. '2024-12-31'. Validated ^\\d{4}-\\d{2}-\\d{2}$."),
+    natureOfSuit: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Nature-of-suit text — folded into the q full-text query (the v4 opinions search has no verified dedicated filter), so it matches the text anywhere in the document (disclosed in _meta.notes)."),
+    cursor: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Opaque continuation token for the NEXT page — pass back the _meta.nextCursor from the previous response (CourtListener uses CURSOR pagination, not page/offset)."),
+    order: z
+        .string()
+        .min(1)
+        .default("dateFiled desc")
+        .describe("Sort order (maps to order_by), default 'dateFiled desc' (most recent first). E.g. 'dateFiled asc', 'score desc'."),
+});
 // api_key_status takes no input — it is a pure status query over process.env.
 const ApiKeyStatusInput = z.object({});
 // Build a ToolDef whose `handler` is type-checked against the schema's inferred
@@ -4484,6 +4531,20 @@ export const TOOLS = [
         description: "Search US Senate LDA (Lobbying Disclosure Act) filings — who is paid HOW MUCH to lobby WHICH federal agency on WHICH issue (lda.senate.gov/api/v1/filings, KEYLESS — anonymous access works; an optional free LDA_API_KEY only raises the rate limit). All inputs optional: `registrantName` (the lobbying firm/in-house filer), `clientName` (who it's for), `lobbyistName`, `filingYear` (4-digit), `filingType` (short code, e.g. 'Q1'/'RR'/'YE'), `agency` (the federal government_entity lobbied — the B2G signal), `issue` (specific lobbying issues text), `page` (1-based, default 1), `pageSize` (1..25, default 25). Returns { filings:[{ filingUuid, filingType, filingYear, filingPeriod, incomeUsd, expensesUsd, registrant, client, lobbyingActivities:[{ issueCode, description, governmentEntities:[names] }], documentUrl, postedDate, terminationDate }] } + honest _meta. HONESTY: totalAvailable is the API's REAL total match count (the corpus is ~1.95M filings) — NOT the rows on this page; pagination is page-based (pass the next page number when hasMore). incomeUsd/expensesUsd are parsed from the null-or-decimal-string income/expenses — null (not reported) ⇒ null, NEVER 0 (a genuine 0 stays 0); a filing reports EITHER income OR expenses, so the other is typically null. Missing lobbying_activities/government_entities ⇒ empty arrays (never fabricated). A genuine no-match (results:[]) ⇒ honest empty (returned:0); a 400 (bad filter) ⇒ invalid_input surfacing the API's message; a 429 ⇒ rate_limited THROWS (Retry-After honored, never routed around); a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-array results / non-number count ⇒ schema_drift. The optional key rides ONLY in the Authorization: Token header (never the URL/_meta).",
         inputSchema: LdaSearchFilingsInput,
         handler: (input) => lda.searchFilings(input),
+    }),
+    // ━━━ US federal court opinions (www.courtlistener.com) — the litigation lane (1) ━━━ ADR-0055
+    // Federal court decisions — the judicial signal no contract/spending/lobbying source
+    // carries (uscfc bid-protest/contract-claim opinions, cafc contract/patent appeals).
+    // ★PROVENANCE: CourtListener (Free Law Project, a non-profit), NOT a .gov API — PACER
+    // (the .gov source) is paywalled. KEYLESS (anonymous 200); the OPTIONAL free
+    // COURTLISTENER_API_TOKEN only raises the rate limit, riding the Authorization: Token …
+    // header ONLY. ★count is the API's REAL total — never results.length; CURSOR pagination
+    // (nextCursor extracted from `next`, host re-asserted). type=o FIXED.
+    defineTool({
+        name: "courtlistener_search_opinions",
+        description: "Search US FEDERAL COURT OPINIONS (case law / litigation) via CourtListener (www.courtlistener.com/api/rest/v4/search, type=o). ★PROVENANCE: the DATA is US federal court PUBLIC RECORDS, but the API is CourtListener, run by the Free Law Project (a NON-PROFIT) — this is NOT a .gov API; CourtListener republishes these records KEYLESS because the .gov primary source (PACER) is PAYWALLED. KEYLESS (anonymous access works; an optional free COURTLISTENER_API_TOKEN only raises the rate limit; get one at https://www.courtlistener.com/help/api/rest/; call api_key_status to see every source's key requirement). All inputs optional: `query` (full-text → q), `court` (a court id, ^[a-z0-9]+$ — e.g. 'uscfc' US Court of Federal Claims for contract claims/bid protests, 'cafc' Federal Circuit for contract/patent appeals, 'scotus'), `dateFiledAfter`/`dateFiledBefore` (ISO ^\\d{4}-\\d{2}-\\d{2}$ → filed_after/filed_before), `natureOfSuit` (folded into the q query — no verified dedicated filter, disclosed in notes), `cursor` (opaque continuation — pass back _meta.nextCursor), `order` (→ order_by, default 'dateFiled desc'). Returns { opinions:[{ caseName, court, courtId, dateFiled, docketNumber, natureOfSuit, status, judge, citation, absoluteUrl }] } + honest _meta. HONESTY: totalAvailable is the API's REAL `count` (the total match count for the filter) — NOT the rows on this page; pagination is an OPAQUE CURSOR (offset/nextOffset are null/meaningless — pass _meta.nextCursor back as `cursor`; nextCursor:null/hasMore:false = last page). CourtListener v4 stops counting on deep cursor pages (count:null) ⇒ totalAvailable:null is DISCLOSED, never faked as results.length. dateFiled is a date STRING; citation may be an array/object ⇒ flattened to a safe string/string[] (never fabricated); judge/natureOfSuit/docketNumber are null when absent (never ''); absoluteUrl is the full https://www.courtlistener.com link. A genuine no-match (results:[]) ⇒ honest empty (returned:0); a 400 (bad param) ⇒ invalid_input surfacing the API's message; a 429 (unauth throttle) ⇒ rate_limited THROWS (Retry-After honored, never routed around); a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-array results / a count that is neither a number nor null ⇒ schema_drift; an off-host `next` is REFUSED (SSRF). The optional token rides ONLY in the Authorization: Token header (never the URL/_meta).",
+        inputSchema: CourtlistenerSearchOpinionsInput,
+        handler: (input) => courtlistener.searchOpinions(input),
     }),
     // ━━━ Self-service key discovery (1) ━━━
     // KEYLESS. A local status query — reads process.env (+ any .env auto-loaded at
