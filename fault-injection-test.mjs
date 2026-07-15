@@ -7010,6 +7010,38 @@ async function testEdgarHonesty() {
       rLatest.data.concepts[0].points.length === 1 && rLatest.data.concepts[0].points[0].end === "2024-09-28", JSON.stringify(rLatest.data.concepts[0].points));
   });
 
+  // (f3) FUZZY-RESOLVE DISCLOSURE (dogfooding 2026-07-16). resolveCik falls back to a
+  // case-insensitive TITLE SUBSTRING match when there's no exact ticker/CIK. That can
+  // silently resolve to the WRONG filer ("MICRO" → MICROSOFT, not Micron), and the
+  // DATA tools (facts/filings/concept) previously returned that filer's financials as
+  // authoritative with NO caveat (only edgar_lookup_cik disclosed it). Now every data
+  // tool surfaces the substring-match note. NON-VACUITY: dropping the fuzzyNote
+  // injection ⇒ no such note ⇒ RED; and an EXACT ticker must NOT get the note.
+  const microTickers = { "0": { cik_str: 789019, ticker: "MSFT", title: "MICROSOFT CORPORATION" }, "1": { cik_str: 320193, ticker: "AAPL", title: "Apple Inc." } };
+  const msftFacts = { cik: 789019, entityName: "MICROSOFT CORPORATION", facts: { "us-gaap": { Assets: { label: "Assets", units: { USD: [{ end: "2024-06-30", val: 512000000000, accn: "m1", fy: 2024, fp: "FY", form: "10-K", filed: "2024-07-30" }] } } } } };
+  _clearCache();
+  await withFetch((u) => {
+    if (isEdgarTickers(u)) return mockResponse({ status: 200, json: microTickers });
+    if (isEdgarFacts(u)) return mockResponse({ status: 200, json: msftFacts });
+    return failClosed()();
+  }, async () => {
+    const r = await runTool("edgar_company_facts", { cikOrTicker: "MICRO", concepts: ["Assets"], unit: "USD" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41f3 facts {cikOrTicker:'MICRO'} ⇒ resolves to MICROSOFT by TITLE SUBSTRING + a _meta note DISCLOSES the substring-match, names the resolved filer, and says VERIFY (a user wanting Micron is warned) — drop the fuzzyNote injection ⇒ RED",
+      r.data.cik === "0000789019" && m.notes.some((n) => /TITLE SUBSTRING/.test(n) && /MICROSOFT/i.test(n) && /VERIFY/i.test(n)), JSON.stringify(m.notes.filter((n) => /SUBSTRING/i.test(n))));
+  });
+  _clearCache();
+  await withFetch((u) => {
+    if (isEdgarTickers(u)) return mockResponse({ status: 200, json: microTickers });
+    if (isEdgarFacts(u)) return mockResponse({ status: 200, json: msftFacts });
+    return failClosed()();
+  }, async () => {
+    const r = await runTool("edgar_company_facts", { cikOrTicker: "MSFT", concepts: ["Assets"], unit: "USD" }, sam);
+    const m = buildMeta(r.meta);
+    ok("41f3 EXACT ticker 'MSFT' ⇒ NO substring-match note (the disclosure is fuzzy-title-only, not exact) — firing it on an exact match ⇒ RED",
+      r.data.cik === "0000789019" && !m.notes.some((n) => /TITLE SUBSTRING/.test(n)), JSON.stringify(m.notes.filter((n) => /SUBSTRING/i.test(n))));
+  });
+
   // (f2) D1 (W3-5) — a DURATION concept (Revenues) with TWO points sharing the same
   // `end` but DIFFERENT `start` (a 3-month Q4 quarter AND the 12-month FY year) MUST
   // emit `start` on every point (so the quarter and the year stay distinguishable) +

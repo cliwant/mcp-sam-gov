@@ -241,18 +241,44 @@ async function tickerMap(): Promise<TickerEntry[]> {
  */
 async function resolveCik(
   cikOrTicker: string,
-): Promise<{ cik: string; ticker: string | null; title: string | null } | null> {
+): Promise<{
+  cik: string;
+  ticker: string | null;
+  title: string | null;
+  matchedBy: "cik" | "ticker" | "title";
+} | null> {
   const raw = cikOrTicker.trim();
   if (/^(cik)?\s*\d+$/i.test(raw)) {
-    return { cik: padCik(raw), ticker: null, title: null };
+    return { cik: padCik(raw), ticker: null, title: null, matchedBy: "cik" };
   }
   const map = await tickerMap();
   const upper = raw.toUpperCase();
   const exact = map.find((e) => e.ticker.toUpperCase() === upper);
-  if (exact) return { cik: exact.cik, ticker: exact.ticker, title: exact.title };
+  if (exact)
+    return { cik: exact.cik, ticker: exact.ticker, title: exact.title, matchedBy: "ticker" };
   const byName = map.find((e) => e.title.toUpperCase().includes(upper));
-  if (byName) return { cik: byName.cik, ticker: byName.ticker, title: byName.title };
+  if (byName)
+    return { cik: byName.cik, ticker: byName.ticker, title: byName.title, matchedBy: "title" };
   return null;
+}
+
+/**
+ * Disclosure note when resolveCik fell back to a case-insensitive TITLE SUBSTRING
+ * match (not an exact ticker/CIK). A substring silently resolves to the FIRST filer
+ * whose title contains the string — which can be the WRONG company (dogfooding
+ * 2026-07-16: "MICRO" → MICROSOFT, not Micron/AMD/Super Micro), and the data tools
+ * would then return that filer's financials as authoritative with no caveat. The
+ * data-returning tools (facts/filings/concept) MUST surface HOW the id resolved —
+ * exactly as edgar_lookup_cik already does. Returns null for exact ticker/CIK matches.
+ */
+function fuzzyResolveNote(
+  resolved: { title: string | null; cik: string; matchedBy: string },
+  input: string,
+): string | null {
+  if (resolved.matchedBy !== "title") return null;
+  return `Resolved "${input}" to ${
+    resolved.title ?? "this filer"
+  } (CIK ${resolved.cik}) by a case-insensitive TITLE SUBSTRING match, NOT an exact ticker/CIK — a substring can silently match the WRONG company. VERIFY this is the intended filer (use edgar_lookup_cik to list all matches, or pass an exact ticker or 10-digit CIK).`;
 }
 
 // ─── meta helper ──────────────────────────────────────────────────
@@ -549,6 +575,7 @@ export async function companyFilings(args: {
     );
   }
   const cik = resolved.cik;
+  const fuzzyNote = fuzzyResolveNote(resolved, args.cikOrTicker);
   let subm;
   try {
     subm = await fetchSubmissions(cik);
@@ -746,7 +773,7 @@ export async function companyFilings(args: {
         hasMore,
         nextOffset,
       },
-      notes,
+      notes: fuzzyNote ? [fuzzyNote, ...notes] : notes,
     }),
   );
 }
@@ -833,6 +860,7 @@ export async function companyFacts(args: {
     );
   }
   const cik = resolved.cik;
+  const fuzzyNote = fuzzyResolveNote(resolved, args.cikOrTicker);
   let doc: FactsDoc;
   try {
     doc = await fetchFacts(cik);
@@ -964,7 +992,7 @@ export async function companyFacts(args: {
       totalAvailable: concepts.length,
       complete: true,
       filtersApplied: latest ? ["concepts", "unit", "latest"] : ["concepts", "unit"],
-      notes,
+      notes: fuzzyNote ? [fuzzyNote, ...notes] : notes,
     }),
   );
 }
@@ -2771,6 +2799,7 @@ export async function companyConcept(args: {
     );
   }
   const cik = resolved.cik;
+  const fuzzyNote = fuzzyResolveNote(resolved, args.cikOrTicker);
   const taxonomy = args.taxonomy ?? "us-gaap";
   const concept = args.concept;
 
@@ -2873,6 +2902,7 @@ export async function companyConcept(args: {
         complete: true,
         filtersApplied: ["concept", "taxonomy"],
         notes: [
+          ...(fuzzyNote ? [fuzzyNote] : []),
           `The companyconcept document for CIK ${cik} / ${taxonomy} / ${concept} has no reported data points (units{} is empty). This is an honest empty — NOT a value of 0 and NOT an outage.`,
         ],
       }),
@@ -2943,7 +2973,9 @@ export async function companyConcept(args: {
   if (fyFilter !== null) filtersApplied.push("fy");
   if (canonicalOnly) filtersApplied.push("canonicalOnly");
 
-  const notes: string[] = [AMENDMENT_DISCLOSURE_NOTE];
+  const notes: string[] = fuzzyNote
+    ? [fuzzyNote, AMENDMENT_DISCLOSURE_NOTE]
+    : [AMENDMENT_DISCLOSURE_NOTE];
 
   // Unit-filter disclosure (Q2-c) — NEVER hide the other units.
   if (unitFilter !== null) {
