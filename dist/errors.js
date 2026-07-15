@@ -154,6 +154,17 @@ export async function fetchWithRetry(url, init, endpointLabel) {
             // to the generic retryable branch below UNCHANGED.
             if (e instanceof Error &&
                 (e.name === "TimeoutError" || e.name === "AbortError")) {
+                // HONESTY (dogfooding 2026-07-16): if a PRIOR attempt already classified a
+                // real upstream signal — a 429 rate_limit — do NOT mask it as a generic
+                // "timed out". The abort here is a DOWNSTREAM artifact of waiting out that
+                // rate limit (the retry-after wait outran getJson's AbortSignal, so the
+                // next fetch hits the already-aborted signal). Surfacing "timed out" hides
+                // the true cause (rate-limited) AND its remedy (wait / supply an API key)
+                // and drops the retryable+retryAfterSeconds guidance. Prefer the real
+                // rate_limited error. (A pure timeout with no prior 429 keeps "timed out".)
+                if (lastErr && lastErr.kind === "rate_limited") {
+                    throw new ToolErrorCarrier(lastErr);
+                }
                 throw new ToolErrorCarrier({
                     kind: "upstream_unavailable",
                     message: `Request to ${endpointLabel} timed out.`,
