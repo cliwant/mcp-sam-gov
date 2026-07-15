@@ -116,6 +116,7 @@ const SamSearchInput = z.object({
     "Set-aside codes: SBA, 8A, HZS, SDVOSBC, WOSB, EDWOSB, VSA, VSS",
   ),
   limit: z.number().min(1).max(50).optional(),
+  offset: z.number().min(0).optional().describe("Page offset into the result set (default 0)."),
 });
 
 // Pre-solicitation shaping radar (doc 06 §3.1). Surfaces Sources Sought /
@@ -6179,6 +6180,28 @@ function synthesizeDefaultMeta(
   return buildMeta({ source, keylessMode, complete: true, truncated: false });
 }
 
+// Unwrap a tool's inputSchema down to its underlying ZodObject so we can read the
+// set of declared top-level keys. Tools wrap the object in .refine()/.superRefine()
+// (ZodEffects), or occasionally .optional()/.default()/.nullable(), so peel those
+// layers. Returns null if no ZodObject is reachable (then unknown-key rejection is
+// skipped for that tool — fail open, never fail closed on our own introspection).
+function objectSchemaOf(schema: z.ZodTypeAny): z.AnyZodObject | null {
+  let s: unknown = schema;
+  for (let i = 0; i < 20; i++) {
+    const def = (s as { _def?: { typeName?: string } } | undefined)?._def;
+    if (!def) break;
+    const tn = def.typeName;
+    if (tn === "ZodObject") return s as z.AnyZodObject;
+    if (tn === "ZodEffects") { s = (def as { schema?: unknown }).schema; continue; }
+    if (tn === "ZodOptional" || tn === "ZodDefault" || tn === "ZodNullable") {
+      s = (def as { innerType?: unknown }).innerType;
+      continue;
+    }
+    break;
+  }
+  return null;
+}
+
 export async function runTool(
   name: string,
   args: Record<string, unknown>,
@@ -6192,6 +6215,27 @@ export async function runTool(
   // gone (all 52 tools migrated) — an unknown name has no entry and throws.
   const entry = TOOLS.find((t) => t.name === name);
   if (entry?.handler) {
+    // HONESTY (dogfooding 2026-07-15): reject UNKNOWN top-level input keys LOUD
+    // instead of Zod's default silent-strip. A misspelled filter (naicsCode↔naics,
+    // keyword↔query) was otherwise dropped and the tool scanned the WHOLE corpus,
+    // returning an authoritative-looking WRONG answer with no error. We name the
+    // unknown key(s) and list the valid ones so the mistake self-corrects. Skip
+    // when the schema intentionally accepts extras (unknownKeys==="passthrough").
+    const obj = objectSchemaOf(entry.inputSchema);
+    if (obj && obj._def.unknownKeys !== "passthrough" && args && typeof args === "object") {
+      const known = new Set(Object.keys(obj.shape));
+      const unknown = Object.keys(args).filter((k) => !known.has(k));
+      if (unknown.length > 0) {
+        throw new ToolErrorCarrier({
+          kind: "invalid_input",
+          message:
+            `Unknown input ${unknown.length > 1 ? "keys" : "key"} for ${name}: ` +
+            `${unknown.map((k) => `'${k}'`).join(", ")}. ` +
+            `Valid keys: ${[...known].sort().join(", ")}.`,
+          retryable: false,
+        });
+      }
+    }
     const input = entry.inputSchema.parse(args);
     return await entry.handler(input, { sam });
   }
