@@ -17707,6 +17707,7 @@ async function main() {
   await testApiKeyStatus();
   await testLoadDotEnv();
   await testToolDescriptionDrift();
+  await testApiKeysDoc();
 
   // Prove the harness bites.
   await selfCheck();
@@ -17750,6 +17751,32 @@ async function testToolDescriptionDrift() {
   );
   // (3) non-vacuity: the guard actually inspects real, non-empty descriptions.
   ok("desc-drift (non-vacuity) scanned ≥100 non-empty tool descriptions", descs.filter((t) => t.d.length > 40).length >= 100, String(descs.length));
+}
+
+// §keys-doc: API_KEYS.md drift guard. The batch-acquisition doc is GENERATED from
+// KEY_REGISTRY (scripts/gen-api-keys-md.mjs). A hand-edited or stale doc drifts the
+// moment a key is added — the exact class this project keeps fixing. This asserts the
+// committed API_KEYS.md byte-equals a fresh render of the current registry, so adding a
+// key FORCES `node scripts/gen-api-keys-md.mjs`. NON-VACUOUS: change the registry (or
+// the doc) without regenerating ⇒ RED. (Line endings normalized — git may store CRLF.)
+async function testApiKeysDoc() {
+  section("§keys-doc API_KEYS.md must stay generated-in-sync with KEY_REGISTRY (drift guard)");
+  const { renderApiKeysMd } = await import("./scripts/gen-api-keys-md.mjs");
+  const { readFileSync: rf } = await import("node:fs");
+  const norm = (s) => s.replace(/\r\n/g, "\n");
+  const expected = norm(renderApiKeysMd(KEY_REGISTRY));
+  let committed = "";
+  try { committed = norm(rf("API_KEYS.md", "utf8")); } catch { committed = "(missing)"; }
+  ok(
+    "keys-doc API_KEYS.md byte-equals the render of the CURRENT KEY_REGISTRY (add/change a key ⇒ run `node scripts/gen-api-keys-md.mjs`) ⇒ leave it stale ⇒ RED",
+    committed === expected,
+    committed === expected ? "in-sync" : "DRIFT (regenerate API_KEYS.md)",
+  );
+  ok(
+    "keys-doc (non-vacuity) the render is a real non-empty doc listing required + optional keys",
+    expected.length > 800 && /## Required keys \(\d+\)/.test(expected) && /## Optional keys \(\d+\)/.test(expected) && KEY_REGISTRY.every((k) => expected.includes(k.envVar)),
+    String(expected.length),
+  );
 }
 
 // §keys-A: apiKeyStatus() — the CONFIG-discovery surface. OFFLINE (no fetch): it
