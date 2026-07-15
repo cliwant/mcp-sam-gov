@@ -151,7 +151,7 @@ export function buildSearch(f) {
  * retryable upstream_unavailable; a redirect TypeError ⇒ schema_drift (never a
  * fake-empty). `label` is host+path only.
  */
-async function fetchOpenfda(url, label) {
+export async function fetchOpenfda(url, label) {
     const built = new URL(url);
     if (built.hostname !== OPENFDA_HOST || built.protocol !== "https:") {
         throw new ToolErrorCarrier({
@@ -190,7 +190,7 @@ async function fetchOpenfda(url, label) {
     }
 }
 /** Best-effort read of an openFDA error body `{error:{code,message}}`. null on any failure. */
-async function readOpenfdaError(res) {
+export async function readOpenfdaError(res) {
     try {
         const body = (await res.json());
         return {

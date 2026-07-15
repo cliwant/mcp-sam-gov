@@ -181,6 +181,7 @@ import { readFileSync as censusReadFile } from "node:fs";
 import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num as cbpNum } from "./dist/census-economic.js";
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
 import { enforcement as openfdaEnforcement, openfdaApiKey, buildSearch as openfdaBuildSearch, luceneQuote as openfdaQuote, OPENFDA_HOST } from "./dist/openfda.js";
+import { deviceClearances as openfdaDeviceClearances, buildDeviceSearch as openfdaBuildDeviceSearch } from "./dist/openfda-device.js";
 import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum } from "./dist/bea.js";
 import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
 import { dolApiKey } from "./dist/dol.js";
@@ -16873,6 +16874,193 @@ async function testOpenfdaEnforcement() {
   });
 }
 
+// §55-openfda-device: openFDA 510(k) DEVICE CLEARANCES (api.fda.gov /device/510k.json,
+// ADR-0056 — the medical-device regulatory lane). SAME source/envelope/crux as
+// openfda_enforcement (reuses openfda.ts's fetchOpenfda/readOpenfdaError/luceneQuote).
+// NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the mutation
+// that turns it RED:
+//   [P1]       meta.results.total 175507 + 2 rows ⇒ totalAvailable:175507 (NOT 2),
+//              hasMore, skip-page offset ⇒ totalAvailable=results.length ⇒ RED.
+//   [★P2 crux] a 404 {error:{code:"NOT_FOUND"}} ⇒ honest empty (returned:0, total:0),
+//              NOT thrown; a 400 ⇒ invalid_input surfacing the message; a 503 ⇒
+//              upstream_unavailable; a 200 non-JSON ⇒ schema_drift ⇒ revert ⇒ RED.
+//   [P3]       decision_date "1982-06-29" preserved as a STRING; k_number/clearance_type
+//              surfaced; a "" field ⇒ null (null-never-empty-string) ⇒ RED.
+//   [search]   applicant+productCode ⇒ the correct escaped `search=`; a Lucene special
+//              is backslash-escaped (structured-only; no raw passthrough) ⇒ RED.
+//   [K-test]   OPENFDA_API_KEY=SECRET ⇒ &api_key= PRESENT in the fetch URL but ABSENT
+//              from the serialized {data,_meta} + label + notes ⇒ RED.
+//   [P4/SSRF]  meta.results/results missing ⇒ drift; fixed host; state charclass.
+const OPENFDA_DEVICE_RE = /api\.fda\.gov\/device\/510k\.json/;
+const isOpenfdaDevice = (u) => OPENFDA_DEVICE_RE.test(u);
+const openfdaDeviceMock = (body, status = 200) => (u) => (isOpenfdaDevice(u) ? mockResponse({ status, json: body }) : failClosed()());
+const openfdaDeviceUrl = (calls) => calls.find((x) => isOpenfdaDevice(x.url))?.url;
+const openfdaDeviceQuery = (calls) => new URL(openfdaDeviceUrl(calls)).searchParams;
+const openfdaDeviceNonJson = (u) => (isOpenfdaDevice(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" }
+  : failClosed()());
+// The openFDA envelope: { meta: { results: { skip, limit, total } }, results: [...] }.
+const openfdaDeviceBody = (total, rows, skip = 0, limit = 25) => ({ meta: { disclaimer: "Do not rely on openFDA to make decisions regarding medical care.", results: { skip, limit, total } }, results: rows });
+const openfda510kRow = (over = {}) => ({
+  applicant: "Medtronic Inc",
+  device_name: "Cardiac Ablation Catheter",
+  k_number: "K123456",
+  decision_date: "1982-06-29",
+  decision_code: "SESE",
+  decision_description: "Substantially Equivalent",
+  clearance_type: "Traditional",
+  product_code: "DXN",
+  advisory_committee: "CV",
+  advisory_committee_description: "Cardiovascular",
+  state: "MN",
+  city: "Minneapolis",
+  ...over,
+});
+
+async function testOpenfdaDeviceClearances() {
+  section("§55-openfda-device. openFDA 510(k) device clearances (ADR-0056 — medical-device regulatory, KEYLESS + OPTIONAL rate-limit key; reuses the openfda.ts fetch/error/escape helpers) — meta.results.total P1 + 404-NOT_FOUND-as-empty P2 crux + date-as-string P3 + escaped search-assembly + optional-key K-test + drift/SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  const KEY = "SECRET-OPENFDA-DEVICE-do-not-leak-abc123";
+
+  // ── keyless by default: NO OPENFDA_API_KEY ⇒ still FETCHES (never throws for a
+  //    missing key) + NO api_key param in the URL. ──
+  await withOpenfdaKey(undefined, async () => {
+    await withFetch(openfdaDeviceMock(openfdaDeviceBody(175507, [openfda510kRow(), openfda510kRow({ applicant: "Medtronic USA" })])), async (calls) => {
+      const r = await runTool("openfda_device_clearances", { applicant: "medtronic", limit: 2 }, sam);
+      const m = buildMeta(r.meta);
+      const q = openfdaDeviceQuery(calls);
+      ok("55-openfda-device keyless: UNSET OPENFDA_API_KEY still FETCHES (a missing key is NOT an error — the tool is keyless) ⇒ make the missing key throw ⇒ RED",
+        r.data.clearances.length === 2 && openfdaDeviceUrl(calls) !== undefined, JSON.stringify({ n: r.data.clearances.length }));
+      ok("55-openfda-device keyless: the built URL carries NO api_key param (keyless mode) ⇒ send an empty api_key= when unset ⇒ RED",
+        q.get("api_key") === null && m.keylessMode === true && m.notes.some((n) => /keyless/i.test(n)), JSON.stringify({ api_key: q.get("api_key"), keyless: m.keylessMode }));
+      ok("55-openfda-device the request is to api.fda.gov/device/510k.json over https (fixed host + 510k path) + search assembled from applicant",
+        new URL(openfdaDeviceUrl(calls)).hostname === "api.fda.gov" && new URL(openfdaDeviceUrl(calls)).protocol === "https:" && /\/device\/510k\.json/.test(openfdaDeviceUrl(calls)) && q.get("search") === 'applicant:"medtronic"', openfdaDeviceUrl(calls));
+
+      // ── [P1] total 175507 + 2 rows @ skip 0 ⇒ totalAvailable:175507 (the REAL total,
+      //    NOT the 2 returned), hasMore:true, nextOffset:2, truncated:true. ──
+      ok("55-openfda-device-P1 meta.results.total 175507 + 2 rows @ skip 0 ⇒ returned:2 but totalAvailable:175507 (openFDA's EXACT total, NOT results.length), hasMore:true, nextOffset:2, truncated:true, complete:false ⇒ set totalAvailable=results.length ⇒ RED",
+        m.returned === 2 && m.totalAvailable === 175507 && m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.truncated === true && m.complete === false, JSON.stringify({ ret: m.returned, ta: m.totalAvailable, hm: m.pagination?.hasMore, no: m.pagination?.nextOffset }));
+
+      // ── [P3] decision_date preserved as a STRING; scalars surfaced. ──
+      const row0 = r.data.clearances[0];
+      ok("55-openfda-device-P3 decision_date '1982-06-29' preserved as the STRING '1982-06-29' (NOT numerically coerced) + kNumber/clearanceType/productCode/advisoryCommittee surfaced via str ⇒ date-coerce or drop a field ⇒ RED",
+        row0.decisionDate === "1982-06-29" && typeof row0.decisionDate === "string" && row0.kNumber === "K123456" && row0.clearanceType === "Traditional" && row0.productCode === "DXN" && row0.advisoryCommittee === "CV" && row0.decisionDescription === "Substantially Equivalent" && row0.applicant === "Medtronic Inc" && row0.deviceName === "Cardiac Ablation Catheter", JSON.stringify(row0));
+    });
+
+    // ── [P3] a "" / whitespace / null field ⇒ null (null-never-empty-string), never "". ──
+    await withFetch(openfdaDeviceMock(openfdaDeviceBody(1, [openfda510kRow({ device_name: "", state: "  ", advisory_committee: null })])), async () => {
+      const r = await runTool("openfda_device_clearances", {}, sam);
+      const row = r.data.clearances[0];
+      ok("55-openfda-device-P3 a '' / whitespace / null field ⇒ null (null-never-empty-string via str) ⇒ surface '' as an empty string ⇒ RED",
+        row.deviceName === null && row.state === null && row.advisoryCommittee === null, JSON.stringify({ deviceName: row.deviceName, state: row.state, ac: row.advisoryCommittee }));
+    });
+
+    // ── [P1] a skip-page: skip 25 + total 175507 ⇒ pagination.offset:25. ──
+    await withFetch(openfdaDeviceMock(openfdaDeviceBody(175507, [openfda510kRow()], 25, 25)), async (calls) => {
+      const r = await runTool("openfda_device_clearances", { applicant: "medtronic", skip: 25, limit: 25 }, sam);
+      const m = buildMeta(r.meta);
+      const q = openfdaDeviceQuery(calls);
+      ok("55-openfda-device-P1 skip:25 ⇒ the URL carries skip=25 & the pagination offset is 25 (skip/limit offset pagination) ⇒ ignore skip ⇒ RED",
+        q.get("skip") === "25" && q.get("limit") === "25" && m.pagination.offset === 25, JSON.stringify({ skip: q.get("skip"), offset: m.pagination?.offset }));
+    });
+
+    // ── [★P2 crux] a 404 {error:{code:"NOT_FOUND"}} ⇒ HONEST EMPTY (returned:0, total:0),
+    //    NOT thrown, NOT not_found. Reverting this handling ⇒ RED. ──
+    await withFetch(openfdaDeviceMock({ error: { code: "NOT_FOUND", message: "No matches found!" } }, 404), async () => {
+      const r = await runTool("openfda_device_clearances", { applicant: "zzznotarealapplicant" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-openfda-device-P2 ★CRUX a 404 with body {error:{code:'NOT_FOUND'}} (a no-match query) ⇒ clearances:[], returned:0, totalAvailable:0, complete:true — an HONEST EMPTY, NOT thrown, NOT not_found ⇒ let the 404 throw (revert the NOT_FOUND-as-empty reclassify) ⇒ RED",
+        r.data.clearances.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.notes.some((n) => /no.match|NOT_FOUND/i.test(n)), JSON.stringify({ n: r.data.clearances.length, ta: m.totalAvailable, c: m.complete }));
+    });
+
+    // ── [P2] a NON-NOT_FOUND 404 ⇒ not_found THROW (never a fake-empty). ──
+    await withFetch(openfdaDeviceMock({ error: { code: "SERVER_ERROR", message: "boom" } }, 404), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_device_clearances", {}, sam));
+      ok("55-openfda-device-P2 a 404 whose body code is NOT 'NOT_FOUND' ⇒ not_found THROW (only the NOT_FOUND no-match idiom is an honest empty; a foreign 404 is never faked empty) ⇒ treat every 404 as empty ⇒ RED",
+        threw && toToolError(error).kind === "not_found", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P2] a 400 syntax error carrying error.message ⇒ invalid_input SURFACING it. ──
+    await withFetch(openfdaDeviceMock({ error: { code: "BAD_REQUEST", message: "Unknown field name query." } }, 400), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_device_clearances", { applicant: "x" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55-openfda-device-P2 a 400 with {error:{message:'Unknown field name…'}} ⇒ invalid_input SURFACING the openFDA message (a caller-fixable request, never a fake-empty, never not_found) ⇒ swallow the 400 as empty ⇒ RED",
+        threw && te.kind === "invalid_input" && /Unknown field name/.test(te.message), JSON.stringify({ kind: te?.kind, msg: te?.message?.slice(0, 60) }));
+    });
+
+    // ── [P2] a 503 ⇒ upstream_unavailable (a DOWN endpoint is NEVER a returned:0). ──
+    await withFetch(openfdaDeviceMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_device_clearances", {}, sam));
+      ok("55-openfda-device-P2 503 ⇒ upstream_unavailable THROW (a down openFDA is never an empty result; distinct from the 404 no-match honest empty)",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P4] a 200 non-JSON ⇒ schema_drift (never a fabricated empty). ──
+    await withFetch(openfdaDeviceNonJson, async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_device_clearances", {}, sam));
+      ok("55-openfda-device-P4 a 200 non-JSON body (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P4] meta.results absent, and results non-array ⇒ schema_drift. ──
+    await withFetch(openfdaDeviceMock({ meta: { disclaimer: "x" }, results: [] }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_device_clearances", {}, sam));
+      ok("55-openfda-device-P4 meta.results (the total carrier) missing ⇒ schema_drift (the total contract broke; never a fabricated empty) ⇒ trust a missing total carrier ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(openfdaDeviceMock({ meta: { results: { skip: 0, limit: 25, total: 5 } }, results: "notanarray" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_device_clearances", {}, sam));
+      ok("55-openfda-device-P4 results is a string (non-array) ⇒ schema_drift ⇒ trust a non-array ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [SSRF] state 'ABC' / '1' ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch). ──
+    for (const [args, label] of [
+      [{ state: "ABC" }, "state 'ABC' (not 2-letter)"],
+      [{ state: "1" }, "state '1' (non-alpha)"],
+    ]) {
+      await withFetch(failClosed(), async (calls) => {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool("openfda_device_clearances", args, sam));
+        ok(`55-openfda-device-ssrf ${label} ⇒ invalid_input, 0 fetch (the charclass re-guard PRE-fetch — a value never touches the fixed host/path) ⇒ widen the validation ⇒ RED`,
+          threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+      });
+    }
+  });
+
+  // ── [search-assembly] the DIRECT buildDeviceSearch/luceneQuote seam: applicant+productCode
+  //    ⇒ the correct escaped `search=` string; a Lucene special is backslash-escaped. ──
+  ok("55-openfda-device-search buildDeviceSearch({applicant,productCode}) ⇒ 'applicant:\"medtronic\" AND product_code:\"DXN\"' (structured→escaped Lucene, joined by AND) ⇒ change the field map or drop the quoting ⇒ RED",
+    openfdaBuildDeviceSearch({ applicant: "medtronic", productCode: "DXN" }) === 'applicant:"medtronic" AND product_code:"DXN"', openfdaBuildDeviceSearch({ applicant: "medtronic", productCode: "DXN" }));
+  ok("55-openfda-device-search a Lucene special (a '\"' in the applicant value) is BACKSLASH-escaped inside the quoted term (injection-safe; the value can never break out of the quotes) ⇒ drop the escape ⇒ RED",
+    /applicant:"john\\"son"/.test(openfdaBuildDeviceSearch({ applicant: 'john"son' })), JSON.stringify(openfdaBuildDeviceSearch({ applicant: 'john"son' })));
+  ok("55-openfda-device-search NO filters ⇒ buildDeviceSearch returns '' (openFDA then returns the whole collection — no fabricated clause)",
+    openfdaBuildDeviceSearch({}) === "", JSON.stringify(openfdaBuildDeviceSearch({})));
+
+  // ── [K-test] WITH OPENFDA_API_KEY set: the key rides &api_key= (PRESENT in the fetch URL —
+  //    the inherent openFDA query-key nuance) but is ABSENT from the serialized {data,_meta}
+  //    + notes + label. ──
+  await withOpenfdaKey(KEY, async () => {
+    await withFetch(openfdaDeviceMock(openfdaDeviceBody(175507, [openfda510kRow()])), async (calls) => {
+      const r = await runTool("openfda_device_clearances", { applicant: "medtronic" }, sam);
+      const m = buildMeta(r.meta);
+      const q = openfdaDeviceQuery(calls);
+      ok("55-openfda-device-Ktest WITH OPENFDA_API_KEY set the key rides &api_key=<value> in the fetch URL (the ONLY carrier — openFDA has no header option; the query-key is INHERENT) ⇒ move the key elsewhere ⇒ RED",
+        q.get("api_key") === KEY, JSON.stringify({ api_key: q.get("api_key") }));
+      const serialized = JSON.stringify({ data: r.data, _meta: m });
+      ok("55-openfda-device-Ktest ★the key value is ABSENT from the serialized {data,_meta} + notes (source names the MODE only, never the value) ⇒ leak the key into _meta.source or a note ⇒ RED",
+        !serialized.includes(KEY) && /OPENFDA_API_KEY/.test(m.source) && m.notes.every((n) => !n.includes(KEY)), JSON.stringify({ leaked: serialized.includes(KEY), source: m.source }));
+    });
+    // ── [K-test] the label (ToolError.upstreamEndpoint) is host+path ONLY — no token. ──
+    await withFetch(openfdaDeviceMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_device_clearances", { applicant: "medtronic" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55-openfda-device-Ktest the ToolError.upstreamEndpoint (label) is host+path ONLY ('openfda:/device/510k') — the key NEVER reaches the label ⇒ put the query (with the key) into the label ⇒ RED",
+        threw && te.upstreamEndpoint === "openfda:/device/510k" && !String(te.upstreamEndpoint).includes(KEY), JSON.stringify({ ep: te?.upstreamEndpoint }));
+    });
+  });
+}
+
 // §55d: BEA Regional Economic Accounts (apps.bea.gov/api/data, ADR-0051, Wave-4
 // source #3 — regional GDP/income AND the server's THIRD key-required source).
 // NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the
@@ -18155,6 +18343,7 @@ async function main() {
   await testCensusBusinessPatterns();
   await testFredHonesty();
   await testOpenfdaEnforcement();
+  await testOpenfdaDeviceClearances();
   await testBeaRegionalData();
   await testDolDataApi();
   await testLdaSearchFilings();
