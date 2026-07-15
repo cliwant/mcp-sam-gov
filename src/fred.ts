@@ -8,7 +8,7 @@
  *   FRED has NO keyless tier: every request needs `&api_key=`, and a missing/bad
  *   key returns HTTP 400 `{error_code, error_message}`. So, honestly: with NO
  *   `FRED_API_KEY` these two tools THROW an `invalid_input` config error BEFORE any
- *   fetch (never a fake-empty, never a keyless-pretend). The other 112 tools stay
+ *   fetch (never a fake-empty, never a keyless-pretend). The other tools stay
  *   keyless — this key is scoped to this one source. (Contrast the OPTIONAL keys of
  *   datagov/bls/nvd, which lift a tier but are not required.)
  *
