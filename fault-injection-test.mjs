@@ -5735,6 +5735,31 @@ async function testSubAgencyAwardsNull() {
         JSON.stringify(res.meta.filtersApplied));
     },
   );
+  // AGENCY-CODE GUARD (dogfooding 2026-07-16): passing a toptier CODE ("036") where
+  // the canonical NAME is required silently matched NOTHING on spending_by_category
+  // → a confidently-wrong empty ("VA had $0 subagency spending" when VA has $66.87B).
+  // The sibling usas_get_agency_* tools take a toptierCode, so a code here is a
+  // natural mistake. Now it fails LOUD (invalid_input naming the code + pointing to
+  // usas_lookup_agency), BEFORE any fetch. NON-VACUITY: reverting awardingAgencyFilter's
+  // numeric guard ⇒ it builds a name-filter from "036", fetches (failClosed leaks) or
+  // returns a silent empty ⇒ kind ≠ invalid_input ⇒ RED.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => searchSubAgencySpending({ agency: "036", fiscalYear: 2024 }));
+    ok("27-code numeric agency '036' (a toptier CODE, not a NAME) ⇒ invalid_input naming the code + pointing to usas_lookup_agency, 0 fetch (never a silent false-empty)",
+      threw && error?.toolError?.kind === "invalid_input" && /036/.test(error?.toolError?.message ?? "") && /toptier|usas_lookup_agency|list_toptier/i.test(error?.toolError?.message ?? "") && calls.length === before,
+      JSON.stringify({ kind: threw ? error?.toolError?.kind : "no-throw", added: calls.length - before }));
+  });
+  // NON-VACUITY companion: a canonical NAME passes the guard and reaches the fetch
+  // (the guard is code-shaped-only, never rejects a real name).
+  await withFetch(
+    (u) => (/spending_by_category\/awarding_subagency/.test(u) ? mockResponse({ status: 200, json: { results: [{ name: "Department of the Army", amount: 1e9 }], page_metadata: { hasNext: false } } }) : failClosed()()),
+    async () => {
+      const res = await searchSubAgencySpending({ agency: "Department of Defense", fiscalYear: 2024 });
+      ok("27-code a canonical NAME ('Department of Defense') PASSES the numeric guard and reaches the endpoint (guard is code-only, not over-broad)",
+        res.data.subAgencies.length === 1 && res.data.subAgencies[0].name === "Department of the Army", JSON.stringify(res.data.subAgencies.map((s) => s.name)));
+    },
+  );
 }
 
 // far_clause_lookup future/uncodified asOfDate (found via C63 dogfood: a real agent
