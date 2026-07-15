@@ -20,8 +20,8 @@
  * `process.env.<NAME>` — DATA_GOV_API_KEY (datagovKey.ts), SAM_GOV_API_KEY
  * (server.ts), BLS_API_KEY (bls.ts), NVD_API_KEY (nvd.ts), SOCRATA_APP_TOKEN
  * (socrata.ts), CENSUS_API_KEY (census-economic.ts), FRED_API_KEY (fred.ts),
- * BEA_API_KEY (bea.ts), DOL_API_KEY (dol.ts), LDA_API_KEY (lda.ts). No invented
- * keys, sources, or signup URLs.
+ * BEA_API_KEY (bea.ts), DOL_API_KEY (dol.ts), LDA_API_KEY (lda.ts),
+ * OPENFDA_API_KEY (openfda.ts). No invented keys, sources, or signup URLs.
  */
 
 import { readFileSync } from "node:fs";
@@ -44,11 +44,11 @@ export type KeyRegistryEntry = {
 };
 
 /**
- * The 10 keys the server reads — code-grounded, no inventions.
+ * The 11 keys the server reads — code-grounded, no inventions.
  *
  * REQUIRED (4): CENSUS_API_KEY, FRED_API_KEY, BEA_API_KEY, DOL_API_KEY — those sources
  * have no keyless tier, so the tool throws without them (DOL_API_KEY gates ONLY
- * dol_get_dataset; the DOL catalog, dol_list_datasets, is keyless). OPTIONAL (6):
+ * dol_get_dataset; the DOL catalog, dol_list_datasets, is keyless). OPTIONAL (7):
  * everything else works keyless; a key only raises a rate limit or unlocks a single filter.
  */
 export const KEY_REGISTRY: readonly KeyRegistryEntry[] = [
@@ -144,6 +144,15 @@ export const KEY_REGISTRY: readonly KeyRegistryEntry[] = [
     unlocks:
       "higher LDA API rate limits (anonymous access already works without it)",
     note: "Keyless by default (anonymous 200); a free token only raises the rate limit.",
+  },
+  {
+    envVar: "OPENFDA_API_KEY",
+    sources: ["openFDA enforcement (openfda_enforcement)"],
+    required: false,
+    signupUrl: "https://open.fda.gov/apis/authentication/",
+    unlocks:
+      "higher openFDA rate limits (keyless works without it — ~1000/day)",
+    note: "Keyless by default; a free key raises the rate limit.",
   },
 ] as const;
 

@@ -59,6 +59,7 @@ import * as nppes from "./nppes.js";
 import * as cms from "./cms.js";
 import * as fac from "./fac.js";
 import * as usitc from "./usitc.js";
+import * as openfda from "./openfda.js";
 import { fetchAttachmentText } from "./attachments.js";
 import * as keys from "./keys.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
@@ -2880,6 +2881,60 @@ const FredSeriesObservationsInput = z.object({
         .optional()
         .describe("Observation date order: 'asc' (oldest first, FRED default) or 'desc' (newest first)."),
 });
+// ─── openFDA recall/enforcement (api.fda.gov) — KEYLESS + OPTIONAL rate-limit key ──
+// ADR-0054. Drug/device/food recall enforcement records. Structured filters ONLY
+// (no raw Lucene passthrough — injection-safe); the tool assembles the openFDA
+// `search=` string with proper escaping. totalAvailable = meta.results.total (P1);
+// a no-match query (openFDA HTTP 404 NOT_FOUND) ⇒ an honest empty (P2). An OPTIONAL
+// OPENFDA_API_KEY only raises the rate limit (keyless works ~1000/day).
+const OpenfdaEnforcementInput = z.object({
+    category: z
+        .enum(["drug", "device", "food"])
+        .optional()
+        .describe("The recall category (default 'drug'): 'drug', 'device', or 'food'. Selects the openFDA /{category}/enforcement endpoint."),
+    firm: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Recalling firm name filter (→ recalling_firm), e.g. 'pfizer'. Matched as an escaped Lucene phrase."),
+    product: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Product description filter (→ product_description), e.g. 'insulin'. Matched as an escaped Lucene phrase."),
+    reason: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Reason-for-recall filter (→ reason_for_recall), e.g. 'contamination'. Matched as an escaped Lucene phrase."),
+    classification: z
+        .enum(["Class I", "Class II", "Class III"])
+        .optional()
+        .describe("FDA recall classification filter: 'Class I' (most serious), 'Class II', or 'Class III'."),
+    status: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Recall status filter (→ status), e.g. 'Ongoing', 'Terminated', 'Completed'."),
+    state: z
+        .string()
+        .regex(/^[A-Za-z]{2}$/)
+        .optional()
+        .describe("2-letter US state/territory postal code filter (→ state), e.g. 'CA'. Validated ^[A-Za-z]{2}$."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Max recall records to return (default 25, max 100). Offset-paginated via skip."),
+    skip: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+});
 // ─── BEA Regional Economic Accounts (apps.bea.gov) — the THIRD key-required source ──
 // ADR-0051. County/state/MSA GDP-by-industry (CAGDP2/SAGDP2N) + personal income
 // (CAINC1/SAINC1) — the regional/sub-national place-of-performance lane. REQUIRES a
@@ -4357,6 +4412,19 @@ export const TOOLS = [
         description: "Fetch a FRED series' time series of date/value observations (FRED /fred/series/observations; api.stlouisfed.org). ★REQUIRES a free FRED_API_KEY (FRED has NO keyless tier — without it this tool THROWS an honest config error; get one at https://fred.stlouisfed.org/docs/api/api_key.html). Input: `seriesId` (required, e.g. 'GDP', 'CPIAUCSL', 'UNRATE', 'DGS10', 'PPIACO'; discover with fred_search_series), optional `startDate`/`endDate` (YYYY-MM-DD), `limit` (default 100, max 100000), `offset`, `sortOrder` (asc|desc). Returns { observations:[{ date, value }] } + honest _meta. ★MISSING-VALUE HONESTY (the crux): FRED encodes a missing observation as the literal '.', which maps to value:null (missing) — NEVER 0; a genuine reported 0 is preserved as 0. HONESTY: totalAvailable is FRED's EXACT `count` (offset pagination via hasMore/nextOffset — never fabricated); a 400 (bad seriesId / missing key) ⇒ invalid_input CARRYING FRED's error_message (never a fake empty); a genuine empty ⇒ honest empty; a 5xx ⇒ THROWS; a 200 non-JSON / non-array `observations` ⇒ schema_drift. seriesId is charclass-validated (^[A-Za-z0-9._-]+$) and dates are YYYY-MM-DD; the key rides ONLY in the &api_key= query param.",
         inputSchema: FredSeriesObservationsInput,
         handler: (input) => fred.seriesObservations(input),
+    }),
+    // ━━━ openFDA recall/enforcement (api.fda.gov) — product-safety recalls (1) ━━━ ADR-0054
+    // KEYLESS with an OPTIONAL OPENFDA_API_KEY (raises the rate limit; keyless works
+    // ~1000/day — it NEVER throws for a missing key, unlike the key-REQUIRED sources).
+    // Structured filters ONLY (no raw Lucene passthrough — the tool assembles + escapes
+    // the search= string, injection-safe). ★P1: totalAvailable = meta.results.total
+    // (EXACT). ★P2 crux: a no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an honest
+    // empty, never a throw. The optional key rides &api_key= ONLY.
+    defineTool({
+        name: "openfda_enforcement",
+        description: "Search openFDA recall/enforcement records — drug/device/food product recalls with the recalling firm, product, reason, FDA classification (Class I/II/III), status, and geography (openFDA /{category}/enforcement.json; api.fda.gov). KEYLESS (an OPTIONAL free OPENFDA_API_KEY only RAISES the rate limit — keyless works at ~1000 requests/day; it NEVER throws for a missing key; get one at https://open.fda.gov/apis/authentication/; call api_key_status to see every source's key requirement). Input: `category` (drug|device|food, default drug), and STRUCTURED filters — `firm` (→recalling_firm), `product` (→product_description), `reason` (→reason_for_recall), `classification` (Class I|II|III), `status` (e.g. Ongoing/Terminated/Completed), `state` (2-letter, e.g. 'CA') — the tool safely assembles + escapes these into the openFDA search= Lucene string (NO raw passthrough — injection-safe), plus `limit` (1..100, default 25) and `skip` (offset ≥0). Returns { recalls:[{ recallingFirm, productDescription, reasonForRecall, classification, status, state, city, recallInitiationDate, recallNumber, voluntaryMandated, distributionPattern }] } + honest _meta. HONESTY: totalAvailable is openFDA's EXACT meta.results.total (skip/limit pagination via hasMore/nextOffset — never results.length); every scalar (dates included, recall_initiation_date is a YYYYMMDD string) is null-never-empty-string. ★A no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an HONEST EMPTY (returned:0, totalAvailable:0), NOT an error; a 400 syntax error ⇒ invalid_input surfacing openFDA's message; a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The optional key rides ONLY the &api_key= query param — never logged or echoed.",
+        inputSchema: OpenfdaEnforcementInput,
+        handler: (input) => openfda.enforcement(input),
     }),
     // ━━━ BEA Regional Economic Accounts (apps.bea.gov) — regional GDP/income (1) ━━━ ADR-0051
     // ★The server's THIRD KEY-REQUIRED source: the BEA Data API has NO keyless tier, so

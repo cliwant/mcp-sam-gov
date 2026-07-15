@@ -3,7 +3,7 @@
  *
  * Why this exists
  * ----------------
- * The server rides 31 federal sources. MOST are fully keyless. But the set of
+ * The server rides dozens of federal data sources. MOST are fully keyless. But the set of
  * *optional* keys (raise a rate limit, unlock one filter) plus the four *required*
  * keys (Census business-patterns, FRED, BEA Regional, DOL data) has grown to the point where a user — or
  * the AI driving the server — cannot tell, without reading source code:
@@ -20,8 +20,8 @@
  * `process.env.<NAME>` — DATA_GOV_API_KEY (datagovKey.ts), SAM_GOV_API_KEY
  * (server.ts), BLS_API_KEY (bls.ts), NVD_API_KEY (nvd.ts), SOCRATA_APP_TOKEN
  * (socrata.ts), CENSUS_API_KEY (census-economic.ts), FRED_API_KEY (fred.ts),
- * BEA_API_KEY (bea.ts), DOL_API_KEY (dol.ts), LDA_API_KEY (lda.ts). No invented
- * keys, sources, or signup URLs.
+ * BEA_API_KEY (bea.ts), DOL_API_KEY (dol.ts), LDA_API_KEY (lda.ts),
+ * OPENFDA_API_KEY (openfda.ts). No invented keys, sources, or signup URLs.
  */
 /** One registry entry describing a single API key the server can use. */
 export type KeyRegistryEntry = {
@@ -39,11 +39,11 @@ export type KeyRegistryEntry = {
     note: string;
 };
 /**
- * The 10 keys the server reads — code-grounded, no inventions.
+ * The 11 keys the server reads — code-grounded, no inventions.
  *
  * REQUIRED (4): CENSUS_API_KEY, FRED_API_KEY, BEA_API_KEY, DOL_API_KEY — those sources
  * have no keyless tier, so the tool throws without them (DOL_API_KEY gates ONLY
- * dol_get_dataset; the DOL catalog, dol_list_datasets, is keyless). OPTIONAL (6):
+ * dol_get_dataset; the DOL catalog, dol_list_datasets, is keyless). OPTIONAL (7):
  * everything else works keyless; a key only raises a rate limit or unlocks a single filter.
  */
 export declare const KEY_REGISTRY: readonly KeyRegistryEntry[];

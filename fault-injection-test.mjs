@@ -180,6 +180,7 @@ import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-in
 import { readFileSync as censusReadFile } from "node:fs";
 import { businessPatterns as cbpBusinessPatterns, censusApiKey as cbpApiKey, num as cbpNum } from "./dist/census-economic.js";
 import { searchSeries as fredSearchSeries, seriesObservations as fredObservations, fredApiKey, fredValue, num as fredNum } from "./dist/fred.js";
+import { enforcement as openfdaEnforcement, openfdaApiKey, buildSearch as openfdaBuildSearch, luceneQuote as openfdaQuote, OPENFDA_HOST } from "./dist/openfda.js";
 import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum } from "./dist/bea.js";
 import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
 import { dolApiKey } from "./dist/dol.js";
@@ -16667,6 +16668,210 @@ async function testFredHonesty() {
   ok("55c-parity fred.num === coerce.num (one shared audited impl — NO local num/str; fredValue's '.'→null map is a WRAPPER around it, not a fork)", fredNum === coerceNum, "fred num diverged from coerce.num");
 }
 
+// §55-openfda: openFDA recall/enforcement (api.fda.gov, ADR-0054 — the product-safety
+// recall lane AND a KEYLESS tool with an OPTIONAL rate-limit key). NON-VACUOUS, OFFLINE,
+// deterministic. Each assertion pins a value + names the mutation that turns it RED:
+//   [P1]       meta.results.total 17793 + 2 rows ⇒ totalAvailable:17793 (NOT 2), hasMore,
+//              skip-page offset ⇒ totalAvailable=results.length ⇒ RED.
+//   [★P2 crux] a 404 with body {error:{code:"NOT_FOUND"}} ⇒ honest empty (returned:0,
+//              total:0), NOT thrown / NOT not_found; a non-NOT_FOUND 404 ⇒ not_found; a
+//              400 ⇒ invalid_input surfacing the message; a 503 ⇒ upstream_unavailable; a
+//              200 non-JSON ⇒ schema_drift ⇒ revert the 404-NOT_FOUND-as-empty ⇒ RED.
+//   [P3]       recall_initiation_date "20150903" preserved as a STRING; classification/
+//              status surfaced; a "" field ⇒ null (null-never-empty-string) ⇒ RED.
+//   [search]   firm+classification ⇒ the correct escaped `search=` string; a `"` in firm
+//              is backslash-escaped (structured-only; no raw passthrough) ⇒ RED.
+//   [K-test]   OPENFDA_API_KEY=SECRET ⇒ &api_key= PRESENT in the fetch URL but ABSENT from
+//              the serialized {data,_meta} + label + notes; unset ⇒ NO api_key param ⇒ RED.
+//   [P4/SSRF]  meta.results/results missing ⇒ drift; category enum enforced; fixed-host.
+const OPENFDA_RE = /api\.fda\.gov\/(?:drug|device|food)\/enforcement\.json/;
+const isOpenfda = (u) => OPENFDA_RE.test(u);
+const openfdaMock = (body, status = 200) => (u) => (isOpenfda(u) ? mockResponse({ status, json: body }) : failClosed()());
+const openfdaUrl = (calls) => calls.find((x) => isOpenfda(x.url))?.url;
+const openfdaQuery = (calls) => new URL(openfdaUrl(calls)).searchParams;
+// A 200 whose .json() THROWS a SyntaxError (an HTML error page parsed as JSON).
+const openfdaNonJson = (u) => (isOpenfda(u)
+  ? { ok: true, status: 200, headers: { get: () => null }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>error</html>" }
+  : failClosed()());
+// The openFDA envelope: { meta: { results: { skip, limit, total } }, results: [...] }.
+const openfdaBody = (total, rows, skip = 0, limit = 25) => ({ meta: { disclaimer: "Do not rely on openFDA to make decisions regarding medical care.", results: { skip, limit, total } }, results: rows });
+const openfdaRecallRow = (over = {}) => ({
+  recalling_firm: "Pfizer Inc",
+  product_description: "Some drug product, 10mg tablets",
+  reason_for_recall: "Contamination",
+  classification: "Class I",
+  status: "Ongoing",
+  state: "NY",
+  city: "New York",
+  recall_initiation_date: "20150903",
+  recall_number: "D-1234-2015",
+  voluntary_mandated: "Voluntary: Firm Initiated",
+  distribution_pattern: "Nationwide",
+  ...over,
+});
+
+/** Run `fn` with OPENFDA_API_KEY set to `val` (or deleted if undefined), restore after. */
+async function withOpenfdaKey(val, fn) {
+  const orig = process.env.OPENFDA_API_KEY;
+  if (val === undefined) delete process.env.OPENFDA_API_KEY;
+  else process.env.OPENFDA_API_KEY = val;
+  try {
+    return await fn();
+  } finally {
+    if (orig === undefined) delete process.env.OPENFDA_API_KEY;
+    else process.env.OPENFDA_API_KEY = orig;
+  }
+}
+
+async function testOpenfdaEnforcement() {
+  section("§55-openfda. openFDA recall/enforcement (ADR-0054 — product-safety recalls, KEYLESS + OPTIONAL rate-limit key) — meta.results.total P1 + 404-NOT_FOUND-as-empty P2 crux + date-as-string P3 + escaped search-assembly + optional-key K-test (query-key nuance) + drift/SSRF (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  const KEY = "SECRET-OPENFDA-do-not-leak-xyz789";
+
+  // ── keyless by default: NO OPENFDA_API_KEY ⇒ still FETCHES (never throws for a
+  //    missing key — unlike the key-REQUIRED sources) + NO api_key param in the URL. ──
+  await withOpenfdaKey(undefined, async () => {
+    ok("55-openfda (non-vacuity) openfdaApiKey() returns undefined when unset ⇒ the seam reads env, not a constant", openfdaApiKey() === undefined, JSON.stringify(openfdaApiKey()));
+    await withFetch(openfdaMock(openfdaBody(17793, [openfdaRecallRow(), openfdaRecallRow({ recalling_firm: "Pfizer Labs" })])), async (calls) => {
+      const r = await runTool("openfda_enforcement", { category: "drug", firm: "pfizer", limit: 2 }, sam);
+      const m = buildMeta(r.meta);
+      const q = openfdaQuery(calls);
+      ok("55-openfda keyless: UNSET OPENFDA_API_KEY still FETCHES (a missing key is NOT an error — the tool is keyless) ⇒ make the missing key throw ⇒ RED",
+        r.data.recalls.length === 2 && openfdaUrl(calls) !== undefined, JSON.stringify({ n: r.data.recalls.length }));
+      ok("55-openfda keyless: the built URL carries NO api_key param (keyless mode) ⇒ send an empty api_key= when unset ⇒ RED",
+        q.get("api_key") === null && m.keylessMode === true && m.notes.some((n) => /keyless/i.test(n)), JSON.stringify({ api_key: q.get("api_key"), keyless: m.keylessMode }));
+      ok("55-openfda the request is to api.fda.gov/drug/enforcement.json over https (fixed host + category path segment) + search assembled from firm",
+        new URL(openfdaUrl(calls)).hostname === "api.fda.gov" && new URL(openfdaUrl(calls)).protocol === "https:" && /\/drug\/enforcement\.json/.test(openfdaUrl(calls)) && q.get("search") === 'recalling_firm:"pfizer"', openfdaUrl(calls));
+
+      // ── [P1] total 17793 + 2 rows @ skip 0 ⇒ totalAvailable:17793 (the REAL total,
+      //    NOT the 2 returned), hasMore:true, nextOffset:2, truncated:true. ──
+      ok("55-openfda-P1 meta.results.total 17793 + 2 rows @ skip 0 ⇒ returned:2 but totalAvailable:17793 (openFDA's EXACT total, NOT results.length), hasMore:true, nextOffset:2, truncated:true, complete:false ⇒ set totalAvailable=results.length ⇒ RED",
+        m.returned === 2 && m.totalAvailable === 17793 && m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.truncated === true && m.complete === false, JSON.stringify({ ret: m.returned, ta: m.totalAvailable, hm: m.pagination?.hasMore, no: m.pagination?.nextOffset }));
+
+      // ── [P3] recall_initiation_date preserved as a STRING; scalars surfaced. ──
+      const row0 = r.data.recalls[0];
+      ok("55-openfda-P3 recall_initiation_date '20150903' preserved as the STRING '20150903' (NOT numerically coerced) + classification/status/recallNumber/distributionPattern surfaced via str ⇒ date-coerce or drop a field ⇒ RED",
+        row0.recallInitiationDate === "20150903" && typeof row0.recallInitiationDate === "string" && row0.classification === "Class I" && row0.status === "Ongoing" && row0.recallNumber === "D-1234-2015" && row0.distributionPattern === "Nationwide" && row0.recallingFirm === "Pfizer Inc", JSON.stringify(row0));
+    });
+
+    // ── [P3] a "" field ⇒ null (null-never-empty-string), never "". ──
+    await withFetch(openfdaMock(openfdaBody(1, [openfdaRecallRow({ city: "", state: "  ", reason_for_recall: null })])), async () => {
+      const r = await runTool("openfda_enforcement", { category: "drug" }, sam);
+      const row = r.data.recalls[0];
+      ok("55-openfda-P3 a '' / whitespace / null field ⇒ null (null-never-empty-string via str) ⇒ surface '' as an empty string ⇒ RED",
+        row.city === null && row.state === null && row.reasonForRecall === null, JSON.stringify({ city: row.city, state: row.state, reason: row.reasonForRecall }));
+    });
+
+    // ── [P1] a skip-page: skip 25 + total 17793 ⇒ pagination.offset:25. ──
+    await withFetch(openfdaMock(openfdaBody(17793, [openfdaRecallRow()], 25, 25)), async (calls) => {
+      const r = await runTool("openfda_enforcement", { category: "drug", firm: "pfizer", skip: 25, limit: 25 }, sam);
+      const m = buildMeta(r.meta);
+      const q = openfdaQuery(calls);
+      ok("55-openfda-P1 skip:25 ⇒ the URL carries skip=25 & the pagination offset is 25 (skip/limit offset pagination) ⇒ ignore skip ⇒ RED",
+        q.get("skip") === "25" && q.get("limit") === "25" && m.pagination.offset === 25, JSON.stringify({ skip: q.get("skip"), offset: m.pagination?.offset }));
+    });
+
+    // ── [★P2 crux] a 404 {error:{code:"NOT_FOUND"}} ⇒ HONEST EMPTY (returned:0,
+    //    total:0), NOT thrown, NOT not_found. Reverting this handling ⇒ RED. ──
+    await withFetch(openfdaMock({ error: { code: "NOT_FOUND", message: "No matches found!" } }, 404), async () => {
+      const r = await runTool("openfda_enforcement", { category: "drug", firm: "zzznotarealfirm" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-openfda-P2 ★CRUX a 404 with body {error:{code:'NOT_FOUND'}} (a no-match query) ⇒ recalls:[], returned:0, totalAvailable:0, complete:true — an HONEST EMPTY, NOT thrown, NOT not_found ⇒ let the 404 throw (revert the NOT_FOUND-as-empty reclassify) ⇒ RED",
+        r.data.recalls.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.notes.some((n) => /no.match|NOT_FOUND/i.test(n)), JSON.stringify({ n: r.data.recalls.length, ta: m.totalAvailable, c: m.complete }));
+    });
+
+    // ── [P2] a NON-NOT_FOUND 404 ⇒ not_found THROW (never a fake-empty). ──
+    await withFetch(openfdaMock({ error: { code: "SERVER_ERROR", message: "boom" } }, 404), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_enforcement", { category: "drug" }, sam));
+      ok("55-openfda-P2 a 404 whose body code is NOT 'NOT_FOUND' ⇒ not_found THROW (only the NOT_FOUND no-match idiom is an honest empty; a foreign 404 is never faked empty) ⇒ treat every 404 as empty ⇒ RED",
+        threw && toToolError(error).kind === "not_found", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P2] a 400 syntax error carrying error.message ⇒ invalid_input SURFACING it. ──
+    await withFetch(openfdaMock({ error: { code: "BAD_REQUEST", message: "Unknown field name query." } }, 400), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_enforcement", { category: "drug", firm: "x" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55-openfda-P2 a 400 with {error:{message:'Unknown field name…'}} ⇒ invalid_input SURFACING the openFDA message (a caller-fixable request, never a fake-empty, never not_found) ⇒ swallow the 400 as empty ⇒ RED",
+        threw && te.kind === "invalid_input" && /Unknown field name/.test(te.message), JSON.stringify({ kind: te?.kind, msg: te?.message?.slice(0, 60) }));
+    });
+
+    // ── [P2] a 503 ⇒ upstream_unavailable (a DOWN endpoint is NEVER a returned:0). ──
+    await withFetch(openfdaMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_enforcement", { category: "drug" }, sam));
+      ok("55-openfda-P2 503 ⇒ upstream_unavailable THROW (a down openFDA is never an empty result; distinct from the 404 no-match honest empty)",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P4] a 200 non-JSON ⇒ schema_drift (never a fabricated empty). ──
+    await withFetch(openfdaNonJson, async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_enforcement", { category: "drug" }, sam));
+      ok("55-openfda-P4 a 200 non-JSON body (r.json() SyntaxError) ⇒ schema_drift (never read as an empty result) ⇒ swallow the SyntaxError as empty ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [P4] meta.results absent, and results non-array ⇒ schema_drift. ──
+    await withFetch(openfdaMock({ meta: { disclaimer: "x" }, results: [] }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_enforcement", { category: "drug" }, sam));
+      ok("55-openfda-P4 meta.results (the total carrier) missing ⇒ schema_drift (the total contract broke; never a fabricated empty) ⇒ trust a missing total carrier ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+    await withFetch(openfdaMock({ meta: { results: { skip: 0, limit: 25, total: 5 } }, results: "notanarray" }), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_enforcement", { category: "drug" }, sam));
+      ok("55-openfda-P4 results is a string (non-array) ⇒ schema_drift ⇒ trust a non-array ⇒ RED",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+
+    // ── [SSRF] category 'planet' / state 'ABC' / classification 'Class IV' ⇒
+    //    invalid_input, 0 fetch (the enum/charclass re-guard PRE-fetch). ──
+    for (const [args, label] of [
+      [{ category: "planet" }, "category 'planet' (path segment — enum enforced)"],
+      [{ category: "drug", state: "ABC" }, "state 'ABC' (not 2-letter)"],
+      [{ category: "drug", state: "1" }, "state '1' (non-alpha)"],
+      [{ category: "drug", classification: "Class IV" }, "classification 'Class IV' (not in enum)"],
+    ]) {
+      await withFetch(failClosed(), async (calls) => {
+        const before = calls.length;
+        const { threw, error } = await expectThrow(() => runTool("openfda_enforcement", args, sam));
+        ok(`55-openfda-ssrf ${label} ⇒ invalid_input, 0 fetch (the enum/charclass re-guard PRE-fetch — a value never touches the fixed host/path) ⇒ widen the validation ⇒ RED`,
+          threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+      });
+    }
+  });
+
+  // ── [search-assembly] the DIRECT buildSearch/luceneQuote seam: firm+classification
+  //    ⇒ the correct escaped `search=` string; a `"` in firm is backslash-escaped. ──
+  ok("55-openfda-search buildSearch({firm,classification}) ⇒ 'recalling_firm:\"pfizer\" AND classification:\"Class I\"' (structured→escaped Lucene, joined by AND) ⇒ change the field map or drop the quoting ⇒ RED",
+    openfdaBuildSearch({ firm: "pfizer", classification: "Class I" }) === 'recalling_firm:"pfizer" AND classification:"Class I"', openfdaBuildSearch({ firm: "pfizer", classification: "Class I" }));
+  ok("55-openfda-search a Lucene special (a '\"' in the firm value) is BACKSLASH-escaped inside the quoted term (injection-safe; the value can never break out of the quotes) ⇒ drop the escape ⇒ RED",
+    openfdaQuote('aceta"minophen') === '"aceta\\"minophen"' && /recalling_firm:"aceta\\"minophen"/.test(openfdaBuildSearch({ firm: 'aceta"minophen' })), JSON.stringify(openfdaQuote('aceta"minophen')));
+  ok("55-openfda-search NO filters ⇒ buildSearch returns '' (openFDA then returns the whole category — no fabricated clause)",
+    openfdaBuildSearch({}) === "", JSON.stringify(openfdaBuildSearch({})));
+
+  // ── [K-test] WITH OPENFDA_API_KEY set: the key rides &api_key= (PRESENT in the fetch
+  //    URL — the inherent openFDA query-key nuance) but is ABSENT from the serialized
+  //    {data,_meta} + notes + label. ──
+  await withOpenfdaKey(KEY, async () => {
+    await withFetch(openfdaMock(openfdaBody(17793, [openfdaRecallRow()])), async (calls) => {
+      const r = await runTool("openfda_enforcement", { category: "drug", firm: "pfizer" }, sam);
+      const m = buildMeta(r.meta);
+      const q = openfdaQuery(calls);
+      ok("55-openfda-Ktest WITH OPENFDA_API_KEY set the key rides &api_key=<value> in the fetch URL (the ONLY carrier — openFDA has no header option; the query-key is INHERENT) ⇒ move the key elsewhere ⇒ RED",
+        q.get("api_key") === KEY, JSON.stringify({ api_key: q.get("api_key") }));
+      const serialized = JSON.stringify({ data: r.data, _meta: m });
+      ok("55-openfda-Ktest ★the key value is ABSENT from the serialized {data,_meta} + notes (source names the MODE only, never the value) ⇒ leak the key into _meta.source or a note ⇒ RED",
+        !serialized.includes(KEY) && /OPENFDA_API_KEY/.test(m.source) && m.notes.every((n) => !n.includes(KEY)), JSON.stringify({ leaked: serialized.includes(KEY), source: m.source }));
+    });
+    // ── [K-test] the label (ToolError.upstreamEndpoint) is host+path ONLY — no token.
+    //    Force an error WITH the key set and assert the endpoint carries no key. ──
+    await withFetch(openfdaMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_enforcement", { category: "drug", firm: "pfizer" }, sam));
+      const te = threw ? toToolError(error) : null;
+      ok("55-openfda-Ktest the ToolError.upstreamEndpoint (label) is host+path ONLY ('openfda:/drug/enforcement') — the key NEVER reaches the label ⇒ put the query (with the key) into the label ⇒ RED",
+        threw && te.upstreamEndpoint === "openfda:/drug/enforcement" && !String(te.upstreamEndpoint).includes(KEY), JSON.stringify({ ep: te?.upstreamEndpoint }));
+    });
+  });
+}
+
 // §55d: BEA Regional Economic Accounts (apps.bea.gov/api/data, ADR-0051, Wave-4
 // source #3 — regional GDP/income AND the server's THIRD key-required source).
 // NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the
@@ -17697,6 +17902,7 @@ async function main() {
   await testCensusHonesty();
   await testCensusBusinessPatterns();
   await testFredHonesty();
+  await testOpenfdaEnforcement();
   await testBeaRegionalData();
   await testDolDataApi();
   await testLdaSearchFilings();
@@ -17784,7 +17990,7 @@ async function testApiKeysDoc() {
 //   (1) with every key env UNSET → all currentlySet:false, requiredMissing is
 //       EXACTLY [BEA_API_KEY, CENSUS_API_KEY, DOL_API_KEY, FRED_API_KEY] (the 4
 //       keyless-less sources — DOL_API_KEY gates ONLY dol_get_dataset), the registry
-//       has 10 entries with the right `required` flags + a non-empty signupUrl each;
+//       has 11 entries with the right `required` flags + a non-empty signupUrl each;
 //       setting CENSUS_API_KEY flips its bool and drops it from requiredMissing.
 //   (2) ★K-TEST: the key VALUE is NEVER in the serialized output — only the bool.
 async function testApiKeyStatus() {
@@ -17798,9 +18004,9 @@ async function testApiKeyStatus() {
     // (1) all unset.
     clearAll();
     const r0 = apiKeyStatus();
-    ok("keys-A registry has EXACTLY 10 entries", r0.keys.length === 10, String(r0.keys.length));
+    ok("keys-A registry has EXACTLY 11 entries", r0.keys.length === 11, String(r0.keys.length));
     ok(
-      "keys-A envVars are the 10 code-grounded names",
+      "keys-A envVars are the 11 code-grounded names",
       JSON.stringify([...ALL].sort()) ===
         JSON.stringify(
           [
@@ -17812,6 +18018,7 @@ async function testApiKeyStatus() {
             "FRED_API_KEY",
             "LDA_API_KEY",
             "NVD_API_KEY",
+            "OPENFDA_API_KEY",
             "SAM_GOV_API_KEY",
             "SOCRATA_APP_TOKEN",
           ].sort(),
@@ -17850,7 +18057,12 @@ async function testApiKeyStatus() {
       JSON.stringify([...r0.requiredMissing].sort()) === JSON.stringify(["BEA_API_KEY", "CENSUS_API_KEY", "DOL_API_KEY", "FRED_API_KEY"]),
       JSON.stringify(r0.requiredMissing),
     );
-    ok("keys-A optionalMissing (all unset) has the 6 optional envVars", r0.optionalMissing.length === 6, JSON.stringify(r0.optionalMissing));
+    ok("keys-A optionalMissing (all unset) has the 7 optional envVars", r0.optionalMissing.length === 7, JSON.stringify(r0.optionalMissing));
+    ok(
+      "keys-A OPENFDA_API_KEY is present + OPTIONAL (required:false) with the open.fda.gov auth signup URL + a keyless-by-default note",
+      (() => { const o = r0.keys.find((k) => k.envVar === "OPENFDA_API_KEY"); return o && o.required === false && /open\.fda\.gov\/apis\/authentication/.test(o.signupUrl) && r0.optionalMissing.includes("OPENFDA_API_KEY") && !r0.requiredMissing.includes("OPENFDA_API_KEY") && /keyless/i.test(o.note) && /openfda_enforcement/.test(o.sources.join(" ")); })(),
+      JSON.stringify(r0.keys.find((k) => k.envVar === "OPENFDA_API_KEY")),
+    );
     ok(
       "keys-A DOL_API_KEY is present + REQUIRED (required:true) with a LIVE dataportal.dol.gov signup URL (not the dead dol.gov/developer 404), and its note discloses the catalog-keyless split",
       (() => { const d = r0.keys.find((k) => k.envVar === "DOL_API_KEY"); return d && d.required === true && /dataportal\.dol\.gov/.test(d.signupUrl) && !/dol\.gov\/developer/.test(d.signupUrl) && r0.requiredMissing.includes("DOL_API_KEY") && !r0.optionalMissing.includes("DOL_API_KEY") && /keyless/i.test(d.note) && /dol_list_datasets/.test(d.note); })(),
