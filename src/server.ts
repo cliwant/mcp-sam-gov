@@ -56,6 +56,7 @@ import * as clinicaltrials from "./clinicaltrials.js";
 import * as census from "./census.js";
 import * as censusEconomic from "./census-economic.js";
 import * as epaEnvirofacts from "./epa-envirofacts.js";
+import * as cmsUtilization from "./cms-utilization.js";
 import * as fred from "./fred.js";
 import * as bea from "./bea.js";
 import * as gsaPerdiem from "./gsa-perdiem.js";
@@ -3484,6 +3485,62 @@ const EpaTriFacilitiesInput = z
     path: ["state"],
   });
 
+// ─── CMS Medicare provider-service utilization (ADR-0061) — keyless, two-request ──
+// data.cms.gov /data-api/v1/dataset/{uuid}. Two requests: a stats count sub-query
+// for the EXACT total (P1 — found_rows) + the data slice (a bare JSON array). Filter
+// VALUES ride via URLSearchParams (bracket key + value encoded). REQUIRE npi OR
+// state (the 9.78M-row table is never scanned unscoped).
+const CmsMedicareProviderServicesInput = z
+  .object({
+    npi: z
+      .string()
+      .regex(/^\d{10}$/)
+      .optional()
+      .describe(
+        "A 10-digit National Provider Identifier (→ Rndrng_NPI), e.g. '1003000126'. Provide at least this OR `state`. Validated ^\\d{10}$.",
+      ),
+    state: z
+      .string()
+      .regex(/^[A-Za-z]{2}$/)
+      .optional()
+      .describe(
+        "A 2-letter US state/territory code (→ Rndrng_Prvdr_State_Abrvtn), e.g. 'VA', 'CA'. Provide at least this OR `npi`. Validated ^[A-Za-z]{2}$.",
+      ),
+    providerType: z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Za-z0-9 &.,()/'-]+$/)
+      .optional()
+      .describe(
+        "An optional specialty filter matching the CMS provider type EXACTLY (→ Rndrng_Prvdr_Type), e.g. 'Family Practice', 'Physical Therapist in Private Practice'. Allowed: letters/digits/space/& . , ( ) / ' - (≤100 chars).",
+      ),
+    hcpcsCode: z
+      .string()
+      .regex(/^[A-Za-z0-9]{1,10}$/)
+      .optional()
+      .describe(
+        "An optional HCPCS/CPT service code filter (→ HCPCS_Cd), e.g. '97110', 'G0463'. Validated ^[A-Za-z0-9]{1,10}$.",
+      ),
+    size: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Max provider-service rows to return (1–100, default 25). Offset-paginated."),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+  })
+  .refine((v) => v.npi !== undefined || v.state !== undefined, {
+    message: "Provide at least `npi` or `state` (an all-empty query would scan the entire 9.78M-row Medicare utilization table and is refused; providerType/hcpcsCode alone are not enough to scope).",
+    path: ["npi"],
+  });
+
 // ─── FRED (Federal Reserve Economic Data) — the SECOND key-required source ──
 // ADR-0048. Macro context (GDP/CPI/rates/unemployment/PPI). REQUIRES a free
 // FRED_API_KEY; without it both tools throw an honest config error (the other 112
@@ -5536,6 +5593,20 @@ export const TOOLS: ToolDef[] = [
       "Look up EPA Toxics Release Inventory (TRI) reporting facilities by state / facility-name / county — an environmental-footprint / place-of-performance screen (EPA Envirofacts, keyless; data.epa.gov/efservice/tri_facility). Input: `state` (2-letter, e.g. 'VA'), `facilityName` (partial match, e.g. 'chemical'), `county` (partial match) — provide at least `state` OR `facilityName` (an all-empty query is refused); optional `limit` (1–100, default 25), `offset`. Returns { facilities:[{ triFacilityId, facilityName, streetAddress, city, county, state, zip, region, closed }] } + honest _meta. ★HONESTY: totalAvailable is the EXACT count from a SEPARATE count sub-query (…/count/JSON → TOTALQUERYRESULTS), NEVER the returned-rows length; if that count fails, totalAvailable is null + a disclosing note (never length-faked). offset/limit pagination (hasMore = offset+returned < total). `closed` normalizes fac_closed_ind ('0'/'N'→false, '1'/'Y'→true, unrecognized→null — never a fabricated false); addresses/names are null-never-empty-string. A genuine no-match ⇒ honest empty (returned:0); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array/non-JSON ⇒ schema_drift. These are nominal TRI reporters, NOT a compliance/enforcement determination. KEYLESS — no key is sent.",
     inputSchema: EpaTriFacilitiesInput,
     handler: (input) => epaEnvirofacts.triFacilities(input),
+  }),
+  // ━━━ CMS Medicare provider-service utilization — healthcare market (1) ━━━ ADR-0061
+  // KEYLESS (data.cms.gov /data-api/v1/dataset/{uuid}). ★Two requests: a stats
+  // count sub-query yields the EXACT per-filter total (P1 — found_rows, e.g.
+  // VA=278254), then the data slice (a bare JSON array). All filter VALUES ride via
+  // URLSearchParams (bracket key + value encoded — the SSRF guard). REQUIRE npi OR
+  // state (the 9.78M-row table is never scanned unscoped). The dataset UUID is a
+  // SPECIFIC ANNUAL VINTAGE (surfaced in a _meta note; update yearly).
+  defineTool({
+    name: "cms_medicare_provider_services",
+    description:
+      "Look up Medicare Part-B provider utilization — for a given provider (NPI) or state, the HCPCS services rendered, beneficiaries served, and submitted / Medicare-allowed / Medicare-paid amounts (CMS 'Medicare Physician & Other Practitioners — by Provider and Service', keyless; data.cms.gov data-API). The demand-side complement to nppes_lookup_provider (who providers ARE → what they BILL) for healthcare-market / competitor / teaming due-diligence. Input: `npi` (10-digit) OR `state` (2-letter) — at least ONE is REQUIRED (the table is 9.78M rows; an all-empty query is refused; providerType/hcpcsCode alone are NOT enough to scope); optional `providerType` (exact CMS specialty, e.g. 'Family Practice'), `hcpcsCode` (e.g. '97110', 'G0463'), `size` (1–100, default 25), `offset`. Returns { services:[{ npi, providerName, credentials, providerType, city, state, zip, hcpcsCode, hcpcsDescription, totalBeneficiaries, totalServices, avgSubmittedCharge, avgMedicareAllowed, avgMedicarePayment }] } + honest _meta. ★HONESTY: totalAvailable is the EXACT count from a SEPARATE stats sub-query (…/data-viewer/stats → found_rows, e.g. VA=278254), NEVER the returned-rows length; if that count fails, totalAvailable is null + a disclosing note (never length-faked). offset/size pagination (hasMore = offset+returned < total). Aggregate/payment values are numeric-string → number|null (a genuine 0 stays 0, absent → null, never 0-faked); NPI/HCPCS/names are null-never-empty-string. A genuine no-match ⇒ honest empty (returned:0); a 4xx ⇒ invalid_input/not_found; a 5xx ⇒ THROWS; a 200 non-array/non-JSON ⇒ schema_drift. These are public PROVIDER-level AGGREGATE figures (no patient identifiers) for ONE annual vintage (the dataset year is disclosed in _meta) — a utilization snapshot, NOT a fraud/quality/fitness determination. KEYLESS — no key is sent.",
+    inputSchema: CmsMedicareProviderServicesInput,
+    handler: (input) => cmsUtilization.providerServices(input),
   }),
   // ━━━ FRED (Federal Reserve Economic Data) — macro context (2) ━━━ ADR-0048
   // ★The server's SECOND KEY-REQUIRED source: FRED has NO keyless tier, so WITHOUT
