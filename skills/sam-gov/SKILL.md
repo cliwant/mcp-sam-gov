@@ -1,224 +1,334 @@
 ---
 name: sam-gov
-description: Query and analyze US federal contracting + spending + regulation data. 52 keyless tools across SAM.gov (active + pre-solicitation opportunities, RFPs, attachment TEXT extraction, contacting officers), USAspending.gov (awards, recipients, sub-agencies, time-series, NAICS/PSC analysis, recompete + incumbent pressure), Federal Register (rules, notices), eCFR + FAR/DFARS compliance (clause lookup, compliance matrix), SBA size standards, Grants.gov (federal grants), pricing & wage determinations (SCA/DBA + GSA CALC), and integrity/teaming/protests (exclusions, teaming partners, GAO protests). Use when the user asks about federal contracts, GovCon opportunities, SAM.gov notices, contracting officers, RFP / SOW analysis, reading the actual solicitation documents, FAR/DFARS clause compliance, agency spending, recompete signals, recipient win history, subawards, vetting a firm or teaming partner, bid pricing / wage floors, federal regulations, FAR clauses, federal grants, or any US Government procurement / spending question.
-when_to_use: federal contracting, SAM.gov search, GovCon opportunities, pre-solicitation / sources sought shaping, RFP attachments, read the solicitation / SOW text, USAspending awards, contracting officer lookup, NAICS code search, SBA size standard, PSC code analysis, agency spending, recompete radar, incumbent pressure, capture brief, bid no-bid, set-aside contracts (SDVOSB / 8(a) / WOSB / HUBZone), federal procurement, FAR DFARS clause lookup, FAR compliance matrix, Section 889 / CMMC / limitations on subcontracting, vet a firm, debarment / exclusions, teaming partners, GAO bid protests, wage determination / SCA / DBA / CALC labor rates, Federal Register rules, eCFR compliance, grants.gov, federal grants, CFDA programs
+description: Query and analyze the full surface of US federal contracting + spending + regulation + partner-vetting + market data. 120 tools across 37 federal data sources (keyless-first — only 4 sources need a free key). Covers SAM.gov opportunities (active + pre-solicitation, RFP/SOW attachment TEXT, contacting officers), USAspending + FPDS awards/recipients/competition/recompetes, GAO protests, entity vetting (OFAC sanctions, SAM exclusions, FAC single-audit, FDIC bank health, EPA ECHO), SEC EDGAR financials, Federal Register / Regulations.gov / eCFR + FAR/DFARS / Congress / GovInfo, pricing & labor & fiscal (GSA CALC, SCA/DBA wage determinations, BLS CPI/OEWS/QCEW, Treasury, BEA regional GDP, Census CBP market sizing, FRED macro, GSA per-diem), health & research funding (NIH/NSF/ClinicalTrials/CMS/NPPES), cyber compliance (NVD CVE + CISA KEV), trade tariffs (HTS), geo/disaster/state-local open data (Census geocode, FEMA, Socrata, CKAN), lobbying influence (Senate LDA), DOL labor-enforcement, data.gov + SBA size standards. Use for any US federal procurement / spending / regulation / vetting / market-sizing / macro question.
+when_to_use: federal contracting, SAM.gov search, GovCon opportunities, pre-solicitation shaping, RFP attachments / read the SOW text, USAspending awards, FPDS award actions, contracting officer lookup, NAICS / PSC analysis, agency spending, recompete radar, incumbent pressure, capture brief, bid no-bid, set-aside contracts (SDVOSB / 8(a) / WOSB / HUBZone), FAR/DFARS clause lookup, FAR compliance matrix, Section 889 / CMMC, vet a firm, OFAC sanctions, debarment / exclusions, single-audit findings, bank health (FDIC), EPA compliance, SEC EDGAR financials, teaming partners, GAO bid protests, wage determination / SCA / DBA / CALC labor rates, BLS CPI escalation / OEWS wages / QCEW market size, Treasury fiscal data, BEA regional GDP, Census business patterns / market sizing, FRED macro (GDP/CPI/rates), GSA per-diem travel cost, Federal Register / Regulations.gov rules, eCFR, Congress bills, GovInfo, grants.gov / federal grants, CFDA, NIH / NSF / clinical trials / CMS Open Payments / NPPES, CVE / CISA KEV cyber, HTS tariff, FEMA disasters, Socrata / CKAN open data, Senate LDA lobbying, DOL wage-hour / OSHA enforcement, data.gov datasets, SBA size standard, which API keys are set
 disable-model-invocation: false
 user-invocable: true
 ---
 
-# SAM.gov + USAspending + Federal Register + eCFR/FAR + SBA + Grants + Pricing + Integrity skill
+# SAM.gov federal-data skill — 120 tools across 37 sources
 
-This skill teaches Claude how to use the **`sam-gov` MCP server** (52 keyless tools wrapped from `@cliwant/mcp-sam-gov`) to answer the full surface of US federal contracting / spending / regulation questions end-to-end — from discovering (and shaping) an opportunity, to **reading the actual RFP/SOW documents**, running a **FAR/DFARS compliance matrix**, **vetting a firm or teaming partner**, and **pricing the bid** against statutory wage floors.
+This skill teaches Claude how to use the **`sam-gov` MCP server** (120 tools wrapped from `@cliwant/mcp-sam-gov`) to answer the full surface of US federal contracting / spending / regulation / vetting / market questions end-to-end — from discovering (and shaping) an opportunity, to **reading the actual RFP/SOW documents**, running a **FAR/DFARS compliance matrix**, **vetting a firm** (sanctions, exclusions, audits, bank health, EPA), **sizing a market** (establishments + wages + regional GDP), pricing the bid against statutory wage floors, and pulling **macro context** for escalation.
 
-> **Setup requirement:** the `sam-gov` MCP server must be reachable. If you installed via `/plugin install seungdo-keum/mcp-sam-gov`, the bundled `.mcp.json` registers the server automatically. Otherwise see the [repo README](https://github.com/cliwant/mcp-sam-gov) for manual MCP setup.
+> **Setup:** the `sam-gov` MCP server must be reachable. `/plugin install cliwant/mcp-sam-gov` registers it automatically; otherwise see the [repo README](https://github.com/cliwant/mcp-sam-gov). Host prefixing: Claude Code exposes tools as `mcp__sam-gov__<tool>`; bare MCP hosts use just `<tool>`. Use whichever your host gives you.
 
-## Available tools — 52 total, all keyless
+## Tool inventory — 120 tools, keyless-first
 
-The MCP server exposes **the only sources of truth** for federal contracting + spending + regulation data — never invent notice IDs, contracting officer names, award amounts, NAICS codes, or regulation citations.
+**Keyless-first: 33 of 37 sources need no key. Only 4 sources require a free key** (marked 🔑 below): Census CBP (`census_business_patterns`), FRED (`fred_search_series`, `fred_series_observations`), BEA (`bea_regional_data`), and DOL's *data* endpoint (`dol_get_dataset`; DOL's catalog is keyless). Those 4 tools **throw** an honest config error without a key. A handful of others take an *optional* free key for higher limits (see the Keys section). The server is **the only source of truth** — never invent notice IDs, officer names, award amounts, NAICS codes, or regulation citations.
 
-### SAM.gov — opportunities + attachment TEXT (8 tools)
-| Tool | When to call |
-|---|---|
-| `sam_search_opportunities` | "Find solicitations…", "What's open at VA…", any discovery query. Filters: `query`, `ncode` (NAICS), `organizationName`, `state`, `setAside`, `limit`. |
-| `sam_search_shaping` | **PRE-solicitation radar** — Sources Sought / Presolicitation / Special Notices BEFORE the RFP exists (defaults noticeType `['r','p','s']`; opt into `k/i/u`). Catch a requirement while it's still shapeable. Each row carries `noticeTypeCode`, `postedDate`, `responseDeadline` + `daysUntilResponse`; keyless list rows null `naics/setAside/place` — call `sam_get_opportunity` for those. |
-| `sam_get_opportunity` | After search — full detail for ONE notice by 32-char hex `noticeId`. POCs, deadline, `attachments[]` (with download URLs), inline body. Call BEFORE bid/no-bid or compliance work. |
-| `sam_fetch_description` | Full SOW / RFP body as plain text (when `sam_get_opportunity` gave a description URL instead of inline body). |
-| `sam_attachment_url` | Build the public download URL for an attachment `resourceId` (303 → signed S3). |
-| `sam_fetch_attachment_text` | **READ the actual attachment** — extract the TEXT of an RFP / SOW / Q&A / wage table PDF or HTML by its `attachments[].url` (resourceLinks). Returns `{ format, text, pages, filename, truncated }`. A DOCX/binary/scanned-image PDF it can't read keyless returns `text:null` + a disclosed reason (never fabricated). |
-| `sam_lookup_organization` | Resolve a SAM.gov federal-organization id to its canonical `fullParentPathName`. |
-| `sam_lookup_notice_fields` | **BATCH-fill** the keyless-nulled `naics/setAside/place/responseDeadline/type` for 1–100 `noticeId`s in ONE call from the GSA daily bulk CSV — instead of one `sam_get_opportunity` per notice. **OFF by default**: enable via `SAM_GOV_CSV_CACHE` or `SAM_GOV_ENABLE_CSV=1` (else returns `enabled:false` + how-to-enable note). Snapshot can lag live ~24h — confirm real-time-critical fields with `sam_get_opportunity`. |
+### Opportunities & solicitations — SAM.gov + Grants.gov (10)
+- `sam_search_opportunities` — search active SAM.gov contracting opportunities (filters: query, ncode/NAICS, organizationName, state, setAside, limit).
+- `sam_search_shaping` — **pre-solicitation radar**: Sources Sought / Presol / Special Notices before the RFP exists (keyless rows null naics/setAside/place — get those via `sam_get_opportunity`).
+- `sam_get_opportunity` — full detail for ONE notice by 32-char hex noticeId (POCs, deadline, `attachments[]`, body). Call BEFORE bid/no-bid or compliance work.
+- `sam_fetch_description` — full SOW/RFP body as plain text (when detail gave a description URL not inline body).
+- `sam_fetch_attachment_text` — **READ the attachment** (RFP/SOW/Q&A/wage PDF+DOCX+HTML) by its `attachments[].url`. A scanned/image-only or unreadable doc returns `text:null` + disclosed reason (honest, not a bug).
+- `sam_attachment_url` — build the public download URL for an attachment resourceId (303 → signed S3).
+- `sam_lookup_organization` — federal-organization id → canonical `fullParentPathName`.
+- `sam_lookup_notice_fields` — **batch-fill** nulled naics/setAside/PoP/deadline for 1–100 noticeIds from the opt-in GSA daily CSV. **OFF by default** (returns `enabled:false` until `SAM_GOV_ENABLE_CSV=1`); snapshot can lag ~24h.
+- `grants_search` — Grants.gov federal grant opportunities (financial assistance, distinct from contracts).
+- `grants_get_opportunity` — full grant detail (description, dates, award ceiling, applicant types, CFDA).
 
-### USAspending — awards + recipients (10 tools)
-| Tool | When to call |
-|---|---|
-| `usas_search_awards` | Aggregate share-of-wallet at agency × NAICS. "Who wins the most at VA in 541512?" |
-| `usas_search_individual_awards` | Line-item contracts. "Show me the actual contracts." Returns `generatedInternalId` for follow-up. |
-| `usas_search_subagency_spending` | Buyer-office breakdown ("OI&T vs VHA"). |
-| `usas_lookup_agency` | **ALWAYS call FIRST** when user uses an agency abbreviation ("VA", "DHS", "CMS"). |
-| `usas_search_awards_by_recipient` | Recipient win history at agency × NAICS slice. "Show Booz Allen wins at VA last year." |
-| `usas_search_subawards` | Supply-chain / teaming partners. "Who teams with Leidos at DISA?" |
-| `usas_search_recompetes` | **Recompete radar (preferred)** — contracts whose current PoP ends inside a window around today (default −90d..+18mo), soonest-first. Filter by agency/naics/pscCodes/setAside/minAwardValue; counts (never drops) missing-end rows; flags truncated scans in `_meta`. Public signals only — no vulnerability score. |
-| `usas_search_expiring_contracts` | **DEPRECATED alias** of `usas_search_recompetes` (legacy `{ contracts, searchedCount }` shape, N-months window). New callers should use `usas_search_recompetes`. |
-| `usas_get_award_detail` | Per-award rich detail (`period_of_performance`, `base_and_all_options`, set-aside, competition extent, `number_of_offers`) by `generatedInternalId`. |
-| `usas_analyze_incumbent` | **Incumbent + recompete-pressure** for ONE award (`generatedInternalId`): identity, IDV linkage, and PUBLIC pressure SIGNALS — `pctConsumed`, mod count, competition extent + offers, set-aside, days-to-PoP-end. Emits `pressureHints` (`single_offer` / `ceiling_nearly_exhausted` / `hard_stop_no_options`) as HINTS, NEVER a composite score (CPARS/protest/option-intent aren't public). Bounded ≤3 upstream calls. |
+### Spending, awards & competition — USAspending + FPDS + GAO (29)
+- `usas_search_awards` — aggregate share-of-wallet at agency × NAICS.
+- `usas_search_individual_awards` — line-item contracts (returns `generatedInternalId`).
+- `usas_get_award_detail` — per-award detail (period_of_performance, options, set-aside, competition, offers) by generatedInternalId.
+- `usas_search_awards_by_recipient` — a recipient's wins in an agency × NAICS slice.
+- `usas_search_subawards` — subcontracts on prime awards (supply chain / teaming).
+- `usas_search_recompetes` — **recompete radar (preferred)**: PoP ending in a window (default −90d..+18mo), soonest-first, no silent drops. Public signals only.
+- `usas_search_expiring_contracts` — **DEPRECATED** alias of `usas_search_recompetes` (legacy shape).
+- `usas_analyze_incumbent` — per-award incumbent + PUBLIC `pressureHints` (single_offer / ceiling_nearly_exhausted / hard_stop_no_options) — HINTS, never a composite score.
+- `usas_search_teaming_partners` — small-business teaming discovery by socioeconomic `cert` × NAICS × agency, exclusion-screened (`cert` is award-derived, not the SBA cert of record).
+- `usas_spending_over_time` — contract-spending time series (fiscal_year / quarter / month).
+- `usas_search_agency_spending` — top buying agencies for a NAICS / set-aside.
+- `usas_search_subagency_spending` — parent agency → sub-agency / office breakdown.
+- `usas_search_psc_spending` — spending by Product Service Code (contract market structure).
+- `usas_search_cfda_spending` — spending by CFDA grant-program code (grants, not contracts).
+- `usas_search_state_spending` — spending by state / territory.
+- `usas_search_federal_account_spending` — spending mapped to Treasury Account Symbols (TAS).
+- `usas_search_recipients` — recipient list with parent/child hierarchy (returns `id`).
+- `usas_get_recipient_profile` — full recipient detail (UEI, alternate names, business types, totals).
+- `usas_get_agency_profile` — agency mission/abbreviation/website/subtier count by toptierCode.
+- `usas_get_agency_awards_summary` — award activity (transaction count + obligations) by FY.
+- `usas_get_agency_budget_function` — budget breakdown by program area.
+- `usas_list_toptier_agencies` — all toptier agencies + current-FY obligations.
+- `usas_lookup_agency` — **ALWAYS call FIRST** on an agency abbreviation ('VA'/'DHS'/'CMS') → canonical name + toptier code.
+- `usas_autocomplete_naics` — **anti-hallucination guard**: confirm a NAICS code before use.
+- `usas_autocomplete_recipient` — **anti-hallucination guard**: confirm exact recipient legal name.
+- `usas_naics_hierarchy` — navigate the NAICS tree (2→4→6) + active-contract count per code.
+- `usas_glossary` — 151 federal-spending terms; confirm terminology.
+- `fpds_search_awards` — FPDS-NG federal contract *award actions* (the authoritative action feed).
+- `gao_protest_lookup` — recent GAO bid-protest decisions (public RSS; `complete:false` — recent ~25-item window only, NOT full history).
 
-### USAspending — aggregate analysis (6 tools)
-| Tool | When to call |
-|---|---|
-| `usas_spending_over_time` | Time-series — group by fiscal_year / quarter / month. "How has VA 541512 spending trended?" |
-| `usas_search_psc_spending` | PSC (Product Service Code) market structure. |
-| `usas_search_state_spending` | Geographic — top states by federal $. |
-| `usas_search_cfda_spending` | Grant program (CFDA) breakdown. |
-| `usas_search_federal_account_spending` | Map money to budget line items (Treasury Account Symbols). |
-| `usas_search_agency_spending` | Top buying agencies for a NAICS / set-aside. |
+### Entity & partner vetting — OFAC · SAM · FAC · FDIC · EPA (14)
+- `ofac_screen_entity` — OFAC denied-party / sanctions screening.
+- `sam_check_exclusions` — SAM debarment/exclusion screen by name and/or UEI/CAGE. Empty ≠ "responsible" — only "no ACTIVE match"; a name match isn't identity-proof (verify UEI/CAGE).
+- `sam_integrity_lookup` — one-call integrity screen; `integrityFlag` = `excluded` or `review_fapiis` — NEVER "clear" keylessly (FAPIIS has no keyless API); check `fapiisUrl`.
+- `fac_search_audits` — Single Audit summaries from the Federal Audit Clearinghouse.
+- `fac_get_findings` — drill into audit-RISK findings for an entity.
+- `fdic_search_institutions` — search the FDIC-insured-institution directory.
+- `fdic_institution_financials` — quarterly financial time-series for one institution (by cert #).
+- `fdic_risk_ratios` — counterparty risk ratios for one institution.
+- `fdic_institution_history` — structural-change event log (mergers, charter changes).
+- `fdic_branch_deposits` — branch-deposit footprint.
+- `fdic_bank_failures` — historical bank failures & assistance transactions.
+- `fdic_industry_summary` — industry & state banking-sector annual aggregates.
+- `echo_search_facilities` — search EPA-regulated facilities by state with compliance/enforcement screening.
+- `echo_facility_report` — EPA ECHO Detailed Facility Report for one facility (by FRS RegistryID).
 
-### USAspending — agency profile (3 tools)
-| Tool | When to call |
-|---|---|
-| `usas_get_agency_profile` | Agency mission, abbreviation, website, subtier count. By `toptierCode`. |
-| `usas_get_agency_awards_summary` | High-level award activity (transaction count + obligations) by FY. |
-| `usas_get_agency_budget_function` | Budget breakdown by program area. |
+### Financial disclosure — SEC EDGAR (8)
+- `edgar_lookup_cik` — company ticker/name → 10-digit SEC CIK.
+- `edgar_company_filings` — a company's SEC filings.
+- `edgar_company_facts` — curated XBRL financial facts for a filer.
+- `edgar_company_concept` — one filer × one XBRL concept × full reported time-series.
+- `edgar_xbrl_frames` — cross-filer XBRL cross-section (one concept across all filers for a period).
+- `edgar_full_text_search` — full-text search across EDGAR filings, 2001–present.
+- `edgar_filing_index` — bulk cross-filer filing index for a quarter.
+- `edgar_daily_filing_index` — per-day cross-filer filing index.
 
-### USAspending — recipient profile (2 tools)
-| Tool | When to call |
-|---|---|
-| `usas_search_recipients` | Recipient list with parent/child hierarchy. Returns `id` for follow-up. |
-| `usas_get_recipient_profile` | Full detail by recipient_id (DUNS, UEI, alternate names, business types, location, totals). |
+### Regulatory & legislative — Fed Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (18)
+- `fed_register_search_documents` — search Federal Register docs by query / agency / type / date.
+- `fed_register_get_document` — full detail by document_number (citation, body URL, CFR refs).
+- `fed_register_public_inspection` — the public-inspection desk (pre-publication).
+- `fed_register_list_agencies` — Federal Register agency slugs reference.
+- `regulations_search_dockets` — search Regulations.gov rulemaking dockets.
+- `regulations_search_documents` — search Regulations.gov documents (rules, proposed rules, notices).
+- `regulations_search_comments` — search public comments on rulemakings.
+- `regulations_get_docket` — one Regulations.gov docket by id.
+- `ecfr_search` — full-text search across all of CFR (titleNumber=48 for FAR). For an EXACT clause number use `far_clause_lookup` (full-text mis-ranks GSAM).
+- `ecfr_list_titles` — all 50 CFR titles + last-amended dates.
+- `far_clause_lookup` — **authoritative FAR/DFARS clause text + its prescription** ("As prescribed in…") for an exact clause number. Carries `farOverhaulRisk` currency caveat.
+- `far_search` — FAR/DFARS-scoped topic search (excludes GSAM, collapses to current in-force version). Feeds `far_clause_lookup`.
+- `far_compliance_matrix` — cited-clause list (1–25) → proposal-ready Section L/M matrix with pass/fail `gate` flags (Section 889 / limitations on subcontracting / CMMC). A 404 → `unresolved`, an eCFR-down clause → separate `errored` bucket; never drops a clause.
+- `congress_search_bills` — search Congress.gov bills / legislation.
+- `congress_get_bill` — one bill by congress / type / number.
+- `govinfo_search_packages` — search GovInfo (GPO-authoritative) packages in a collection.
+- `govinfo_get_package` — one GovInfo package summary + download links (txt/xml/pdf/mods).
+- `govinfo_list_collections` — the GovInfo collection catalog.
 
-### USAspending — reference / autocomplete (5 tools)
-| Tool | When to call |
-|---|---|
-| `usas_autocomplete_naics` | **ANTI-HALLUCINATION GUARD** — confirm NAICS codes before using them. |
-| `usas_autocomplete_recipient` | **ANTI-HALLUCINATION GUARD** — confirm exact recipient legal name. |
-| `usas_naics_hierarchy` | Navigate NAICS tree (2-digit → 6-digit). |
-| `usas_glossary` | 151 federal-spending terms. Confirm terminology before answering. |
-| `usas_list_toptier_agencies` | List all toptier agencies + current FY obligations. |
+### Pricing, labor & fiscal — GSA CALC · WDs · BLS · Treasury · BEA · Census · FRED · per-diem (15)
+- `gsa_benchmark_labor_rates` — GSA CALC awarded-ceiling market band (a min/median/max DISTRIBUTION, fully burdened — do not re-add wrap; not a single price).
+- `sam_search_wage_determinations` — find SCA / Davis-Bacon wage determination(s) for a locality (filter coverage sca/dba, state, county; `query` matches WD number/title, NOT occupation).
+- `sam_get_wage_rates` — prevailing-wage + fringe/H&W rate table parsed from a WD + EO minimum-wage floor (check `parseConfidence`).
+- `bls_timeseries` — BLS time series (CPI-U / ECI escalation, PPI, employment) — the escalation layer.
+- `bls_oews_wages` — benchmark occupational wages & employment (OEWS) by area × occupation.
+- `bls_qcew` — county × NAICS **market size**: establishment count (competitor density), employment, avg weekly wage, and location quotient (>1.00 = higher concentration). Suppressed cells → null, never $0. Keyless, un-rate-limited (separate BLS domain).
+- `treasury_debt_to_penny` — daily total US public debt outstanding.
+- `treasury_avg_interest_rates` — average interest rate Treasury pays by security type.
+- `treasury_monthly_statement` — Monthly Treasury Statement: receipts, outlays, deficit/surplus by month.
+- `treasury_query_dataset` — escape-hatch query over 5 confirmed Treasury Fiscal Data datasets.
+- 🔑 `bea_regional_data` — regional (county/state/MSA) GDP-by-industry + personal income (BEA Regional; **requires free BEA_API_KEY** — throws without it; a bad key returns HTTP 200 with an Error object → surfaced as invalid_input; suppression codes → null).
+- 🔑 `census_business_patterns` — establishments / employment / annual payroll by NAICS × geography (Census CBP; **requires free CENSUS_API_KEY**; suppression sentinels → null, never 0; geoId/naicsCode are strings).
+- 🔑 `fred_search_series` — search the FRED macro series catalog (GDP/CPI/rates/unemployment/PPI; **requires free FRED_API_KEY**). Feed `id` into observations.
+- 🔑 `fred_series_observations` — time-series observations for a FRED series (**requires free FRED_API_KEY**; missing value '.' → null, never 0).
+- `gsa_perdiem_rates` — federal travel per-diem: monthly lodging (varies seasonally) + M&IE meal caps by city+state OR zip (keyless via DEMO_KEY; ~10 req/hr shared — set DATA_GOV_API_KEY for more).
 
-### Federal Register — rules + notices (3 tools)
-| Tool | When to call |
-|---|---|
-| `fed_register_search_documents` | Search rules / notices / proclamations by agency / type / date. |
-| `fed_register_get_document` | Full doc detail (body URL, citation, CFR refs) by document_number. |
-| `fed_register_list_agencies` | List Federal Register agencies + slugs. |
+### Health & research funding — NIH · NSF · ClinicalTrials · CMS · NPPES (9)
+- `nih_reporter_search_projects` — awarded NIH RePORTER research-grant projects.
+- `nsf_search_awards` — awarded NSF research-grant awards.
+- `nsf_get_award` — one NSF award by numeric award id.
+- `clinicaltrials_search_studies` — federally-registered clinical studies with sponsor/funder enrichment.
+- `clinicaltrials_get_study` — one study by NCT id (incl. brief summary).
+- `clinicaltrials_facet_counts` — exact per-value study-count distribution over the whole registry.
+- `cms_search_datasets` — discover CMS Open Payments (Sunshine Act) datasets.
+- `cms_query_dataset` — query a CMS Open Payments distribution (industry → physician payments).
+- `nppes_lookup_provider` — CMS/HHS NPPES NPI Registry provider lookup.
 
-### eCFR + FAR/DFARS compliance (5 tools)
-| Tool | When to call |
-|---|---|
-| `ecfr_search` | Full-text search across ALL of CFR. Pass `titleNumber=48` for FAR, `titleNumber=2` for federal financial assistance. For a specific FAR/DFARS clause, prefer `far_search`/`far_clause_lookup` (full-text mis-ranks GSAM over FAR). |
-| `ecfr_list_titles` | List all 50 CFR titles with last-amended dates. |
-| `far_search` | **"Which clauses touch topic X"** front-door — FAR/DFARS-scoped semantic search that EXCLUDES GSAM/agency supplements and collapses eCFR's historical version dupes to the CURRENT in-force one. `scope: far`(default)`|dfars|both`. Feeds `far_clause_lookup`. |
-| `far_clause_lookup` | **Authoritative clause text + its PRESCRIPTION** ("As prescribed in…") for an EXACT clause number (e.g. `52.212-4`) via the eCFR versioner. Use this, NOT `ecfr_search`, for a known clause. Carries the `farOverhaulRisk` currency caveat; a genuinely-absent clause returns `not_found`. |
-| `far_compliance_matrix` | **Shred an RFP's cited-clause list** (1–25 clauses, deduped) into a proposal-ready matrix: per-clause text + prescription + regulation + a `gate` flag for pass/fail award-eligibility GATES (Section 889 `52.204-24/25/26`, limitations on subcontracting `52.219-14`, DFARS cyber/CMMC `252.204-7012/7020/7021`). TRUTHFUL: a 404 clause → `unresolved`; an eCFR-down clause → SEPARATE `errored` bucket. Does NOT parse the PDF or give a compliance verdict. |
+### Cyber compliance — NVD + CISA KEV (2)
+- `cve_lookup` — NIST NVD CVE records by cveId or keyword/CPE/severity/date, each row JOINED with CISA KEV status (severity + mandated remediation date in one row). not-in-KEV ≠ safe. Optional NVD_API_KEY raises the rate.
+- `cisa_kev_lookup` — filter the CISA KEV catalog standalone (binding BOD 22-01 / BOD 26-04 due-dates). Works when NVD is rate-limited. not-in-KEV ≠ safe caveat on every response.
 
-### SBA — size standards (1 tool)
-| Tool | When to call |
-|---|---|
-| `sba_size_standard` | **"Is a firm SMALL for this NAICS?"** — the gate for set-aside eligibility and for vetting a teaming-partner candidate. By 6-digit NAICS (keyless sba.gov). Returns `standardType` (receipts/employees/assets), a normalized threshold (dollars or headcount), unit, and any footnote. No effective-date field → value is `asOf` retrieval; re-verify at sba.gov for high-stakes eligibility. Unknown NAICS → `found:false`. |
+### Trade & tariffs — USITC (1)
+- `hts_lookup` — US import-tariff classification + duty rates from the USITC Harmonized Tariff Schedule.
 
-### Grants.gov — federal grants (2 tools)
-| Tool | When to call |
-|---|---|
-| `grants_search` | Search federal grant opportunities by keyword / CFDA / agency. |
-| `grants_get_opportunity` | Full grant detail (description, dates, award ceiling, applicant types, CFDA programs). |
+### Geo, disaster & state/local open data — Census · FEMA · Socrata · CKAN (8)
+- `census_geocode_address` — one-line US address → matched address + Census geographies (tract, CD, place).
+- `census_geographies_by_coordinates` — longitude/latitude point → Census geographies.
+- `fema_disaster_declarations` — FEMA disaster / emergency declarations by state, type, incident, year.
+- `fema_search_public_assistance` — FEMA Public Assistance funded projects.
+- `socrata_discover_datasets` — find Socrata dataset 4x4 ids by keyword.
+- `socrata_query` — query rows from an allowlisted Socrata/SODA open-data portal.
+- `ckan_discover_datasets` — find CKAN datastore resource ids by keyword.
+- `ckan_query` — query rows from an allowlisted CKAN datastore resource (state/city spend/checkbook).
 
-### Pricing & wage determinations (3 tools)
-| Tool | When to call |
-|---|---|
-| `sam_search_wage_determinations` | Find the **SCA or Davis-Bacon wage determination(s)** governing a locality (keyless SAM SGS). Filter by `coverage` (`sca`/`dba`), `state`, `county`, or WD number/title. Follow with `sam_get_wage_rates`. NOTE: `query` matches WD number/title, NOT occupation. |
-| `sam_get_wage_rates` | Read the **prevailing-wage + fringe/H&W rate table** for a WD, PARSED from its plain-text doc, plus the Executive-Order minimum-wage floor. Distinguishes SCA (WD-wide H&W) vs DBA (per-craft fringe). Returns `parseConfidence`; supports `format:'parsed'|'raw'|'both'`. |
-| `gsa_benchmark_labor_rates` | **GSA CALC market band** for a labor category (keyless) — a DISTRIBUTION (`currentRate` min/median/max + escalated medians), NOT a single price. CALC rates are CEILING/catalog and FULLY BURDENED (do not re-add wrap). Filter by businessSize/education/experience/sin to narrow. |
+### Dataset discovery — data.gov (1)
+- `datagov_search_datasets` — search the data.gov v4 catalog for federal open datasets across all publishing agencies.
 
-### Integrity, teaming & protests (4 tools)
-| Tool | When to call |
-|---|---|
-| `sam_check_exclusions` | **Debarment/exclusion screen** — screen a firm/individual by `query` (name) and/or `uei`/`cage` against the SAM exclusions index (FAPIIS). Returns `excluded` (true iff ≥1 ACTIVE match), `matchCount`, per-record detail. CRITICAL: an EMPTY result means "no matching exclusion" — NOT proof of responsibility; a name match isn't identity-proof (verify UEI/CAGE). Needs ≥1 of query/uei/cage. |
-| `sam_integrity_lookup` | **One-call integrity screen** — "any red flags on this entity?" Composes the exclusion verdict with a pointer to the FAPIIS record. Needs ≥1 of `uei`/`cage`/`name`. `integrityFlag` is `excluded` (≥1 active exclusion) else `review_fapiis` — it NEVER returns "clear" keylessly (FAPIIS has no keyless machine API). `fapiisRecords` is ALWAYS null; `fapiisUrl` deep-links the viewable page. |
-| `usas_search_teaming_partners` | **Small-business teaming-partner discovery** by socioeconomic `cert` (enum) + optional naics/agency + lookback (keyless USAspending proxy). Ranks awardees by `agencyObligated` with award count + recency; optionally screens top candidates via `sam_check_exclusions` and drops active exclusions (`excludeDebarred`, default true). `cert` is AWARD-DERIVED, NOT the SBA cert of record — verify active certification in SAM/SBS. |
-| `gao_protest_lookup` | **Recent GAO bid-protest decisions** from the public Legal-Products RSS feed (protester, agency, decision date, outcome sustained/denied/dismissed/withdrawn, solicitation #, PDF). Filter by agency/protester/solicitation/outcome, or pull one by `bNumber`. HONEST SCOPE: keyless covers only the RECENT feed window (~25 items) — always marked `complete:false`, NOT the full protest history. |
+### Small business — SBA (1)
+- `sba_size_standard` — SBA size standard for a 6-digit NAICS (set-aside eligibility gate). Returns standardType (receipts/employees/assets), normalized threshold, unit, footnote; value is `asOf` retrieval — re-verify for high-stakes eligibility.
 
-The exact tool names depend on the host — Claude Code prefixes MCP tools as `mcp__<server>__<tool>`, while bare MCP hosts use just `<tool>`. Use whichever your host gives you.
+### Labor compliance — US DOL (2)
+- `dol_list_datasets` — browse the DOL enforcement/compliance dataset catalog (WHD wage-hour, OSHA, OFCCP, ILAB, MSHA…). **Keyless.** agency/query filtering is client-side. Feed a row's `apiUrl` + `agencyAbbr` into the next tool.
+- 🔑 `dol_get_dataset` — fetch records from ONE DOL dataset (**requires free DOL_API_KEY** — data endpoint has no keyless tier, throws without it). Records surfaced VERBATIM (envelope key-gated/unverified); totalAvailable null unless the response carries a real count.
 
-## 11 standard workflows
+### Lobbying & influence — US Senate LDA (1)
+- `lda_search_filings` — Senate lobbying filings: who is paid HOW MUCH to lobby WHICH agency on WHICH issue (keyless; optional LDA_API_KEY raises the rate). totalAvailable is the API's real ~1.95M-filing match count, not page rows; income/expenses null-never-0.
+
+### Server utilities — key discovery (1)
+- `api_key_status` — list every key the server can use, required vs optional, signup URL, what it unlocks, and whether each is currently set (a boolean — the value is NEVER shown). The live source of truth for key config.
+
+## Standard workflows
 
 ### Workflow 1 — Discover + qualify a single opportunity
-1. `sam_search_opportunities` with NAICS / agency / state filter (or `sam_search_shaping` for pre-RFP Sources Sought / Presolicitation).
-2. For most promising hit: `sam_get_opportunity` with its noticeId.
+1. `sam_search_opportunities` (NAICS/agency/state) — or `sam_search_shaping` for pre-RFP Sources Sought/Presol.
+2. Best hit: `sam_get_opportunity(noticeId)` for POCs + `attachments[]`.
 3. SOW depth: `sam_fetch_description` for full RFP text.
-4. Attachments: surface URLs from step 2's `attachments` array — then read them (Workflow 8).
-5. (Optional) Cross-check the issuing agency with `usas_get_agency_profile` for context.
+4. Read the attachments (Workflow 8).
+5. (Optional) `usas_get_agency_profile` for issuing-agency context.
 
 ### Workflow 2 — Competitive landscape ("who wins at agency X")
-1. If agency is an abbreviation: `usas_lookup_agency` first to get canonical name.
-2. `usas_search_awards` with canonical name + NAICS + fiscal year.
-3. Line items: `usas_search_individual_awards`.
+1. If agency is an abbreviation: `usas_lookup_agency` first (canonical name + toptier code).
+2. `usas_search_awards` with canonical name + NAICS + FY.
+3. Line items: `usas_search_individual_awards`. Award actions: `fpds_search_awards`.
 4. Office-level: `usas_search_subagency_spending`.
-5. (Optional) Time-series: `usas_spending_over_time` to see trend.
+5. (Optional) `usas_spending_over_time` for the trend.
 
 ### Workflow 3 — Recompete radar
-1. `usas_search_recompetes` for agency × NAICS (window default −90d..+18mo; filter pscCodes/setAside/minAwardValue). Soonest-first.
-2. For each candidate: `usas_get_award_detail` for period_of_performance + set-aside + competition extent, or `usas_analyze_incumbent` for the incumbent + PUBLIC `pressureHints` (single-offer / ceiling-exhausted / hard-stop-no-options).
-3. Cross-reference with `sam_search_shaping` (same NAICS) to catch pre-RFP shaping (Sources Sought / Presolicitation) while the requirement is still shapeable.
+1. `usas_search_recompetes` for agency × NAICS (window −90d..+18mo; filter pscCodes/setAside/minAwardValue). Soonest-first.
+2. Per candidate: `usas_get_award_detail` (PoP + set-aside + competition) or `usas_analyze_incumbent` (incumbent + public `pressureHints`).
+3. Cross-reference `sam_search_shaping` (same NAICS) to catch pre-RFP shaping while still shapeable.
 
 ### Workflow 4 — Teaming / supply-chain map
-1. `usas_search_individual_awards` for prime awards at target agency.
-2. `usas_search_subawards` filtered by prime to surface sub network.
-3. For each sub: `usas_get_recipient_profile` to confirm alternate names / hierarchy, and `sba_size_standard(naics)` to confirm it's small for the set-aside NAICS.
-4. To find NEW partners (not just existing subs): `usas_search_teaming_partners(cert, naics, agency)` — integrity-screened, ranked by agency award history (see Workflow 10).
+1. `usas_search_individual_awards` for prime awards at the target agency.
+2. `usas_search_subawards` filtered by prime → sub network.
+3. Per sub: `usas_get_recipient_profile` (alternate names/hierarchy) + `sba_size_standard(naics)` (small for the set-aside?).
+4. Find NEW partners: `usas_search_teaming_partners(cert, naics, agency)` — ranked, exclusion-screened (see Workflow 10).
 
-### Workflow 5 — Capture brief / agency intelligence (NEW)
+### Workflow 5 — Capture brief / agency intelligence
 1. `usas_lookup_agency` → canonical name + toptier code.
 2. `usas_get_agency_profile` — mission + scale.
-3. `usas_get_agency_budget_function` — where the budget actually goes.
+3. `usas_get_agency_budget_function` — where the budget goes.
 4. `usas_search_subagency_spending` — buying offices.
 5. `usas_spending_over_time` (group=fiscal_year) — multi-year trend.
-6. `usas_search_state_spending` — geographic spend distribution.
+6. `usas_search_state_spending` — geographic distribution.
 
-### Workflow 6 — Regulatory context for a pursuit (NEW)
-When the user asks about FAR / DFARS / set-aside policy / cybersecurity rules:
-1. `ecfr_search` (titleNumber=48 for FAR) — find the relevant section text.
-2. `fed_register_search_documents` (agency + recent date range) — find proposed rules / amendments.
-3. `fed_register_get_document` — pull the exact citation + body.
-4. Quote at most 1 short snippet (< 15 words) from regulation text. Always include the eCFR section path or Federal Register citation.
+### Workflow 6 — Regulatory context for a pursuit
+1. `ecfr_search` (titleNumber=48 for FAR) — the relevant section text.
+2. `regulations_search_dockets` / `regulations_search_documents` — open rulemakings; `regulations_search_comments` for public comment.
+3. `fed_register_search_documents` (agency + recent range) → `fed_register_get_document` for the exact citation + body. `fed_register_public_inspection` for pre-publication.
+4. (Statute) `congress_search_bills` → `congress_get_bill`; `govinfo_search_packages` for GPO-authoritative source. Quote ≤1 short snippet (<15 words); always cite the section path / citation.
 
-### Workflow 7 — Grants pivot (NEW)
-When the user pivots from contracts to grants (very common for SDVOSB / 8(a)):
-1. `grants_search` with keyword / CFDA.
+### Workflow 7 — Grants pivot
+1. `grants_search` (keyword / CFDA).
 2. `grants_get_opportunity` — full grant detail.
-3. (Optional) `usas_search_cfda_spending` — see who's already winning that grant program.
+3. (Optional) `usas_search_cfda_spending` — who already wins that program. Research grants: `nih_reporter_search_projects` / `nsf_search_awards`.
 
-### Workflow 8 — Read the solicitation documents (NEW)
-Get past the metadata and read the ACTUAL RFP / SOW / Q&A / wage tables:
-1. `sam_search_opportunities` (or `sam_search_shaping`) to find the notice.
-2. `sam_get_opportunity(noticeId)` — returns the `attachments[]` array (each with a `url` / resourceLinks).
-3. For each `attachments[].url`: `sam_fetch_attachment_text(url)` to extract the document TEXT (PDF + HTML; only sam.gov / api.sam.gov URLs are fetched).
-4. Read the returned `text` to answer scope / eligibility / evaluation-criteria questions. A scanned/image-only PDF or a DOCX/binary it can't read keyless returns `text:null` + a disclosed reason — that's honest, not a failure (the doc may be image-only). Respect `truncated` (raise `maxChars` or page through).
+### Workflow 8 — Read the solicitation documents
+1. `sam_search_opportunities` / `sam_search_shaping` to find the notice.
+2. `sam_get_opportunity(noticeId)` → the `attachments[]` array.
+3. Per `attachments[].url`: `sam_fetch_attachment_text(url)` (PDF+DOCX+HTML; only sam.gov URLs fetched).
+4. Read the returned `text`. A `text:null` = honest (scanned/image-only or unreadable-keyless, reason disclosed) — don't fabricate; respect `truncated` (raise maxChars / page).
 
-### Workflow 9 — FAR/DFARS compliance check (NEW)
-When the user needs the clauses on a topic, or to shred an RFP's cited-clause list:
-1. `far_search(query, scope)` (`scope: far|dfars|both`) — find the FAR/DFARS clauses on a topic (excludes GSAM, current-version only).
-2. `far_clause_lookup(clauseNumber)` — authoritative text + its **prescription** ("As prescribed in…") for each clause of interest. Use this, NOT `ecfr_search`, for an exact clause number.
-3. `far_compliance_matrix(clauses[])` — turn the RFP's cited-clause list into a per-clause **text + prescription + eligibility-`gate`** matrix for a Section L/M response (flags Section 889 / limitations on subcontracting / CMMC gates; a 404 clause → `unresolved`, an eCFR-down clause → `errored` — no clause dropped).
-4. Currency caveat: eCFR is the CODIFIED FAR; every response carries `farOverhaulRisk` — a Revolutionary-FAR-Overhaul agency class deviation may supersede a clause not shown here. Verify the controlling deviation for high-stakes gates.
+### Workflow 9 — FAR/DFARS compliance check
+1. `far_search(query, scope: far|dfars|both)` — the clauses on a topic (excludes GSAM, current version).
+2. `far_clause_lookup(clauseNumber)` — authoritative text + prescription. Use this, NOT `ecfr_search`, for an exact clause.
+3. `far_compliance_matrix(clauses[])` — cited-clause list → per-clause text + prescription + eligibility-`gate` matrix (flags 889 / limitations on subcontracting / CMMC; 404 → `unresolved`, eCFR-down → `errored`, none dropped).
+4. Currency caveat: every response carries `farOverhaulRisk` — verify the controlling class deviation for high-stakes gates.
 
-### Workflow 10 — Vet a firm / teaming partner (NEW)
-Before teaming with (or bidding against) a firm:
-1. `sam_check_exclusions(name|uei)` — is it debarred/excluded? (empty ≠ "responsible"; verify UEI/CAGE on a name match.)
-2. `sam_integrity_lookup(uei|cage|name)` — one-call integrity screen (`integrityFlag` = `excluded` or `review_fapiis`; never "clear" keylessly — check the `fapiisUrl` page).
-3. `sba_size_standard(naics)` — is the firm SMALL for this NAICS (set-aside eligibility gate)?
-4. `usas_search_teaming_partners(cert, naics, agency)` — discover ranked, integrity-screened small-business partners with the target cert + agency award history (`cert` is award-derived — verify active SBA certification in SAM/SBS before teaming).
+### Workflow 10 — Vet a firm / teaming partner
+1. `ofac_screen_entity(name)` — sanctions / denied-party screen.
+2. `sam_check_exclusions(name|uei)` — debarred/excluded? (empty ≠ responsible; verify UEI/CAGE on a name match.)
+3. `sam_integrity_lookup(uei|cage|name)` — one-call integrity (`integrityFlag` = excluded or review_fapiis; never "clear" keylessly — check `fapiisUrl`).
+4. `fac_search_audits` → `fac_get_findings` — adverse Single Audit findings.
+5. (Financial firm) `fdic_search_institutions` → `fdic_risk_ratios` / `fdic_institution_financials` — bank health.
+6. (Facility) `echo_search_facilities` → `echo_facility_report` — EPA compliance/enforcement.
+7. (Public co.) `edgar_lookup_cik` → `edgar_company_facts` / `edgar_company_filings` — revenue trend + 10-K.
+8. `sba_size_standard(naics)` — small for the set-aside NAICS?
 
-### Workflow 11 — Price a bid (NEW)
-Build a labor-cost basis of estimate:
-1. `sam_search_wage_determinations(coverage, state, county)` — find the SCA/DBA wage determination(s) governing the place of performance.
-2. `sam_get_wage_rates(wdNumber)` — the statutory prevailing-wage + fringe/H&W **floor** (parsed from the WD; check `parseConfidence`, read `raw` when low).
-3. `gsa_benchmark_labor_rates(laborCategory)` — the GSA CALC awarded-ceiling market band (a min/median/max DISTRIBUTION, fully burdened — do not re-add wrap) to sanity-check proposed rates against the market.
+### Workflow 11 — Price a bid
+1. `sam_search_wage_determinations(coverage, state, county)` — the SCA/DBA WD(s) governing the place of performance.
+2. `sam_get_wage_rates(wdNumber)` — the statutory prevailing-wage + fringe/H&W floor (check `parseConfidence`, read `raw` when low).
+3. `gsa_benchmark_labor_rates(laborCategory)` — GSA CALC awarded-ceiling market band (fully burdened; don't re-add wrap) to sanity-check proposed rates.
+4. (Travel) `gsa_perdiem_rates(city+state | zip)` — lodging + M&IE caps for the cost basis.
+
+### Workflow 12 — Market sizing (NEW)
+Estimate the addressable market for a NAICS × geography:
+1. `bls_qcew(mode, area|industry, year, quarter)` — establishment count (competitor density), employment, avg weekly wage, location quotient (keyless).
+2. 🔑 `census_business_patterns(naics, geography, state)` — establishments / employment / annual payroll (needs CENSUS_API_KEY).
+3. 🔑 `bea_regional_data(tableName, geoFips, lineCode)` — regional GDP-by-industry / personal income (needs BEA_API_KEY).
+4. (Occupational depth) `bls_oews_wages(area, occupation)` — wage/employment for the labor category.
+The establishments/employment/wages + GDP triad; only `census_business_patterns` and `bea_regional_data` need a key.
+
+### Workflow 13 — Macro / bid-escalation context (NEW)
+1. 🔑 `fred_search_series(query)` — find the right series id (e.g. 'CPI', 'GDP', '10-year treasury'; needs FRED_API_KEY).
+2. 🔑 `fred_series_observations(seriesId, startDate, endDate)` — the CPI/GDP/rate time series (missing '.' → null).
+3. Cross-check with `bls_timeseries` (CPI-U / ECI for an escalation clause) and `treasury_avg_interest_rates` for cost-of-money context.
+
+### Workflow 14 — Influence / competitive lobbying (NEW)
+1. `lda_search_filings(agency, issue)` — who lobbies the target agency, on what, for how much (keyless).
+2. Narrow by `registrantName` / `clientName` to profile a competitor's B2G footprint (income/expenses null-never-0; totalAvailable is the real match count, not page rows).
+
+### Workflow 15 — Labor-compliance vetting (NEW)
+1. `dol_list_datasets(agency|query)` — find the WHD wage-hour / OSHA inspection dataset (keyless catalog); grab a row's `apiUrl` + `agencyAbbr`.
+2. 🔑 `dol_get_dataset(agency, table, filterField, filterValue)` — pull the enforcement records for a partner (needs DOL_API_KEY; records surfaced verbatim).
+
+### Workflow 16 — Cyber compliance (NEW)
+For FedRAMP / CMMC / SBOM component review:
+1. `cve_lookup(cveId | keyword)` — severity + CISA KEV status joined in one row.
+2. `cisa_kev_lookup(cveId | vendorProject)` — standalone KEV membership + the binding remediation due-date (works even when NVD is rate-limited). not-in-KEV ≠ safe.
+
+### Workflow 17 — Health / research pursuit (NEW)
+1. `nih_reporter_search_projects` / `nsf_search_awards` — awarded research grants on a topic (funder/competitive intel).
+2. `clinicaltrials_search_studies` → `clinicaltrials_get_study`; `clinicaltrials_facet_counts` for the distribution.
+3. `cms_search_datasets` → `cms_query_dataset` — CMS Open Payments industry→physician payments; `nppes_lookup_provider` to confirm a provider NPI.
+
+### Workflow 18 — Config / which keys are set (NEW)
+1. `api_key_status` — the live source of truth: every key, required vs optional, signup URL, what it unlocks, and whether it's currently set (boolean; value never shown).
+2. For the 4 required keys not set, point the user to the signup URL (see Keys section). To confirm a key WORKS, call that source's own tool.
 
 ## Output discipline (anti-hallucination)
 
-- **Cite tool calls inline** when surfacing facts: "VA awarded $410M to Booz Allen across 28 contracts in FY26 (`usas_search_awards`)."
+- **Cite tool calls inline**: "VA awarded $410M to Booz Allen across 28 contracts in FY26 (`usas_search_awards`)."
 - **Never invent** notice IDs, NAICS codes, recipient names, contract amounts, regulation citations. If a tool returns nothing, say so.
-- **Use autocomplete guards FIRST**:
-  - User mentions a NAICS theme without code → `usas_autocomplete_naics` to confirm.
-  - User mentions a recipient name → `usas_autocomplete_recipient` to confirm exact USAspending-canonical legal name.
-  - User mentions an agency abbreviation → `usas_lookup_agency` to get canonical name + toptier code.
-- **Quote sparingly** from RFP body / regulation text — at most 1 snippet, < 15 words. Point to the source URL.
-- Notice IDs starting with `demo-` are fictional fixtures from non-OSS demos; they don't exist on sam.gov.
+- **Use autocomplete guards FIRST**: NAICS theme → `usas_autocomplete_naics`; recipient name → `usas_autocomplete_recipient`; agency abbreviation → `usas_lookup_agency`.
+- **Quote sparingly** from RFP body / regulation text — at most 1 snippet, < 15 words; point to the source URL.
+- **`totalAvailable` is the real upstream total**, not the rows on this page — report it as the match count; page forward when `hasMore`.
+- **Suppression / missing → null, never 0** — Census/BEA/QCEW/FRED/per-diem/LDA all map a withheld or missing value to null; a genuine 0 is preserved. Never read a null as "$0".
+- **Key-required tools throw without a key** — the 4 🔑 tools (Census, FRED×2, BEA, DOL data) return an honest config error, not a fake empty. Check `api_key_status`.
+- Notice IDs starting with `demo-` are fictional demo fixtures; they don't exist on sam.gov.
 
 ## Common pitfalls
 
-- ❌ "VA" passed directly as `agency` to USAspending tools → returns nothing. ✅ `usas_lookup_agency("VA")` first.
-- ❌ Searching opportunities without a `ncode` or `query` filter — useless deluge. ✅ Always narrow.
-- ❌ Quoting an old noticeId from training data — they expire. ✅ Always do a fresh `sam_search_opportunities`.
-- ❌ Calling `sam_fetch_description` before `sam_get_opportunity` — you don't have the noticeId yet.
-- ❌ Confusing `usas_search_cfda_spending` (grants) with `usas_search_psc_spending` (contracts) — different award types.
-- ❌ Using a NAICS code from training without verification — they get retired. ✅ `usas_autocomplete_naics` to confirm currency.
-- ❌ Agency name spelled wrong (e.g. "VA Department" vs canonical "Department of Veterans Affairs") → empty results. ✅ Always use `usas_lookup_agency`.
-- ❌ Treating `sam_fetch_attachment_text` `text:null` as a bug — it's honest: the doc may be a scanned/image-only PDF or a DOCX/binary not readable keyless (a reason is disclosed). ✅ Note the limitation; don't fabricate the contents.
-- ❌ `ecfr_search` for an exact FAR clause number (e.g. `52.212-4`) — full-text mis-ranks GSAM `552.212-4` above the real clause. ✅ Use `far_clause_lookup` (exact) / `far_search` (topic → clauses).
-- ❌ Reading `sam_check_exclusions` / `sam_integrity_lookup` empty as "the firm is responsible" — empty only means "no matching ACTIVE exclusion"; FAPIIS has no keyless API (never "clear"). ✅ Also check the `fapiisUrl` page; a name match isn't identity-proof — verify UEI/CAGE.
-- ❌ Expecting `sam_lookup_notice_fields` to just work — it's OFF by default (returns `enabled:false` until `SAM_GOV_CSV_CACHE` / `SAM_GOV_ENABLE_CSV=1` is set). ✅ For a few notices, `sam_get_opportunity` per notice is fine.
-- ❌ Treating `gsa_benchmark_labor_rates` as a single price or adding wrap on top — it's a fully-burdened CEILING distribution. And `gao_protest_lookup` is `complete:false` (recent ~25-item feed only), not the full protest history.
+- ❌ "VA" passed directly as `agency` to USAspending → nothing. ✅ `usas_lookup_agency("VA")` first.
+- ❌ Searching opportunities with no `ncode`/`query` — useless deluge. ✅ Always narrow.
+- ❌ Quoting an old noticeId from training — they expire. ✅ Always fresh `sam_search_opportunities`.
+- ❌ `sam_fetch_description` before `sam_get_opportunity` — you don't have the noticeId yet.
+- ❌ Confusing `usas_search_cfda_spending` (grants) with `usas_search_psc_spending` (contracts).
+- ❌ A NAICS code from training unverified — they get retired. ✅ `usas_autocomplete_naics`.
+- ❌ Treating `sam_fetch_attachment_text` `text:null` as a bug — it's honest (image-only / unreadable-keyless, reason disclosed).
+- ❌ `ecfr_search` for an exact FAR clause (e.g. `52.212-4`) — mis-ranks GSAM `552.212-4`. ✅ `far_clause_lookup` (exact) / `far_search` (topic).
+- ❌ Reading `ofac_screen_entity` / `sam_check_exclusions` / `sam_integrity_lookup` empty as "responsible" — empty = "no ACTIVE match"; FAPIIS has no keyless API (never "clear"). ✅ Also check `fapiisUrl`; verify UEI/CAGE.
+- ❌ Expecting `sam_lookup_notice_fields` to just work — OFF by default (`enabled:false` until `SAM_GOV_ENABLE_CSV=1`). ✅ Few notices → `sam_get_opportunity` each.
+- ❌ Treating `gsa_benchmark_labor_rates` as a single price or adding wrap — it's a fully-burdened CEILING distribution.
+- ❌ `gao_protest_lookup` is `complete:false` (recent ~25-item feed only), not full history.
+- ❌ Calling a 🔑 tool (Census/FRED/BEA/`dol_get_dataset`) with no key — it THROWS. ✅ `api_key_status` first; set the free key.
+- ❌ Reading a Census/BEA/QCEW/FRED null as `0` — it's suppression/missing, never zero.
+- ❌ Reporting a page's row count as the total — `totalAvailable` is the real upstream match count (e.g. LDA's ~1.95M corpus); page forward on `hasMore`.
+- ❌ Summing `bls_qcew` rows across aggregation levels / ownerships — the file mixes them; a do-not-sum note rides every response.
+- ❌ Treating a CVE/component *not* on CISA KEV as "safe" — KEV is a curated subset of confirmed in-the-wild exploitation; absence ≠ unexploited.
+- ❌ Coercing `dol_get_dataset` records — the envelope is key-gated/unverified, so rows are surfaced VERBATIM; totalAvailable is null unless the response carries a real count.
 
-## Optional — higher rate limits + archives
+## Keys & rate limits
 
-The MCP server runs **keyless** by default. For higher SAM.gov rate limits + archives older than ~12 months, the operator can set `SAM_GOV_API_KEY` in the MCP server's `env` block. The agent doesn't need to know — auth path is transparent.
+**Most tools are keyless.** Ask the server live with **`api_key_status`** — it lists every key, whether required or optional, the free signup URL, what it unlocks, and whether each is currently set (a boolean; the value is never shown). Set keys via the host `env` block OR a `.env` file in the server's working directory (auto-loaded; real env wins). Every key below is free.
+
+**Required — the source has NO keyless tier, so the tool throws without it:**
+
+| Env var | Unlocks | Free signup |
+|---|---|---|
+| `CENSUS_API_KEY` | `census_business_patterns` | api.census.gov/data/key_signup.html |
+| `FRED_API_KEY` | `fred_search_series`, `fred_series_observations` | fred.stlouisfed.org/docs/api/api_key.html |
+| `BEA_API_KEY` | `bea_regional_data` | apps.bea.gov/API/signup/ |
+| `DOL_API_KEY` | `dol_get_dataset` (the DOL *data* endpoint; `dol_list_datasets` catalog is keyless) | dataportal.dol.gov/registration |
+
+**Optional — only raise a rate limit or unlock one filter (all tools work keyless without them):**
+
+| Env var | Effect |
+|---|---|
+| `SAM_GOV_API_KEY` | authenticated SAM.gov v2 search + the organizationName filter + full archive (>~12mo) |
+| `DATA_GOV_API_KEY` | higher limits across api.data.gov sources (Regulations.gov, FAC, NPPES, CMS, data.gov catalog, GSA per-diem) — lifts the shared `DEMO_KEY` cap |
+| `LDA_API_KEY` | higher rate on `lda_search_filings` |
+| `BLS_API_KEY` | BLS v2 tier (~500/day vs keyless ~25/day) for `bls_timeseries` (QCEW/CSV path is un-rate-limited regardless) |
+| `NVD_API_KEY` | higher NVD rate for `cve_lookup` |
+| `SOCRATA_APP_TOKEN` | higher Socrata throttling limits |
+
+Creating the account at a signup URL is the one manual step; the server automates *discovery* (`api_key_status`) and *configuration* (`.env`). To confirm a key actually works, call that source's own tool.
