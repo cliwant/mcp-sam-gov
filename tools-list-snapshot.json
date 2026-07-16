@@ -938,7 +938,7 @@
       "properties": {
         "query": {
           "type": "string",
-          "description": "Free-text search over the dataset catalog (→ _q), e.g. 'wildfire'. LIVE-CONFIRMED to narrow."
+          "description": "Free-text search over the dataset catalog (→ q), e.g. 'wildfire'. LIVE-CONFIRMED to narrow (2026-07-16: the v4 API param is `q`; the old `_q` is silently ignored)."
         },
         "organization": {
           "type": "string",
