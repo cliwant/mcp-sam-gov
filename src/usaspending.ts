@@ -2685,6 +2685,118 @@ export async function glossary(args: { limit?: number; search?: string }) {
   });
 }
 
+// ─── Disaster / emergency-fund spending (DEFC axis) ───────────────
+/**
+ * List the Disaster Emergency Fund Codes (DEFC) — the supplemental-appropriation
+ * tags (COVID-19 relief, IIJA/infrastructure, and other emergency laws) that
+ * usas_disaster_spending filters on. GET references/def_codes/ (keyless). Returns the
+ * COMPLETE code set (no pagination), each with `group` ('covid_19' | 'infrastructure'
+ * | null), title, and public law. Discovery front-door for usas_disaster_spending.
+ */
+export async function listDisasterCodes() {
+  return memoize("usas:def_codes", async () => {
+    type Resp = {
+      codes?: {
+        code?: string;
+        disaster?: string | null;
+        title?: string;
+        public_law?: string;
+      }[];
+    };
+    const json = await getUsas<Resp>("references/def_codes/");
+    const results = json.codes ?? [];
+    const codes = results.map((c) => ({
+      code: c.code ?? "",
+      // The supplemental-law GROUP: 'covid_19' (COVID relief), 'infrastructure'
+      // (IIJA), or null (other emergency appropriations). NOT fabricated when absent.
+      group: c.disaster ?? null,
+      title: c.title ?? "",
+      publicLaw: typeof c.public_law === "string" ? c.public_law : null,
+    }));
+    return withMeta(
+      { codes },
+      referenceMeta({
+        source: "usaspending.gov/api/v2 references/def_codes",
+        returned: codes.length,
+        limit: codes.length,
+        totalAvailable: codes.length,
+        // The endpoint takes no `limit` and returns the COMPLETE DEFC set → complete.
+        limitHonored: false,
+        extraNotes: [
+          "Complete list of Disaster Emergency Fund Codes (DEFC). group 'covid_19' = COVID-19 relief appropriations; 'infrastructure' = IIJA (Infrastructure Investment and Jobs Act); null = other supplemental/emergency appropriations. Pass one or more `code` values to usas_disaster_spending's `defCodes` to see spending tagged to those funds.",
+        ],
+      }),
+    );
+  });
+}
+
+/**
+ * Disaster / emergency-fund spending BY GEOGRAPHY — obligations or outlays tagged to
+ * one or more Disaster Emergency Fund Codes (DEFC: COVID-19, IIJA, etc.), broken out
+ * per state / county / congressional district. POST disaster/spending_by_geography/
+ * (keyless). Answers "which geographies captured COVID/IIJA relief money" — a
+ * distinct axis the standard award search does not expose. `defCodes` REQUIRED
+ * (discover them via usas_list_disaster_codes). The geography endpoint returns the
+ * COMPLETE set of geo units (no pagination) ⇒ totalAvailable = returned, complete.
+ * amount/perCapita are number|null (a real 0 stays 0 — some DEFCs report $0
+ * obligations with a nonzero awardCount; absent → null, never a fabricated 0).
+ */
+export async function disasterSpending(args: {
+  defCodes: string[];
+  spendingType?: "obligation" | "outlay";
+  geoLayer?: "state" | "county" | "district";
+}): Promise<MetaBundle> {
+  const spendingType = args.spendingType ?? "obligation";
+  const geoLayer = args.geoLayer ?? "state";
+  type Resp = {
+    geo_layer?: string;
+    results?: {
+      amount?: number;
+      display_name?: string;
+      shape_code?: string;
+      population?: number | null;
+      per_capita?: number;
+      award_count?: number;
+    }[];
+  };
+  const json = await postUsas<Resp>("disaster/spending_by_geography/", {
+    filter: { def_codes: args.defCodes },
+    spending_type: spendingType,
+    geo_layer: geoLayer,
+  });
+  const results = json.results ?? [];
+  // null-never-0: a real 0 (a DEFC that obligated nothing in that geo) stays 0; an
+  // absent/non-number amount is null (never a fabricated 0).
+  const nn = (v: unknown): number | null => (typeof v === "number" ? v : null);
+  const geographies = results.map((r) => ({
+    name: r.display_name ?? "",
+    code: r.shape_code ?? null,
+    amount: nn(r.amount),
+    awardCount: nn(r.award_count),
+    population: nn(r.population),
+    perCapita: nn(r.per_capita),
+  }));
+  return withMeta(
+    { spendingType, geoLayer, defCodes: args.defCodes, geographies },
+    {
+      source: "usaspending.gov/api/v2 disaster/spending_by_geography",
+      keylessMode: true,
+      returned: geographies.length,
+      // The endpoint returns EVERY geo unit for the layer (no cursor/paging) → the
+      // returned set IS complete; totalAvailable = returned, never a fabricated cap.
+      totalAvailable: geographies.length,
+      truncated: false,
+      filtersApplied: ["defCodes", "spendingType", "geoLayer"],
+      filtersDropped: [],
+      notes: [
+        "Spending tagged to the given Disaster Emergency Fund Codes (DEFC), per geography. amount/perCapita are number|null (a real 0 stays 0; absent → null).",
+        "obligation vs outlay differ: some DEFCs (e.g. IIJA/infrastructure) report $0 OBLIGATIONS by geography while awardCount is nonzero — a $0 with awards is NOT 'no activity'; try spendingType:'outlay' and read awardCount alongside the amount.",
+        "This returns the COMPLETE set of geo units for the layer (no pagination) — totalAvailable is the returned count, not a fabricated total.",
+      ],
+    } satisfies Partial<ResponseMeta>,
+  );
+}
+
 export async function listToptierAgencies(args: { limit?: number }) {
   const limit = args.limit ?? 50;
   return memoize(`usas:toptier:${limit}`, async () => {
