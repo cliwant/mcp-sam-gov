@@ -6652,6 +6652,58 @@ async function testNistControls() {
   });
 }
 
+// §36e: cbp_border_wait_times (CBP Border Wait Times, added 2026-07-16). Locks: array
+// parse + border/portName filter, delay/lanes null-never-0 (a real 0 stays 0, an
+// empty/N/A value ⇒ null), fixed host, non-array ⇒ schema_drift, 503 ⇒ THROW.
+async function testCbpBorder() {
+  section("36e. cbp_border_wait_times (bwt.cbp.gov) — array parse + border/portName filter + delay null-never-0 + fixed host + non-array schema_drift + 503 THROW");
+  const sam = new SamGovClient({});
+  const isCbp = (u) => /bwt\.cbp\.gov\/api\/bwtnew/.test(u);
+  const cbpMock = (json, status = 200) => (u) => (isCbp(u) ? mockResponse({ status, json }) : failClosed()());
+  const PORTS = [
+    { port_number: "0101", border: "Mexican Border", port_name: "Laredo", crossing_name: "World Trade Bridge", date: "2026-07-16", time: "03:00", port_status: "Open", commercial_vehicle_lanes: { maximum_lanes: 8, standard_lanes: { update_time: "At 3:00 am CDT", operational_status: "delay", delay_minutes: "30", lanes_open: "4" }, FAST_lanes: { update_time: "", operational_status: "N/A", delay_minutes: "", lanes_open: "" } } },
+    { port_number: "0102", border: "Canadian Border", port_name: "Detroit", crossing_name: "Ambassador Bridge", date: "2026-07-16", time: "03:00", port_status: "Open", commercial_vehicle_lanes: { maximum_lanes: "3", standard_lanes: { update_time: "At 3:00 am EDT", operational_status: "no delay", delay_minutes: "0", lanes_open: "3" }, FAST_lanes: { delay_minutes: "5", operational_status: "delay", lanes_open: "1" } } },
+  ];
+
+  // (a) array parse + border filter + fixed host + delay null-never-0 (nested) + note.
+  _clearCache();
+  await withFetch(cbpMock(PORTS), async (calls) => {
+    const r = await runTool("cbp_border_wait_times", { border: "mexican" }, sam);
+    const m = buildMeta(r.meta);
+    ok("36e fetch on the fixed host bwt.cbp.gov/api/bwtnew",
+      new URL(calls.find((x) => isCbp(x.url)).url).hostname === "bwt.cbp.gov", JSON.stringify(calls.some((x) => isCbp(x.url))));
+    ok("36e border='mexican' (case-insensitive substring) ⇒ EXACT 1 port (Laredo, Mexican Border), NOT the Canadian one",
+      m.totalAvailable === 1 && r.data.ports.length === 1 && r.data.ports[0].portName === "Laredo" && r.data.ports[0].border === "Mexican Border", JSON.stringify(r.data.ports.map((p) => [p.portName, p.border])));
+    const cv = r.data.ports[0].commercialVehicle;
+    ok("36e delay/lanes null-never-0: standard delay '30'→30, lanesOpen '4'→4; FAST empty ''→null (a closed/N-A lane's delay is UNKNOWN, not 0) ⇒ mapping '' to 0 ⇒ RED",
+      cv.standard.delayMinutes === 30 && cv.standard.lanesOpen === 4 && cv.fast.delayMinutes === null && cv.fast.lanesOpen === null && cv.maxLanes === 8, JSON.stringify(cv));
+    ok("36e real-time freshness note present (updateTime surfaced; not implied live-to-the-second)",
+      m.notes.some((n) => /REAL-TIME|updateTime/i.test(n)) && r.data.ports[0].commercialVehicle.standard.updateTime === "At 3:00 am CDT", JSON.stringify({ hasNote: m.notes.length, ut: r.data.ports[0].commercialVehicle.standard.updateTime }));
+  });
+  // (b) a REAL 0 delay stays 0 (Detroit standard delay '0' ⇒ 0, NOT null).
+  _clearCache();
+  await withFetch(cbpMock(PORTS), async () => {
+    const r = await runTool("cbp_border_wait_times", { portName: "detroit" }, sam);
+    const cv = r.data.ports[0].commercialVehicle;
+    ok("36e a genuine 0 delay STAYS 0 (Detroit standard delay '0' ⇒ 0, never null) — the null-never-0 boundary is exact",
+      r.data.ports.length === 1 && cv.standard.delayMinutes === 0 && cv.standard.operationalStatus === "no delay", JSON.stringify(cv.standard));
+  });
+  // (c) a non-array body ⇒ schema_drift THROW (never a fake empty).
+  _clearCache();
+  await withFetch(cbpMock({ error: "maintenance" }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cbp_border_wait_times", {}, sam));
+    ok("36e a non-array body ⇒ schema_drift THROW (never a fabricated empty ports[])",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (d) 503 ⇒ upstream_unavailable THROW.
+  _clearCache();
+  await withFetch(cbpMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("cbp_border_wait_times", {}, sam));
+    ok("36e 503 ⇒ upstream_unavailable THROW (a DOWN feed is NEVER an empty ports[])",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+}
+
 async function testGovDomains() {
   section("36c. search_gov_domains (CISA get.gov) — CSV parse + quoted-comma + email EXCLUDED + client-side filter exact-total + fixed host + header-rename schema_drift + 503 THROW");
   const sam = new SamGovClient({});
@@ -20576,6 +20628,7 @@ async function main() {
   await testDisasterSpending();
   await testGovDomains();
   await testNistControls();
+  await testCbpBorder();
   await testSearchSubawardsMapping();
   await testTeamingMostRecentAwardDate();
   await testNaicsHierarchy();
