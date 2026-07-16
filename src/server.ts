@@ -83,6 +83,7 @@ import * as openfdaDevice from "./openfda-device.js";
 import * as openfdaDrugsfda from "./openfda-drugsfda.js";
 import * as nhtsa from "./nhtsa.js";
 import * as cpsc from "./cpsc.js";
+import * as cbpBorder from "./cbp-border.js";
 import { fetchAttachmentText } from "./attachments.js";
 import * as keys from "./keys.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
@@ -1056,6 +1057,21 @@ const NistControlsInput = z.object({
     .optional()
     .describe("Case-insensitive substring searched over the control title + requirement statement."),
   limit: z.number().int().min(1).max(200).optional().describe("Max controls returned (default 25, max 200)."),
+  offset: z.number().int().min(0).optional().describe("Zero-based page offset (default 0)."),
+});
+
+const CbpBorderWaitInput = z.object({
+  border: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by border — case-insensitive substring, e.g. 'Canadian' or 'Mexican' (the feed labels ports 'Canadian Border' / 'Mexican Border')."),
+  portName: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by port name — case-insensitive substring, e.g. 'Laredo', 'Detroit'."),
+  limit: z.number().int().min(1).max(200).optional().describe("Max ports returned (default 100, max 200)."),
   offset: z.number().int().min(0).optional().describe("Zero-based page offset (default 0)."),
 });
 
@@ -6171,6 +6187,14 @@ export const TOOLS: ToolDef[] = [
       "Look up U.S. CPSC consumer-product RECALLS — the recall title, hazard description, remedy, affected products, manufacturers, retailers, injuries, and country of manufacture (CPSC SaferProducts /RestWebServices/Recall; www.saferproducts.gov). The consumer-goods / import product-safety lane alongside nhtsa_recalls (vehicles) and openfda (medical). KEYLESS — no API key is required or accepted. Inputs (ALL optional): `dateStart`/`dateEnd` (YYYY-MM-DD recall date range), `productName` (substring), `manufacturer` (substring), `recallNumber` (a specific CPSC recall number). Returns { recalls:[{ recallNumber, recallDate, title, description, url, products:[names], numberOfUnits, manufacturers:[names], retailers:[names], hazards:[descriptions], remedies:[descriptions], injuries:[names], manufacturerCountries:[names] }] } + honest _meta. HONESTY: the CPSC response is a bare array with NO count field and NO pagination — it returns the COMPLETE matching set, so totalAvailable = the number of returned recalls and complete:true (never a fabricated total). ★With NO filter given, results are bounded to a DEFAULT ~90-day recent window (RecallDateStart, disclosed in _meta.notes) rather than a silent whole-dataset fetch. An empty result ⇒ an HONEST EMPTY (returned:0), NOT an error; a 4xx ⇒ invalid_input; a 5xx/timeout ⇒ THROWS; a 200 non-JSON OR a non-array body ⇒ schema_drift. Nested arrays are flattened to name/description strings (an empty {} object is skipped, never fabricated); NumberOfUnits is free text kept as a string; dates are strings; every scalar is null-never-empty-string. Fixed host www.saferproducts.gov (SSRF-guarded); dates are ^\\d{4}-\\d{2}-\\d{2}$ and recallNumber is letters/digits/hyphen only.",
     inputSchema: CpscRecallsInput,
     handler: (input) => cpsc.recalls(input),
+  }),
+  // ━━━ CBP Border Wait Times (bwt.cbp.gov) — freight/logistics (1) ━━━
+  defineTool({
+    name: "cbp_border_wait_times",
+    description:
+      "Live CBP land-border-port wait times — current commercial-vehicle (and passenger) crossing delays at every US Canadian- and Mexican-border port (keyless; bwt.cbp.gov). The FREIGHT / LOGISTICS situational-awareness lane: per-port commercial-vehicle standard + FAST lane delay (minutes), operational status, open-lane count, and maximum lanes. Filters (optional): `border` (case-insensitive substring, 'Canadian'/'Mexican'), `portName` (substring, e.g. 'Laredo'); `limit`/`offset` pagination. Each row: { portNumber, portName, crossingName, border, portStatus (Open/Closed), asOf, commercialVehicle:{ maxLanes, standard:{operationalStatus, delayMinutes, lanesOpen, updateTime}, fast:{…} } }. HONESTY: this is REAL-TIME operational data — each lane carries its own updateTime (surfaced verbatim; freshness never implied live-to-the-second); delayMinutes/lanesOpen are number|null (a real 0 stays 0; an empty/N/A value — e.g. a closed lane — is null, NEVER a fabricated 0, because a closed lane's delay is UNKNOWN, not zero); the API returns the WHOLE port set so totalAvailable is the EXACT matched-port count; an outage/4xx/timeout THROWS and a non-array body ⇒ schema_drift (never a fake empty).",
+    inputSchema: CbpBorderWaitInput,
+    handler: (input) => cbpBorder.borderWaitTimes(input),
   }),
   // ━━━ BEA Regional Economic Accounts (apps.bea.gov) — regional GDP/income (1) ━━━ ADR-0051
   // ★The server's THIRD KEY-REQUIRED source: the BEA Data API has NO keyless tier, so

@@ -214,6 +214,31 @@
     }
   },
   {
+    "name": "cbp_border_wait_times",
+    "description": "Live CBP land-border-port wait times — current commercial-vehicle (and passenger) crossing delays at every US Canadian- and Mexican-border port (keyless; bwt.cbp.gov). The FREIGHT / LOGISTICS situational-awareness lane: per-port commercial-vehicle standard + FAST lane delay (minutes), operational status, open-lane count, and maximum lanes. Filters (optional): `border` (case-insensitive substring, 'Canadian'/'Mexican'), `portName` (substring, e.g. 'Laredo'); `limit`/`offset` pagination. Each row: { portNumber, portName, crossingName, border, portStatus (Open/Closed), asOf, commercialVehicle:{ maxLanes, standard:{operationalStatus, delayMinutes, lanesOpen, updateTime}, fast:{…} } }. HONESTY: this is REAL-TIME operational data — each lane carries its own updateTime (surfaced verbatim; freshness never implied live-to-the-second); delayMinutes/lanesOpen are number|null (a real 0 stays 0; an empty/N/A value — e.g. a closed lane — is null, NEVER a fabricated 0, because a closed lane's delay is UNKNOWN, not zero); the API returns the WHOLE port set so totalAvailable is the EXACT matched-port count; an outage/4xx/timeout THROWS and a non-array body ⇒ schema_drift (never a fake empty).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "border": {
+          "type": "string",
+          "description": "Filter by border — case-insensitive substring, e.g. 'Canadian' or 'Mexican' (the feed labels ports 'Canadian Border' / 'Mexican Border')."
+        },
+        "portName": {
+          "type": "string",
+          "description": "Filter by port name — case-insensitive substring, e.g. 'Laredo', 'Detroit'."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max ports returned (default 100, max 200)."
+        },
+        "offset": {
+          "type": "number",
+          "description": "Zero-based page offset (default 0)."
+        }
+      }
+    }
+  },
+  {
     "name": "census_business_patterns",
     "description": "Market sizing by NAICS × geography — establishments, employment, and annual payroll from the US Census County Business Patterns (CBP) API (api.census.gov/data/{year}/cbp). ★REQUIRES a free CENSUS_API_KEY: the Census Data API has NO keyless tier, so without the key this tool THROWS an honest config error (get one at https://api.census.gov/data/key_signup.html; call api_key_status to see every source's key requirement). Input: optional `naics` (2–6 digit NAICS-2017, e.g. '5415'; omit to aggregate all sectors), `geography` (us|state|county, default us; county REQUIRES `state`), `state` (2-digit FIPS, e.g. '06'), `year` (default '2022'), optional `limit` (client-side top-N; CBP has no server pagination). Returns { rows:[{ name, geoId, naicsCode, naicsLabel, establishments, employees, annualPayrollUsd, state }] } + honest _meta. HONESTY: establishments/employees are integer counts and annualPayrollUsd is annual US dollars (×1000 from the source's $1,000-unit PAYANN); large-negative suppression sentinels map to null — NEVER a negative number and NEVER 0 (a genuine 0 stays 0; note CBP primarily uses noise-infusion + suppression flags, surfaced as reported — see the tool's suppression note); geoId/naicsCode/state are STRINGS (leading zeros survive). CBP returns the COMPLETE geography set for the filter (no pagination) ⇒ totalAvailable = the row count, complete:true. A missing/invalid key ⇒ invalid_input (a 302 to the Missing-Key page); a header-only body ⇒ honest empty (returned:0); a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The key rides ONLY in the &key= query param — never logged or echoed.",
     "inputSchema": {
