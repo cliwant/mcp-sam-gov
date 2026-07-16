@@ -6501,6 +6501,67 @@ async function testUnknownKeyRejection() {
   });
 }
 
+// §36b: usas_list_disaster_codes + usas_disaster_spending (DEFC axis, added
+// 2026-07-16). Locks: (1) def_codes maps code/group/title with group null-never-
+// fabricated + complete (no-pagination reference); (2) disaster_spending POSTs
+// def_codes/spending_type/geo_layer correctly, maps geo rows, amount null-never-0 (a
+// real 0 stays 0, absent → null), and totalAvailable = returned (complete geo set).
+async function testDisasterSpending() {
+  section("36b. usas_list_disaster_codes + usas_disaster_spending (DEFC axis) — def_codes mapping/complete + geo POST body + amount null-never-0 + complete geo set");
+  const sam = new SamGovClient({});
+  const isDefCodes = (u) => /references\/def_codes\/?$/.test(u);
+  const isDisasterGeo = (u) => /disaster\/spending_by_geography\/?$/.test(u);
+  _clearCache();
+
+  // (a) def_codes: group null-never-fabricated; complete (no-pagination reference).
+  await withFetch((u) => (isDefCodes(u) ? mockResponse({ status: 200, json: { codes: [
+    { code: "1", disaster: "infrastructure", title: "Infrastructure Investment and Jobs Act", public_law: "117-58" },
+    { code: "L", disaster: "covid_19", title: "CARES Act" },
+    { code: "2", disaster: null, title: "Further Extending Government Funding Act" },
+  ] } }) : failClosed()()), async () => {
+    const r = await runTool("usas_list_disaster_codes", {}, sam);
+    const m = buildMeta(r.meta);
+    const byCode = Object.fromEntries(r.data.codes.map((c) => [c.code, c]));
+    ok("36b def_codes maps code/group/title; group is VERBATIM ('infrastructure'/'covid_19') and null-never-fabricated for an ungrouped code (mutate `?? null`→`?? ''` on group ⇒ RED)",
+      byCode["1"].group === "infrastructure" && byCode["L"].group === "covid_19" && byCode["2"].group === null && byCode["1"].publicLaw === "117-58" && byCode["L"].publicLaw === null,
+      JSON.stringify(r.data.codes.map((c) => [c.code, c.group, c.publicLaw])));
+    ok("36b def_codes is a COMPLETE reference (no pagination) ⇒ totalAvailable === returned === 3, complete:true, truncated:false",
+      m.totalAvailable === 3 && m.returned === 3 && m.complete === true && m.truncated === false, JSON.stringify({ ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // (b) disaster_spending: POST body carries def_codes/spending_type/geo_layer; geo
+  // rows map; amount null-never-0 (0 stays 0, absent → null); complete geo set.
+  await withFetch((u, init) => {
+    if (!isDisasterGeo(u)) return failClosed()();
+    const body = JSON.parse(init.body);
+    ok("36b disaster POST body: filter.def_codes=['L','M'], spending_type='obligation'(default), geo_layer='state'(default) — a dropped/renamed field ⇒ RED",
+      JSON.stringify(body.filter?.def_codes) === JSON.stringify(["L", "M"]) && body.spending_type === "obligation" && body.geo_layer === "state",
+      JSON.stringify({ dc: body.filter?.def_codes, st: body.spending_type, gl: body.geo_layer }));
+    return mockResponse({ status: 200, json: { geo_layer: "state", results: [
+      { amount: 2506859049.24, display_name: "California", shape_code: "CA", population: 39000000, per_capita: 64.3, award_count: 12000 },
+      { amount: 0, display_name: "Ohio", shape_code: "OH", population: 11799448, per_capita: 0, award_count: 7233 },
+      { display_name: "Nowhere", shape_code: "ZZ", award_count: 0 }, // amount ABSENT
+    ] } });
+  }, async () => {
+    const r = await runTool("usas_disaster_spending", { defCodes: ["L", "M"] }, sam);
+    const m = buildMeta(r.meta);
+    const byName = Object.fromEntries(r.data.geographies.map((g) => [g.name, g]));
+    ok("36b disaster maps geo rows (name/code/amount/awardCount/perCapita); CA amount 2506859049.24, awardCount 12000",
+      byName["California"].amount === 2506859049.24 && byName["California"].code === "CA" && byName["California"].awardCount === 12000 && byName["California"].perCapita === 64.3, JSON.stringify(byName["California"]));
+    ok("36b disaster amount null-never-0: a real 0 (Ohio, $0 obligations but 7233 awards) STAYS 0; an ABSENT amount (Nowhere) ⇒ null (mutate the typeof-guard to `?? null` alone would keep 0 as 0 too, but absent must be null; mutate to `?? 0` ⇒ RED)",
+      byName["Ohio"].amount === 0 && byName["Ohio"].awardCount === 7233 && byName["Nowhere"].amount === null, JSON.stringify({ oh: byName["Ohio"].amount, nw: byName["Nowhere"].amount }));
+    ok("36b disaster returns the COMPLETE geo set (no pagination) ⇒ totalAvailable === returned === 3, complete:true, truncated:false + obligation-vs-outlay note present",
+      m.totalAvailable === 3 && m.returned === 3 && m.complete === true && m.truncated === false && m.notes.some((n) => /obligation vs outlay/i.test(n)), JSON.stringify({ ta: m.totalAvailable, c: m.complete }));
+  });
+
+  // (c) an outage (503) THROWS upstream_unavailable — never a fake empty geo set.
+  await withFetch((u) => (isDisasterGeo(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("usas_disaster_spending", { defCodes: ["L"] }, sam));
+    ok("36b disaster 503 ⇒ throws upstream_unavailable (NEVER a fabricated empty geographies[])",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+}
+
 // §36: usas_search_subawards — field mapping (A3 fix) + count-honesty. This tool
 // was live-smoke only (no offline guard). Locks in TWO real invariants: (1) the A3
 // fix — subaward NAICS is read from the "NAICS" field, NOT the invalid "Sub-Award
@@ -20291,6 +20352,7 @@ async function main() {
   await testRecipientProfileNotFound();
   await testAgencyDetailTools();
   await testUnknownKeyRejection();
+  await testDisasterSpending();
   await testSearchSubawardsMapping();
   await testTeamingMostRecentAwardDate();
   await testNaicsHierarchy();
