@@ -2296,7 +2296,7 @@ const DatagovSearchDatasetsInput = z.object({
         .min(1)
         .max(500)
         .optional()
-        .describe("Free-text search over the dataset catalog (→ _q), e.g. 'wildfire'. LIVE-CONFIRMED to narrow."),
+        .describe("Free-text search over the dataset catalog (→ q), e.g. 'wildfire'. LIVE-CONFIRMED to narrow (2026-07-16: the v4 API param is `q`; the old `_q` is silently ignored)."),
     organization: z
         .string()
         .min(1)
