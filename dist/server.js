@@ -69,6 +69,7 @@ import * as fac from "./fac.js";
 import * as usitc from "./usitc.js";
 import * as openfda from "./openfda.js";
 import * as openfdaDevice from "./openfda-device.js";
+import * as openfdaDrugsfda from "./openfda-drugsfda.js";
 import * as nhtsa from "./nhtsa.js";
 import * as cpsc from "./cpsc.js";
 import { fetchAttachmentText } from "./attachments.js";
@@ -3372,6 +3373,41 @@ const OpenfdaDeviceClearancesInput = z.object({
         .optional()
         .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
 });
+const OpenfdaDrugApprovalsInput = z.object({
+    sponsorName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Sponsor / applicant company name (→ sponsor_name), e.g. 'pfizer'. Matched as an escaped Lucene phrase."),
+    brandName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Product brand name (→ products.brand_name), e.g. 'lipitor'. Matched as an escaped Lucene phrase."),
+    activeIngredient: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Active ingredient name (→ products.active_ingredients.name), e.g. 'atorvastatin calcium'. Matched as an escaped Lucene phrase."),
+    applicationNumber: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("FDA application number (→ application_number), e.g. 'NDA050347'. Matched as an escaped Lucene phrase."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Max application records to return (default 25, max 100). Offset-paginated via skip."),
+    skip: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."),
+});
 // ─── NHTSA vehicle safety (api.nhtsa.gov) — KEYLESS vehicle/parts supplier vetting ──
 // ADR-0057. Two tools (recalls + complaints) share make/model/modelYear inputs. NO
 // API key at all. ★The complaints VIN (PII) is excluded from the output. modelYear is
@@ -5110,6 +5146,12 @@ export const TOOLS = [
         description: "Search openFDA 510(k) DEVICE CLEARANCES — the FDA's premarket-notification (510(k)) clearances for medical devices, with the applicant/manufacturer, device name, clearance number (K-number), decision (date + description), clearance type, product code, advisory committee, and geography (openFDA /device/510k.json; api.fda.gov). KEYLESS (an OPTIONAL free OPENFDA_API_KEY only RAISES the rate limit — keyless works at ~1000 requests/day; it NEVER throws for a missing key; get one at https://open.fda.gov/apis/authentication/; call api_key_status to see every source's key requirement). Input: STRUCTURED filters — `applicant` (→applicant), `deviceName` (→device_name), `productCode` (→product_code), `clearanceType` (→clearance_type, e.g. Traditional/Special/Abbreviated), `kNumber` (→k_number, e.g. 'K123456'), `state` (2-letter, e.g. 'CA') — the tool safely assembles + escapes these into the openFDA search= Lucene string (NO raw passthrough — injection-safe), plus `limit` (1..100, default 25) and `skip` (offset ≥0). Returns { clearances:[{ applicant, deviceName, kNumber, decisionDate, decisionDescription, clearanceType, productCode, advisoryCommittee, state }] } + honest _meta. HONESTY: totalAvailable is openFDA's EXACT meta.results.total (skip/limit pagination via hasMore/nextOffset — never results.length); every scalar (dates included, decision_date is a YYYY-MM-DD string) is null-never-empty-string. ★A no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an HONEST EMPTY (returned:0, totalAvailable:0), NOT an error; a 400 syntax error ⇒ invalid_input surfacing openFDA's message; a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The optional key rides ONLY the &api_key= query param — never logged or echoed.",
         inputSchema: OpenfdaDeviceClearancesInput,
         handler: (input) => openfdaDevice.deviceClearances(input),
+    }),
+    defineTool({
+        name: "openfda_drug_approvals",
+        description: "Search openFDA Drugs@FDA DRUG APPROVALS — FDA-approved drug applications (NDA/ANDA/BLA) with the sponsor, application number, each approved product (brand + generic/active-ingredient name, dosage form, route, marketing status), and the submission/approval history (openFDA /drug/drugsfda.json; api.fda.gov). Answers 'what drugs did sponsor X get approved, and which are still marketed' — pharma vendor product/approval intelligence. KEYLESS (an OPTIONAL free OPENFDA_API_KEY only RAISES the rate limit — keyless works at ~1000 requests/day; NEVER throws for a missing key; api_key_status lists every source's key requirement). Input: STRUCTURED filters — `sponsorName` (→sponsor_name), `brandName` (→products.brand_name), `activeIngredient` (→products.active_ingredients.name), `applicationNumber` (→application_number) — safely escaped into the openFDA search= Lucene string (NO raw passthrough — injection-safe), plus `limit` (1..100, default 25) and `skip` (offset ≥0). Returns { applications:[{ applicationNumber, sponsorName, products:[{ brandName, genericIngredients:[{name,strength}], dosageForm, route, marketingStatus }], submissions:[{ submissionType, submissionNumber, submissionStatus, submissionStatusDate, submissionClass }] }] } + honest _meta. HONESTY: totalAvailable is openFDA's EXACT meta.results.total (skip/limit pagination — never results.length); every scalar is null-never-empty-string; a 'Discontinued' marketingStatus is NOT an approval revocation (disclosed in _meta). ★A no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an HONEST EMPTY (returned:0/total:0), NOT an error; a 400 ⇒ invalid_input surfacing openFDA's message; a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The optional key rides ONLY the &api_key= query param — never logged or echoed.",
+        inputSchema: OpenfdaDrugApprovalsInput,
+        handler: (input) => openfdaDrugsfda.drugApprovals(input),
     }),
     // ━━━ NHTSA vehicle safety (api.nhtsa.gov) — vehicle/parts supplier vetting (2) ━━━ ADR-0057
     // ★KEYLESS — no API key at all (no parameter, no header). The cross-agency

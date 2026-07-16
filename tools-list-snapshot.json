@@ -3154,6 +3154,39 @@
     }
   },
   {
+    "name": "openfda_drug_approvals",
+    "description": "Search openFDA Drugs@FDA DRUG APPROVALS — FDA-approved drug applications (NDA/ANDA/BLA) with the sponsor, application number, each approved product (brand + generic/active-ingredient name, dosage form, route, marketing status), and the submission/approval history (openFDA /drug/drugsfda.json; api.fda.gov). Answers 'what drugs did sponsor X get approved, and which are still marketed' — pharma vendor product/approval intelligence. KEYLESS (an OPTIONAL free OPENFDA_API_KEY only RAISES the rate limit — keyless works at ~1000 requests/day; NEVER throws for a missing key; api_key_status lists every source's key requirement). Input: STRUCTURED filters — `sponsorName` (→sponsor_name), `brandName` (→products.brand_name), `activeIngredient` (→products.active_ingredients.name), `applicationNumber` (→application_number) — safely escaped into the openFDA search= Lucene string (NO raw passthrough — injection-safe), plus `limit` (1..100, default 25) and `skip` (offset ≥0). Returns { applications:[{ applicationNumber, sponsorName, products:[{ brandName, genericIngredients:[{name,strength}], dosageForm, route, marketingStatus }], submissions:[{ submissionType, submissionNumber, submissionStatus, submissionStatusDate, submissionClass }] }] } + honest _meta. HONESTY: totalAvailable is openFDA's EXACT meta.results.total (skip/limit pagination — never results.length); every scalar is null-never-empty-string; a 'Discontinued' marketingStatus is NOT an approval revocation (disclosed in _meta). ★A no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an HONEST EMPTY (returned:0/total:0), NOT an error; a 400 ⇒ invalid_input surfacing openFDA's message; a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The optional key rides ONLY the &api_key= query param — never logged or echoed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sponsorName": {
+          "type": "string",
+          "description": "Sponsor / applicant company name (→ sponsor_name), e.g. 'pfizer'. Matched as an escaped Lucene phrase."
+        },
+        "brandName": {
+          "type": "string",
+          "description": "Product brand name (→ products.brand_name), e.g. 'lipitor'. Matched as an escaped Lucene phrase."
+        },
+        "activeIngredient": {
+          "type": "string",
+          "description": "Active ingredient name (→ products.active_ingredients.name), e.g. 'atorvastatin calcium'. Matched as an escaped Lucene phrase."
+        },
+        "applicationNumber": {
+          "type": "string",
+          "description": "FDA application number (→ application_number), e.g. 'NDA050347'. Matched as an escaped Lucene phrase."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max application records to return (default 25, max 100). Offset-paginated via skip."
+        },
+        "skip": {
+          "type": "number",
+          "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
+        }
+      }
+    }
+  },
+  {
     "name": "openfda_enforcement",
     "description": "Search openFDA recall/enforcement records — drug/device/food product recalls with the recalling firm, product, reason, FDA classification (Class I/II/III), status, and geography (openFDA /{category}/enforcement.json; api.fda.gov). KEYLESS (an OPTIONAL free OPENFDA_API_KEY only RAISES the rate limit — keyless works at ~1000 requests/day; it NEVER throws for a missing key; get one at https://open.fda.gov/apis/authentication/; call api_key_status to see every source's key requirement). Input: `category` (drug|device|food, default drug), and STRUCTURED filters — `firm` (→recalling_firm), `product` (→product_description), `reason` (→reason_for_recall), `classification` (Class I|II|III), `status` (e.g. Ongoing/Terminated/Completed), `state` (2-letter, e.g. 'CA') — the tool safely assembles + escapes these into the openFDA search= Lucene string (NO raw passthrough — injection-safe), plus `limit` (1..100, default 25) and `skip` (offset ≥0). Returns { recalls:[{ recallingFirm, productDescription, reasonForRecall, classification, status, state, city, recallInitiationDate, recallNumber, voluntaryMandated, distributionPattern }] } + honest _meta. HONESTY: totalAvailable is openFDA's EXACT meta.results.total (skip/limit pagination via hasMore/nextOffset — never results.length); every scalar (dates included, recall_initiation_date is a YYYYMMDD string) is null-never-empty-string. ★A no-match query returns openFDA HTTP 404 NOT_FOUND ⇒ an HONEST EMPTY (returned:0, totalAvailable:0), NOT an error; a 400 syntax error ⇒ invalid_input surfacing openFDA's message; a 5xx ⇒ THROWS; a 200 non-JSON ⇒ schema_drift. The optional key rides ONLY the &api_key= query param — never logged or echoed.",
     "inputSchema": {
