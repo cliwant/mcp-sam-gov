@@ -84,6 +84,39 @@ import { withMeta } from "./meta.js";
 export { num };
 // ─── Fixed host + curated dataset registry (SSRF core) ────────────
 export const FEMA_HOST = "www.fema.gov";
+// The HazardMitigationAssistanceProjects dataset filters on the FULL state NAME
+// ('Alabama'), NOT the 2-letter code the SIBLING FEMA tools (PA/declarations) use —
+// so a caller who naturally passes 'AL' (as those tools accept) would get a
+// confidently-wrong empty (total:0). Map a 2-letter USPS code → the canonical FEMA
+// full name so the HMA tool accepts EITHER form; a full name (or an unknown token)
+// passes through unchanged. (Same confidently-wrong-empty class this codebase guards
+// elsewhere — don't ship a new tool with that foot-gun.)
+const US_STATE_ABBR_TO_NAME = {
+    AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
+    CO: "Colorado", CT: "Connecticut", DE: "Delaware", DC: "District of Columbia",
+    FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois",
+    IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana",
+    ME: "Maine", MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota",
+    MS: "Mississippi", MO: "Missouri", MT: "Montana", NE: "Nebraska", NV: "Nevada",
+    NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York",
+    NC: "North Carolina", ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon",
+    PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota",
+    TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia",
+    WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
+    PR: "Puerto Rico", VI: "Virgin Islands", GU: "Guam", AS: "American Samoa",
+    MP: "Northern Mariana Islands",
+};
+/** Resolve a HMA `state` arg: a 2-letter USPS code → the FEMA full name; a full
+ *  name (or any non-2-letter token) is returned unchanged. */
+export function resolveHmaState(state) {
+    const t = state.trim();
+    if (/^[A-Za-z]{2}$/.test(t)) {
+        const full = US_STATE_ABBR_TO_NAME[t.toUpperCase()];
+        if (full)
+            return full;
+    }
+    return state;
+}
 /**
  * The frozen dataset registry (SSRF core — no free host, no free path, no free
  * version). Each entry's count + fields are LIVE-VERIFIED keyless (2026-07-12).
@@ -132,6 +165,33 @@ export const FEMA_DATASETS = {
             "iaProgramDeclared", // eq true → 17187
         ]),
         amountFields: [],
+    },
+    // Hazard Mitigation Assistance projects — 56,034 rows (LIVE-VERIFIED 2026-07-16).
+    // The disaster-RESILIENCE grant axis (HMGP/FMA/PDM/BRIC mitigation grants to
+    // state/local/tribal subrecipients) — distinct from PA's disaster-RECOVERY spend.
+    // The planned "3rd tool" of ADR-0016 §3. THIS dataset's `state` is the FULL state
+    // NAME ('Alabama'; `stateAbbreviation` → HTTP 400). Every field below LIVE-VERIFIED
+    // to NARROW (2026-07-16): state 2457/'Alabama', programArea 42657/'HMGP',
+    // disasterNumber 330/1605, status 36123/'Closed', programFy 2780/2005, region
+    // 15922/4, projectAmount ge 1e6 → 10257.
+    hazard_mitigation: {
+        entityName: "HazardMitigationAssistanceProjects",
+        version: "v4",
+        filterFields: new Set([
+            "state",
+            "programArea",
+            "disasterNumber",
+            "status",
+            "programFy",
+            "region",
+            "projectAmount",
+        ]),
+        amountFields: [
+            "projectAmount",
+            "federalShareObligated",
+            "initialObligationAmount",
+            "netValueBenefits",
+        ],
     },
 };
 const SOURCE_LABEL = "openfema:" + FEMA_HOST;
@@ -432,5 +492,69 @@ export async function disasterDeclarations(args) {
         params.set("$filter", filter);
     const { body } = await getOpenFema("disaster_declarations", params);
     return shapeResponse({ body, datasetKey: "disaster_declarations", offset, limit, filtersApplied });
+}
+// ─── Tool 3: fema_search_hazard_mitigation ────────────────────────
+/**
+ * Search FEMA Hazard Mitigation Assistance projects (the disaster-RESILIENCE grant
+ * axis — HMGP/FMA/PDM/BRIC mitigation grants to state/local/tribal subrecipients,
+ * distinct from Public Assistance's disaster-RECOVERY spend). Dataset
+ * HazardMitigationAssistanceProjects v4. Structured filters → module-built `$filter`
+ * (each field LIVE-VERIFIED to narrow):
+ *   state → state eq (FULL state NAME, e.g. "Alabama" — NOT the 2-letter code;
+ *   stateAbbreviation 400s here) · programArea eq (HMGP / FMA / PDM / BRIC / LPDM /
+ *   FMA-SL) · disasterNumber eq · status eq (e.g. "Closed") · programFy eq ·
+ *   region eq (FEMA region number 1–10) · minProjectAmount → projectAmount ge ·
+ *   maxProjectAmount → projectAmount le.
+ * Rows carry projectAmount / federalShareObligated / initialObligationAmount /
+ * netValueBenefits as number|null. Honest `_meta` (totalAvailable = exact filtered
+ * metadata.count).
+ */
+export async function searchHazardMitigation(args) {
+    const limit = args.limit ?? 100;
+    const offset = args.offset ?? 0;
+    const clauses = [];
+    const filtersApplied = [];
+    if (args.state !== undefined) {
+        // Accept a 2-letter code (as the sibling FEMA tools do) OR a full name — HMA's
+        // upstream filters on the FULL name, so a bare 'AL' would silently return 0.
+        clauses.push({ field: "state", op: "eq", type: "string", value: resolveHmaState(args.state) });
+        filtersApplied.push("state");
+    }
+    if (args.programArea !== undefined) {
+        clauses.push({ field: "programArea", op: "eq", type: "string", value: args.programArea });
+        filtersApplied.push("programArea");
+    }
+    if (args.disasterNumber !== undefined) {
+        clauses.push({ field: "disasterNumber", op: "eq", type: "number", value: args.disasterNumber });
+        filtersApplied.push("disasterNumber");
+    }
+    if (args.status !== undefined) {
+        clauses.push({ field: "status", op: "eq", type: "string", value: args.status });
+        filtersApplied.push("status");
+    }
+    if (args.programFy !== undefined) {
+        clauses.push({ field: "programFy", op: "eq", type: "number", value: args.programFy });
+        filtersApplied.push("programFy");
+    }
+    if (args.region !== undefined) {
+        clauses.push({ field: "region", op: "eq", type: "number", value: args.region });
+        filtersApplied.push("region");
+    }
+    if (args.minProjectAmount !== undefined) {
+        clauses.push({ field: "projectAmount", op: "ge", type: "number", value: args.minProjectAmount });
+        filtersApplied.push("minProjectAmount");
+    }
+    if (args.maxProjectAmount !== undefined) {
+        clauses.push({ field: "projectAmount", op: "le", type: "number", value: args.maxProjectAmount });
+        filtersApplied.push("maxProjectAmount");
+    }
+    const params = new URLSearchParams();
+    params.set("$top", String(limit));
+    params.set("$skip", String(offset));
+    const filter = buildFilter("hazard_mitigation", clauses);
+    if (filter)
+        params.set("$filter", filter);
+    const { body } = await getOpenFema("hazard_mitigation", params);
+    return shapeResponse({ body, datasetKey: "hazard_mitigation", offset, limit, filtersApplied });
 }
 //# sourceMappingURL=fema.js.map
