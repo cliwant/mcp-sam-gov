@@ -68,6 +68,7 @@ import * as lda from "./lda.js";
 import * as courtlistener from "./courtlistener.js";
 import * as nonprofit from "./nonprofit.js";
 import * as fema from "./fema.js";
+import * as govDomains from "./gov-domains.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
 import * as ofac from "./ofac.js";
@@ -2566,6 +2567,51 @@ const FemaSearchHazardMitigationInput = z.object({
     .min(0)
     .default(0)
     .describe("0-based row offset ($skip) for pagination, default 0."),
+});
+
+const SearchGovDomainsInput = z.object({
+  scope: z
+    .enum(["all", "federal"])
+    .optional()
+    .describe("'all' (federal + SLED: state/county/city/school-district/special-district/tribal, ~16k rows, DEFAULT) or 'federal' (federal-only, ~1.3k rows)."),
+  organization: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Organization name — case-insensitive SUBSTRING match (e.g. 'veterans', 'cybersecurity')."),
+  domain: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Domain name — case-insensitive SUBSTRING match (e.g. 'cdc.gov', 'irs')."),
+  domainType: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Domain type — case-insensitive match (e.g. 'Federal - Executive', 'County', 'Tribal', 'State or territory', 'School district')."),
+  state: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("2-letter state/territory code — case-insensitive exact match (e.g. 'CA')."),
+  city: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("City — case-insensitive SUBSTRING match."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(500)
+    .optional()
+    .describe("Rows per page, 1..500, default 50."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("0-based row offset for pagination, default 0."),
 });
 
 // ─── EPA ECHO REST (keyless facility compliance/enforcement) — input schemas ──
@@ -5639,6 +5685,14 @@ export const TOOLS: ToolDef[] = [
       "Search FEMA Hazard Mitigation Assistance projects — the disaster-RESILIENCE grant axis (HMGP/FMA/PDM/BRIC mitigation grants to state/local/tribal subrecipients, distinct from the disaster-RECOVERY spend in fema_search_public_assistance). Keyless OpenFEMA, dataset HazardMitigationAssistanceProjects v4, ~56k rows. Structured filters (module-built into an OData $filter; each LIVE-VERIFIED to narrow): `state` (→ state — the FULL state NAME, e.g. 'Alabama', NOT the 2-letter code), `programArea` (HMGP/FMA/PDM/BRIC/LPDM/FMA-SL), `disasterNumber`, `status` (e.g. 'Closed'), `programFy`, `region` (FEMA region 1–10), `minProjectAmount`/`maxProjectAmount` (projectAmount ge/le). `limit` (≤1000, def 100 → $top), `offset` (→ $skip). HONESTY: the module ALWAYS sends $inlinecount=allpages so totalAvailable is the EXACT filtered total (metadata.count), never the page length; amount fields (projectAmount/federalShareObligated/initialObligationAmount/netValueBenefits) are number|null (a real 0 stays 0, absent → null); genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). NOTE: 'state' here is the full name (this dataset 400s on a 2-letter code), whereas fema_search_public_assistance maps 'state' to the 2-letter 'stateAbbreviation'.",
     inputSchema: FemaSearchHazardMitigationInput,
     handler: (input) => fema.searchHazardMitigation(input),
+  }),
+  // ━━━ get.gov — CISA authoritative .gov domain registry (keyless) (1) ━━━
+  defineTool({
+    name: "search_gov_domains",
+    description:
+      "Search the authoritative US .gov domain registry (CISA get.gov) — resolve which ORGANIZATION owns a .gov domain, enumerate federal agencies, and MAP SLED entities (state/county/city/school-district/special-district/tribal) for market targeting. Keyless. scope 'all' (federal + SLED, ~16k rows, default) | 'federal'. Filters (client-side over the published CSV): organization/domain/city (case-insensitive SUBSTRING), domainType (e.g. 'Federal - Executive', 'County', 'Tribal'), state (2-letter). Each row: domain, domainType, organization, suborganization, city, state. HONESTY: source is CISA's OFFICIAL registry published at github.com/cisagov/dotgov-data (authoritative first-party data, not a .gov API host — provenance disclosed in _meta); the registry has no query API so filtering is CLIENT-SIDE and totalAvailable is the EXACT match count; the 'Security contact email' column is intentionally EXCLUDED (org mailbox — this tool resolves organizations, not contacts); an outage/4xx THROWS (never a fake empty); a header-column rename ⇒ schema_drift.",
+    inputSchema: SearchGovDomainsInput,
+    handler: (input) => govDomains.searchGovDomains(input),
   }),
   // ━━━ FPDS-NG — federal contract AWARD ACTIONS (keyless ATOM) (1) ━━━ ADR-0012
   // The FIRST XML/ATOM source (bounded, ReDoS-safe hand-parser — the far.ts/gao.ts

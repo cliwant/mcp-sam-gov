@@ -3784,6 +3784,51 @@
     }
   },
   {
+    "name": "search_gov_domains",
+    "description": "Search the authoritative US .gov domain registry (CISA get.gov) — resolve which ORGANIZATION owns a .gov domain, enumerate federal agencies, and MAP SLED entities (state/county/city/school-district/special-district/tribal) for market targeting. Keyless. scope 'all' (federal + SLED, ~16k rows, default) | 'federal'. Filters (client-side over the published CSV): organization/domain/city (case-insensitive SUBSTRING), domainType (e.g. 'Federal - Executive', 'County', 'Tribal'), state (2-letter). Each row: domain, domainType, organization, suborganization, city, state. HONESTY: source is CISA's OFFICIAL registry published at github.com/cisagov/dotgov-data (authoritative first-party data, not a .gov API host — provenance disclosed in _meta); the registry has no query API so filtering is CLIENT-SIDE and totalAvailable is the EXACT match count; the 'Security contact email' column is intentionally EXCLUDED (org mailbox — this tool resolves organizations, not contacts); an outage/4xx THROWS (never a fake empty); a header-column rename ⇒ schema_drift.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "all",
+            "federal"
+          ],
+          "description": "'all' (federal + SLED: state/county/city/school-district/special-district/tribal, ~16k rows, DEFAULT) or 'federal' (federal-only, ~1.3k rows)."
+        },
+        "organization": {
+          "type": "string",
+          "description": "Organization name — case-insensitive SUBSTRING match (e.g. 'veterans', 'cybersecurity')."
+        },
+        "domain": {
+          "type": "string",
+          "description": "Domain name — case-insensitive SUBSTRING match (e.g. 'cdc.gov', 'irs')."
+        },
+        "domainType": {
+          "type": "string",
+          "description": "Domain type — case-insensitive match (e.g. 'Federal - Executive', 'County', 'Tribal', 'State or territory', 'School district')."
+        },
+        "state": {
+          "type": "string",
+          "description": "2-letter state/territory code — case-insensitive exact match (e.g. 'CA')."
+        },
+        "city": {
+          "type": "string",
+          "description": "City — case-insensitive SUBSTRING match."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Rows per page, 1..500, default 50."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based row offset for pagination, default 0."
+        }
+      }
+    }
+  },
+  {
     "name": "socrata_discover_datasets",
     "description": "Find Socrata dataset 4x4 ids by keyword via the Socrata catalog (keyless, api.us.socrata.com). Input `q` (e.g. 'procurement', 'vendor payments'), optional `domain` (scope to one allowlisted portal; omit to search the whole allowlist), `limit` (≤100, def 20). Returns [{ id, name, description, domain, updatedAt, link }] + totalAvailable = the catalog resultSetSize. Feed a result's `id` to socrata_query as `datasetId`. NOTE: the federated catalog does not index every allowlisted host (e.g. USAC E-rate) — those stay queryable via socrata_query with a known 4x4.",
     "inputSchema": {
