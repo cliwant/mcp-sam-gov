@@ -2492,6 +2492,63 @@ const FemaDisasterDeclarationsInput = z.object({
     .describe("0-based row offset ($skip) for pagination, default 0."),
 });
 
+const FemaSearchHazardMitigationInput = z.object({
+  state: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by state (→ state eq '...'). Accepts EITHER a 2-letter code ('AL', like the other FEMA tools) OR the full name ('Alabama'); the module maps a 2-letter code to the full name this dataset requires."),
+  programArea: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by mitigation program (→ programArea eq '...'): HMGP (Hazard Mitigation Grant Program), FMA (Flood Mitigation Assistance), PDM (Pre-Disaster Mitigation), BRIC (Building Resilient Infrastructure and Communities), LPDM, FMA-SL."),
+  disasterNumber: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Filter by FEMA disaster number (→ disasterNumber eq N)."),
+  status: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by project status (→ status eq '...'). e.g. 'Closed', 'Open'."),
+  programFy: z
+    .number()
+    .int()
+    .optional()
+    .describe("Filter by program fiscal year (→ programFy eq N). e.g. 2005."),
+  region: z
+    .number()
+    .int()
+    .min(1)
+    .max(10)
+    .optional()
+    .describe("Filter by FEMA region number 1–10 (→ region eq N)."),
+  minProjectAmount: z
+    .number()
+    .optional()
+    .describe("Minimum project amount (→ projectAmount ge N)."),
+  maxProjectAmount: z
+    .number()
+    .optional()
+    .describe("Maximum project amount (→ projectAmount le N)."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(1000)
+    .default(100)
+    .describe("Rows per page ($top), 1..1000, default 100."),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe("0-based row offset ($skip) for pagination, default 0."),
+});
+
 // ─── EPA ECHO REST (keyless facility compliance/enforcement) — input schemas ──
 // ADR-0009. KEYLESS, single fixed host (echodata.epa.gov) + three fixed service
 // paths (the SSRF core — no free host/path). `state` is a curated US state/
@@ -5528,7 +5585,7 @@ export const TOOLS: ToolDef[] = [
     inputSchema: BlsQcewInput,
     handler: (input) => bls.qcew(input),
   }),
-  // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (2) ━━━ ADR-0016
+  // ━━━ OpenFEMA — keyless disaster declarations + emergency-assistance spend (3) ━━━ ADR-0016
   defineTool({
     name: "fema_search_public_assistance",
     description:
@@ -5542,6 +5599,13 @@ export const TOOLS: ToolDef[] = [
       "Look up FEMA disaster / emergency declarations by state, type, incident, year, or date (keyless OpenFEMA, dataset DisasterDeclarationsSummaries v2, ~70k rows). Structured filters (module-built into an OData $filter; each LIVE-VERIFIED to narrow): `state` (→ state), `incidentType` (e.g. 'Flood'), `declarationType` (DR/EM/FM), `fyDeclared`, `disasterNumber`, `declaredDateFrom`/`declaredDateTo` (declarationDate ge/le), `paProgramDeclared`/`iaProgramDeclared` (booleans). `limit` (≤1000, def 100 → $top), `offset` (→ $skip). HONESTY: the module ALWAYS sends $inlinecount=allpages so totalAvailable is the EXACT filtered total (metadata.count), never the page length; genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). NOTE: per-dataset OData field names differ — 'state' here is the real field, whereas the public-assistance tool maps 'state' to 'stateAbbreviation'.",
     inputSchema: FemaDisasterDeclarationsInput,
     handler: (input) => fema.disasterDeclarations(input),
+  }),
+  defineTool({
+    name: "fema_search_hazard_mitigation",
+    description:
+      "Search FEMA Hazard Mitigation Assistance projects — the disaster-RESILIENCE grant axis (HMGP/FMA/PDM/BRIC mitigation grants to state/local/tribal subrecipients, distinct from the disaster-RECOVERY spend in fema_search_public_assistance). Keyless OpenFEMA, dataset HazardMitigationAssistanceProjects v4, ~56k rows. Structured filters (module-built into an OData $filter; each LIVE-VERIFIED to narrow): `state` (→ state — the FULL state NAME, e.g. 'Alabama', NOT the 2-letter code), `programArea` (HMGP/FMA/PDM/BRIC/LPDM/FMA-SL), `disasterNumber`, `status` (e.g. 'Closed'), `programFy`, `region` (FEMA region 1–10), `minProjectAmount`/`maxProjectAmount` (projectAmount ge/le). `limit` (≤1000, def 100 → $top), `offset` (→ $skip). HONESTY: the module ALWAYS sends $inlinecount=allpages so totalAvailable is the EXACT filtered total (metadata.count), never the page length; amount fields (projectAmount/federalShareObligated/initialObligationAmount/netValueBenefits) are number|null (a real 0 stays 0, absent → null); genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). NOTE: 'state' here is the full name (this dataset 400s on a 2-letter code), whereas fema_search_public_assistance maps 'state' to the 2-letter 'stateAbbreviation'.",
+    inputSchema: FemaSearchHazardMitigationInput,
+    handler: (input) => fema.searchHazardMitigation(input),
   }),
   // ━━━ FPDS-NG — federal contract AWARD ACTIONS (keyless ATOM) (1) ━━━ ADR-0012
   // The FIRST XML/ATOM source (bounded, ReDoS-safe hand-parser — the far.ts/gao.ts

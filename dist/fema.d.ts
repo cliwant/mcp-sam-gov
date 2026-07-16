@@ -78,6 +78,9 @@ import { num } from "./coerce.js";
 import { type MetaBundle } from "./meta.js";
 export { num };
 export declare const FEMA_HOST = "www.fema.gov";
+/** Resolve a HMA `state` arg: a 2-letter USPS code → the FEMA full name; a full
+ *  name (or any non-2-letter token) is returned unchanged. */
+export declare function resolveHmaState(state: string): string;
 /**
  * The frozen dataset registry (SSRF core — no free host, no free path, no free
  * version). Each entry's count + fields are LIVE-VERIFIED keyless (2026-07-12).
@@ -98,6 +101,12 @@ export declare const FEMA_DATASETS: {
         version: string;
         filterFields: Set<string>;
         amountFields: never[];
+    };
+    hazard_mitigation: {
+        entityName: string;
+        version: string;
+        filterFields: Set<string>;
+        amountFields: string[];
     };
 };
 export type FemaDatasetKey = keyof typeof FEMA_DATASETS;
@@ -175,6 +184,33 @@ export declare function disasterDeclarations(args: {
     declaredDateTo?: string;
     paProgramDeclared?: boolean;
     iaProgramDeclared?: boolean;
+    limit?: number;
+    offset?: number;
+}): Promise<MetaBundle>;
+/**
+ * Search FEMA Hazard Mitigation Assistance projects (the disaster-RESILIENCE grant
+ * axis — HMGP/FMA/PDM/BRIC mitigation grants to state/local/tribal subrecipients,
+ * distinct from Public Assistance's disaster-RECOVERY spend). Dataset
+ * HazardMitigationAssistanceProjects v4. Structured filters → module-built `$filter`
+ * (each field LIVE-VERIFIED to narrow):
+ *   state → state eq (FULL state NAME, e.g. "Alabama" — NOT the 2-letter code;
+ *   stateAbbreviation 400s here) · programArea eq (HMGP / FMA / PDM / BRIC / LPDM /
+ *   FMA-SL) · disasterNumber eq · status eq (e.g. "Closed") · programFy eq ·
+ *   region eq (FEMA region number 1–10) · minProjectAmount → projectAmount ge ·
+ *   maxProjectAmount → projectAmount le.
+ * Rows carry projectAmount / federalShareObligated / initialObligationAmount /
+ * netValueBenefits as number|null. Honest `_meta` (totalAvailable = exact filtered
+ * metadata.count).
+ */
+export declare function searchHazardMitigation(args: {
+    state?: string;
+    programArea?: string;
+    disasterNumber?: number;
+    status?: string;
+    programFy?: number;
+    region?: number;
+    minProjectAmount?: number;
+    maxProjectAmount?: number;
     limit?: number;
     offset?: number;
 }): Promise<MetaBundle>;

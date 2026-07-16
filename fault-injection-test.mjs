@@ -197,7 +197,7 @@ import { searchOpinions as clSearchOpinions, courtlistenerAuthHeader, courtliste
 import { search as npSearch, financials as npFinancials, num as npNum, NONPROFIT_HOST } from "./dist/nonprofit.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
-import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS } from "./dist/fema.js";
+import { num as femaNum, buildFilter as femaBuildFilter, escapeODataString as femaEscape, FEMA_DATASETS, resolveHmaState } from "./dist/fema.js";
 import { getJson, getText, isRedirectError, driftError, throughGate, getJsonWithProvenance, getJsonConditional, throughPathChain, CircuitBreaker, isHardFailure } from "./dist/datasource.js";
 import { errorFromResponse, isHonorRetryAfter } from "./dist/errors.js";
 import { resolveSnapshotBaseUrl, resilienceConfig, snapshotPath, DEFAULT_SNAPSHOT_BASE_URL } from "./dist/snapshot.js";
@@ -10232,6 +10232,45 @@ async function testFemaHonesty() {
       url.searchParams.get("$inlinecount") === "allpages" && url.searchParams.get("$filter") === "state eq 'CA'",
       JSON.stringify({ ic: url.searchParams.get("$inlinecount"), f: url.searchParams.get("$filter") }));
   });
+
+  // (c2) fema_search_hazard_mitigation (HazardMitigationAssistanceProjects v4, the
+  // ADR-0016 §3 "3rd tool", added 2026-07-16). Locks: v4 path (NOT v2), $inlinecount
+  // crux, region as an UNQUOTED number, and the state 2-letter→FULL-name resolution
+  // (THIS dataset filters on the full name; a bare 'AL' would silently return 0 — the
+  // confidently-wrong-empty foot-gun this map closes).
+  const HMA = "HazardMitigationAssistanceProjects";
+  const isFemaHma = (u) => new RegExp(`/api/open/v4/${HMA}\\?`).test(u);
+  const femaBodyV4 = (rows, count) => ({ metadata: { count, top: 100, skip: 0, entityname: HMA, version: "v4" }, [HMA]: rows });
+  // resolveHmaState: 2-letter → full FEMA name; full name / unknown token passthrough.
+  eq("52c2 resolveHmaState('AL') → 'Alabama' (2-letter USPS → FEMA full name)", resolveHmaState("AL"), "Alabama");
+  eq("52c2 resolveHmaState('ca') → 'California' (case-insensitive 2-letter)", resolveHmaState("ca"), "California");
+  eq("52c2 resolveHmaState('Alabama') → 'Alabama' (a full name passes through unchanged)", resolveHmaState("Alabama"), "Alabama");
+  eq("52c2 resolveHmaState('ZZ') → 'ZZ' (an unknown 2-letter token passes through — becomes an honest empty, never a wrong mapping)", resolveHmaState("ZZ"), "ZZ");
+  await withFetch((u) => (isFema(u) ? mockResponse({ status: 200, json: femaBodyV4([{ projectIdentifier: "DR-1605-0125-R", state: "Alabama", projectAmount: 6005.57, federalShareObligated: "" }], 2268) }) : failClosed()()), async (calls) => {
+    const r = await runTool("fema_search_hazard_mitigation", { state: "AL", programArea: "HMGP", region: 4, limit: 2 }, sam);
+    const url = new URL(calls.find((x) => isFemaHma(x.url)).url);
+    ok("52c2 HMA fetch on the v4 path (fixed host + PINNED v4 version — NOT v2; a version copy-paste from the sibling tools ⇒ RED)",
+      url.hostname === "www.fema.gov" && url.protocol === "https:" && url.pathname === `/api/open/v4/${HMA}`, JSON.stringify(url.pathname));
+    ok("52c2 HMA state='AL' RESOLVES to the FULL name in the $filter (state eq 'Alabama'), $inlinecount present, region is an UNQUOTED number (region eq 4) — a bare 'AL' or a quoted region ⇒ RED",
+      url.searchParams.get("$inlinecount") === "allpages" && url.searchParams.get("$filter") === "state eq 'Alabama' and programArea eq 'HMGP' and region eq 4",
+      JSON.stringify(url.searchParams.get("$filter")));
+    const m = buildMeta(r.meta);
+    ok("52c2 HMA totalAvailable = exact metadata.count (2268), amount null-never-0 (federalShareObligated '' → null; projectAmount 6005.57 stays)",
+      m.totalAvailable === 2268 && r.data.rows[0].federalShareObligated === null && r.data.rows[0].projectAmount === 6005.57, JSON.stringify({ ta: m.totalAvailable, fso: r.data.rows[0].federalShareObligated }));
+  });
+  eq("52c2 HMA $filter builder compound (state full-name + programArea + projectAmount ge) via the hazard_mitigation whitelist",
+    femaBuildFilter("hazard_mitigation", [
+      { field: "state", op: "eq", type: "string", value: "Alabama" },
+      { field: "programArea", op: "eq", type: "string", value: "HMGP" },
+      { field: "projectAmount", op: "ge", type: "number", value: 1000000 },
+    ]),
+    "state eq 'Alabama' and programArea eq 'HMGP' and projectAmount ge 1000000");
+  {
+    const { threw, error } = await expectThrow(async () =>
+      femaBuildFilter("hazard_mitigation", [{ field: "stateAbbreviation", op: "eq", type: "string", value: "AL" }]));
+    ok("52c2 HMA un-whitelisted field (stateAbbreviation — NOT an HMA field; it 400s upstream) ⇒ invalid_input, no filter built (per-dataset whitelist)",
+      threw && toToolError(error).kind === "invalid_input", JSON.stringify({ threw, kind: threw ? toToolError(error).kind : null }));
+  }
 
   // (d) ★ totalAvailable === metadata.count, NEVER the page length.
   await withFetch(femaMock(PA, [{ disasterNumber: 3638 }], 803904), async () => {
