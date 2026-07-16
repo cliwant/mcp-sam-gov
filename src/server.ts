@@ -73,6 +73,7 @@ import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
 import * as ofac from "./ofac.js";
 import * as nvd from "./nvd.js";
+import * as nistControls from "./nist-controls.js";
 import * as nppes from "./nppes.js";
 import * as cms from "./cms.js";
 import * as fac from "./fac.js";
@@ -1036,6 +1037,26 @@ const CisaKevLookupInput = z.object({
     .optional()
     .describe("Max matches returned (default 100, max 1000)."),
   offset: z.number().min(0).optional().describe("Zero-based page offset (default 0)."),
+});
+
+const NistControlsInput = z.object({
+  controlId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Exact control identifier, e.g. 'AC-2', 'SC-7', 'AC-2(1)' (case-insensitive; zero-padding is normalized)."),
+  family: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Control family — the 2-letter code ('AC', 'SC', 'IA') OR a substring of the family name ('Access Control', 'Audit'). Case-insensitive."),
+  keyword: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Case-insensitive substring searched over the control title + requirement statement."),
+  limit: z.number().int().min(1).max(200).optional().describe("Max controls returned (default 25, max 200)."),
+  offset: z.number().int().min(0).optional().describe("Zero-based page offset (default 0)."),
 });
 
 // ━━━ NPPES NPI Registry — the healthcare-provider identity/credentialing lane (1) ━━━ ADR-0036
@@ -5433,6 +5454,13 @@ export const TOOLS: ToolDef[] = [
       "Filter the CISA Known Exploited Vulnerabilities (KEV) catalog standalone (keyless; www.cisa.gov feed, cached) — the mandatory-remediation list carrying BINDING due-dates under BOD 22-01 / its 2026 successor BOD 26-04. Works even when NVD is rate-limited (a separate host, no key). Filters (all optional, AND-combined, client-side): `cveId` (exact KEV membership check), `vendorProject`/`product` (case-insensitive substring), `ransomwareOnly` (knownRansomwareCampaignUse === 'Known'), `addedSince`/`dueBefore` (ISO YYYY-MM-DD); `limit` (≤1000, def 100), `offset`. Returns { catalogVersion, dateReleased, count, found?, matches:[{ cveID, vendorProject, product, vulnerabilityName, dateAdded, dueDate, knownRansomwareCampaignUse, shortDescription, requiredAction, cwes, nvdUrl }] } + honest _meta. ★HONESTY: knownRansomwareCampaignUse and requiredAction are surfaced VERBATIM (never defaulted); dueDate is the CISA-mandated remediation deadline. A cveId NOT in the catalog ⇒ found:false — but the not-in-KEV≠safe caveat rides on EVERY response: KEV is a CURATED SUBSET of confirmed in-the-wild exploitation, so absence means CISA has not catalogued it, NOT that the component is unexploited/safe. A catalog download failure / floor-fail / count-drift THROWS (a truncated/near-empty catalog must never read as 'nothing is exploited') — never a fake-empty. The snapshot freshness (catalogVersion + release date + cache age) is disclosed.",
     inputSchema: CisaKevLookupInput,
     handler: (input) => nvd.cisaKevLookup(input),
+  }),
+  defineTool({
+    name: "nist_800_53_controls",
+    description:
+      "Look up NIST SP 800-53 Rev 5 security & privacy CONTROLS (keyless) — the requirement backbone for FedRAMP / CMMC / RMF compliance work. Retrieve a control by `controlId` (exact, e.g. 'AC-2', 'SC-7', 'AC-2(1)'), a `family` (2-letter code 'AC'/'SC'/'IA' or a name substring 'Access Control'), and/or a `keyword` (case-insensitive substring over title + statement); `limit`/`offset` pagination. Each row: { id (e.g. 'AC-2'), family (e.g. 'AC — Access Control'), title, statement (the labelled requirement prose), guidance (discussion), enhancements:[{id,title}] (e.g. AC-2(1)) }. Complements cve_lookup + cisa_kev_lookup (the vulnerability side) with the CONTROL/requirement side. HONESTY: source is NIST's OFFICIAL OSCAL catalog published at github.com/usnistgov/oscal-content (authoritative first-party data served from GitHub, not a .gov API host — provenance disclosed in _meta); the catalog has no query API so filtering is CLIENT-SIDE and totalAvailable is the EXACT match count; this is the REQUIREMENT text only — applicability depends on the system's FIPS-199 impact baseline (Low/Moderate/High), which the catalog does not encode (disclosed); a download failure or an implausibly-truncated catalog (< 15 families) THROWS (never a fake-empty 'control not found').",
+    inputSchema: NistControlsInput,
+    handler: (input) => nistControls.searchControls(input),
   }),
   // ━━━ NPPES NPI Registry — Healthcare-Provider Vetting (1) ━━━ ADR-0036
   defineTool({
