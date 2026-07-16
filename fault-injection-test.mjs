@@ -6704,6 +6704,65 @@ async function testCbpBorder() {
   });
 }
 
+// §36f: nws_active_alerts (NWS api.weather.gov, added 2026-07-16). Locks: Feature
+// Collection parse, state→?area= server param, event/severity client filter,
+// null-never-empty, non-FeatureCollection ⇒ schema_drift, empty ⇒ honest empty, 503 ⇒ THROW.
+async function testNwsAlerts() {
+  section("36f. nws_active_alerts (api.weather.gov) — FeatureCollection parse + state→?area= + event/severity filter + null-never-empty + non-FC schema_drift + honest-empty + 503 THROW");
+  const sam = new SamGovClient({});
+  const isNws = (u) => /api\.weather\.gov\/alerts\/active/.test(u);
+  const fc = (features) => ({ type: "FeatureCollection", features });
+  const nwsMock = (json, status = 200) => (u) => (isNws(u) ? mockResponse({ status, json }) : failClosed()());
+  const FEATS = [
+    { properties: { id: "urn:oid:1", event: "Wind Advisory", severity: "Moderate", urgency: "Expected", certainty: "Likely", category: "Met", status: "Actual", messageType: "Alert", areaDesc: "Santa Barbara County", effective: "2026-07-16T03:00:00-07:00", expires: "2026-07-16T18:00:00-07:00", headline: "Wind Advisory in effect", description: "Southwest winds 20 to 30 mph.", instruction: "", senderName: "NWS Los Angeles", response: "Prepare" } },
+    { properties: { id: "urn:oid:2", event: "Flood Warning", severity: "Severe", urgency: "Immediate", areaDesc: "Sacramento County", status: "Actual", effective: "2026-07-16T02:00:00-07:00", expires: "2026-07-16T12:00:00-07:00" } },
+  ];
+
+  // (a) state→?area= server param + FeatureCollection parse + null-never-empty + note.
+  _clearCache();
+  await withFetch(nwsMock(fc(FEATS)), async (calls) => {
+    const r = await runTool("nws_active_alerts", { state: "CA" }, sam);
+    const m = buildMeta(r.meta);
+    const q = new URL(calls.find((x) => isNws(x.url)).url).searchParams;
+    ok("36f state 'CA' ⇒ server-side ?area=CA + fixed host api.weather.gov",
+      q.get("area") === "CA" && new URL(calls.find((x) => isNws(x.url)).url).hostname === "api.weather.gov", JSON.stringify({ area: q.get("area") }));
+    const a0 = r.data.alerts[0];
+    ok("36f FeatureCollection parse ⇒ 2 alerts mapped (event/severity/areaDesc/effective) + null-never-empty (instruction '' ⇒ null) ⇒ surface '' ⇒ RED",
+      m.totalAvailable === 2 && a0.event === "Wind Advisory" && a0.severity === "Moderate" && a0.areaDesc === "Santa Barbara County" && a0.instruction === null && a0.senderName === "NWS Los Angeles", JSON.stringify(a0));
+    ok("36f real-time freshness + provenance disclosed in _meta.notes",
+      m.notes.some((n) => /REAL-TIME|active at request time/i.test(n)) && m.notes.some((n) => /api\.weather\.gov/.test(n)), JSON.stringify(m.notes.length));
+  });
+  // (b) event (substring) + severity (exact) client filters.
+  _clearCache();
+  await withFetch(nwsMock(fc(FEATS)), async () => {
+    const r = await runTool("nws_active_alerts", { event: "flood", severity: "Severe" }, sam);
+    ok("36f event 'flood' (substring) + severity 'Severe' (exact) ⇒ only the Flood Warning, NOT the Wind Advisory",
+      r.data.alerts.length === 1 && r.data.alerts[0].event === "Flood Warning", JSON.stringify(r.data.alerts.map((a) => a.event)));
+  });
+  // (c) a genuine no-active-alerts ⇒ HONEST EMPTY (returned:0), never an error.
+  _clearCache();
+  await withFetch(nwsMock(fc([])), async () => {
+    const r = await runTool("nws_active_alerts", { state: "WY" }, sam);
+    const m = buildMeta(r.meta);
+    ok("36f empty features ⇒ HONEST EMPTY (alerts:[], returned:0, totalAvailable:0, complete:true), never a throw",
+      r.data.alerts.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.alerts.length, ta: m.totalAvailable, c: m.complete }));
+  });
+  // (d) a non-FeatureCollection body ⇒ schema_drift THROW.
+  _clearCache();
+  await withFetch(nwsMock({ type: "Feature", properties: {} }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nws_active_alerts", {}, sam));
+    ok("36f a non-FeatureCollection body ⇒ schema_drift THROW (never a fabricated empty alerts[])",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (e) 503 ⇒ upstream_unavailable THROW.
+  _clearCache();
+  await withFetch(nwsMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nws_active_alerts", {}, sam));
+    ok("36f 503 ⇒ upstream_unavailable THROW (a DOWN feed is NEVER an empty alerts[])",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+}
+
 async function testGovDomains() {
   section("36c. search_gov_domains (CISA get.gov) — CSV parse + quoted-comma + email EXCLUDED + client-side filter exact-total + fixed host + header-rename schema_drift + 503 THROW");
   const sam = new SamGovClient({});
@@ -20629,6 +20688,7 @@ async function main() {
   await testGovDomains();
   await testNistControls();
   await testCbpBorder();
+  await testNwsAlerts();
   await testSearchSubawardsMapping();
   await testTeamingMostRecentAwardDate();
   await testNaicsHierarchy();

@@ -68,6 +68,7 @@ import * as lda from "./lda.js";
 import * as courtlistener from "./courtlistener.js";
 import * as nonprofit from "./nonprofit.js";
 import * as fema from "./fema.js";
+import * as nws from "./nws-weather.js";
 import * as govDomains from "./gov-domains.js";
 import * as fdic from "./fdic.js";
 import * as bls from "./bls.js";
@@ -2607,6 +2608,25 @@ const FemaSearchHazardMitigationInput = z.object({
     .min(0)
     .default(0)
     .describe("0-based row offset ($skip) for pagination, default 0."),
+});
+
+const NwsActiveAlertsInput = z.object({
+  state: z
+    .string()
+    .regex(/^[A-Za-z]{2}$/)
+    .optional()
+    .describe("2-letter US state/territory code to scope alerts (→ NWS ?area=), e.g. 'CA'. Omit for all active US alerts."),
+  event: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Filter by event type — case-insensitive substring, e.g. 'Flood', 'Wind', 'Winter Storm'."),
+  severity: z
+    .enum(["Extreme", "Severe", "Moderate", "Minor", "Unknown"])
+    .optional()
+    .describe("Filter by severity (exact): Extreme | Severe | Moderate | Minor | Unknown."),
+  limit: z.number().int().min(1).max(500).optional().describe("Max alerts returned (default 50, max 500)."),
+  offset: z.number().int().min(0).optional().describe("Zero-based page offset (default 0)."),
 });
 
 const SearchGovDomainsInput = z.object({
@@ -5768,6 +5788,14 @@ export const TOOLS: ToolDef[] = [
       "Search FEMA Hazard Mitigation Assistance projects — the disaster-RESILIENCE grant axis (HMGP/FMA/PDM/BRIC mitigation grants to state/local/tribal subrecipients, distinct from the disaster-RECOVERY spend in fema_search_public_assistance). Keyless OpenFEMA, dataset HazardMitigationAssistanceProjects v4, ~56k rows. Structured filters (module-built into an OData $filter; each LIVE-VERIFIED to narrow): `state` (→ state — the FULL state NAME, e.g. 'Alabama', NOT the 2-letter code), `programArea` (HMGP/FMA/PDM/BRIC/LPDM/FMA-SL), `disasterNumber`, `status` (e.g. 'Closed'), `programFy`, `region` (FEMA region 1–10), `minProjectAmount`/`maxProjectAmount` (projectAmount ge/le). `limit` (≤1000, def 100 → $top), `offset` (→ $skip). HONESTY: the module ALWAYS sends $inlinecount=allpages so totalAvailable is the EXACT filtered total (metadata.count), never the page length; amount fields (projectAmount/federalShareObligated/initialObligationAmount/netValueBenefits) are number|null (a real 0 stays 0, absent → null); genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). NOTE: 'state' here is the full name (this dataset 400s on a 2-letter code), whereas fema_search_public_assistance maps 'state' to the 2-letter 'stateAbbreviation'.",
     inputSchema: FemaSearchHazardMitigationInput,
     handler: (input) => fema.searchHazardMitigation(input),
+  }),
+  // ━━━ NWS — National Weather Service active alerts (keyless) (1) ━━━
+  defineTool({
+    name: "nws_active_alerts",
+    description:
+      "List CURRENTLY-ACTIVE National Weather Service alerts — watches, warnings, and advisories (keyless; api.weather.gov). The disaster/climate-readiness lane that pairs with the FEMA tools (declarations → public assistance → hazard mitigation → LIVE active weather): where severe-weather events are active NOW, ahead of the declarations/contracts that follow. Filters: `state` (2-letter code → server-side ?area=, e.g. 'CA'; omit for all US), `event` (case-insensitive substring, e.g. 'Flood', 'Wind'), `severity` (Extreme/Severe/Moderate/Minor/Unknown); `limit`/`offset` pagination. Each alert: { id, event, headline, severity, urgency, certainty, category, status, messageType, areaDesc, effective, onset, expires, ends, senderName, description, instruction, response }. HONESTY: this is REAL-TIME data (alerts active at request time — a live snapshot, NOT a historical archive; read effective/expires for each window, disclosed in _meta); every scalar is null-never-empty-string and dates are ISO strings; totalAvailable is the EXACT count of matched active alerts; a NO-active-alerts result is an HONEST EMPTY (returned:0), never an error; an outage/4xx/timeout THROWS and a non-FeatureCollection body ⇒ schema_drift. A descriptive User-Agent is sent per NWS policy (no key/token).",
+    inputSchema: NwsActiveAlertsInput,
+    handler: (input) => nws.activeAlerts(input),
   }),
   // ━━━ get.gov — CISA authoritative .gov domain registry (keyless) (1) ━━━
   defineTool({
