@@ -69,6 +69,13 @@ export const TREASURY_DATASETS = {
     mts_table_1: "/v1/accounting/mts/mts_table_1",
     rates_of_exchange: "/v1/accounting/od/rates_of_exchange",
     debt_outstanding: "/v2/accounting/od/debt_outstanding",
+    // interest_expense = ACTUAL interest PAID on the debt (debt-service cost by
+    // security type), distinct from avg_interest_rates (rates only). LIVE-VERIFIED
+    // 2026-07-16 (total-count 7245, truthful pagination). tror = the Treasury Report
+    // on Receivables — federal receivables + delinquent-debt collections BY AGENCY
+    // (debt-collection contracting / agency financial-management signal; total 3953).
+    interest_expense: "/v2/accounting/od/interest_expense",
+    tror: "/v2/debt/tror",
 };
 // ─── HONESTY-CRITICAL coercions (F1/F2/F3) ────────────────────────
 // `num`/`str` are the shared, audited null-never-0 coercions in ./coerce.js
