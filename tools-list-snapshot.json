@@ -2782,6 +2782,35 @@
     }
   },
   {
+    "name": "nist_800_53_controls",
+    "description": "Look up NIST SP 800-53 Rev 5 security & privacy CONTROLS (keyless) — the requirement backbone for FedRAMP / CMMC / RMF compliance work. Retrieve a control by `controlId` (exact, e.g. 'AC-2', 'SC-7', 'AC-2(1)'), a `family` (2-letter code 'AC'/'SC'/'IA' or a name substring 'Access Control'), and/or a `keyword` (case-insensitive substring over title + statement); `limit`/`offset` pagination. Each row: { id (e.g. 'AC-2'), family (e.g. 'AC — Access Control'), title, statement (the labelled requirement prose), guidance (discussion), enhancements:[{id,title}] (e.g. AC-2(1)) }. Complements cve_lookup + cisa_kev_lookup (the vulnerability side) with the CONTROL/requirement side. HONESTY: source is NIST's OFFICIAL OSCAL catalog published at github.com/usnistgov/oscal-content (authoritative first-party data served from GitHub, not a .gov API host — provenance disclosed in _meta); the catalog has no query API so filtering is CLIENT-SIDE and totalAvailable is the EXACT match count; this is the REQUIREMENT text only — applicability depends on the system's FIPS-199 impact baseline (Low/Moderate/High), which the catalog does not encode (disclosed); a download failure or an implausibly-truncated catalog (< 15 families) THROWS (never a fake-empty 'control not found').",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "controlId": {
+          "type": "string",
+          "description": "Exact control identifier, e.g. 'AC-2', 'SC-7', 'AC-2(1)' (case-insensitive; zero-padding is normalized)."
+        },
+        "family": {
+          "type": "string",
+          "description": "Control family — the 2-letter code ('AC', 'SC', 'IA') OR a substring of the family name ('Access Control', 'Audit'). Case-insensitive."
+        },
+        "keyword": {
+          "type": "string",
+          "description": "Case-insensitive substring searched over the control title + requirement statement."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max controls returned (default 25, max 200)."
+        },
+        "offset": {
+          "type": "number",
+          "description": "Zero-based page offset (default 0)."
+        }
+      }
+    }
+  },
+  {
     "name": "nonprofit_financials",
     "description": "Fetch ONE US tax-exempt nonprofit's IRS Form 990 profile + FINANCIALS by EIN via ProPublica Nonprofit Explorer (projects.propublica.org/nonprofits/api/v2/organizations/{ein}.json). ★PROVENANCE: the DATA is IRS Form 990 filings (federal tax-exempt public records) but the API is ProPublica Nonprofit Explorer, run by ProPublica (a NON-PROFIT newsroom) — NOT a .gov API; ProPublica republishes these records KEYLESS because the IRS has no clean query API. KEYLESS (no key). Input: `ein` (required — the Employer Identification Number, 1..9 digits ^\\d{1,9}$, e.g. '530196605' American National Red Cross; rides the URL path). Returns { organization:{ ein, name, address, city, state, zip, nteeCode, subsectionCode, rulingDate, statusCode }, filings:[{ taxYear, formType, revenueUsd, expensesUsd, assetsUsd, liabilitiesUsd, pdfUrl }] } + honest _meta. HONESTY: the four Form 990 figures (revenueUsd/expensesUsd/assetsUsd/liabilitiesUsd, from totrevenue/totfuncexpns/totassetsend/totliabend) ride null-never-0 coercion — a genuine reported 0 stays 0, an absent figure ⇒ null (NEVER 0-faked); ein/codes are strings; rulingDate is a date string. totalAvailable = filings.length (the COMPLETE Form 990 filing set from the one detail document — no pagination). An unknown EIN (HTTP 404) ⇒ not_found (NEVER a fabricated empty org); a 4xx ⇒ invalid_input; a 429 ⇒ rate_limited THROWS; a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / non-object organization / non-array filings_with_data ⇒ schema_drift. Data is IRS Form 990 data via ProPublica Nonprofit Explorer, disclosed in _meta.source and a note.",
     "inputSchema": {

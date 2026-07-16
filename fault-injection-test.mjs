@@ -6567,6 +6567,91 @@ async function testDisasterSpending() {
 // email" column EXCLUSION (contact-PII safety), client-side substring/exact filters
 // with an EXACT match total, fixed-host/pinned-path fetch, provenance disclosure, a
 // header-rename ⇒ schema_drift, and a 503 ⇒ THROW (never a fake-empty).
+// §36d: nist_800_53_controls (NIST SP 800-53 Rev5 OSCAL catalog, added 2026-07-16).
+// Locks: OSCAL group→control parse + recursive statement assembly + enhancement
+// listing, controlId/family/keyword filters (keyword covers enhancement titles),
+// provenance disclosure, the plausibility FLOOR (< 15 families ⇒ schema_drift, never
+// a fake "control not found"), fixed host, and a 503 ⇒ THROW.
+const oscalCatalog = (families = 20) => {
+  const groups = [];
+  for (let i = 0; i < families; i++) {
+    if (i === 0) {
+      groups.push({ id: "ac", title: "Access Control", controls: [
+        { id: "ac-2", title: "Account Management",
+          parts: [
+            { name: "statement", parts: [
+              { props: [{ name: "label", value: "a." }], prose: "Define and document account types." },
+              { props: [{ name: "label", value: "b." }], prose: "Assign account managers." },
+            ] },
+            { name: "guidance", prose: "Discussion: account management is foundational." },
+          ],
+          controls: [
+            { id: "ac-2.1", title: "Automated System Account Management" },
+            { id: "ac-2.12", title: "Account Monitoring for Atypical Usage" },
+          ],
+        },
+      ] });
+    } else {
+      groups.push({ id: `f${i}`, title: `Family ${i}`, controls: [{ id: `f${i}-1`, title: `Control ${i}` }] });
+    }
+  }
+  return { catalog: { uuid: "x", metadata: {}, groups } };
+};
+
+async function testNistControls() {
+  section("36d. nist_800_53_controls (NIST SP 800-53 Rev5 OSCAL) — group/control parse + recursive statement + enhancements + controlId/family/keyword filter + provenance + FLOOR(<15 families ⇒ schema_drift) + 503 THROW");
+  const sam = new SamGovClient({});
+  const isOscal = (u) => /raw\.githubusercontent\.com\/usnistgov\/oscal-content\/.*NIST_SP-800-53_rev5_catalog\.json/.test(u);
+  const oscalMock = (json, status = 200) => (u) => (isOscal(u) ? mockResponse({ status, json }) : failClosed()());
+
+  // (a) controlId AC-2 ⇒ parses id/family/title + recursive statement (a./b.) +
+  //     guidance + enhancements (AC-2(1), AC-2(12)); fixed host; provenance note.
+  _clearCache();
+  await withFetch(oscalMock(oscalCatalog(20)), async (calls) => {
+    const r = await runTool("nist_800_53_controls", { controlId: "ac-02" }, sam); // zero-padded/lowercase input normalizes
+    const m = buildMeta(r.meta);
+    const c = r.data.controls[0];
+    ok("36d fetch on the PINNED host + OSCAL path (raw.githubusercontent.com/usnistgov/oscal-content)",
+      new URL(calls.find((x) => isOscal(x.url)).url).hostname === "raw.githubusercontent.com", JSON.stringify(calls.some((x) => isOscal(x.url))));
+    ok("36d controlId 'ac-02' normalizes to 'AC-2' ⇒ EXACT 1 match; family 'AC — Access Control'; title 'Account Management'",
+      m.totalAvailable === 1 && c.id === "AC-2" && c.family === "AC — Access Control" && c.title === "Account Management", JSON.stringify({ ta: m.totalAvailable, id: c?.id, fam: c?.family }));
+    ok("36d recursive STATEMENT assembly ('a. Define…' + 'b. Assign…') + guidance prose + enhancements [AC-2(1), AC-2(12)] (label-normalized) — a non-recursive/flat parse ⇒ RED",
+      /a\. Define and document account types\./.test(c.statement) && /b\. Assign account managers\./.test(c.statement) && c.guidance === "Discussion: account management is foundational." && c.enhancements.length === 2 && c.enhancements[0].id === "AC-2(1)" && c.enhancements[1].id === "AC-2(12)", JSON.stringify({ stmt: c.statement, enh: c.enhancements }));
+    ok("36d provenance disclosed (usnistgov/oscal-content) + FIPS-baseline caveat present in _meta.notes",
+      m.notes.some((n) => /usnistgov\/oscal-content/.test(n)) && m.notes.some((n) => /FIPS-199|impact baseline/i.test(n)), JSON.stringify(m.notes.length));
+  });
+  // (b) keyword covers ENHANCEMENT titles: 'atypical' lives only in AC-2(12) ⇒ still
+  //     surfaces the parent AC-2. Searching only the top-level statement ⇒ RED (0).
+  _clearCache();
+  await withFetch(oscalMock(oscalCatalog(20)), async () => {
+    const r = await runTool("nist_800_53_controls", { keyword: "atypical" }, sam);
+    ok("36d keyword 'atypical' (only in the AC-2(12) enhancement title) ⇒ surfaces parent AC-2 (enhancement titles ARE searched) — search only title+statement ⇒ RED",
+      r.data.controls.length === 1 && r.data.controls[0].id === "AC-2", JSON.stringify(r.data.controls.map((c) => c.id)));
+  });
+  // (c) family filter by 2-letter code.
+  _clearCache();
+  await withFetch(oscalMock(oscalCatalog(20)), async () => {
+    const r = await runTool("nist_800_53_controls", { family: "ac" }, sam);
+    ok("36d family 'ac' (case-insensitive code) ⇒ only the AC family control(s), NOT the filler families",
+      r.data.controls.length === 1 && r.data.controls[0].id === "AC-2", JSON.stringify(r.data.controls.map((c) => c.id)));
+  });
+  // (d) FLOOR: a truncated catalog (< 15 families) ⇒ schema_drift THROW, never a fake
+  //     "control not found". NON-VACUITY: removing the floor check ⇒ returns empty ⇒ RED.
+  _clearCache();
+  await withFetch(oscalMock(oscalCatalog(5)), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nist_800_53_controls", { controlId: "AC-2" }, sam));
+    ok("36d FLOOR: a truncated catalog (5 < 15 families) ⇒ schema_drift THROW (a near-empty catalog must NEVER read as 'control not found')",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (e) 503 ⇒ upstream_unavailable THROW (never a fabricated empty catalog).
+  _clearCache();
+  await withFetch(oscalMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("nist_800_53_controls", {}, sam));
+    ok("36d 503 ⇒ upstream_unavailable THROW (a DOWN source is NEVER an empty controls[])",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+}
+
 async function testGovDomains() {
   section("36c. search_gov_domains (CISA get.gov) — CSV parse + quoted-comma + email EXCLUDED + client-side filter exact-total + fixed host + header-rename schema_drift + 503 THROW");
   const sam = new SamGovClient({});
@@ -20490,6 +20575,7 @@ async function main() {
   await testUnknownKeyRejection();
   await testDisasterSpending();
   await testGovDomains();
+  await testNistControls();
   await testSearchSubawardsMapping();
   await testTeamingMostRecentAwardDate();
   await testNaicsHierarchy();
