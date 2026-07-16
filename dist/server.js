@@ -371,6 +371,21 @@ const UsasGlossaryInput = z.object({
 const UsasListAgenciesInput = z.object({
     limit: z.number().min(1).max(150).optional(),
 });
+const UsasListDisasterCodesInput = z.object({});
+const UsasDisasterSpendingInput = z.object({
+    defCodes: z
+        .array(z.string().min(1))
+        .min(1)
+        .describe("Disaster Emergency Fund Codes (DEFC) to include — REQUIRED. e.g. ['L','M'] (COVID-19 relief) or ['1'] (IIJA / infrastructure). Discover the full code set via usas_list_disaster_codes."),
+    spendingType: z
+        .enum(["obligation", "outlay"])
+        .optional()
+        .describe("obligation (default) or outlay. Some DEFCs report $0 obligations but real outlays — try both."),
+    geoLayer: z
+        .enum(["state", "county", "district"])
+        .optional()
+        .describe("Geographic breakout: state (default), county, or congressional district."),
+});
 // Federal Register
 const FedRegSearchInput = z.object({
     query: z.string().optional(),
@@ -4296,6 +4311,18 @@ export const TOOLS = [
         description: "List all toptier federal agencies with toptier_code, abbreviation, slug, current-FY obligations. Use for 'show me every cabinet department + their FY26 spending' or to find a toptier_code for usas_get_agency_*.",
         inputSchema: UsasListAgenciesInput,
         handler: (input) => usas.listToptierAgencies(input),
+    }),
+    defineTool({
+        name: "usas_list_disaster_codes",
+        description: "List the Disaster Emergency Fund Codes (DEFC) — the supplemental-appropriation tags (COVID-19 relief, IIJA/infrastructure, and other emergency laws) that usas_disaster_spending filters on. Keyless USAspending references/def_codes. Returns the COMPLETE code set (no pagination): each `code` with its `group` ('covid_19' | 'infrastructure' | null), `title`, and `publicLaw`. Use this to discover the codes to pass to usas_disaster_spending. HONESTY: group is null (never fabricated) when a code belongs to no named group; totalAvailable is the exact complete count.",
+        inputSchema: UsasListDisasterCodesInput,
+        handler: () => usas.listDisasterCodes(),
+    }),
+    defineTool({
+        name: "usas_disaster_spending",
+        description: "Disaster / emergency-fund spending BY GEOGRAPHY — obligations or outlays tagged to one or more Disaster Emergency Fund Codes (DEFC: COVID-19, IIJA, etc.), broken out per state / county / congressional district (keyless USAspending disaster/spending_by_geography). Answers 'which geographies captured COVID/IIJA relief money' — a distinct axis the standard award search does not expose. `defCodes` REQUIRED (discover via usas_list_disaster_codes); `spendingType` obligation (default) | outlay; `geoLayer` state (default) | county | district. Each row: name, code, amount, awardCount, population, perCapita. HONESTY: amount/perCapita are number|null (a real 0 stays 0 — some DEFCs like IIJA report $0 OBLIGATIONS with a nonzero awardCount, disclosed in a note; absent → null, never a fabricated 0); the endpoint returns the COMPLETE set of geo units (no pagination) so totalAvailable = returned; an outage/4xx THROWS (never a fake empty).",
+        inputSchema: UsasDisasterSpendingInput,
+        handler: (input) => usas.disasterSpending(input),
     }),
     // ━━━ Federal Register (4) ━━━
     defineTool({

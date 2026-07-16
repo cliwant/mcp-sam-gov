@@ -549,6 +549,37 @@ export declare function glossary(args: {
         definition: string;
     }[];
 }>>;
+/**
+ * List the Disaster Emergency Fund Codes (DEFC) — the supplemental-appropriation
+ * tags (COVID-19 relief, IIJA/infrastructure, and other emergency laws) that
+ * usas_disaster_spending filters on. GET references/def_codes/ (keyless). Returns the
+ * COMPLETE code set (no pagination), each with `group` ('covid_19' | 'infrastructure'
+ * | null), title, and public law. Discovery front-door for usas_disaster_spending.
+ */
+export declare function listDisasterCodes(): Promise<MetaBundle<{
+    codes: {
+        code: string;
+        group: string | null;
+        title: string;
+        publicLaw: string | null;
+    }[];
+}>>;
+/**
+ * Disaster / emergency-fund spending BY GEOGRAPHY — obligations or outlays tagged to
+ * one or more Disaster Emergency Fund Codes (DEFC: COVID-19, IIJA, etc.), broken out
+ * per state / county / congressional district. POST disaster/spending_by_geography/
+ * (keyless). Answers "which geographies captured COVID/IIJA relief money" — a
+ * distinct axis the standard award search does not expose. `defCodes` REQUIRED
+ * (discover them via usas_list_disaster_codes). The geography endpoint returns the
+ * COMPLETE set of geo units (no pagination) ⇒ totalAvailable = returned, complete.
+ * amount/perCapita are number|null (a real 0 stays 0 — some DEFCs report $0
+ * obligations with a nonzero awardCount; absent → null, never a fabricated 0).
+ */
+export declare function disasterSpending(args: {
+    defCodes: string[];
+    spendingType?: "obligation" | "outlay";
+    geoLayer?: "state" | "county" | "district";
+}): Promise<MetaBundle>;
 export declare function listToptierAgencies(args: {
     limit?: number;
 }): Promise<MetaBundle<{
