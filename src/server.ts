@@ -1368,9 +1368,11 @@ const TreasuryDatasetEnum = z
     "mts_table_1",
     "rates_of_exchange",
     "debt_outstanding",
+    "interest_expense",
+    "tror",
   ])
   .describe(
-    "Which confirmed Treasury Fiscal Data dataset to query: debt_to_penny (daily total public debt), avg_interest_rates (avg rate by security type), mts_table_1 (Monthly Treasury Statement receipts/outlays/deficit), rates_of_exchange (quarterly FX by currency), debt_outstanding (historical fiscal-year-end debt).",
+    "Which confirmed Treasury Fiscal Data dataset to query: debt_to_penny (daily total public debt), avg_interest_rates (avg rate by security type), mts_table_1 (Monthly Treasury Statement receipts/outlays/deficit), rates_of_exchange (quarterly FX by currency), debt_outstanding (historical fiscal-year-end debt), interest_expense (ACTUAL interest PAID / debt-service cost by security type — distinct from the rate), tror (Treasury Report on Receivables: federal receivables + delinquent-debt collections BY AGENCY).",
   );
 
 const TreasuryQueryDatasetInput = z.object({
@@ -5445,7 +5447,7 @@ export const TOOLS: ToolDef[] = [
   defineTool({
     name: "treasury_query_dataset",
     description:
-      "Escape-hatch query over 5 confirmed US Treasury Fiscal Data datasets (keyless): debt_to_penny, avg_interest_rates, mts_table_1 (Monthly Treasury Statement), rates_of_exchange, debt_outstanding. Choose `dataset` (enum — no free path), and optionally project `fields` (CSV), `filter` (CSV 'col:op:val', ops lt|lte|gt|gte|eq|in, AND-combined), and `sort` (CSV, '-' = desc), with page[size]/page[number] pagination. Returns raw rows plus a truthful `_meta` (totalAvailable = upstream total-count, offset pagination). Value/amount fields are raw upstream strings — the string \"null\"/empty means 'no value', never 0. Covers rates_of_exchange + debt_outstanding without a dedicated tool.",
+      "Escape-hatch query over 7 confirmed US Treasury Fiscal Data datasets (keyless): debt_to_penny, avg_interest_rates, mts_table_1 (Monthly Treasury Statement), rates_of_exchange, debt_outstanding, interest_expense (actual interest PAID / debt-service cost), tror (Treasury Report on Receivables — federal receivables + delinquent-debt collections by agency). Choose `dataset` (enum — no free path), and optionally project `fields` (CSV), `filter` (CSV 'col:op:val', ops lt|lte|gt|gte|eq|in, AND-combined), and `sort` (CSV, '-' = desc), with page[size]/page[number] pagination. Returns raw rows plus a truthful `_meta` (totalAvailable = upstream total-count, offset pagination). Value/amount fields are raw upstream strings — the string \"null\"/empty means 'no value', never 0. Covers rates_of_exchange + debt_outstanding without a dedicated tool.",
     inputSchema: TreasuryQueryDatasetInput,
     handler: (input) => treasury.queryDataset(input),
   }),

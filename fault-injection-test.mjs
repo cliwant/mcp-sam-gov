@@ -6911,6 +6911,22 @@ async function testTreasuryHonesty() {
       m.pagination.offset === 8300 && m.pagination.hasMore === false && m.pagination.nextOffset === null, JSON.stringify(m.pagination));
   });
 
+  // (d2) NEW datasets interest_expense + tror (scout C, 2026-07-16) — the enum→
+  // registry→PATH wiring: treasury_query_dataset{dataset} must fetch the dataset's
+  // REAL Fiscal-Data path and report the honest total-count. NON-VACUITY: a wrong
+  // path in TREASURY_DATASETS ⇒ the fetched URL misses the expected segment ⇒ RED.
+  for (const [ds, seg, total] of [
+    ["interest_expense", "/v2/accounting/od/interest_expense", 7245],
+    ["tror", "/v2/debt/tror", 3953],
+  ]) {
+    await withFetch((u) => (new RegExp(seg.replace(/\//g, "\\/")).test(u) ? mockResponse({ status: 200, json: env([{ record_date: "2026-06-30" }], total) }) : failClosed()()), async (calls) => {
+      const r = await runTool("treasury_query_dataset", { dataset: ds, pageSize: 1, sort: "-record_date" }, sam);
+      const m = buildMeta(r.meta);
+      ok(`40d2 dataset '${ds}' ⇒ fetches the pinned Fiscal-Data path '${seg}' (enum→registry wiring; a wrong path ⇒ RED) + totalAvailable === total-count ${total} (NOT page length 1)`,
+        calls.some((c) => c.url.includes(seg)) && m.totalAvailable === total && m.returned === 1, JSON.stringify({ hit: calls.some((c) => c.url.includes(seg)), ta: m.totalAvailable }));
+    });
+  }
+
   // (e) num() — the HONESTY-CRITICAL coercion (F3). "" is the trap: Number("") is 0.
   eq('40e num("null") ⇒ null (not 0)', treasuryNum("null"), null);
   eq('40e num("") ⇒ null (CRITICAL: Number("") is 0, so this MUST be caught)', treasuryNum(""), null);

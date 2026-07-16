@@ -50,6 +50,8 @@ export declare const TREASURY_DATASETS: {
     readonly mts_table_1: "/v1/accounting/mts/mts_table_1";
     readonly rates_of_exchange: "/v1/accounting/od/rates_of_exchange";
     readonly debt_outstanding: "/v2/accounting/od/debt_outstanding";
+    readonly interest_expense: "/v2/accounting/od/interest_expense";
+    readonly tror: "/v2/debt/tror";
 };
 export type TreasuryDatasetKey = keyof typeof TREASURY_DATASETS;
 export type TreasuryValue = string | number | null;
