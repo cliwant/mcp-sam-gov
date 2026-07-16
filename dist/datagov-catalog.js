@@ -161,14 +161,19 @@ export async function searchDatasets(args) {
     const params = new URLSearchParams();
     const filtersApplied = [];
     if (args.query !== undefined) {
-        params.set("_q", args.query);
+        // DRIFT FIX (dogfooding 2026-07-16): the data.gov v4 catalog renamed its
+        // free-text param `_q` → `q` (and `_size` → `size`). The old `_q` was SILENTLY
+        // IGNORED — every query returned the same default catalog page while
+        // filtersApplied still claimed "query", a confidently-wrong result. LIVE-VERIFIED:
+        // q=wildfire → wildfire datasets; _q=wildfire → the generic default list.
+        params.set("q", args.query);
         filtersApplied.push("query");
     }
     if (args.organization !== undefined) {
         params.set("organization", args.organization);
         filtersApplied.push("organization");
     }
-    params.set("_size", String(limit));
+    params.set("size", String(limit));
     if (args.cursor !== undefined) {
         params.set("after", args.cursor);
         filtersApplied.push("cursor");
@@ -210,6 +215,15 @@ export async function searchDatasets(args) {
     pushKeyNote(notes);
     if (filtersApplied.length === 0) {
         notes.push("No filters were applied — this is an unscoped scan of the WHOLE data.gov catalog. Add `query` and/or `organization` for a meaningful scoped result set.");
+    }
+    // Behavior-driven limit-honesty (dogfooding 2026-07-16): the v4 catalog currently
+    // returns an upstream-FIXED page (~20) and ignores the `size` argument. Fire ONLY
+    // when the API returned MORE than requested (returned > limit) — a DEFINITIVE
+    // "limit ignored" signal that can't be confused with a genuine small result set
+    // (returned < limit could just be few matches). Behavior-driven, so if the API
+    // begins honoring `size` again (returned ≤ limit) the note self-suppresses.
+    if (returned > limit) {
+        notes.push(`The requested limit (${limit}) was NOT honored — the data.gov v4 catalog returned MORE (${returned} rows): it currently serves an upstream-fixed page and ignores the size argument. Page through the full result set with _meta.nextCursor, not by raising limit.`);
     }
     return withMeta({ datasets }, {
         source: DATAGOV_CATALOG_SOURCE(keyModeLabel()),

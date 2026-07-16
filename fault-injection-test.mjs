@@ -12334,8 +12334,8 @@ async function testDatagovCatalogHonesty() {
     ok("45C-P1a opaque `after` cursor ⇒ nextCursor = the token VERBATIM ('QUER+abc/123='), hasMore:true, offset/nextOffset null (a numeric offset is meaningless for a cursor), complete:false — fabricate/derive/mutate the token, or compute hasMore from anything but after-presence ⇒ RED",
       m.nextCursor === "QUER+abc/123=" && m.pagination.hasMore === true && m.pagination.offset === null && m.pagination.nextOffset === null && m.complete === false, JSON.stringify({ nc: m.nextCursor, pg: m.pagination, c: m.complete }));
     const q = dgQuery(calls);
-    ok("45C-P1a query is MODULE-BUILT: _q, _size, _format=json (countTotal-free) — _q carries the query, _size the limit",
-      q.get("_q") === "air quality" && q.get("_size") === "2" && q.get("_format") === "json", JSON.stringify([...q.keys()]));
+    ok("45C-P1a query is MODULE-BUILT: q, size, _format=json (countTotal-free) — `q` carries the query, `size` the limit (2026-07-16 drift: renamed from _q/_size, which are silently ignored upstream)",
+      q.get("q") === "air quality" && q.get("size") === "2" && q.get("_format") === "json" && q.get("_q") === null, JSON.stringify([...q.keys()]));
     const d = r.data.datasets[0];
     ok("45C-P1a dataset map: id=slug, organization, description (row-level), keywords/themes arrays (''/'null' dropped), distributions ({title,format}; mediaType→format; empty dropped), identifier",
       d.id === "epa-air-quality-system" && d.organization === "epa-gov" && d.description === "Row-level description of the dataset." && JSON.stringify(d.keywords) === '["air quality","emissions"]' && JSON.stringify(d.themes) === '["Environment"]' && d.distributions.length === 2 && d.distributions[0].format === "CSV" && d.distributions[1].format === "application/json" && d.identifier === "https://data.epa.gov/aqs",
@@ -12444,11 +12444,32 @@ async function testDatagovCatalogHonesty() {
       q.get("after") === "QUER+abc/123=" && url.hostname === DATAGOV_CATALOG_HOST && url.protocol === "https:" && dgCall(calls).init.redirect === "error", JSON.stringify({ after: q.get("after"), host: url.hostname }));
   });
   // organization filter + an embedded &/= stays INSIDE the value (URLSearchParams contains the breakout).
+  // DRIFT FIX (dogfooding 2026-07-16): the v4 param is `q`/`size` (renamed from `_q`/`_size`);
+  // the OLD names are silently ignored upstream. Assert the request carries `q`/`size` and
+  // NOT the stale `_q`/`_size`. NON-VACUITY: reverting to `_q` ⇒ q.get("q") null ⇒ RED.
   await withFetch(dgMock(dgBody([])), async (calls) => {
-    await runTool("datagov_search_datasets", { query: "a&_size=9999&organization=dod", organization: "epa-gov", limit: 7 }, sam);
+    await runTool("datagov_search_datasets", { query: "a&size=9999&organization=dod", organization: "epa-gov", limit: 7 }, sam);
     const q = dgQuery(calls);
-    ok("45C-ssrf an embedded &/= in `query` stays INSIDE _q (URLSearchParams contains the breakout) ⇒ _size stays 7, organization stays 'epa-gov' (no injected override)",
-      q.get("_q") === "a&_size=9999&organization=dod" && q.get("_size") === "7" && q.get("organization") === "epa-gov", JSON.stringify({ q: q.get("_q"), size: q.get("_size"), org: q.get("organization") }));
+    ok("45C-ssrf an embedded &/= in `query` stays INSIDE `q` (URLSearchParams contains the breakout) ⇒ `size` stays 7, organization stays 'epa-gov' (no injected override); the stale `_q`/`_size` are NOT sent",
+      q.get("q") === "a&size=9999&organization=dod" && q.get("size") === "7" && q.get("organization") === "epa-gov" && q.get("_q") === null && q.get("_size") === null,
+      JSON.stringify({ q: q.get("q"), size: q.get("size"), org: q.get("organization"), _q: q.get("_q") }));
+  });
+  // Limit-not-honored disclosure (dogfooding 2026-07-16): the v4 catalog returns a
+  // fixed page and ignores `size`. When it returns MORE than the requested limit, a
+  // note discloses the limit was NOT honored (page via nextCursor). NON-VACUITY: a
+  // result set at/under the limit fires NO such note (a genuine small result is not
+  // a limit violation).
+  await withFetch(dgMock(dgBody(dgRows(20), "NX")), async () => {
+    const r = await runTool("datagov_search_datasets", { query: "x", limit: 3 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45C-limit returned(20) > requested limit(3) ⇒ a note discloses the limit was NOT honored (fixed page; use nextCursor) — drop the guard ⇒ RED",
+      r.data.datasets.length === 20 && m.notes.some((n) => /requested limit \(3\) was NOT honored/.test(n) && /nextCursor/.test(n)), JSON.stringify(m.notes.filter((n) => /NOT honored/.test(n))));
+  });
+  await withFetch(dgMock(dgBody(dgRows(3))), async () => {
+    const r = await runTool("datagov_search_datasets", { query: "x", limit: 20 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45C-limit returned(3) ≤ requested limit(20) ⇒ NO limit-not-honored note (a genuine small result is not a limit violation)",
+      r.data.datasets.length === 3 && !m.notes.some((n) => /was NOT honored/.test(n)), JSON.stringify(m.notes.filter((n) => /NOT honored/.test(n))));
   });
 
   // ── K-test: the key rides ONLY the X-Api-Key header, NEVER the URL/_meta/output;
