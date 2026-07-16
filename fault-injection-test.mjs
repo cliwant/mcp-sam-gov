@@ -18573,6 +18573,64 @@ async function testOpenfdaDeviceClearances() {
   });
 }
 
+// §55-openfda-drugsfda: openFDA Drugs@FDA drug approvals (api.fda.gov /drug/drugsfda.json,
+// added 2026-07-16 — pharma approval lane; reuses openfda.ts fetch/error/escape). Same
+// envelope + crux as the device sibling; ADDS nested products[]/submissions[] mapping.
+const isOpenfdaDrugsfda = (u) => /api\.fda\.gov\/drug\/drugsfda\.json/.test(u);
+const openfdaDrugsfdaMock = (body, status = 200) => (u) => (isOpenfdaDrugsfda(u) ? mockResponse({ status, json: body }) : failClosed()());
+const openfdaDrugsfdaUrl = (calls) => calls.find((x) => isOpenfdaDrugsfda(x.url))?.url;
+const openfdaDrugsfdaQuery = (calls) => new URL(openfdaDrugsfdaUrl(calls)).searchParams;
+const drugsfdaBody = (total, rows, skip = 0, limit = 25) => ({ meta: { disclaimer: "Do not rely on openFDA…", results: { skip, limit, total } }, results: rows });
+const drugsfdaRow = (over = {}) => ({
+  application_number: "NDA020702",
+  sponsor_name: "UPJOHN",
+  products: [{ brand_name: "LIPITOR", active_ingredients: [{ name: "ATORVASTATIN CALCIUM", strength: "EQ 80MG BASE" }], dosage_form: "TABLET", route: "ORAL", marketing_status: "Prescription" }],
+  submissions: [{ submission_type: "ORIG", submission_number: "1", submission_status: "AP", submission_status_date: "19961217", submission_class_code_description: "Type 1 - New Molecular Entity" }],
+  ...over,
+});
+
+async function testOpenfdaDrugApprovals() {
+  section("§55-openfda-drugsfda. openFDA Drugs@FDA drug approvals — meta.results.total P1 + nested products/submissions mapping + null-never-empty P3 + escaped nested-field search + 404-NOT_FOUND-as-empty P2 crux + 5xx THROW (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  await withOpenfdaKey(undefined, async () => {
+    // keyless + P1 total + nested-field search assembly + nested mapping.
+    await withFetch(openfdaDrugsfdaMock(drugsfdaBody(191, [drugsfdaRow(), drugsfdaRow({ sponsor_name: "PFIZER" })])), async (calls) => {
+      const r = await runTool("openfda_drug_approvals", { brandName: "LIPITOR", limit: 2 }, sam);
+      const m = buildMeta(r.meta);
+      const q = openfdaDrugsfdaQuery(calls);
+      ok("55-drugsfda keyless: UNSET key still FETCHES + NO api_key param + fixed host /drug/drugsfda.json + NESTED-field search (products.brand_name:\"LIPITOR\", escaped) ⇒ RED on a missing-key throw or wrong field",
+        r.data.applications.length === 2 && q.get("api_key") === null && new URL(openfdaDrugsfdaUrl(calls)).hostname === "api.fda.gov" && /\/drug\/drugsfda\.json/.test(openfdaDrugsfdaUrl(calls)) && q.get("search") === 'products.brand_name:"LIPITOR"',
+        JSON.stringify({ n: r.data.applications.length, search: q.get("search") }));
+      ok("55-drugsfda-P1 total 191 + 2 rows @ skip 0 ⇒ totalAvailable 191 (openFDA EXACT total, NOT results.length 2), hasMore true, nextOffset 2, complete false",
+        m.returned === 2 && m.totalAvailable === 191 && m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.complete === false, JSON.stringify({ ret: m.returned, ta: m.totalAvailable }));
+      const a0 = r.data.applications[0];
+      ok("55-drugsfda NESTED mapping: applicationNumber/sponsorName + products[0]{brandName, genericIngredients[{name,strength}], dosageForm, route, marketingStatus} + submissions[0]{submissionType, submissionStatus, submissionStatusDate, submissionClass}",
+        a0.applicationNumber === "NDA020702" && a0.sponsorName === "UPJOHN" && a0.products[0].brandName === "LIPITOR" && a0.products[0].genericIngredients[0].name === "ATORVASTATIN CALCIUM" && a0.products[0].genericIngredients[0].strength === "EQ 80MG BASE" && a0.products[0].marketingStatus === "Prescription" && a0.submissions[0].submissionType === "ORIG" && a0.submissions[0].submissionStatus === "AP" && a0.submissions[0].submissionStatusDate === "19961217",
+        JSON.stringify(a0));
+    });
+    // P3: "" / null scalars ⇒ null (null-never-empty-string), incl. nested.
+    await withFetch(openfdaDrugsfdaMock(drugsfdaBody(1, [drugsfdaRow({ sponsor_name: "", products: [{ brand_name: "", active_ingredients: [{ name: null, strength: "  " }], dosage_form: null }] })])), async () => {
+      const r = await runTool("openfda_drug_approvals", {}, sam);
+      const a = r.data.applications[0];
+      ok("55-drugsfda-P3 '' / whitespace / null ⇒ null (null-never-empty-string via str), incl. nested product + ingredient fields ⇒ surface '' ⇒ RED",
+        a.sponsorName === null && a.products[0].brandName === null && a.products[0].dosageForm === null && a.products[0].genericIngredients[0].name === null && a.products[0].genericIngredients[0].strength === null, JSON.stringify(a));
+    });
+    // ★P2 crux: 404 NOT_FOUND ⇒ honest empty (never thrown).
+    await withFetch(openfdaDrugsfdaMock({ error: { code: "NOT_FOUND", message: "No matches found!" } }, 404), async () => {
+      const r = await runTool("openfda_drug_approvals", { sponsorName: "zzznosuchsponsor" }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-drugsfda-P2 ★CRUX 404 {error:{code:'NOT_FOUND'}} ⇒ applications:[], returned:0, total:0, complete:true — HONEST EMPTY, not thrown ⇒ RED if it throws",
+        r.data.applications.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.notes.some((n) => /no.match|NOT_FOUND/i.test(n)), JSON.stringify({ n: r.data.applications.length, ta: m.totalAvailable }));
+    });
+    // 5xx ⇒ upstream_unavailable THROW (never a fake empty).
+    await withFetch(openfdaDrugsfdaMock("", 503), async () => {
+      const { threw, error } = await expectThrow(() => runTool("openfda_drug_approvals", { sponsorName: "pfizer" }, sam));
+      ok("55-drugsfda 503 ⇒ upstream_unavailable THROW (a DOWN endpoint is NEVER a returned:0)",
+        threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    });
+  });
+}
+
 // §57-nhtsa: NHTSA vehicle safety — nhtsa_recalls + nhtsa_complaints (api.nhtsa.gov,
 // ADR-0057 — the KEYLESS vehicle/parts supplier product-safety vetting lane).
 // NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value + names the mutation
@@ -20489,6 +20547,7 @@ async function main() {
   await testFredHonesty();
   await testOpenfdaEnforcement();
   await testOpenfdaDeviceClearances();
+  await testOpenfdaDrugApprovals();
   await testNhtsaVehicleSafety();
   await testCpscRecalls();
   await testBeaRegionalData();
