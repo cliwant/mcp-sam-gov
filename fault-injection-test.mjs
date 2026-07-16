@@ -6562,6 +6562,68 @@ async function testDisasterSpending() {
   });
 }
 
+// §36c: search_gov_domains (CISA get.gov .gov registry, added 2026-07-16). Locks:
+// CSV parsing (incl. a QUOTED field with an embedded comma), the "Security contact
+// email" column EXCLUSION (contact-PII safety), client-side substring/exact filters
+// with an EXACT match total, fixed-host/pinned-path fetch, provenance disclosure, a
+// header-rename ⇒ schema_drift, and a 503 ⇒ THROW (never a fake-empty).
+async function testGovDomains() {
+  section("36c. search_gov_domains (CISA get.gov) — CSV parse + quoted-comma + email EXCLUDED + client-side filter exact-total + fixed host + header-rename schema_drift + 503 THROW");
+  const sam = new SamGovClient({});
+  const isGovCsv = (u) => /raw\.githubusercontent\.com\/cisagov\/dotgov-data\/main\/current-(full|federal)\.csv/.test(u);
+  const CSV = [
+    "Domain name,Domain type,Organization name,Suborganization name,City,State,Security contact email",
+    "va.gov,Federal - Executive,Department of Veterans Affairs,,Washington,DC,security@va.gov",
+    '"twentynine.gov",Tribal,"Twenty-Nine Palms Band, of Mission Indians",,Coachella,CA,sec@example.gov',
+    "bcvetsoh.gov,County,Butler County Veterans,,Hamilton,OH,",
+  ].join("\n");
+
+  // (a) parse + email exclusion + quoted-comma + fixed host + provenance.
+  _clearCache();
+  await withFetch((u) => (isGovCsv(u) ? mockResponse({ status: 200, json: CSV }) : failClosed()()), async (calls) => {
+    const r = await runTool("search_gov_domains", { organization: "veterans" }, sam);
+    const m = buildMeta(r.meta);
+    const url = new URL(calls.find((x) => isGovCsv(x.url)).url);
+    ok("36c fetch on the PINNED host+path (raw.githubusercontent.com/cisagov/dotgov-data/main/current-full.csv for scope 'all' default)",
+      url.hostname === "raw.githubusercontent.com" && url.pathname === "/cisagov/dotgov-data/main/current-full.csv", JSON.stringify({ h: url.hostname, p: url.pathname }));
+    ok("36c org='veterans' substring filter ⇒ EXACT total 2 (Department of Veterans Affairs + Butler County Veterans); a filter that scanned unfiltered ⇒ RED",
+      m.totalAvailable === 2 && r.data.domains.length === 2 && r.data.domains.every((d) => /veterans/i.test(d.organization)), JSON.stringify(r.data.domains.map((d) => d.organization)));
+    ok("36c the 'Security contact email' column is EXCLUDED from every row (contact-PII safety) — no email key/value present; adding it back ⇒ RED",
+      r.data.domains.every((d) => !("securityContactEmail" in d) && !("Security contact email" in d) && !JSON.stringify(d).includes("@")), JSON.stringify(Object.keys(r.data.domains[0])));
+    ok("36c provenance + client-side + email-exclusion disclosures present in _meta.notes",
+      m.notes.some((n) => /cisagov\/dotgov-data/.test(n)) && m.notes.some((n) => /CLIENT-SIDE/i.test(n)) && m.notes.some((n) => /excluded/i.test(n)), JSON.stringify(m.notes.length));
+  });
+  // (b) a QUOTED field with an embedded comma parses as ONE field (org name intact).
+  _clearCache();
+  await withFetch((u) => (isGovCsv(u) ? mockResponse({ status: 200, json: CSV }) : failClosed()()), async () => {
+    const r = await runTool("search_gov_domains", { domainType: "Tribal" }, sam);
+    ok("36c QUOTED org with an embedded comma parses as ONE field ('Twenty-Nine Palms Band, of Mission Indians' — comma preserved, NOT split) + domainType exact filter",
+      r.data.domains.length === 1 && r.data.domains[0].organization === "Twenty-Nine Palms Band, of Mission Indians" && r.data.domains[0].domain === "twentynine.gov" && r.data.domains[0].state === "CA", JSON.stringify(r.data.domains[0]));
+  });
+  // (c) state exact filter (CA) — case-insensitive exact, not substring.
+  _clearCache();
+  await withFetch((u) => (isGovCsv(u) ? mockResponse({ status: 200, json: CSV }) : failClosed()()), async () => {
+    const r = await runTool("search_gov_domains", { state: "ca" }, sam);
+    ok("36c state='ca' (case-insensitive EXACT) ⇒ only the CA row (twentynine.gov), NOT the DC/OH rows",
+      r.data.domains.length === 1 && r.data.domains[0].domain === "twentynine.gov", JSON.stringify(r.data.domains.map((d) => [d.domain, d.state])));
+  });
+  // (d) header-column rename ⇒ schema_drift (never a silently mis-mapped/empty result).
+  _clearCache();
+  const BAD_HEADER = CSV.replace("Organization name", "Org");
+  await withFetch((u) => (isGovCsv(u) ? mockResponse({ status: 200, json: BAD_HEADER }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("search_gov_domains", {}, sam));
+    ok("36c a required header rename ('Organization name'→'Org') ⇒ schema_drift THROW (never a silently mis-mapped/empty result)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (e) 503 ⇒ upstream_unavailable THROW (never a fabricated empty registry).
+  _clearCache();
+  await withFetch((u) => (isGovCsv(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("search_gov_domains", {}, sam));
+    ok("36c 503 ⇒ upstream_unavailable THROW (never a fabricated empty domains[])",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+}
+
 // §36: usas_search_subawards — field mapping (A3 fix) + count-honesty. This tool
 // was live-smoke only (no offline guard). Locks in TWO real invariants: (1) the A3
 // fix — subaward NAICS is read from the "NAICS" field, NOT the invalid "Sub-Award
@@ -20353,6 +20415,7 @@ async function main() {
   await testAgencyDetailTools();
   await testUnknownKeyRejection();
   await testDisasterSpending();
+  await testGovDomains();
   await testSearchSubawardsMapping();
   await testTeamingMostRecentAwardDate();
   await testNaicsHierarchy();
