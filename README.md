@@ -4,7 +4,7 @@
 
 ### **$4 trillion of public federal data, one `npm install` away.**
 
-The most comprehensive **keyless-first** MCP server for US federal contracting + spending + regulation + partner vetting. **134 tools across 44 federal data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 40 sources need none. Works today, in any AI agent.
+The most comprehensive **keyless-first** MCP server for US federal contracting + spending + regulation + partner vetting. **142 tools across 48 federal data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 44 need none. Works today, in any AI agent.
 
 [![npm](https://img.shields.io/npm/v/@cliwant/mcp-sam-gov?color=cb3837&label=%40cliwant%2Fmcp-sam-gov&logo=npm)](https://www.npmjs.com/package/@cliwant/mcp-sam-gov)
 [![mcp-registry](https://img.shields.io/badge/MCP%20Registry-active-2ea44f?logo=anthropic)](https://registry.modelcontextprotocol.io/v0/servers?search=cliwant)
@@ -50,7 +50,7 @@ The most comprehensive **keyless-first** MCP server for US federal contracting +
 |---|---|
 | GovWin: $30K-$100K/yr per seat | Free, MIT license |
 | API key registration → wait 24h → quota tier shopping | `npm install` → working in 60s |
-| 5+ separate vendor APIs / scrapers | 1 unified surface, 134 tools across 44 sources |
+| 5+ separate vendor APIs / scrapers | 1 unified surface, 142 tools across 48 sources |
 | LLMs hallucinate NAICS codes / agency names | Anti-hallucination autocomplete guards built-in |
 | Brittle scraping breaks weekly | Daily live smoke test ([badge above](#)) |
 | Procurement officer → IT ticket → 3-week wait | Claude Desktop double-click install |
@@ -79,7 +79,7 @@ The federal data this wraps is **public domain**. There is no good reason it sho
 | 🌐 **Trade, geo & disaster** | "HTS tariff for this product; Census tract for this address; FEMA declarations in this state" | USITC HTS, US Census, FEMA, Socrata, CKAN |
 | 🎓 **Grants & datasets** | "Cybersecurity grants posted in the last 30 days; discover federal open datasets" | Grants.gov, data.gov |
 
-**134 tools across 44 federal data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 40 sources need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
+**142 tools across 48 federal data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 44 need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
 
 ---
 
@@ -106,7 +106,7 @@ If you already use Claude Code (the CLI):
 /plugin install cliwant/mcp-sam-gov
 ```
 
-This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 134 tools.
+This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 142 tools.
 
 ### 🔵 Path 3 — Manual install for any MCP host (Codex, Cursor, Continue, Gemini)
 
@@ -174,7 +174,7 @@ Then point your host config at the absolute path:
 
 (Or skip this entirely — use Path 1's `.mcpb` and it auto-configures.)
 
-Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (134 tools)".
+Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (142 tools)".
 
 ### Claude Code
 
@@ -380,7 +380,7 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 
 ---
 
-## Tool catalog (134 tools)
+## Tool catalog (142 tools)
 
 Grouped by workflow. Keyless-first — most tools need no key; Census business-patterns, FRED, BEA, and DOL's data endpoint require a free key, and a handful of others gain higher limits from an optional free key (noted above). Descriptions are condensed — each tool's own `inputSchema` carries the full contract and honesty caveats.
 
@@ -400,7 +400,7 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 </details>
 
 <details>
-<summary><b>Spending, awards & competition — USAspending + FPDS + GAO (29 tools)</b></summary>
+<summary><b>Spending, awards & competition — USAspending + FPDS + GAO (31 tools)</b></summary>
 
 - `usas_search_awards` — aggregate share-of-wallet at agency × NAICS
 - `usas_search_individual_awards` — line-item federal contracts (returns generatedInternalId)
@@ -429,6 +429,8 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 - `usas_autocomplete_recipient` — anti-hallucination recipient guard
 - `usas_naics_hierarchy` — navigate the NAICS tree (2→4→6) + active-contract count per code
 - `usas_glossary` — 151 federal-spending terms
+- `usas_list_disaster_codes` — list Disaster Emergency Fund Codes (DEFC): COVID-19, IIJA/infrastructure, and other emergency-appropriation tags
+- `usas_disaster_spending` — disaster/emergency-fund spending BY GEOGRAPHY for given DEFCs (which state/county/district captured COVID/IIJA relief money)
 - `fpds_search_awards` — FPDS-NG federal contract award actions (the authoritative award-action feed)
 - `gao_protest_lookup` — recent GAO bid-protest decisions from the public Legal-Products RSS feed (recent window only)
 </details>
@@ -454,10 +456,11 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 </details>
 
 <details>
-<summary><b>Product safety & recalls — openFDA · NHTSA · CPSC (5 tools)</b></summary>
+<summary><b>Product safety & recalls — openFDA · NHTSA · CPSC (6 tools)</b></summary>
 
 - `openfda_enforcement` — FDA drug / device / food recalls & enforcement actions (product-safety supplier vetting)
 - `openfda_device_clearances` — FDA 510(k) medical-device clearances (device-maker capability check)
+- `openfda_drug_approvals` — openFDA Drugs@FDA drug-approval applications (sponsor, approved products, submission/approval history)
 - `nhtsa_recalls` — NHTSA vehicle recalls by make / model / year
 - `nhtsa_complaints` — NHTSA vehicle safety complaints by make / model / year
 - `cpsc_recalls` — CPSC consumer-product recalls (product supplier vetting)
@@ -524,7 +527,7 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 - `treasury_debt_to_penny` — daily total US public debt outstanding (Treasury Fiscal Data)
 - `treasury_avg_interest_rates` — average interest rate the Treasury pays by security type
 - `treasury_monthly_statement` — Monthly Treasury Statement: receipts, outlays, deficit/surplus by month
-- `treasury_query_dataset` — escape-hatch query over 5 confirmed Treasury Fiscal Data datasets
+- `treasury_query_dataset` — escape-hatch query over 7 confirmed Treasury Fiscal Data datasets
 - `bea_regional_data` — GDP / personal income by industry × geography (BEA Regional; requires free BEA_API_KEY)
 - `census_business_patterns` — establishments / employment / annual payroll by NAICS × geography (Census CBP; requires free CENSUS_API_KEY)
 - `fred_search_series` — search the FRED macroeconomic series catalog (GDP/CPI/rates/unemployment; requires free FRED_API_KEY)
@@ -557,25 +560,29 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 </details>
 
 <details>
-<summary><b>Cyber compliance — NVD + CISA KEV (2 tools)</b></summary>
+<summary><b>Cyber compliance — NVD + CISA KEV + NIST 800-53 (3 tools)</b></summary>
 
 - `cve_lookup` — look up NIST NVD CVE records
 - `cisa_kev_lookup` — filter the CISA Known Exploited Vulnerabilities catalog (binding BOD 22-01 remediation due-dates)
+- `nist_800_53_controls` — NIST SP 800-53 Rev 5 security & privacy controls lookup (FedRAMP/CMMC/RMF requirement text by controlId/family/keyword)
 </details>
 
 <details>
-<summary><b>Trade & tariffs — USITC (1 tool)</b></summary>
+<summary><b>Trade, tariffs & logistics — USITC · CBP (2 tools)</b></summary>
 
 - `hts_lookup` — US import-tariff classification + duty rates from the USITC Harmonized Tariff Schedule
+- `cbp_border_wait_times` — live CBP land-border commercial-vehicle wait times (Canadian + Mexican ports; freight/logistics)
 </details>
 
 <details>
-<summary><b>Geo, disaster & state/local open data — Census · FEMA · Socrata · CKAN (8 tools)</b></summary>
+<summary><b>Geo, disaster & state/local open data — Census · FEMA · NWS · Socrata · CKAN (10 tools)</b></summary>
 
 - `census_geocode_address` — resolve a one-line US address → matched address + Census geographies (tract, CD, place)
 - `census_geographies_by_coordinates` — resolve a longitude/latitude point → Census geographies
 - `fema_disaster_declarations` — FEMA disaster / emergency declarations by state, type, incident, year
 - `fema_search_public_assistance` — FEMA Public Assistance funded projects
+- `fema_search_hazard_mitigation` — FEMA Hazard Mitigation Assistance projects (HMGP/FMA/PDM/BRIC mitigation grants to state/local/tribal subrecipients; disaster-resilience, distinct from Public Assistance recovery)
+- `nws_active_alerts` — currently-active NWS weather alerts (watches/warnings/advisories; disaster/climate readiness, pairs with the FEMA tools)
 - `socrata_discover_datasets` — find Socrata dataset 4x4 ids by keyword
 - `socrata_query` — query rows from an allowlisted Socrata/SODA open-data portal
 - `ckan_discover_datasets` — find CKAN datastore resource ids by keyword
@@ -583,9 +590,10 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 </details>
 
 <details>
-<summary><b>Dataset discovery — data.gov (1 tool)</b></summary>
+<summary><b>Dataset & registry discovery — data.gov · get.gov (2 tools)</b></summary>
 
 - `datagov_search_datasets` — search the data.gov v4 catalog for federal open datasets across all publishing agencies
+- `search_gov_domains` — CISA get.gov authoritative .gov domain registry (resolve which org owns a .gov domain; enumerate federal agencies + map SLED entities)
 </details>
 
 <details>

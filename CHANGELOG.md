@@ -5,6 +5,82 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-07-16 (Systematic domain sweep: disaster-resilience + emergency-fund + cyber-compliance + freight + gov-registry — 134 → 142 tools; plus dogfooding honesty hardening — all keyless)
+
+Additive minor release. Every 1.4.0 tool is unchanged and byte-identical; this adds **8 keyless tools across 4 new sources**, sweeping five B2G domains in one pass — disaster-resilience, emergency-fund spending, cyber-compliance, freight/logistics, and the authoritative .gov registry. Every new source is keyless. Two ride non-`.gov` hosts but are **first-party federal publications with provenance disclosed in `_meta`** — NIST's OSCAL SP 800-53 content (`github.com/usnistgov/oscal-content`) and CISA's get.gov registry (`github.com/cisagov/dotgov-data`), both distributed by their own agencies via GitHub.
+
+### Added — disaster-resilience & emergency-fund
+
+- **FEMA Hazard Mitigation Assistance** (`fema_search_hazard_mitigation`): HMGP / FMA /
+  PDM / BRIC mitigation grants to state/local/tribal subrecipients — the resilience
+  (pre-disaster) counterpart to Public Assistance recovery, distinct from
+  `fema_search_public_assistance`.
+- **USAspending Disaster Emergency Fund Codes** (`usas_list_disaster_codes`,
+  `usas_disaster_spending`): enumerate the DEFC tags (COVID-19, IIJA/infrastructure,
+  and other emergency-appropriation tags), then break emergency-fund spending down
+  **by geography** — which state / county / district captured the COVID / IIJA relief.
+- **NWS active weather alerts** (`nws_active_alerts`): currently-active watches /
+  warnings / advisories from `api.weather.gov` — disaster/climate readiness that pairs
+  with the FEMA tools.
+
+### Added — cyber-compliance
+
+- **NIST SP 800-53 Rev 5** (`nist_800_53_controls`): security & privacy control lookup —
+  FedRAMP / CMMC / RMF requirement text by controlId / family / keyword. *Source =
+  NIST's first-party OSCAL content (`github.com/usnistgov/oscal-content`); provenance
+  disclosed in `_meta`.*
+
+### Added — pharma
+
+- **openFDA Drugs@FDA** (`openfda_drug_approvals`): drug-approval applications —
+  sponsor, approved products, submission/approval history — extending the openFDA
+  recall/clearance pair into approvals.
+
+### Added — freight/logistics
+
+- **CBP border wait times** (`cbp_border_wait_times`): live land-border
+  commercial-vehicle wait times at Canadian + Mexican ports (`bwt.cbp.gov`) — a
+  freight/logistics signal alongside the USITC tariff tool.
+
+### Added — gov-registry
+
+- **CISA get.gov .gov registry** (`search_gov_domains`): the authoritative .gov domain
+  registry — resolve which org owns a .gov domain, enumerate federal agencies, and map
+  SLED entities. *Source = CISA's first-party dataset (`github.com/cisagov/dotgov-data`);
+  provenance disclosed in `_meta`.*
+
+### Changed
+
+- `treasury_query_dataset` gained 2 datasets — `interest_expense` and `tror` — same
+  tool, no tool-count change (the escape-hatch query surface widens to more confirmed
+  Treasury Fiscal Data datasets).
+- Documentation refreshed to **142 tools across 48 federal data sources**;
+  `api_key_status` / `API_KEYS.md` are unchanged — every new source is keyless, so the
+  key inventory stays at 4 required + 8 optional.
+
+### Fixed
+
+Dogfooding-driven honesty & drift hardening (~10 fixes), each preserving the
+"honest failure over confident fabrication" contract — a genuine empty and an outage
+stay distinguishable:
+
+- **Subaward upstream field-rename drift**: an upstream field rename in the subaward
+  feed is re-mapped, restoring populated subaward rows.
+- **Unknown-input-key loud-fail**: an unrecognized input key now fails loudly
+  (`invalid_input`) instead of being silently dropped.
+- **List-tool `_meta` envelopes**: list-style tools now carry the standard `_meta`
+  envelope for provenance/staleness parity with the rest of the surface.
+- **`rate_limited` not `timeout`**: a throttled upstream is now typed `rate_limited`
+  rather than misreported as a timeout.
+- **openFDA default-category disclosure**: the default openFDA category is now disclosed
+  in the response rather than applied silently.
+- **usas agency code/name guards**: an unresolved agency code or name now fails honestly
+  instead of returning a confidently-wrong empty result.
+- **EDGAR fuzzy-match disclosure**: a fuzzy company-name match is now disclosed rather
+  than presented as an exact hit.
+- **data.gov v4 param-rename drift**: a renamed data.gov v4 query parameter is realigned
+  so the catalog search keeps working.
+
 ## [1.4.0] — 2026-07-15 (Waves 6–7: cross-agency safety/vetting + healthcare depth — 120 → 134 tools, all keyless)
 
 Additive minor release. Every 1.3.0 tool is unchanged and byte-identical; this adds **14 keyless tools** across new B2G vetting/market lanes. All the new sources are keyless (a couple of non-.gov republishers of federal public data are provenance-disclosed).
