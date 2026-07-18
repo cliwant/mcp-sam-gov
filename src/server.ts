@@ -89,6 +89,7 @@ import { fetchAttachmentText } from "./attachments.js";
 import * as keys from "./keys.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import * as feedback from "./feedback.js";
+import { checkForUpdate } from "./update-check.js";
 import {
   buildMeta,
   isMetaBundle,
@@ -101,7 +102,7 @@ import { realpathSync } from "node:fs";
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
 // Keep in sync with package.json "version" (asserted at release; see CHANGELOG).
-const SERVER_VERSION = "1.6.0";
+const SERVER_VERSION = "1.7.0";
 
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 
@@ -6470,6 +6471,9 @@ async function main() {
   console.error(
     `[mcp-sam-gov] v${SERVER_VERSION} listening on stdio (${TOOLS.length} tools).`,
   );
+  // Fire-and-forget, opt-out, fail-silent update notice (STDERR only, never stdout).
+  // Deliberately NOT awaited: it must never delay or affect the server (update-check.ts).
+  void checkForUpdate(SERVER_VERSION);
 }
 
 /**

@@ -32,7 +32,7 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: read
+  contents: write # create the matching GitHub Release on the tag
   id-token: write # npm provenance only
 
 jobs:
@@ -75,3 +75,29 @@ jobs:
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Keep the GitHub Release in lockstep with the npm version. Notes come from
+      # this version's CHANGELOG section; idempotent (edit if the release exists).
+      - name: Create the matching GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          # Literal (not regex) header match — robust to the [x.y.z] brackets.
+          notes="$(awk -v hdr="## [$VER]" '
+            index($0, hdr) == 1 {f=1; next}
+            f && index($0, "## [") == 1 {exit}
+            f {print}
+          ' CHANGELOG.md)"
+          if [ -z "$notes" ]; then
+            notes="Release $GITHUB_REF_NAME. See CHANGELOG.md."
+          fi
+          notes="$notes
+
+          ---
+          📦 npm: \`npm i @cliwant/mcp-sam-gov@$VER\` · published with npm provenance (SLSA v1)."
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "$notes"
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "$notes"
+          fi

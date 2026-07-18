@@ -45,6 +45,7 @@ import zlib from "node:zlib";
 // runTool over a mocked fetch so a regression in the real wrapper turns RED.
 import { runTool, TOOLS } from "./dist/server.js";
 import { maybeAttachReport, reportUrlForError } from "./dist/feedback.js";
+import { checkForUpdate, isNewerVersion } from "./dist/update-check.js";
 import { apiKeyStatus, loadDotEnv, KEY_REGISTRY } from "./dist/keys.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20690,6 +20691,65 @@ async function testFeedbackLoop() {
   }
 }
 
+// ── startup update notice (update-check.ts): opt-out, fail-silent, stderr-only ──
+// Reaches ALREADY-installed users without telemetry. OFFLINE, deterministic,
+// non-vacuous: every branch pins a specific outcome; a broken guarantee WOULD fail.
+async function testUpdateCheck() {
+  section("update notice: opt-out, fail-silent, quiet-when-current version check");
+
+  // (a) pure MAJOR.MINOR.PATCH compare — never nags backward, never spurious.
+  ok("isNewerVersion 1.7.0 > 1.6.0 ⇒ true", isNewerVersion("1.7.0", "1.6.0") === true);
+  ok("isNewerVersion equal ⇒ false", isNewerVersion("1.6.0", "1.6.0") === false);
+  ok("isNewerVersion older ⇒ false (never nags backward)", isNewerVersion("1.5.9", "1.6.0") === false);
+  ok("isNewerVersion major bump ⇒ true", isNewerVersion("2.0.0", "1.9.9") === true);
+  ok("isNewerVersion prerelease of same ⇒ false (rc is not 'newer')", isNewerVersion("1.6.0-rc1", "1.6.0") === false);
+  ok("isNewerVersion malformed ⇒ false (never spurious notice)", isNewerVersion("garbage", "1.6.0") === false);
+
+  // (b) a genuinely newer registry version ⇒ notice logged (to the injected sink =
+  // stderr in prod) + returned. This is how an installed user learns of an update.
+  await withFetch(() => mockResponse({ status: 200, json: { version: "9.9.9" } }), async () => {
+    let logged = null;
+    const r = await checkForUpdate("1.7.0", (m) => { logged = m; });
+    ok("newer available ⇒ notice emitted (reaches installed users)", typeof r === "string" && /1\.7\.0/.test(r) && /9\.9\.9/.test(r) && logged === r);
+  });
+
+  // (c) already current ⇒ SILENT (no nag when up to date).
+  await withFetch(() => mockResponse({ status: 200, json: { version: "1.7.0" } }), async () => {
+    let logged = null;
+    const r = await checkForUpdate("1.7.0", (m) => { logged = m; });
+    ok("up-to-date ⇒ NO notice (quiet when current)", r === null && logged === null);
+  });
+
+  // (d) registry 5xx ⇒ fail-silent (a bad registry never becomes a user-facing error).
+  await withFetch(() => mockResponse({ status: 503 }), async () => {
+    let logged = null;
+    const r = await checkForUpdate("1.7.0", (m) => { logged = m; });
+    ok("registry 5xx ⇒ fail-silent (no notice)", r === null && logged === null);
+  });
+
+  // (e) network throw ⇒ fail-silent AND never throws (an update check must never
+  // affect the server). Non-vacuous: a re-thrown error WOULD trip the outer catch.
+  await withFetch(() => { throw new Error("network down"); }, async () => {
+    let logged = null, threw = false;
+    try {
+      const r = await checkForUpdate("1.7.0", (m) => { logged = m; });
+      ok("network fault ⇒ fail-silent null (no notice)", r === null && logged === null);
+    } catch { threw = true; }
+    ok("network fault ⇒ checkForUpdate NEVER throws", threw === false);
+  });
+
+  // (f) opt-out env ⇒ no fetch at all, no notice.
+  {
+    process.env.MCP_SAM_GOV_NO_UPDATE_CHECK = "1";
+    let logged = null, fetched = false;
+    await withFetch(() => { fetched = true; return mockResponse({ status: 200, json: { version: "9.9.9" } }); }, async () => {
+      const r = await checkForUpdate("1.7.0", (m) => { logged = m; });
+      ok("MCP_SAM_GOV_NO_UPDATE_CHECK=1 ⇒ no fetch, no notice (opt-out honored)", r === null && logged === null && fetched === false);
+    });
+    delete process.env.MCP_SAM_GOV_NO_UPDATE_CHECK;
+  }
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -20817,6 +20877,7 @@ async function main() {
   await testToolDescriptionDrift();
   await testApiKeysDoc();
   await testFeedbackLoop();
+  await testUpdateCheck();
 
   // Prove the harness bites.
   await selfCheck();
