@@ -1,0 +1,61 @@
+# Developer Certificate of Origin (DCO) check.
+#
+# This project takes contributions under the DCO (see the `DCO` file at the
+# repo root) instead of a CLA. Contributors certify they wrote / have the
+# right to submit their code by SIGNING OFF each commit:  git commit -s
+# That appends a line:  Signed-off-by: Name <email>
+#
+# This workflow verifies every non-merge commit in a pull request carries a
+# well-formed sign-off line. It is intentionally self-contained (no third-party
+# actions beyond the official checkout) to keep the CI supply chain minimal.
+# The check is lenient: it requires a valid Signed-off-by line, not an exact
+# match to the commit author (which would false-fail on noreply/alias emails).
+name: DCO
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Developer Certificate of Origin sign-off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          commits="$(git rev-list --no-merges "$BASE..$HEAD")"
+          if [ -z "$commits" ]; then
+            echo "No non-merge commits to check."
+            exit 0
+          fi
+          missing=0
+          for c in $commits; do
+            subject="$(git show -s --format='%s' "$c")"
+            if git show -s --format='%B' "$c" \
+                 | grep -qiE '^[[:space:]]*Signed-off-by:[[:space:]]+.+[[:space:]]+<[^>]+@[^>]+>[[:space:]]*$'; then
+              echo "ok    $c  $subject"
+            else
+              echo "MISS  $c  $subject"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo ""
+            echo "::error::One or more commits are missing a Developer Certificate of Origin sign-off."
+            echo "Every commit must end with:  Signed-off-by: Your Name <your@email>"
+            echo "Add it automatically with:   git commit -s"
+            echo "Fix an existing branch with: git rebase --signoff origin/main   (then force-push)"
+            echo "See the DCO file at the repo root for what you are certifying."
+            exit 1
+          fi
+          echo "All commits carry a DCO sign-off."

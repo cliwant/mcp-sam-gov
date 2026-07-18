@@ -95,7 +95,37 @@ If your tool needs a different policy, add a comment explaining why.
 - Add a CHANGELOG entry under `[Unreleased]`.
 - Keep PRs focused. One concern per PR.
 
+## Developer Certificate of Origin (DCO)
+
+This project takes contributions under the [Developer Certificate of
+Origin](DCO) (DCO 1.1) — **not** a CLA. The DCO is a lightweight, standard
+way to certify that you wrote (or otherwise have the right to submit) the
+code you contribute. There is no copyright assignment and no separate
+agreement to sign.
+
+Certify it by **signing off** each commit:
+
+```bash
+git commit -s -m "your message"
+```
+
+That appends one line to the commit message:
+
+```
+Signed-off-by: Your Name <your@email>
+```
+
+Use the same name and email as your git identity. If you forgot to sign
+off, fix your branch and force-push:
+
+```bash
+git rebase --signoff origin/main
+```
+
+A CI check (`DCO`) verifies every commit in a PR is signed off.
+
 ## License
 
-By contributing, you agree your code is licensed under the same MIT
-license as the project.
+By contributing, you agree your contribution is provided under the
+project's MIT license (inbound = outbound). You retain the copyright to
+your own work.
