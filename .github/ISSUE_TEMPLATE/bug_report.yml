@@ -1,0 +1,38 @@
+name: 🐛 Bug report
+description: A tool errored, crashed, or behaved incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping keep this working as the federal APIs evolve — a broken tool is the highest-value thing to report.
+
+        ⚠️ **This is a public repo.** Do NOT paste API keys, credentials, personal data, or sensitive query values. Redact anything private.
+  - type: input
+    id: tool
+    attributes:
+      label: Which tool?
+      placeholder: e.g. sam_search_opportunities
+  - type: input
+    id: version
+    attributes:
+      label: Server version
+      placeholder: e.g. 1.6.0 (shown in the startup log and package.json)
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you asked the tool to do, and what it did instead. Redact anything sensitive.
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error envelope (if any)
+      description: "The `{ ok: false, error: { kind, message } }` your agent received. Redact sensitive values."
+      render: json
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      placeholder: e.g. Claude Desktop / Claude Code / Cursor / other

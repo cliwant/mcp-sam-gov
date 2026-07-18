@@ -44,6 +44,7 @@ import zlib from "node:zlib";
 // smoke's spawn), never on an import like this one. §9/§12/§13 call this real
 // runTool over a mocked fetch so a regression in the real wrapper turns RED.
 import { runTool, TOOLS } from "./dist/server.js";
+import { maybeAttachReport, reportUrlForError } from "./dist/feedback.js";
 import { apiKeyStatus, loadDotEnv, KEY_REGISTRY } from "./dist/keys.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20636,6 +20637,59 @@ async function testW31UsasHonesty() {
   });
 }
 
+// ── feedback loop: PULL-only prefilled GitHub issue links (feedback.ts) ──────
+// The server NEVER posts; it hands the agent a prefilled URL the HUMAN submits.
+// OFFLINE, deterministic, non-vacuous: every assertion pins a specific value.
+async function testFeedbackLoop() {
+  section("feedback loop: prefilled GitHub issue links (PULL-only, no PII, no posting)");
+  const NEW_ISSUE = "https://github.com/cliwant/mcp-sam-gov/issues/new?";
+  // `feedback` is a pure, keyless tool — it never touches the SamGovClient, so a
+  // dummy ctx suffices (matches how it dispatches: handler(input, { sam })).
+  const sam = {};
+
+  // (a) the `feedback` tool returns a prefilled URL and explicitly does NOT post.
+  {
+    const r = await runTool(
+      "feedback",
+      { kind: "wrong_output", tool: "sam_search_opportunities", summary: "0 results for an active NAICS" },
+      sam,
+    );
+    ok("feedback ⇒ willPost:false (the server never posts — human submits)", r.willPost === false, JSON.stringify(r.willPost));
+    ok("feedback ⇒ reportUrl is a cliwant/mcp-sam-gov new-issue URL", typeof r.reportUrl === "string" && r.reportUrl.startsWith(NEW_ISSUE), r.reportUrl);
+    const q = new URL(r.reportUrl).searchParams;
+    ok("feedback wrong_output ⇒ labels bug,wrong-output", q.get("labels") === "bug,wrong-output", q.get("labels"));
+    ok("feedback ⇒ caller summary is carried into the prefilled title (its own words)", (q.get("title") || "").includes("0 results for an active NAICS"), q.get("title"));
+    ok("feedback ⇒ privacy note present (public issue; redact)", typeof r.privacy === "string" && /public/i.test(r.privacy), r.privacy);
+  }
+  {
+    const r = await runTool("feedback", { kind: "feature" }, sam);
+    const q = new URL(r.reportUrl).searchParams;
+    ok("feedback feature ⇒ label enhancement (default kind=bug not applied)", q.get("labels") === "enhancement", q.get("labels"));
+  }
+
+  // (b) POLICY: ONLY schema_drift / upstream_unavailable get a `report` link; the
+  // user/expected kinds stay byte-identical (no report). Non-vacuous both ways.
+  for (const kind of ["schema_drift", "upstream_unavailable"]) {
+    const e = { kind, message: "x", retryable: false };
+    maybeAttachReport(e, "some_tool", "9.9.9");
+    ok(`error ${kind} ⇒ report attached (a cliwant new-issue URL)`, typeof e.report === "string" && e.report.startsWith(NEW_ISSUE), JSON.stringify(e.report));
+    ok(`error ${kind} ⇒ report carries tool + kind in the title (no args/PII possible)`, decodeURIComponent(new URL(e.report).searchParams.get("title")) === `[some_tool] ${kind}`, e.report);
+  }
+  for (const kind of ["invalid_input", "not_found", "rate_limited", "unknown"]) {
+    const e = { kind, message: "x", retryable: false };
+    maybeAttachReport(e, "some_tool", "9.9.9");
+    ok(`error ${kind} ⇒ NO report (envelope byte-identical — never nags on expected errors)`, e.report === undefined, JSON.stringify(e.report));
+  }
+
+  // (c) reportUrlForError is structurally incapable of leaking args — it only
+  // accepts (tool, kind, version). Pin that its body carries the version, nothing else.
+  {
+    const u = reportUrlForError("bls_series", "schema_drift", "1.6.0");
+    const body = decodeURIComponent(new URL(u).searchParams.get("body") || "");
+    ok("reportUrlForError body carries the server version (debuggable) + no secret", body.includes("1.6.0") && body.includes("schema_drift") && !/api[_-]?key/i.test(body), body.slice(0, 60));
+  }
+}
+
 async function main() {
   console.log("=== fault-injection + golden-fixture harness (OFFLINE, deterministic) ===");
   console.log("    imports dist/*.js; monkeypatches globalThis.fetch; makes NO network calls.");
@@ -20762,6 +20816,7 @@ async function main() {
   await testLoadDotEnv();
   await testToolDescriptionDrift();
   await testApiKeysDoc();
+  await testFeedbackLoop();
 
   // Prove the harness bites.
   await selfCheck();

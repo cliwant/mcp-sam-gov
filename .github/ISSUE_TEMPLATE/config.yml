@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 📘 Docs & usage
+    url: https://github.com/cliwant/mcp-sam-gov#readme
+    about: Setup, the full tool catalog, and API-key guidance.
+  - name: 🔐 Security / sensitive report
+    url: https://github.com/cliwant/mcp-sam-gov/security/advisories/new
+    about: Report a security issue privately — do NOT open a public issue for it.

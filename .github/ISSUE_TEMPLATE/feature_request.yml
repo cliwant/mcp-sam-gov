@@ -1,0 +1,25 @@
+name: ✨ Feature / data-source request
+description: Request a new tool, a new federal data source, or a capability.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Public repo — no secrets or personal data, please.
+  - type: textarea
+    id: want
+    attributes:
+      label: What do you want to be able to do?
+      description: The capability or question you wish this server could answer.
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Federal data source / endpoint (if known)
+      placeholder: e.g. https://api.usaspending.gov/api/v2/... (must be public open data)
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Use case
+      description: Who benefits and why (the B2G / procurement workflow it unlocks).

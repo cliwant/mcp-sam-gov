@@ -42,6 +42,16 @@ export type ToolError = {
     /** Endpoint that failed — for ops. */
     upstreamEndpoint?: string;
     /**
+     * PULL-only feedback loop (feedback.ts). A PREFILLED GitHub new-issue URL, set
+     * by the dispatcher ONLY for the two "something may be broken" kinds —
+     * `schema_drift` and `upstream_unavailable`. The agent MAY relay it to the
+     * human, who opens and submits it; the server NEVER posts. Carries only the
+     * tool name, error kind, and server version — no arguments, no PII. Absent on
+     * user/expected errors (invalid_input, not_found, rate_limited) so the 429 and
+     * bad-input envelopes stay byte-identical.
+     */
+    report?: string;
+    /**
      * Set true when the upstream EXPLICITLY asked us to wait — i.e. a 429, or a
      * 5xx that CARRIED a `Retry-After` header (ADR-0045 M2). The resilience layer
      * (circuit breaker + path-chain) consults `isHonorRetryAfter(err)` and EXCLUDES
