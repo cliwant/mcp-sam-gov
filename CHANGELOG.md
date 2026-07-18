@@ -5,6 +5,18 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-07-18 (Stay-current: startup update notice + auto GitHub Releases — keyless, no telemetry)
+
+Additive minor release. Two "keep installed users current" changes; no tool changes (still **143**).
+
+### Added
+
+- **Startup update notice** (opt-out, no telemetry): on startup the server makes a single anonymous GET to the public npm registry for its own `latest` version and — **only if a newer one exists** — prints one line to **stderr** (never stdout). This reaches already-installed users; npm is pull-based and otherwise never tells them. It sends **no user data** (a version check, not telemetry), is non-blocking, fail-silent, and quiet when you're current. Opt out with `MCP_SAM_GOV_NO_UPDATE_CHECK=1` (or `NO_UPDATE_NOTIFIER=1`). 12 non-vacuous fault-injection assertions pin the behavior.
+
+### Changed
+
+- **Releases**: the tag-triggered release workflow now also creates the matching **GitHub Release** (notes drawn from this CHANGELOG), so the npm version and the GitHub Release stay in lockstep and repo watchers are notified of every version.
+
 ## [1.6.0] — 2026-07-18 (In-product feedback loop → GitHub issues — 142 → 143 tools, keyless)
 
 Additive minor release. Adds a **PULL-only** feedback loop so the server improves from real usage — without ever posting anything itself.

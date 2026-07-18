@@ -171,6 +171,14 @@ npm install --omit=dev
 
 ---
 
+## 最新バージョンの維持
+
+npm はインストール済みユーザーに新バージョンを通知しないため、サーバーが**最小限に**通知します。起動時に**公開 npm レジストリへ匿名リクエストを 1 回**送って自身の最新版を確認し、**より新しい版がある場合のみ** stderr に 1 行出力します(例: `a newer version is available: 1.7.0 → 1.8.0`)。**利用データは一切送信せず**(テレメトリではなくバージョン確認)、プロトコルの stdout には触れず、ノンブロッキングで、最新なら沈黙します。
+
+- **更新:** `npm i -g @cliwant/mcp-sam-gov@latest` — または `npx @cliwant/mcp-sam-gov@latest` 設定なら再起動のみ。
+- **無効化:** `MCP_SAM_GOV_NO_UPDATE_CHECK=1`(または `NO_UPDATE_NOTIFIER=1`)。
+- **変更内容:** [releases](https://github.com/cliwant/mcp-sam-gov/releases) + [CHANGELOG](./CHANGELOG.md)。
+
 ## バグ報告 / 機能リクエスト — ワンステップ
 
 このサーバーは**実利用から改善**されるよう設計されています。ツールを呼ぶのは人間ではなく AI エージェントなので、フィードバックも**エージェント経由**です:

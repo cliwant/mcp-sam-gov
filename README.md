@@ -380,6 +380,14 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 
 ---
 
+## Staying up to date
+
+npm doesn't notify installed users of new versions, so the server does — minimally. On startup it makes **one anonymous request to the public npm registry** for its own latest version and, **only if a newer one exists**, prints a single line to stderr (e.g. `a newer version is available: 1.7.0 → 1.8.0`). It sends **no usage data** (a version check, not telemetry), never touches the protocol's stdout, is non-blocking, and stays silent when you're current.
+
+- **Update:** `npm i -g @cliwant/mcp-sam-gov@latest` — or just restart if your config uses `npx @cliwant/mcp-sam-gov@latest`.
+- **Opt out:** set `MCP_SAM_GOV_NO_UPDATE_CHECK=1` (or `NO_UPDATE_NOTIFIER=1`).
+- **What changed:** the [releases page](https://github.com/cliwant/mcp-sam-gov/releases) + [CHANGELOG](./CHANGELOG.md).
+
 ## Found a bug? Want a feature? Report it in one step
 
 This server is built to **improve from real usage**. Because an AI agent (not a human) calls the tools, the feedback path runs **through the agent**:
