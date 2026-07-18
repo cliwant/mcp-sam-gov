@@ -5,6 +5,21 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-07-18 (In-product feedback loop → GitHub issues — 142 → 143 tools, keyless)
+
+Additive minor release. Adds a **PULL-only** feedback loop so the server improves from real usage — without ever posting anything itself.
+
+### Added
+
+- **`feedback` tool** (143rd tool, keyless): returns a PREFILLED GitHub new-issue link (`kind` = bug / feature / wrong_output) for the human to open and submit. The server never posts — no token, no account, no network call. Prefills carry only the caller's summary + tool name.
+- **`report` field on error envelopes**: `schema_drift` and `upstream_unavailable` errors now carry a prefilled GitHub issue URL (tool + kind + server version only — no arguments, no PII). Expected errors (`invalid_input`, `not_found`, `rate_limited`) stay byte-identical (no `report`).
+- **Server `instructions`**: tell the agent to offer the issue link when a result looks wrong, a tool stays broken, or the user wants a missing capability.
+- **GitHub issue templates** (bug / feature / wrong-output), plus contributor governance landed since 1.5.0: a self-contained **DCO** sign-off CI check + CONTRIBUTING guidance, and the `LICENSE` copyright holder clarified to `Cliwant and the mcp-sam-gov contributors` (still MIT).
+
+### Guarantees
+
+PULL-only (the server never submits a form for you), no PII in any prefill, no telemetry, and non-nagging (report links appear only on the two "something may be broken" error kinds). 15 new non-vacuous fault-injection assertions pin all of the above.
+
 ## [1.5.0] — 2026-07-16 (Systematic domain sweep: disaster-resilience + emergency-fund + cyber-compliance + freight + gov-registry — 134 → 142 tools; plus dogfooding honesty hardening — all keyless)
 
 Additive minor release. Every 1.4.0 tool is unchanged and byte-identical; this adds **8 keyless tools across 4 new sources**, sweeping five B2G domains in one pass — disaster-resilience, emergency-fund spending, cyber-compliance, freight/logistics, and the authoritative .gov registry. Every new source is keyless. Two ride non-`.gov` hosts but are **first-party federal publications with provenance disclosed in `_meta`** — NIST's OSCAL SP 800-53 content (`github.com/usnistgov/oscal-content`) and CISA's get.gov registry (`github.com/cisagov/dotgov-data`), both distributed by their own agencies via GitHub.

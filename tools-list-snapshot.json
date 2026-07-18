@@ -2128,6 +2128,32 @@
     }
   },
   {
+    "name": "feedback",
+    "description": "Report a problem, request a feature, or flag a wrong-looking result for THIS server — returns a PREFILLED GitHub issue link (public repo cliwant/mcp-sam-gov) for the USER to open and submit. KEYLESS. The server does NOT post anything: it only builds the link; the human submits it (nothing is sent automatically, no network call). Use when the user reports a bug, says a tool's output looks wrong, or wants a capability this server doesn't have. Input (all optional): `kind` (bug|feature|wrong_output, default bug), `tool` (the tool it's about), `summary` (a short, NON-SENSITIVE title line). Returns { reportUrl, repo, willPost:false, instructions, privacy }. PRIVACY: never put secrets, personal data, or sensitive query values in `summary` — the issue is PUBLIC and the link prefills only your summary + tool + server version.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "bug",
+            "feature",
+            "wrong_output"
+          ],
+          "description": "What kind of report: bug (default), feature (a capability this server lacks), or wrong_output (a tool returned a wrong/suspicious result)."
+        },
+        "tool": {
+          "type": "string",
+          "description": "The tool name this is about, if any (e.g. 'sam_search_opportunities')."
+        },
+        "summary": {
+          "type": "string",
+          "description": "A short one-line summary for the issue title/body. PUBLIC — never include API keys, personal data, or sensitive query values."
+        }
+      }
+    }
+  },
+  {
     "name": "fema_disaster_declarations",
     "description": "Look up FEMA disaster / emergency declarations by state, type, incident, year, or date (keyless OpenFEMA, dataset DisasterDeclarationsSummaries v2, ~70k rows). Structured filters (module-built into an OData $filter; each LIVE-VERIFIED to narrow): `state` (→ state), `incidentType` (e.g. 'Flood'), `declarationType` (DR/EM/FM), `fyDeclared`, `disasterNumber`, `declaredDateFrom`/`declaredDateTo` (declarationDate ge/le), `paProgramDeclared`/`iaProgramDeclared` (booleans). `limit` (≤1000, def 100 → $top), `offset` (→ $skip). HONESTY: the module ALWAYS sends $inlinecount=allpages so totalAvailable is the EXACT filtered total (metadata.count), never the page length; genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). NOTE: per-dataset OData field names differ — 'state' here is the real field, whereas the public-assistance tool maps 'state' to 'stateAbbreviation'.",
     "inputSchema": {

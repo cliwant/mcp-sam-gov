@@ -4,7 +4,7 @@
 
 ### **$4 trillion of public federal data, one `npm install` away.**
 
-The most comprehensive **keyless-first** MCP server for US federal contracting + spending + regulation + partner vetting. **142 tools across 48 federal data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 44 need none. Works today, in any AI agent.
+The most comprehensive **keyless-first** MCP server for US federal contracting + spending + regulation + partner vetting. **143 tools across 48 federal data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 44 need none. Works today, in any AI agent.
 
 [![npm](https://img.shields.io/npm/v/@cliwant/mcp-sam-gov?color=cb3837&label=%40cliwant%2Fmcp-sam-gov&logo=npm)](https://www.npmjs.com/package/@cliwant/mcp-sam-gov)
 [![mcp-registry](https://img.shields.io/badge/MCP%20Registry-active-2ea44f?logo=anthropic)](https://registry.modelcontextprotocol.io/v0/servers?search=cliwant)
@@ -50,7 +50,7 @@ The most comprehensive **keyless-first** MCP server for US federal contracting +
 |---|---|
 | GovWin: $30K-$100K/yr per seat | Free, MIT license |
 | API key registration → wait 24h → quota tier shopping | `npm install` → working in 60s |
-| 5+ separate vendor APIs / scrapers | 1 unified surface, 142 tools across 48 sources |
+| 5+ separate vendor APIs / scrapers | 1 unified surface, 143 tools across 48 sources |
 | LLMs hallucinate NAICS codes / agency names | Anti-hallucination autocomplete guards built-in |
 | Brittle scraping breaks weekly | Daily live smoke test ([badge above](#)) |
 | Procurement officer → IT ticket → 3-week wait | Claude Desktop double-click install |
@@ -79,7 +79,7 @@ The federal data this wraps is **public domain**. There is no good reason it sho
 | 🌐 **Trade, geo & disaster** | "HTS tariff for this product; Census tract for this address; FEMA declarations in this state" | USITC HTS, US Census, FEMA, Socrata, CKAN |
 | 🎓 **Grants & datasets** | "Cybersecurity grants posted in the last 30 days; discover federal open datasets" | Grants.gov, data.gov |
 
-**142 tools across 48 federal data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 44 need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
+**143 tools across 48 federal data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 44 need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
 
 ---
 
@@ -106,7 +106,7 @@ If you already use Claude Code (the CLI):
 /plugin install cliwant/mcp-sam-gov
 ```
 
-This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 142 tools.
+This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 143 tools.
 
 ### 🔵 Path 3 — Manual install for any MCP host (Codex, Cursor, Continue, Gemini)
 
@@ -174,7 +174,7 @@ Then point your host config at the absolute path:
 
 (Or skip this entirely — use Path 1's `.mcpb` and it auto-configures.)
 
-Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (142 tools)".
+Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (143 tools)".
 
 ### Claude Code
 
@@ -380,7 +380,18 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 
 ---
 
-## Tool catalog (142 tools)
+## Found a bug? Want a feature? Report it in one step
+
+This server is built to **improve from real usage**. Because an AI agent (not a human) calls the tools, the feedback path runs **through the agent**:
+
+- On the two "something may be broken" errors — `schema_drift` (a federal API changed shape) and `upstream_unavailable` (an outage) — the error envelope carries a **`report`** field: a prefilled GitHub issue link your agent can offer you.
+- Or just tell your agent "report a bug" / "this result looks wrong" / "I wish it could do X" — it calls the **`feedback` tool**, which returns a prefilled issue link for you to open and submit.
+
+**Nothing is ever posted automatically.** The server has no token and no account — it only *builds the link*; **you** open and submit it. Prefilled links carry only the tool name, error kind, and server version — never your query values. The repo is public, so redact anything sensitive first.
+
+You can also open one directly: [**New issue**](https://github.com/cliwant/mcp-sam-gov/issues/new/choose) — bug / feature / wrong-output templates.
+
+## Tool catalog (143 tools)
 
 Grouped by workflow. Keyless-first — most tools need no key; Census business-patterns, FRED, BEA, and DOL's data endpoint require a free key, and a handful of others gain higher limits from an optional free key (noted above). Descriptions are condensed — each tool's own `inputSchema` carries the full contract and honesty caveats.
 

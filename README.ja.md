@@ -1,7 +1,7 @@
 # @cliwant/mcp-sam-gov
 
 > **最も包括的なキーレス連邦データ MCP サーバー。**
-> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) ほか **48 の連邦データソース、142 ツール。** キーレス優先 — Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 44 ソースはキー不要。
+> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) ほか **48 の連邦データソース、143 ツール。** キーレス優先 — Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 44 ソースはキー不要。
 > API キー不要、登録不要、サインアップ不要。Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI、すべての MCP ホスト対応。
 
 [English README](./README.md) · [한국어 README](./README.ko.md)
@@ -30,7 +30,7 @@
 | 🌐 **貿易・地理・災害** | "この品目の HTS 関税、この住所の Census tract、この州の FEMA 宣言" | USITC HTS, Census, FEMA, Socrata, CKAN |
 | 🎓 **grant・データセット** | "過去 30 日のサイバーセキュリティ grant、連邦オープンデータセット発見" | Grants.gov, data.gov |
 
-**48 の連邦データソース、合計 142 ツール — キーレス優先: Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 44 ソースはキー不要。** (初期の 52 ツール版でおおよそ p50 ~0.25s / p95 ~0.8s を計測 — ソースや上流負荷で変動する近似値であり保証値ではありません。)
+**48 の連邦データソース、合計 143 ツール — キーレス優先: Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 44 ソースはキー不要。** (初期の 52 ツール版でおおよそ p50 ~0.25s / p95 ~0.8s を計測 — ソースや上流負荷で変動する近似値であり保証値ではありません。)
 
 ---
 
@@ -57,7 +57,7 @@ Claude Code (CLI) を既に使用している場合：
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP サーバー + Claude が 142 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
+MCP サーバー + Claude が 143 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
 
 ### 🔵 パス 3 — Codex / Cursor / Continue / Gemini 等の手動インストール
 
@@ -171,9 +171,18 @@ npm install --omit=dev
 
 ---
 
-## ツールカタログ (142)
+## バグ報告 / 機能リクエスト — ワンステップ
 
-ワークフロー別グループ。キーレス優先 — 大半はキー不要、Census business-patterns · FRED · BEA · DOL データエンドポイントは無料キーが必要。全 per-tool 一覧と入力 schema・誠実性 caveat の原文は [英語 README のカタログセクション](./README.md#tool-catalog-142-tools) を正とします。
+このサーバーは**実利用から改善**されるよう設計されています。ツールを呼ぶのは人間ではなく AI エージェントなので、フィードバックも**エージェント経由**です:
+
+- `schema_drift`(連邦 API の形状変更)・`upstream_unavailable`(障害)のエラーエンベロープには **`report`** フィールド(事前入力済みの GitHub Issue リンク)が付きます。
+- または「バグ報告」「結果がおかしい」「この機能が欲しい」とエージェントに伝えると、**`feedback` ツール**が事前入力済みリンクを返します。
+
+**自動投稿は一切ありません。** サーバーにトークンもアカウントもなく、リンクを作るだけで、開いて送信するのは**あなた**です。事前入力リンクにはツール名・エラー種別・サーバーバージョンのみが含まれ、クエリ値は含まれません。公開リポジトリなので、機微な内容は削除してから送信してください。直接開く: [**New issue**](https://github.com/cliwant/mcp-sam-gov/issues/new/choose)。
+
+## ツールカタログ (143)
+
+ワークフロー別グループ。キーレス優先 — 大半はキー不要、Census business-patterns · FRED · BEA · DOL データエンドポイントは無料キーが必要。全 per-tool 一覧と入力 schema・誠実性 caveat の原文は [英語 README のカタログセクション](./README.md#tool-catalog-143-tools) を正とします。
 
 - **案件 + ソリシテーション — SAM.gov + Grants.gov (10)**: `sam_search_opportunities` `sam_search_shaping` `sam_get_opportunity` `sam_fetch_description` `sam_fetch_attachment_text` `sam_attachment_url` `sam_lookup_organization` `sam_lookup_notice_fields` `grants_search` `grants_get_opportunity`
 - **spending・受注・競合 — USAspending + FPDS + GAO (31)**: `usas_search_awards` `usas_search_individual_awards` `usas_get_award_detail` `usas_search_awards_by_recipient` `usas_search_subawards` `usas_search_recompetes` `usas_search_expiring_contracts`(deprecated) `usas_analyze_incumbent` `usas_search_teaming_partners` `usas_spending_over_time` `usas_search_agency_spending` `usas_search_subagency_spending` `usas_search_psc_spending` `usas_search_cfda_spending` `usas_search_state_spending` `usas_search_federal_account_spending` `usas_search_recipients` `usas_get_recipient_profile` `usas_get_agency_profile` `usas_get_agency_awards_summary` `usas_get_agency_budget_function` `usas_list_toptier_agencies` `usas_lookup_agency` `usas_autocomplete_naics` `usas_autocomplete_recipient` `usas_naics_hierarchy` `usas_glossary` `usas_list_disaster_codes`(災害緊急基金コード(DEFC)一覧 — COVID-19·IIJA/インフラ等の緊急歳出タグ) `usas_disaster_spending`(指定 DEFC の災害/緊急基金支出の地域別内訳 — どの州/郡/選挙区が COVID/IIJA 救済金を受領) `fpds_search_awards` `gao_protest_lookup`

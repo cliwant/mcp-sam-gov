@@ -88,6 +88,7 @@ import * as cbpBorder from "./cbp-border.js";
 import { fetchAttachmentText } from "./attachments.js";
 import * as keys from "./keys.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
+import * as feedback from "./feedback.js";
 import {
   buildMeta,
   isMetaBundle,
@@ -100,7 +101,7 @@ import { realpathSync } from "node:fs";
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
 // Keep in sync with package.json "version" (asserted at release; see CHANGELOG).
-const SERVER_VERSION = "1.5.0";
+const SERVER_VERSION = "1.6.0";
 
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 
@@ -4527,6 +4528,30 @@ const NonprofitFinancialsInput = z.object({
 // api_key_status takes no input — it is a pure status query over process.env.
 const ApiKeyStatusInput = z.object({});
 
+// `feedback` builds a PREFILLED GitHub issue URL for the human to submit (PULL —
+// the server never posts). All inputs optional; `summary` is a short, NON-sensitive
+// title line (the issue is public — the description + return value say so).
+const FeedbackInput = z.object({
+  kind: z
+    .enum(["bug", "feature", "wrong_output"])
+    .optional()
+    .describe(
+      "What kind of report: bug (default), feature (a capability this server lacks), or wrong_output (a tool returned a wrong/suspicious result).",
+    ),
+  tool: z
+    .string()
+    .max(80)
+    .optional()
+    .describe("The tool name this is about, if any (e.g. 'sam_search_opportunities')."),
+  summary: z
+    .string()
+    .max(500)
+    .optional()
+    .describe(
+      "A short one-line summary for the issue title/body. PUBLIC — never include API keys, personal data, or sensitive query values.",
+    ),
+});
+
 // ─── Tool catalog ────────────────────────────────────────────────
 
 type ToolDef = {
@@ -6337,6 +6362,18 @@ export const TOOLS: ToolDef[] = [
     inputSchema: ApiKeyStatusInput,
     handler: async () => keys.apiKeyStatus(),
   }),
+  // ━━━ Meta: in-product feedback → GitHub issue (PULL-only, keyless) ━━━
+  // The server's "user" is an AI agent, so we collect real-usage friction THROUGH
+  // it: this returns a PREFILLED GitHub new-issue URL for the HUMAN to open and
+  // submit. The server NEVER posts (no token/account/auto-submit) and embeds no
+  // PII — only the caller's summary + tool name. See feedback.ts.
+  defineTool({
+    name: "feedback",
+    description:
+      "Report a problem, request a feature, or flag a wrong-looking result for THIS server — returns a PREFILLED GitHub issue link (public repo cliwant/mcp-sam-gov) for the USER to open and submit. KEYLESS. The server does NOT post anything: it only builds the link; the human submits it (nothing is sent automatically, no network call). Use when the user reports a bug, says a tool's output looks wrong, or wants a capability this server doesn't have. Input (all optional): `kind` (bug|feature|wrong_output, default bug), `tool` (the tool it's about), `summary` (a short, NON-SENSITIVE title line). Returns { reportUrl, repo, willPost:false, instructions, privacy }. PRIVACY: never put secrets, personal data, or sensitive query values in `summary` — the issue is PUBLIC and the link prefills only your summary + tool + server version.",
+    inputSchema: FeedbackInput,
+    handler: async (input) => feedback.feedbackTool(input),
+  }),
 ];
 
 // ─── Server bootstrap ────────────────────────────────────────────
@@ -6365,7 +6402,13 @@ async function main() {
 
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
-    { capabilities: { tools: {} } },
+    {
+      capabilities: { tools: {} },
+      // Surfaced to the agent at initialize. Tells it how to route real-usage
+      // friction back to the project WITHOUT the server ever posting anything.
+      instructions:
+        "This server wraps US government open data (keyless-first). If a tool result looks wrong, a tool stays broken, or the user wants a capability this server lacks, help improve it: call the `feedback` tool — or use the `report` URL present on schema_drift / upstream_unavailable errors — to get a PREFILLED GitHub issue link, and offer it to the user to open and submit. Nothing is posted automatically; the user submits. Never include secrets or personal data in a report (the repo is public).",
+    },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -6406,6 +6449,12 @@ async function main() {
       // NON-retryable `invalid_input` with readable field-level issues — never a
       // generic `unknown` carrying Zod's raw JSON dump.
       const error = toToolError(err, name);
+      // PULL-only feedback loop (feedback.ts): attach a PREFILLED GitHub issue URL
+      // ONLY for the two "something may be broken" kinds — schema_drift (the
+      // upstream changed shape) and upstream_unavailable (a possible moved/broken
+      // endpoint). Carries only tool + kind + version (no args/PII). The 429 and
+      // invalid_input/not_found envelopes stay byte-identical (no `report`).
+      feedback.maybeAttachReport(error, name, SERVER_VERSION);
       const envelope = { ok: false as const, error };
       return {
         content: [

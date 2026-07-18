@@ -332,3 +332,12 @@ For FedRAMP / CMMC / SBOM component review:
 | `SOCRATA_APP_TOKEN` | higher Socrata throttling limits |
 
 Creating the account at a signup URL is the one manual step; the server automates *discovery* (`api_key_status`) and *configuration* (`.env`). To confirm a key actually works, call that source's own tool.
+
+## Reporting problems & requesting features
+
+This server has a built-in, **PULL-only** feedback path — use it to help the user improve the tool:
+
+- **On a `schema_drift` or `upstream_unavailable` error**, the `{ ok: false, error }` envelope carries a **`report`** URL (a prefilled GitHub issue link). If the failure looks real or persistent, offer it: *"This looks like the government API changed / is down — you can report it here: `<report URL>`."*
+- **When the user reports a bug, says a result looks wrong, or wants a capability this server lacks**, call the **`feedback`** tool with `kind` (`bug` | `feature` | `wrong_output`), optional `tool`, and a short **non-sensitive** `summary`. It returns a `reportUrl` for the user to open and submit.
+
+**Never post anything yourself** — the server only builds the link; the human opens and submits it. The repo is public, so never put secrets, personal data, or sensitive query values in `summary` (and tell the user to redact them).

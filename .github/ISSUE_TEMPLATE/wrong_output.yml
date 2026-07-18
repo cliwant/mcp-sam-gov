@@ -1,0 +1,35 @@
+name: ⚠️ Tool returned a wrong-looking result
+description: A tool returned data that looks wrong, stale, empty, or misleading.
+labels: ["bug", "wrong-output"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        These are the most valuable reports — a wrong result presented as authoritative is exactly what this project exists to prevent.
+
+        ⚠️ **Public repo** — redact API keys, personal data, and sensitive query values.
+  - type: input
+    id: tool
+    attributes:
+      label: Which tool?
+      placeholder: e.g. usas_search_awards
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect vs. what did you get?
+      description: Why the result looks wrong. Include the authoritative value if you have one.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal repro (arguments)
+      description: The (redacted) arguments that reproduce it.
+      render: json
+  - type: input
+    id: version
+    attributes:
+      label: Server version
+      placeholder: e.g. 1.6.0
