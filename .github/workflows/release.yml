@@ -1,0 +1,77 @@
+# Publish to npm on a version tag push.
+#
+# SECURITY (this is a PUBLIC repo — the token must never leak):
+#   * Triggers ONLY on a `v*.*.*` tag push. Tags can only be pushed by someone with
+#     write access to THIS repo — a pull request from a fork can NOT push a tag here,
+#     and GitHub does NOT expose secrets to workflows triggered by fork PRs. So the
+#     NPM_TOKEN is only ever available when the maintainer deliberately pushes a tag.
+#   * No `pull_request` trigger ⇒ untrusted PR code never runs with the token.
+#   * Least privilege: `contents: read`. `id-token: write` is only for npm PROVENANCE
+#     (a signed attestation proving this package was built from this repo+commit on
+#     GitHub Actions — a supply-chain integrity guarantee, not a secret exposure).
+#   * The secret is injected as an env var ONLY in the publish step and is auto-masked
+#     (`***`) in all logs by GitHub. It lives only in GitHub's encrypted secret store,
+#     never in the repo or on any server.
+#   * `environment: npm-publish` lets you (optionally) add a REQUIRED REVIEWER in the
+#     repo's Environments settings, so a tag push pauses for your manual approval
+#     before publishing — matching the "publish only on explicit go-ahead" policy.
+#
+# ONE-TIME SETUP (maintainer):
+#   1. npmjs.com → Access Tokens → generate an **Automation** token (bypasses 2FA)
+#      OR a **Granular Access** token scoped to publish `@cliwant/mcp-sam-gov` only.
+#   2. GitHub repo → Settings → Environments → New environment `npm-publish`
+#      (optional: add yourself as a Required reviewer for a manual gate), then add a
+#      secret `NPM_TOKEN` there. (A repo-level Actions secret named NPM_TOKEN also works.)
+#   3. Release = bump version + docs, `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  id-token: write # npm provenance only
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify the tag matches package.json version
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "package.json=$PKG  tag=$TAG"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::tag v$TAG does not match package.json version $PKG — refusing to publish"
+            exit 1
+          fi
+
+      - name: Smoke gate (registry snapshot + fault suite)
+        run: |
+          node registry-snapshot-test.mjs
+          node fault-injection-test.mjs > /tmp/fault.log 2>&1 || { tail -5 /tmp/fault.log; exit 1; }
+          tail -1 /tmp/fault.log
+
+      - name: Publish to npm (with provenance)
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
