@@ -130,6 +130,15 @@ export const SOCRATA_DOMAINS = [
   "data.pa.gov", // PA — e.g. mcba-yywm
   "data.mo.gov", // MO — e.g. gfq7-aa86
   "data.delaware.gov", // DE — e.g. 5zy2-grhr
+  // ── SLED city/county tier (loop cycle 1, 2026-07-18; host-scoped catalog +
+  //    /resource/<4x4>.json 200 bare-array live-verified; all .gov; B2G
+  //    procurement/vendor/contract data — the fragmented local layer above the
+  //    state portals). ─────────────────────────────────────────────────────
+  "data.austintexas.gov", // Austin TX (city) — e.g. 3ebq-e9iz (Purchase Orders)
+  "data.kingcounty.gov", // King County WA — e.g. dqit-zt74 (Procurement Contracts)
+  "data.montgomerycountymd.gov", // Montgomery County MD — e.g. vmu2-pnrc (Contracts)
+  "data.mesaaz.gov", // Mesa AZ (city) — e.g. j7s9-qiuq (Vendor Payments)
+  "data.cambridgema.gov", // Cambridge MA (city) — e.g. gp98-ja4f (Contracts bid list)
   "opendata.usac.org", // USAC E-rate (.org, m6) — e.g. avi8-svp9
 ] as const;
 

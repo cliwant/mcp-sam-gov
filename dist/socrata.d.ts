@@ -103,7 +103,7 @@
 import { num } from "./coerce.js";
 import { type MetaBundle } from "./meta.js";
 export { num };
-export declare const SOCRATA_DOMAINS: readonly ["data.ny.gov", "data.colorado.gov", "data.ct.gov", "data.texas.gov", "data.wa.gov", "opendata.maryland.gov", "data.vermont.gov", "data.nj.gov", "data.oregon.gov", "data.pa.gov", "data.mo.gov", "data.delaware.gov", "opendata.usac.org"];
+export declare const SOCRATA_DOMAINS: readonly ["data.ny.gov", "data.colorado.gov", "data.ct.gov", "data.texas.gov", "data.wa.gov", "opendata.maryland.gov", "data.vermont.gov", "data.nj.gov", "data.oregon.gov", "data.pa.gov", "data.mo.gov", "data.delaware.gov", "data.austintexas.gov", "data.kingcounty.gov", "data.montgomerycountymd.gov", "data.mesaaz.gov", "data.cambridgema.gov", "opendata.usac.org"];
 export type SocrataDomain = (typeof SOCRATA_DOMAINS)[number];
 export type SocrataRow = Record<string, unknown>;
 /**
