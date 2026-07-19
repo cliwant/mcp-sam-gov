@@ -7,7 +7,8 @@
  * 4x4 dataset id. Hosts are a CURATED allowlist (see SSRF below); the caller
  * never supplies a free host or a free path.
  *   Row query:  https://{domain}/resource/{4x4}.json?$select=…&$where=…&$limit=…
- *   Catalog:    https://api.us.socrata.com/api/catalog/v1?domains={domain}&q=…
+ *   Catalog (host-scoped): https://{domain}/api/catalog/v1?search_context={domain}&q=…
+ *   Catalog (all-host):    https://api.us.socrata.com/api/catalog/v1?domains=…&q=…
  *
  * Three layers (mirror treasury.ts / edgar.ts):
  *   fetch — `getSocrataResource` / `getCatalog`: SSRF-guard, build the URL,
@@ -73,10 +74,13 @@
  * the four major-city portals (.us/.org — see the inline blocks below):
  *   m6 — `opendata.usac.org` is a `.org` (USAC, a Congress-designated non-profit;
  *        E-rate). It is on the periodic re-verification checklist. NOTE: the
- *        federated discovery catalog (api.us.socrata.com) does NOT index USAC
- *        (returns resultSetSize 0), so `socrata_discover_datasets` will not
- *        surface it — but `socrata_query` works against it with a known 4x4
- *        (live: opendata.usac.org/resource/avi8-svp9.json → 200 bare array).
+ *        FEDERATED discovery catalog (api.us.socrata.com) does NOT index USAC
+ *        (resultSetSize 0), so the ALL-HOST `socrata_discover_datasets` (domain
+ *        omitted) won't surface it; as of loop cycle 8 a DOMAIN-scoped discover
+ *        uses USAC's own catalog (search_context) and DOES surface it (live:
+ *        opendata.usac.org/api/catalog/v1?search_context=… → resultSetSize 8).
+ *        `socrata_query` works regardless with a known 4x4 (live:
+ *        opendata.usac.org/resource/avi8-svp9.json → 200 bare array).
  *   M1 — MA is DROPPED from slice 1: `cthru.data.socrata.com` is a commercial
  *        vendor host (Tyler Technologies `.socrata.com`, not gov-controlled) and
  *        no `.gov` MA Socrata host verifies (`data.mass.gov` → the catalog
@@ -146,13 +150,12 @@ export const SOCRATA_DOMAINS = [
   //    host-scoped catalog + /resource/<4x4>.json 200 bare-array + count(*)
   //    companion live-verified. High-value B2G federal datasets (carrier/company
   //    census, transportation infrastructure & stats, public health).
-  //    CAVEAT (same class as USAC/Mesa, m6): the FEDERATED discovery catalog
-  //    (api.us.socrata.com) UNDER-INDEXES these hosts — e.g. DOT surfaces 3
-  //    datasets federated vs 1,873 host-scoped — so `socrata_discover_datasets`
-  //    under-reports federal datasets (an HONEST partial from the upstream
-  //    federated index, NOT our bug). `socrata_query` works normally with a known
-  //    4x4. (LIVING BACKLOG: switch discover to the per-host `search_context`
-  //    catalog to fix the under-index globally.) ──────────────────────────────
+  //    NOTE (m3/under-index): the FEDERATED aggregator (api.us.socrata.com)
+  //    under-indexes these hosts (DOT: 3 federated vs 1,873 host-scoped). As of
+  //    loop cycle 8, `socrata_discover_datasets` WITH a domain uses each host's
+  //    OWN catalog (search_context) → complete per-host discovery; only the
+  //    all-host search (domain omitted) still relies on the federated aggregator
+  //    (its `_meta` note discloses the gap). ──────────────────────────────────
   "data.transportation.gov", // US DOT — e.g. az4n-8mr2 (Company Census File, ~4.47M carriers)
   "data.cdc.gov", // US CDC — e.g. 9bhg-hcku (Provisional COVID-19 Deaths)
   "data.bts.gov", // US BTS (DOT) — e.g. keg4-3bc2 (Border Crossing Entry Data)
@@ -284,6 +287,44 @@ async function getCatalog(params: URLSearchParams): Promise<unknown> {
   // label (m7, never the token) as getSocrataResource.
   return getJson(url, {
     label: "socrata:catalog",
+    headers: appTokenHeader(),
+    redirect: "error",
+  });
+}
+
+/**
+ * GET a HOST-SCOPED discovery catalog (`https://{domain}/api/catalog/v1?
+ * search_context={domain}&…`). Unlike the FEDERATED `getCatalog`
+ * (api.us.socrata.com), each portal's OWN catalog COMPLETELY indexes its own
+ * datasets — the federated aggregator under-indexes many hosts (loop cycle 8:
+ * USAC → 0, DOT → 3 of 1,873). Used whenever a specific `domain` is requested;
+ * the all-host search (domain omitted) still needs the federated aggregator.
+ * SSRF: identical guard to getSocrataResource — domain ∈ allowlist + the
+ * CONSTRUCTED URL's hostname === domain (https); redirect:"error" (B1); the
+ * host-only label carries the domain (never the token, m7).
+ */
+async function getHostCatalog(
+  domain: string,
+  params: URLSearchParams,
+): Promise<unknown> {
+  if (!SOCRATA_DOMAIN_SET.has(domain)) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `Socrata domain ${JSON.stringify(domain)} is not on the curated allowlist. Allowed: ${SOCRATA_DOMAINS.join(", ")}.`,
+      retryable: false,
+    });
+  }
+  const url = `https://${domain}/api/catalog/v1?${params.toString()}`;
+  const built = new URL(url);
+  if (built.hostname !== domain || built.protocol !== "https:") {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `Constructed Socrata host-catalog URL host ${JSON.stringify(built.hostname)} (${built.protocol}) does not match the allowlisted domain ${JSON.stringify(domain)} over https — refusing to fetch (SSRF safety).`,
+      retryable: false,
+    });
+  }
+  return getJson(url, {
+    label: "socrata:catalog:" + domain,
     headers: appTokenHeader(),
     redirect: "error",
   });
@@ -491,16 +532,21 @@ function mapCatalogRow(row: unknown): CatalogDataset {
 }
 
 /**
- * Discover dataset 4x4 ids via the Socrata catalog (memoized ~10 min). Omitting
- * `domain` searches the WHOLE allowlist (repeated `domains=`); passing one scopes
- * to it. Returns `[{ id, name, description, domain, updatedAt, link }]` +
- * `totalAvailable = resultSetSize`. Feeds `datasetId` to socrata_query.
+ * Discover dataset 4x4 ids via the Socrata catalog (memoized ~10 min). Passing a
+ * `domain` queries that portal's OWN catalog (search_context) — a COMPLETE
+ * per-host index; omitting it searches the WHOLE allowlist via the federated
+ * api.us.socrata.com aggregator (repeated `domains=`). Returns `[{ id, name,
+ * description, domain, updatedAt, link }]` + `totalAvailable = resultSetSize`.
+ * Feeds `datasetId` to socrata_query.
  *
  * m3 — this is the catalog's PRIMARY response: a non-number `resultSetSize` is a
  * hard schema_drift throw (nothing valid to return), never a fabricated total.
- * (Note: the catalog does not index every allowlisted host — e.g. USAC — so a
- * host may return 0 here yet still be queryable via socrata_query with a known
- * 4x4.)
+ *
+ * UNDER-INDEX (loop cycle 8 fix): the FEDERATED aggregator under-indexes many
+ * hosts (USAC → 0; DOT → 3 of 1,873), so the all-host search (domain omitted) can
+ * miss datasets — its `_meta` note discloses this. A DOMAIN-scoped search now
+ * uses that host's OWN catalog, which indexes it completely (USAC/DOT/etc. fully
+ * discoverable). socrata_query works regardless with a known 4x4.
  */
 export async function discoverDatasets(args: {
   q: string;
@@ -512,8 +558,11 @@ export async function discoverDatasets(args: {
   params.set("q", args.q);
   params.set("only", "datasets");
   params.set("limit", String(limit));
+  // A specific domain → that portal's OWN catalog (search_context), a COMPLETE
+  // per-host index. Omitting domain → the federated aggregator (repeated
+  // domains=), the only way to search across all hosts (loop cycle 8).
   if (args.domain) {
-    params.append("domains", args.domain);
+    params.set("search_context", args.domain);
   } else {
     for (const d of SOCRATA_DOMAINS) params.append("domains", d);
   }
@@ -522,7 +571,9 @@ export async function discoverDatasets(args: {
   const { totalAvailable, results } = await memoize(
     key,
     async () => {
-      const body = await getCatalog(params);
+      const body = args.domain
+        ? await getHostCatalog(args.domain, params)
+        : await getCatalog(params);
       const b = (body ?? {}) as { results?: unknown; resultSetSize?: unknown };
       // m3 — hard drift on the PRIMARY response (contrast the best-effort count).
       // The check stays INSIDE the memoize callback so a bad shape is never
@@ -544,6 +595,9 @@ export async function discoverDatasets(args: {
   const scope = args.domain ? `domain ${args.domain}` : `the ${SOCRATA_DOMAINS.length}-host allowlist`;
   const notes: string[] = [
     `Catalog search over ${scope} (only=datasets). Feed a result's id to socrata_query as datasetId.`,
+    args.domain
+      ? `Source: the ${args.domain} portal's OWN catalog (search_context) — a COMPLETE per-host index.`
+      : `Source: the federated ${CATALOG_HOST} aggregator, which UNDER-INDEXES some hosts (e.g. USAC, DOT) — pass a specific domain to use that host's own complete catalog.`,
     `App token: ${appTokenPresent() ? "present (X-App-Token sent; value never logged)" : "absent (keyless)"}.`,
   ];
   if (totalAvailable !== null && returned < totalAvailable) {
@@ -555,7 +609,7 @@ export async function discoverDatasets(args: {
   return withMeta(
     { query: args.q, domain: args.domain ?? null, results },
     {
-      source: `${CATALOG_HOST} catalog ${SOURCE_SUFFIX}`,
+      source: `${args.domain ?? CATALOG_HOST} catalog ${SOURCE_SUFFIX}`,
       keylessMode: true,
       returned,
       totalAvailable,

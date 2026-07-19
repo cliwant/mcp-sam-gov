@@ -8975,7 +8975,11 @@ const isSocrataRow = (u) =>
   /\/resource\/[a-z0-9]{4}-[a-z0-9]{4}\.json\?/.test(u) && /%24limit=/.test(u);
 const isSocrataCount = (u) =>
   /\/resource\/[a-z0-9]{4}-[a-z0-9]{4}\.json\?/.test(u) && /count%28\*%29/.test(u);
-const isSocrataCatalog = (u) => /api\.us\.socrata\.com\/api\/catalog\/v1/.test(u);
+// Matches BOTH the federated catalog (api.us.socrata.com/api/catalog/v1) and a
+// host-scoped catalog ({domain}/api/catalog/v1, loop cycle 8). Only ever applied
+// to URLs inside socrata withFetch handlers (non-socrata URLs fail closed), so
+// the broad path match is safe.
+const isSocrataCatalog = (u) => /\/api\/catalog\/v1/.test(u);
 // A row+count mock (both succeed) — the common healthy path.
 const socrataRowsAndCount = (rows, count) => (u) =>
   isSocrataCount(u)
@@ -9245,6 +9249,32 @@ async function testSocrataHonesty() {
       JSON.stringify({ res: r.data.results[0], ta: m.totalAvailable }));
     ok("42n discover: returned 1 < totalAvailable 71 ⇒ truncated:true, complete:false (honest partial catalog page)",
       m.truncated === true && m.complete === false, JSON.stringify(m));
+  });
+
+  // (p) loop cycle 8 — host-scoped vs federated catalog ROUTING. A DOMAIN-scoped
+  // discover uses the host's OWN catalog (search_context), so the federated
+  // aggregator's under-index (USAC→0, DOT→3-of-1,873) no longer hides datasets;
+  // the all-host search (no domain) still uses the federated aggregator (the only
+  // cross-host search). Non-vacuous: reverting to federated for a domain ⇒ RED.
+  await withFetch((u) => (isSocrataCatalog(u) ? mockResponse({ status: 200, json: catalogBody }) : failClosed()()), async (calls) => {
+    const r = await runTool("socrata_discover_datasets", { q: "42p-hostscoped-unique", domain: "data.transportation.gov" }, sam);
+    const u = new URL(calls[0].url);
+    const p = u.searchParams;
+    ok("42p domain-scoped discover ⇒ fetch hits the HOST's own catalog (hostname===domain, https, /api/catalog/v1), search_context set, NO federated domains=, redirect:error (fixes under-index; revert to federated ⇒ RED)",
+      calls.length === 1 && u.hostname === "data.transportation.gov" && u.protocol === "https:" && u.pathname === "/api/catalog/v1" && p.get("search_context") === "data.transportation.gov" && !p.has("domains") && calls[0].init.redirect === "error",
+      JSON.stringify({ host: u.hostname, sc: p.get("search_context"), domains: p.get("domains"), redir: calls[0].init.redirect }));
+    ok("42p domain-scoped discover ⇒ _meta.source names the HOST's own catalog (honest provenance, not the federated aggregator)",
+      buildMeta(r.meta).source === "data.transportation.gov catalog via Socrata SODA (keyless)", buildMeta(r.meta).source);
+  });
+  await withFetch((u) => (isSocrataCatalog(u) ? mockResponse({ status: 200, json: catalogBody }) : failClosed()()), async (calls) => {
+    const r = await runTool("socrata_discover_datasets", { q: "42p-federated-unique" }, sam);
+    const u = new URL(calls[0].url);
+    ok("42p all-host discover (no domain) ⇒ FEDERATED aggregator (api.us.socrata.com) with repeated domains= (all hosts), NO search_context, redirect:error",
+      calls.length === 1 && u.hostname === "api.us.socrata.com" && u.pathname === "/api/catalog/v1" && u.searchParams.getAll("domains").length === SOCRATA_DOMAINS.length && !u.searchParams.has("search_context") && calls[0].init.redirect === "error",
+      JSON.stringify({ host: u.hostname, nDomains: u.searchParams.getAll("domains").length, expected: SOCRATA_DOMAINS.length, sc: u.searchParams.has("search_context") }));
+    ok("42p all-host discover ⇒ _meta.source names the federated aggregator + a note DISCLOSES the under-index (honest limitation)",
+      buildMeta(r.meta).source === "api.us.socrata.com catalog via Socrata SODA (keyless)" && buildMeta(r.meta).notes.some((n) => /under-index/i.test(n)),
+      JSON.stringify({ src: buildMeta(r.meta).source, notes: buildMeta(r.meta).notes }));
   });
 
   // (o) app-token: SET ⇒ X-App-Token on every fetch; token NEVER in _meta/error/label.

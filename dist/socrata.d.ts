@@ -7,7 +7,8 @@
  * 4x4 dataset id. Hosts are a CURATED allowlist (see SSRF below); the caller
  * never supplies a free host or a free path.
  *   Row query:  https://{domain}/resource/{4x4}.json?$select=…&$where=…&$limit=…
- *   Catalog:    https://api.us.socrata.com/api/catalog/v1?domains={domain}&q=…
+ *   Catalog (host-scoped): https://{domain}/api/catalog/v1?search_context={domain}&q=…
+ *   Catalog (all-host):    https://api.us.socrata.com/api/catalog/v1?domains=…&q=…
  *
  * Three layers (mirror treasury.ts / edgar.ts):
  *   fetch — `getSocrataResource` / `getCatalog`: SSRF-guard, build the URL,
@@ -73,10 +74,13 @@
  * the four major-city portals (.us/.org — see the inline blocks below):
  *   m6 — `opendata.usac.org` is a `.org` (USAC, a Congress-designated non-profit;
  *        E-rate). It is on the periodic re-verification checklist. NOTE: the
- *        federated discovery catalog (api.us.socrata.com) does NOT index USAC
- *        (returns resultSetSize 0), so `socrata_discover_datasets` will not
- *        surface it — but `socrata_query` works against it with a known 4x4
- *        (live: opendata.usac.org/resource/avi8-svp9.json → 200 bare array).
+ *        FEDERATED discovery catalog (api.us.socrata.com) does NOT index USAC
+ *        (resultSetSize 0), so the ALL-HOST `socrata_discover_datasets` (domain
+ *        omitted) won't surface it; as of loop cycle 8 a DOMAIN-scoped discover
+ *        uses USAC's own catalog (search_context) and DOES surface it (live:
+ *        opendata.usac.org/api/catalog/v1?search_context=… → resultSetSize 8).
+ *        `socrata_query` works regardless with a known 4x4 (live:
+ *        opendata.usac.org/resource/avi8-svp9.json → 200 bare array).
  *   M1 — MA is DROPPED from slice 1: `cthru.data.socrata.com` is a commercial
  *        vendor host (Tyler Technologies `.socrata.com`, not gov-controlled) and
  *        no `.gov` MA Socrata host verifies (`data.mass.gov` → the catalog
@@ -140,16 +144,21 @@ export type CatalogDataset = {
     link: string | null;
 };
 /**
- * Discover dataset 4x4 ids via the Socrata catalog (memoized ~10 min). Omitting
- * `domain` searches the WHOLE allowlist (repeated `domains=`); passing one scopes
- * to it. Returns `[{ id, name, description, domain, updatedAt, link }]` +
- * `totalAvailable = resultSetSize`. Feeds `datasetId` to socrata_query.
+ * Discover dataset 4x4 ids via the Socrata catalog (memoized ~10 min). Passing a
+ * `domain` queries that portal's OWN catalog (search_context) — a COMPLETE
+ * per-host index; omitting it searches the WHOLE allowlist via the federated
+ * api.us.socrata.com aggregator (repeated `domains=`). Returns `[{ id, name,
+ * description, domain, updatedAt, link }]` + `totalAvailable = resultSetSize`.
+ * Feeds `datasetId` to socrata_query.
  *
  * m3 — this is the catalog's PRIMARY response: a non-number `resultSetSize` is a
  * hard schema_drift throw (nothing valid to return), never a fabricated total.
- * (Note: the catalog does not index every allowlisted host — e.g. USAC — so a
- * host may return 0 here yet still be queryable via socrata_query with a known
- * 4x4.)
+ *
+ * UNDER-INDEX (loop cycle 8 fix): the FEDERATED aggregator under-indexes many
+ * hosts (USAC → 0; DOT → 3 of 1,873), so the all-host search (domain omitted) can
+ * miss datasets — its `_meta` note discloses this. A DOMAIN-scoped search now
+ * uses that host's OWN catalog, which indexes it completely (USAC/DOT/etc. fully
+ * discoverable). socrata_query works regardless with a known 4x4.
  */
 export declare function discoverDatasets(args: {
     q: string;
