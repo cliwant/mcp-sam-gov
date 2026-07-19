@@ -1,0 +1,210 @@
+/**
+ * arcgis-feature.ts — generic ArcGIS REST FeatureServer/MapServer layer query
+ * over a CURATED service allowlist (loop — SLED bid campaign, 2026-07-19).
+ *
+ * WHAT IT ADDS: an enormous amount of US government data (esp. SLED procurement /
+ * GIS / infrastructure) is published as ArcGIS REST feature layers. This is the
+ * QUERY companion to `arcgis_hub_discover_datasets` (which DISCOVERS Hub datasets):
+ * it queries the ROWS of a curated set of high-value ArcGIS layers. First payload:
+ * the DC OCP "PASS" procurement layers (solicitations / contracts / purchase
+ * orders / payments) — DC's live open-solicitation feed with 46 fields, keyless.
+ *
+ * The module REUSES `getJson` (redirect:"error") / `driftError` / `num`·`str` /
+ * `withMeta`·`buildMeta`, mirroring socrata.ts (curated allowlist) + datagov-
+ * catalog.ts. KEYLESS.
+ *
+ * ★ SSRF: the caller supplies a `service` ENUM key (never a free host/URL); each
+ *   allowlist entry is a FIXED, live-verified ArcGIS layer base URL. The query
+ *   URL is built on that fixed base, and a post-construction assertion requires
+ *   the built hostname === the allowlist entry's host (over https) BEFORE the
+ *   fetch; `redirect:"error"`. `where`/`outFields`/`orderByFields` ride in
+ *   URLSearchParams (encoded) — they filter/project the read-only layer and
+ *   CANNOT alter the host (a malformed `where` ⇒ upstream 400 ⇒ invalid_input,
+ *   surfaced, never silent). Adding a service later = an allowlist SOURCE edit +
+ *   a live count/`/query` verification — NEVER a free runtime param.
+ *
+ * ★ HONESTY PILLARS (captured live 2026-07-19):
+ *   P1: totalAvailable = the layer's EXACT match count (a `returnCountOnly=true`
+ *     companion query), NEVER the page length. Best-effort: a count failure ⇒
+ *     totalAvailable:null + a note (the rows are still returned) — never a fake
+ *     total. `exceededTransferLimit` also forces hasMore.
+ *   P2: getJson THROWS on 429/5xx/timeout; an ArcGIS `{error:{code,message}}`
+ *     body (HTTP 200) is classified (400 ⇒ invalid_input, else upstream) and
+ *     THROWN — never a fake empty. A genuine no-match (features:[], count:0) ⇒
+ *     honest empty.
+ *   P3: attributes pass through VERBATIM (they are the layer's own record). NOTE
+ *     (disclosed every response): ArcGIS date fields are epoch MILLISECONDS and a
+ *     negative/sentinel value (e.g. -2209093200000 ≈ year 1900) is a placeholder,
+ *     not a real date — surfaced verbatim, never coerced.
+ *   P4: `body.features` absent/non-array (and no error) ⇒ driftError; a 200
+ *     non-JSON body ⇒ schema_drift via the catch-ladder.
+ */
+
+import { ToolErrorCarrier } from "./errors.js";
+import { getJson, driftError } from "./datasource.js";
+import { num } from "./coerce.js";
+import { withMeta, type MetaBundle, type ResponseMeta } from "./meta.js";
+
+export { num };
+
+// ─── Curated service allowlist (SSRF core) — LIVE-VERIFIED 2026-07-19 ──
+// Each `base` is an ArcGIS FeatureServer/MapServer LAYER endpoint; the tool
+// appends `/query`. All keyless. The Zod `service` enum in server.ts is built
+// FROM `key`s (single source of truth).
+export type ArcgisService = { key: string; base: string; label: string; note: string };
+export const ARCGIS_SERVICES: readonly ArcgisService[] = [
+  { key: "dc_pass_solicitations", base: "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/19", label: "DC OCP PASS — Solicitations", note: "DC Office of Contracting & Procurement live solicitations (SOLICITATIONNUMBER, SOLICITATIONTITLE, DUE_DATE, OPENDATE, CLOSEDATE, NIGPCODE, CONTRACTINGOFFICER, AWARD_TO…). ~25k." },
+  { key: "dc_pass_contracts", base: "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/37", label: "DC OCP PASS — Contracts", note: "DC awarded contracts. ~50k." },
+  { key: "dc_pass_purchase_orders", base: "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/16", label: "DC OCP PASS — Purchase Orders", note: "DC purchase orders. ~275k." },
+  { key: "dc_pass_payments", base: "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/17", label: "DC OCP PASS — Payments", note: "DC vendor payments. ~1.55M." },
+] as const;
+
+const SERVICE_BY_KEY: ReadonlyMap<string, ArcgisService> = new Map(ARCGIS_SERVICES.map((s) => [s.key, s]));
+
+const DATE_NOTE =
+  "ArcGIS date fields are epoch MILLISECONDS (e.g. DUE_DATE, OPENDATE, CLOSEDATE); a negative/sentinel value (≈ year 1900) is a placeholder, not a real date — surfaced verbatim, parse client-side.";
+
+// ─── SSRF-guarded fetch (fixed allowlist base + hostname assertion) ──
+async function getArcgisQuery(svc: ArcgisService, params: URLSearchParams): Promise<unknown> {
+  const url = `${svc.base}/query?${params.toString()}`;
+  const allowedHost = new URL(svc.base).hostname;
+  const built = new URL(url);
+  if (built.hostname !== allowedHost || built.protocol !== "https:") {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `Constructed ArcGIS URL host ${JSON.stringify(built.hostname)} (${built.protocol}) does not match the allowlisted service host ${JSON.stringify(allowedHost)} over https — refusing to fetch (SSRF safety).`,
+      retryable: false,
+      upstreamEndpoint: `arcgis:${svc.key}`,
+    });
+  }
+  return getJson(url, { label: `arcgis:${svc.key}`, redirect: "error" });
+}
+
+// ArcGIS returns HTTP 200 + `{error:{code,message}}` for BOTH a bad query AND a
+// transient server hiccup, and the messages OVERLAP (live-verified 2026-07-19):
+//   - "Failed to execute query." ⇒ a bad column/field/where (the caller's query).
+//   - "Unable to complete operation." ⇒ AMBIGUOUS — a bad SQL syntax OR a transient
+//     server blip (observed intermittently on a valid query).
+// So classify a clearly-input message as invalid_input (non-retryable), but treat
+// the ambiguous/generic one as upstream_unavailable (RETRYABLE) — misclassifying a
+// server blip as invalid_input would falsely blame the caller for an outage.
+const ARCGIS_INPUT_ERROR_RE =
+  /failed to execute query|invalid|parameter|field|syntax|parse|not supported|does not exist|cannot find|out of range/i;
+
+/** An ArcGIS `{error:{code,message}}` body (HTTP 200) ⇒ throw the right kind. */
+function throwIfArcgisError(svc: ArcgisService, body: unknown): void {
+  const e = (body as { error?: { code?: unknown; message?: unknown } } | null)?.error;
+  if (e && typeof e === "object") {
+    const code = num((e as { code?: unknown }).code);
+    const msg = String((e as { message?: unknown }).message ?? "ArcGIS query error");
+    const inputish = code === 400 && ARCGIS_INPUT_ERROR_RE.test(msg);
+    throw new ToolErrorCarrier({
+      kind: inputish ? "invalid_input" : "upstream_unavailable",
+      message: `ArcGIS ${svc.key} error${code !== null ? ` (${code})` : ""}: ${msg}`.slice(0, 300),
+      retryable: !inputish,
+      upstreamEndpoint: `arcgis:${svc.key}`,
+    });
+  }
+}
+
+// ─── Tool: arcgis_feature_query ───────────────────────────────────
+export type ArcgisFeatureQueryArgs = {
+  service: string;
+  where?: string;
+  outFields?: string;
+  orderByFields?: string;
+  limit?: number;
+  offset?: number;
+};
+
+/**
+ * Query rows from a curated ArcGIS REST feature layer. `service` is an allowlist
+ * enum; `where` (SQL-ish filter, default 1=1), `outFields` (default *),
+ * `orderByFields`, `limit`/`offset`. Returns curated record attributes + honest
+ * `_meta` (totalAvailable = the layer's exact match count via a returnCountOnly
+ * companion; epoch-ms date disclosure).
+ */
+export async function featureQuery(args: ArcgisFeatureQueryArgs): Promise<MetaBundle> {
+  const svc = SERVICE_BY_KEY.get(args.service);
+  if (!svc) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `Unknown ArcGIS service ${JSON.stringify(args.service)}. Allowed: ${ARCGIS_SERVICES.map((s) => s.key).join(", ")}.`,
+      retryable: false,
+    });
+  }
+  const limit = args.limit ?? 50;
+  const offset = args.offset ?? 0;
+  const where = args.where && args.where.trim() ? args.where.trim() : "1=1";
+  const outFields = args.outFields && args.outFields.trim() ? args.outFields.trim() : "*";
+  const filtersApplied: string[] = ["service"];
+  if (args.where && args.where.trim()) filtersApplied.push("where");
+
+  // ── Primary rows query. ──
+  const rowParams = new URLSearchParams();
+  rowParams.set("where", where);
+  rowParams.set("outFields", outFields);
+  rowParams.set("returnGeometry", "false");
+  rowParams.set("resultOffset", String(offset));
+  rowParams.set("resultRecordCount", String(limit));
+  if (args.orderByFields && args.orderByFields.trim()) rowParams.set("orderByFields", args.orderByFields.trim());
+  rowParams.set("f", "json");
+
+  let body: unknown;
+  try {
+    body = await getArcgisQuery(svc, rowParams);
+  } catch (e) {
+    if (e instanceof ToolErrorCarrier) throw e;
+    if (e instanceof SyntaxError) throw driftError(`arcgis:${svc.key}`, "ArcGIS returned a non-JSON body at HTTP 200 — schema drift.");
+    throw e;
+  }
+  throwIfArcgisError(svc, body); // P2: a 200 {error} body ⇒ throw (never a fake empty)
+
+  const b = (body ?? {}) as { features?: unknown; exceededTransferLimit?: unknown };
+  // P4: features MUST be an array (a missing/non-array, with no error, is drift).
+  if (!Array.isArray(b.features)) {
+    throw driftError(`arcgis:${svc.key}`, "ArcGIS shape drift — response.features must be an array.");
+  }
+  const records = (b.features as unknown[]).map((f) => (f as { attributes?: unknown })?.attributes ?? {});
+  const returned = records.length;
+
+  // ── P1: totalAvailable = the layer's exact match count (returnCountOnly
+  //    companion). BEST-EFFORT: any count failure ⇒ null + note (rows kept). ──
+  let totalAvailable: number | null = null;
+  let countNote: string | null = null;
+  try {
+    const countParams = new URLSearchParams();
+    countParams.set("where", where);
+    countParams.set("returnCountOnly", "true");
+    countParams.set("f", "json");
+    const cbody = await getArcgisQuery(svc, countParams);
+    throwIfArcgisError(svc, cbody);
+    const c = num((cbody as { count?: unknown })?.count);
+    if (c !== null) totalAvailable = c;
+    else countNote = "The returnCountOnly companion returned an unexpected shape — totalAvailable is unknown (null); the rows are still complete.";
+  } catch {
+    countNote = "The returnCountOnly companion failed (transient) — totalAvailable is unknown (null); the rows are still returned.";
+  }
+
+  const exceeded = b.exceededTransferLimit === true;
+  const hasMore = totalAvailable !== null ? offset + returned < totalAvailable : (exceeded || returned >= limit);
+  const nextOffset = hasMore ? offset + returned : null;
+
+  const notes: string[] = [`Source: ${svc.label} (ArcGIS REST feature layer, keyless). ${svc.note}`, DATE_NOTE];
+  if (countNote) notes.push(countNote);
+
+  return withMeta(
+    { service: svc.key, records },
+    {
+      source: `${new URL(svc.base).hostname} via ArcGIS REST (keyless)`,
+      keylessMode: true,
+      returned,
+      totalAvailable,
+      filtersApplied,
+      filtersDropped: [],
+      fieldsUnavailable: [],
+      pagination: { offset, limit, hasMore, nextOffset },
+      notes,
+    } satisfies Partial<ResponseMeta>,
+  );
+}

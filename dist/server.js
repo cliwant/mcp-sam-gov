@@ -41,6 +41,7 @@ import * as datagovCatalog from "./datagov-catalog.js";
 import * as arcgisHub from "./arcgis-hub.js";
 import * as opengov from "./opengov.js";
 import * as bonfire from "./bonfire.js";
+import * as arcgisFeature from "./arcgis-feature.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
@@ -2587,6 +2588,30 @@ const BonfireSearchOpportunitiesInput = z.object({
         .describe("The Bonfire org subdomain slug (from bonfire_list_organizations `org`), e.g. 'harriscountytx', 'broward', 'u-46'. REQUIRED. Lowercase alnum/hyphen; a bad slug ⇒ invalid_input pre-fetch."),
     limit: z.number().int().min(1).max(200).default(50).describe("Opportunities per page, 1..200, default 50. The RSS is the complete open set; this pages over it."),
     offset: z.number().int().min(0).default(0).describe("0-based offset; page with _meta.pagination.nextOffset. totalAvailable = the exact open-opportunity count."),
+});
+// ─── ArcGIS REST feature query (curated service allowlist — SLED bids/GIS) ─
+// Generic ArcGIS FeatureServer/MapServer layer query over a curated allowlist.
+// First payload: DC OCP PASS procurement layers (live solicitations/contracts/PO/
+// payments). `service` is an enum (SSRF core); where/outFields filter the layer.
+const ArcgisFeatureQueryInput = z.object({
+    service: z
+        .enum(arcgisFeature.ARCGIS_SERVICES.map((s) => s.key))
+        .describe("The curated ArcGIS layer (SSRF allowlist enum). e.g. 'dc_pass_solicitations' (DC live solicitations, ~25k), 'dc_pass_contracts', 'dc_pass_purchase_orders', 'dc_pass_payments'."),
+    where: z
+        .string()
+        .min(1)
+        .max(500)
+        .optional()
+        .describe("ArcGIS SQL-ish filter (default '1=1'), e.g. \"SOLICITATIONTITLE LIKE '%security%'\" or \"DUE_DATE > 1750000000000\". Filters the read-only layer; a malformed clause ⇒ invalid_input (surfaced)."),
+    outFields: z
+        .string()
+        .min(1)
+        .max(500)
+        .optional()
+        .describe("Comma-separated fields to return (default '*' = all). e.g. 'SOLICITATIONNUMBER,SOLICITATIONTITLE,DUE_DATE,NIGPCODE'."),
+    orderByFields: z.string().min(1).max(200).optional().describe("ArcGIS orderByFields, e.g. 'DUE_DATE DESC'. Optional."),
+    limit: z.number().int().min(1).max(1000).default(50).describe("Records per page (→ resultRecordCount), 1..1000, default 50."),
+    offset: z.number().int().min(0).default(0).describe("0-based offset (→ resultOffset). Page with _meta.pagination.nextOffset; totalAvailable = the layer's exact match count."),
 });
 // ─── GovInfo (api.govinfo.gov — the api.data.gov keyed trio's 3rd API) ─
 // ADR-0010. Same DATA_GOV_API_KEY/DEMO_KEY/X-Api-Key discipline as the datagov
@@ -5207,6 +5232,16 @@ export const TOOLS = [
         description: "List a government's currently-OPEN solicitations on Bonfire (keyless; {org}.bonfirehub.com/opportunities/rss, RSS 2.0). Input `org` (the subdomain slug from bonfire_list_organizations, e.g. 'harriscountytx', 'broward', 'u-46'; REQUIRED), `limit`(1..200)/`offset`. Returns { org, opportunities:[{ referenceNumber, name, description, closeDate, link, pubDate }] } + honest _meta. HONESTY: the RSS is the COMPLETE set of the org's currently-open opportunities (no server pagination), so totalAvailable = the exact open-opportunity count (never a page length) and this tool pages over it client-side; an empty feed (returned 0) means no open opportunities right now (honest empty, complete:true); `closeDate` is parsed best-effort from the description; a 429/5xx/404/timeout THROWS (never a fake empty); a 200 non-RSS body ⇒ schema_drift; a bad `org` ⇒ invalid_input pre-fetch. Fixed-suffix SSRF (.bonfirehub.com) + redirect:error. Keyless (Bonfire's auth-gated directory API is NOT used).",
         inputSchema: BonfireSearchOpportunitiesInput,
         handler: (input) => bonfire.searchOpportunities(input),
+    }),
+    // ━━━ ArcGIS REST feature query (curated allowlist) — SLED bids/GIS ━━━
+    // Generic query companion to arcgis_hub_discover_datasets. First payload: the DC
+    // OCP PASS procurement layers (live solicitations + contracts/PO/payments), a
+    // keyless live-solicitation feed via ArcGIS REST. `service` enum = SSRF core.
+    defineTool({
+        name: "arcgis_feature_query",
+        description: "Query rows from a curated US-government ArcGIS REST feature layer (keyless) — the QUERY companion to arcgis_hub_discover_datasets (which discovers Hub datasets). A large amount of SLED procurement/GIS data lives on ArcGIS. First payload: the **DC Office of Contracting & Procurement 'PASS'** layers — `dc_pass_solicitations` (DC's LIVE open solicitations, ~25k: SOLICITATIONNUMBER, SOLICITATIONTITLE, DUE_DATE, OPENDATE, CLOSEDATE, NIGPCODE, CONTRACTINGOFFICER, AWARD_TO, 46 fields), `dc_pass_contracts` (~50k), `dc_pass_purchase_orders` (~275k), `dc_pass_payments` (~1.55M). Inputs: `service` (the allowlist ENUM — the SSRF core, never a free host), `where` (ArcGIS SQL-ish filter, default '1=1', e.g. \"SOLICITATIONTITLE LIKE '%security%'\"), `outFields` (default '*'), `orderByFields`, `limit`(1..1000)/`offset`. Returns { service, records:[{…attributes verbatim…}] } + honest _meta. HONESTY: totalAvailable = the layer's EXACT match count (a returnCountOnly companion query, never the page length; a count failure ⇒ null + note, rows still returned); ★ArcGIS date fields are epoch MILLISECONDS and a negative/sentinel (≈1900) is a placeholder — surfaced verbatim, never coerced; a genuine no-match ⇒ complete:true/returned:0; a 429/5xx/timeout THROWS; an ArcGIS {error} body (e.g. a bad where) ⇒ invalid_input/upstream (surfaced, never a fake empty); a non-array features ⇒ schema_drift. SSRF: fixed allowlist base + hostname assertion + redirect:error (where/outFields cannot alter the host).",
+        inputSchema: ArcgisFeatureQueryInput,
+        handler: (input) => arcgisFeature.featureQuery(input),
     }),
     // ━━━ GovInfo (api.govinfo.gov) — the api.data.gov keyed trio's 3rd API (3) ━━━ ADR-0010
     // GPO-authoritative bulk publications (BILLS/PLAW/USCODE/CREC/CFR-FR editions/
