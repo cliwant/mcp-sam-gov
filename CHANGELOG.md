@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **SKILL.md currency refresh (v1.10.0 surface)** — the bundled agent skill was stale at "144 tools / 48 sources"; refreshed to the actual **150 / 52**, added a dedicated **SLED bid-platforms** section for the six new tools (`opengov_list_governments`/`opengov_search_solicitations`, `bonfire_list_organizations`/`bonfire_search_opportunities`, `arcgis_hub_discover_datasets`, `arcgis_feature_query`), and rewrote the SLED-local-procurement routing note to cover the **53-host Socrata allowlist** (state + major-city + county/city sweep) plus the OpenGov/Bonfire live-solicitation feeds and the ArcGIS-REST feature layers. Zero hallucinated tool names (every backticked tool reference verified against the live 150-tool registry; the 4 non-registry tokens are error-kinds / feedback categories / an `integrityFlag` field value, not tool claims). Docs-only — improves agent tool selection for the SLED bid surface.
+
 ### Added
 
 - **Socrata — county/city procurement sweep, wave 4 (tail)** — two more US local-gov Socrata hosts (51 → 53), the clean wins from the diminishing tail of the sweep: **Mesa AZ** secondary hub (`citydata.mesaaz.gov`, attribution "Office of Management and Budget" — City Expenditures ~15.4M) and **City of West Hollywood CA** (`data.weho.org` — Active Contracts with contractor_name/status/type, live/current ~1,030). West Hollywood's `.org` official portal joins the documented non-`.gov` exception. The rest of this wave's catalog hits were Canada/Australia, demo/test, duplicate-county, or off-theme (and `data.miamigov.com` was egress-unreachable from CI — deferred, not added), signalling the federated-catalog procurement vein is largely mined.
