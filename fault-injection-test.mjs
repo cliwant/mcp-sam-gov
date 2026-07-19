@@ -9033,6 +9033,20 @@ async function testSocrataHonesty() {
       ok("42a-fed federal-host lookalike 'data.transportation.gov.evil.com' ⇒ invalid_input, 0 fetch (SSRF tight on the federal tier too)",
         threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind }));
     }
+    // 42a-sled (loop cycle 11, 2026-07-19): the SLED procurement bid-catalog tier
+    // (Cook County / IL / Cincinnati) from the exhaustive bid-site research; all
+    // .gov, live-verified 200 bare-array before add. Non-vacuous: typo/removal ⇒ RED.
+    const SLED_BID_TIER = ["datacatalog.cookcountyil.gov", "data.illinois.gov", "data.cincinnati-oh.gov"];
+    ok("42a-sled procurement bid-catalog hosts (Cook County/IL/Cincinnati) are in SOCRATA_DOMAINS + all .gov",
+      SLED_BID_TIER.every((h) => SOCRATA_DOMAINS.includes(h) && h.endsWith(".gov")),
+      JSON.stringify(SLED_BID_TIER.filter((h) => !SOCRATA_DOMAINS.includes(h) || !h.endsWith(".gov"))));
+    {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() =>
+        runTool("socrata_query", { domain: "datacatalog.cookcountyil.gov.evil.com", datasetId: "32au-zaqn" }, sam));
+      ok("42a-sled SLED-host lookalike 'datacatalog.cookcountyil.gov.evil.com' ⇒ invalid_input, 0 fetch",
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind }));
+    }
     // A lookalike of a NEW host is still rejected pre-fetch (guard covers new hosts).
     {
       const before = calls.length;

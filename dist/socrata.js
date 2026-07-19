@@ -156,6 +156,18 @@ export const SOCRATA_DOMAINS = [
     "data.transportation.gov", // US DOT — e.g. az4n-8mr2 (Company Census File, ~4.47M carriers)
     "data.cdc.gov", // US CDC — e.g. 9bhg-hcku (Provisional COVID-19 Deaths)
     "data.bts.gov", // US BTS (DOT) — e.g. keg4-3bc2 (Border Crossing Entry Data)
+    // ── SLED procurement bid-catalog tier (loop cycle 11, 2026-07-19; from the
+    //    exhaustive US state+local bid-site research). All .gov; host-scoped catalog
+    //    + /resource/<4x4>.json 200 bare-array live-verified. Distinctive value:
+    //    these carry LIVE bid-cycle data (bid tabulations / anticipated
+    //    solicitations), not only award/spend. (★4 other candidate hosts —
+    //    data.iowa.gov, data.scottsdaleaz.gov, data.gilbertaz.gov, opendata.hawaii.gov
+    //    — were REJECTED: their /api/catalog/v1 AND /resource endpoints 404 (Next.js/
+    //    Express apps, not Socrata — a research-agent "Socrata" claim that live
+    //    verification disproved). Never add a host without a 200 bare-array probe.) ─
+    "datacatalog.cookcountyil.gov", // Cook County IL — e.g. 32au-zaqn (Bid Tabulations ~5,607; +awards qh8j-6k63, intent-to-award bgq7-v7ms — 17 procurement datasets)
+    "data.illinois.gov", // IL — e.g. 6rb8-ntpm (Future Solicitations = anticipated construction bids); re-included (cycle-1 excluded on federated-discover 0, but host-scoped catalog + /resource verified 2026-07-19)
+    "data.cincinnati-oh.gov", // Cincinnati OH (city) — e.g. 2iq3-bugw (Certified Vendors MBE/WBE; +contracts 85xi-xdtw)
     // ── Major-city OFFICIAL portals (loop cycle 5, 2026-07-18). NON-.gov but the
     //    unambiguously-official municipal open-data portals for the largest local
     //    procurement markets (NYC OpenData / Chicago / DataSF / LA Controller) —
