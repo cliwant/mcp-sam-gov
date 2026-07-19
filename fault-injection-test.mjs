@@ -13239,6 +13239,19 @@ async function testBonfireHonesty() {
       u.hostname === "harriscountytx.bonfirehub.com" && u.pathname === "/opportunities/rss" && u.protocol === "https:" && calls[0].init.redirect === "error", JSON.stringify({ host: u.hostname, redir: calls[0].init.redirect }));
   });
 
+  // ── item-tag attribute tolerance (dogfood hardening 2026-07-20): an <item …attrs>
+  //    opening tag (namespaced/extended feed) MUST still be parsed — a bare-<item>
+  //    regex would silently DROP it and undercount totalAvailable (P1). ──
+  {
+    const attrRss = `<?xml version="1.0"?><rss version="2.0"><channel><title>Open Public Opportunities</title><item xmlns:ext="urn:x" ext:flag="1"><title>Reference #: 26/0999. Name: RFP - Attr Test</title><link>https://harriscountytx.bonfirehub.com/opportunities/999</link><pubDate>Mon, 29 Jun 2026 09:00:00 -0500</pubDate><description>Description: closes Sep 1, 2026 5:00 PM CDT</description></item></channel></rss>`;
+    await withFetch(bfMock("harriscountytx", attrRss), async () => {
+      const r = await runTool("bonfire_search_opportunities", { org: "harriscountytx" }, sam);
+      const m = buildMeta(r.meta);
+      ok("45BF-attr <item xmlns:ext ext:flag='1'> (attributes on the opening tag) is STILL parsed ⇒ totalAvailable:1 + referenceNumber='26/0999' (a bare-<item> regex would drop it ⇒ 0 ⇒ RED — latent P1 undercount)",
+        m.totalAvailable === 1 && r.data.opportunities.length === 1 && r.data.opportunities[0].referenceNumber === "26/0999", JSON.stringify({ ta: m.totalAvailable, ref: r.data.opportunities[0]?.referenceNumber }));
+    });
+  }
+
   // ── P2: empty channel ⇒ honest empty; 503 ⇒ upstream_unavailable; 429 ⇒ rate_limited. ──
   await withFetch(bfMock("solanocounty", bfRss([])), async () => {
     const r = await runTool("bonfire_search_opportunities", { org: "solanocounty" }, sam);
