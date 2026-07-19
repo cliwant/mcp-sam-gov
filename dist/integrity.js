@@ -212,14 +212,29 @@ export async function checkExclusions(args) {
         classification !== "any";
     const serverTruncated = totalElements !== null && rawResults.length < totalElements;
     const hitCap = totalElements !== null && totalElements > SGS_MAX_RECORDS;
-    const truncated = serverTruncated || hitCap || postFiltered;
+    // totalAvailable HONESTY: the raw free-text `totalElements` counts every record
+    // that merely shares a WORD with the query — NOT the name-gated matches this
+    // tool reports. Surfacing it read as "0 of 252 matches, incomplete" for a firm
+    // with ZERO real matches (a vetting tool must not overstate match availability).
+    // When the result is name-gated (the normal case — a selector is always
+    // required), the true count of name-MATCHING exclusions is genuinely unknown
+    // from one page of text hits, so report null (never the free-text total); the
+    // per-page match count stays in data.matchCount.
+    const totalAvailable = postFiltered ? null : totalElements;
+    // truncated only when there is genuinely more to see: more server pages, the
+    // deep-paging cap, or this page dropped loose text hits (so a name VARIANT
+    // could match on a later page). The old `|| postFiltered` forced truncated:true
+    // even over a genuinely empty result set (0 text hits) — asserting incompleteness
+    // over an empty set, a contradiction. A fully-consumed name-gated result is a
+    // complete, honest empty.
+    const truncated = serverTruncated || hitCap || (postFiltered && looseTextHits > 0);
     const notes = [NOT_PROOF_NOTE];
     notes.push("Exclusion screening is only as precise as the name/UEI/CAGE you pass. A name match is NOT identity-proof — confirm the UEI/CAGE, exclusion type, and dates against the FAPIIS record (samFapiisUrl) before acting on a hit.");
     if (query && looseTextHits > 0) {
         notes.push(`SAM's free-text search returned ${looseTextHits} more record(s) sharing a word with "${query}" but NOT matching the normalized firm name — those are OTHER entities' exclusions and were dropped. \`excluded\` reflects ONLY records whose normalized name matches your query. Because this checked one page of text hits, a match under a name VARIANT could sit on a later page — if in doubt, raise \`size\` or verify the firm's UEI via samFapiisUrl.`);
     }
     if (postFiltered) {
-        notes.push("A uei/cage/classification/activeOnly post-filter was applied over the fetched page only — the true match count for the combined filter may exceed this page. Narrow with a more specific `query` or raise `size`.");
+        notes.push("A uei/cage/classification/activeOnly post-filter was applied over the fetched page only — the true name-matched total is unknown from one page, so `totalAvailable` is null (the raw free-text hit count is NOT the match count). `matchCount` is this page's name-gated matches; narrow with a more specific `query` or raise `size`.");
     }
     if (hitCap) {
         notes.push(`SAM caps deep paging at ${SGS_MAX_RECORDS.toLocaleString()} records; this query is too broad to enumerate fully — narrow the query.`);
@@ -237,7 +252,7 @@ export async function checkExclusions(args) {
         source: EXCLUSIONS_SOURCE,
         keylessMode: true,
         returned: records.length,
-        totalAvailable: totalElements,
+        totalAvailable,
         truncated,
         pagination: {
             offset: page * size,
