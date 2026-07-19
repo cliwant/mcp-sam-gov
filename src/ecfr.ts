@@ -204,6 +204,12 @@ export async function search(args: {
         } only`
       : "searched all CFR titles (no title filter applied)";
   const notes = [scopeNote];
+  // #5 (agent-eval 2026-07-18): an agent couldn't retrieve a clause's full text and
+  // didn't know where to look. Each `excerpt` is a RANKED, ellipsized snippet — NOT
+  // the full section — and a section recurs once per historical version.
+  notes.push(
+    "Each result's `excerpt` is a ranked, ellipsized SNIPPET — NOT the full section text. For the complete in-force text of a section, open its `ecfrUrl`. A section can appear multiple times (one row per historical version, distinguished by `effectiveOn`); the row with the latest `effectiveOn` is the current version.",
+  );
   if (totalIsLowerBound) {
     notes.push(
       `eCFR caps total_count at ${ECFR_TOTAL_COUNT_CAP} (Elasticsearch index.max_result_window); totalAvailable is a LOWER BOUND — the true match count may be higher and is UNKNOWN. See totalIsLowerBound. Narrow by title/chapter/date for an exact count.`,

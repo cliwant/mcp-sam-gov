@@ -6379,6 +6379,11 @@ async function testAgencyDetailTools() {
     const res = await getAgencyProfile("097");
     ok("35a getAgencyProfile 200 ⇒ maps toptierCode/name/abbreviation/subtierAgencyCount",
       res.toptierCode === "097" && res.name === "Department of Defense" && res.abbreviation === "DOD" && res.subtierAgencyCount === 40, JSON.stringify(res));
+    // 35a+ (agent-eval 2026-07-18 fix): the profile carries NO spending total, so it
+    // cross-refs where obligations live — an agent must not dead-end asking "how much
+    // did agency X obligate?" here.
+    ok("35a+ getAgencyProfile ⇒ spendingNote points to award-level + account-level obligation sources (dead-end fix)",
+      typeof res.spendingNote === "string" && /obligation/i.test(res.spendingNote) && /awards_summary/i.test(res.spendingNote) && /list_toptier_agencies/i.test(res.spendingNote), res.spendingNote);
   });
 
   // 35b getAgencyProfile nonexistent code (404) ⇒ not_found (never a fabricated empty profile).
@@ -6427,6 +6432,12 @@ async function testAgencyDetailTools() {
       JSON.stringify({ o: res.data.obligations, r: res.meta.returned, fa: res.meta.filtersApplied }));
     ok("35e VQ-2 ⇒ _meta discloses obligations spans ALL award types (NOT procurement only) + points to contractObligations",
       (res.meta.notes || []).some((n) => /ALL award types/i.test(n) && /(NOT|not)\b/.test(n) && /procurement|contracts only/i.test(n) && /contractObligations/.test(n)),
+      JSON.stringify(res.meta.notes));
+    // 35e+ (agent-eval 2026-07-18 fix): the "obligations double-meaning" — an agent
+    // conflated this AWARD-level figure with usas_list_toptier_agencies' ACCOUNT-level
+    // obligatedAmount. The note now contrasts the two levels explicitly.
+    ok("35e+ ⇒ _meta contrasts AWARD-level vs ACCOUNT-level obligations (double-meaning fix)",
+      (res.meta.notes || []).some((n) => /AWARD-level/i.test(n) && /ACCOUNT-level/i.test(n) && /obligatedAmount/i.test(n)),
       JSON.stringify(res.meta.notes));
   });
   // 35e-2 (M3 W3-1 honesty — FLIPPED from a FALSE-GREEN fixture that enshrined the

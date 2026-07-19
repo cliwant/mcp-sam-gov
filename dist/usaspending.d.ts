@@ -431,6 +431,7 @@ export declare function getAgencyProfile(toptierCode: string): Promise<{
     website: string | undefined;
     subtierAgencyCount: number | undefined;
     congressionalJustificationUrl: string | undefined;
+    spendingNote: string;
 }>;
 export declare function getAgencyAwardsSummary(args: {
     toptierCode: string;
