@@ -2596,7 +2596,7 @@ const BonfireSearchOpportunitiesInput = z.object({
 const ArcgisFeatureQueryInput = z.object({
     service: z
         .enum(arcgisFeature.ARCGIS_SERVICES.map((s) => s.key))
-        .describe("The curated ArcGIS layer (SSRF allowlist enum). DC OCP PASS: 'dc_pass_solicitations' (live solicitations ~25k), 'dc_pass_contracts', 'dc_pass_purchase_orders', 'dc_pass_payments'. Other US local govs: 'asheville_purchase_orders'/'asheville_po_summary' (Asheville NC), 'bellevue_vendor_payments'/'bellevue_awarded_contracts' (Bellevue WA), 'miamidade_purchase_orders_2017' (Miami-Dade FL, 2017 snapshot)."),
+        .describe("The curated ArcGIS layer (SSRF allowlist enum). DC OCP PASS: 'dc_pass_solicitations' (live solicitations ~25k), 'dc_pass_contracts', 'dc_pass_purchase_orders', 'dc_pass_payments'. Other US local govs: 'asheville_purchase_orders'/'asheville_po_summary' (Asheville NC), 'bellevue_vendor_payments'/'bellevue_awarded_contracts' (Bellevue WA), 'miamidade_purchase_orders_2025'/'miamidade_purchase_orders_2017' (Miami-Dade FL, current/2017), 'suffolk_county_ny_contracts_2018' (Suffolk County NY), 'matsu_borough_ak_checkbook' (Matanuska-Susitna Borough AK). 12 curated services."),
     where: z
         .string()
         .min(1)

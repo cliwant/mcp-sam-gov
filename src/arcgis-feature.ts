@@ -65,6 +65,9 @@ export const ARCGIS_SERVICES: readonly ArcgisService[] = [
   { key: "bellevue_vendor_payments", base: "https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/YTD_Vendor_Payments/FeatureServer/0", label: "Bellevue WA — YTD Vendor Payments", note: "City of Bellevue WA year-to-date vendor payments. ~15.8k." },
   { key: "bellevue_awarded_contracts", base: "https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/Annual_Awarded_Contracts/FeatureServer/0", label: "Bellevue WA — Annual Awarded Contracts", note: "City of Bellevue WA annual awarded contracts. ~2.0k." },
   { key: "miamidade_purchase_orders_2017", base: "https://services.arcgis.com/8Pc9XBTAsYuxx9Ny/arcgis/rest/services/miamidade_procurement_data_2017/FeatureServer/0", label: "Miami-Dade County FL — Purchase Orders (ADPICS) 2017", note: "Miami-Dade County FL purchase orders — a 2017 snapshot (historical, disclosed). ~94.8k." },
+  { key: "miamidade_purchase_orders_2025", base: "https://services.arcgis.com/8Pc9XBTAsYuxx9Ny/arcgis/rest/services/miamidade_procurement_data_informs_2025/FeatureServer/0", label: "Miami-Dade County FL — Purchase Orders (INFORMS) 2025", note: "Miami-Dade County FL purchase orders — CURRENT (2025 INFORMS). ~25k." },
+  { key: "suffolk_county_ny_contracts_2018", base: "https://services.arcgis.com/JsDD4qdG5r2a7hR5/arcgis/rest/services/County_Contracts_2018/FeatureServer/0", label: "Suffolk County NY — County Contracts 2018", note: "Suffolk County NY contracts — a 2018 snapshot (historical, disclosed). ~1.4k." },
+  { key: "matsu_borough_ak_checkbook", base: "https://services.arcgis.com/fX5IGselyy1TirdY/arcgis/rest/services/Logos_Checkbook_Data/FeatureServer/0", label: "Matanuska-Susitna Borough AK — Checkbook", note: "Matanuska-Susitna Borough AK checkbook (vendor spend). ~1.2k." },
 ] as const;
 
 const SERVICE_BY_KEY: ReadonlyMap<string, ArcgisService> = new Map(ARCGIS_SERVICES.map((s) => [s.key, s]));
