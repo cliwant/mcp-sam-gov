@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Socrata SLED — major-city portals** — the 4 largest municipal procurement markets added to the curated Socrata allowlist: **NYC OpenData** (`data.cityofnewyork.us` — City Record procurement notices, ~1.1M rows), **Chicago** (`data.cityofchicago.org` — contracts, ~186k), **DataSF** (`data.sfgov.org` — supplier contracts, ~48k), **LA City Controller** (`controllerdata.lacity.org` — checkbook, ~6.4M). Each host-scoped-catalog + `/resource/<4x4>.json` 200-verified. These are the first documented non-`.gov` municipal portals (the official city open-data sites); the SSRF core stays the frozen curated allowlist (not the TLD), and the fault suite now asserts the `.gov`-or-documented-exception policy.
 
+### Changed
+
+- **SKILL.md currency refresh** — the bundled agent skill was stale (advertised "120 tools / 37 sources"); refreshed to the actual **144 / 48**, added the missing capability lanes (product-safety openFDA/NHTSA/CPSC, litigation CourtListener, nonprofit IRS-990, NIST 800-53 controls, NWS/CBP/get.gov, SLED local Socrata, `feedback`), and fixed the eCFR full-text routing (`ecfr_search` snippets → `far_clause_lookup` / `ecfr_get_section`). Zero hallucinated tool names (all 138 verified against the live registry). Improves agent tool selection — the gap that surfaced in the agent-eval.
+
 ## [1.9.0] — 2026-07-18 (SLED Socrata city/county expansion + eCFR full-section tool — keyless, 143 → 144 tools)
 
 Additive minor release (autonomous improvement loop, cycles 1 + 3). Extends SLED coverage down to the local tier and adds full CFR section text for any title.

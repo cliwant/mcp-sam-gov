@@ -1,20 +1,20 @@
 ---
 name: sam-gov
-description: Query and analyze the full surface of US federal contracting + spending + regulation + partner-vetting + market data. 120 tools across 37 federal data sources (keyless-first — only 4 sources need a free key). Covers SAM.gov opportunities (active + pre-solicitation, RFP/SOW attachment TEXT, contacting officers), USAspending + FPDS awards/recipients/competition/recompetes, GAO protests, entity vetting (OFAC sanctions, SAM exclusions, FAC single-audit, FDIC bank health, EPA ECHO), SEC EDGAR financials, Federal Register / Regulations.gov / eCFR + FAR/DFARS / Congress / GovInfo, pricing & labor & fiscal (GSA CALC, SCA/DBA wage determinations, BLS CPI/OEWS/QCEW, Treasury, BEA regional GDP, Census CBP market sizing, FRED macro, GSA per-diem), health & research funding (NIH/NSF/ClinicalTrials/CMS/NPPES), cyber compliance (NVD CVE + CISA KEV), trade tariffs (HTS), geo/disaster/state-local open data (Census geocode, FEMA, Socrata, CKAN), lobbying influence (Senate LDA), DOL labor-enforcement, data.gov + SBA size standards. Use for any US federal procurement / spending / regulation / vetting / market-sizing / macro question.
+description: Query and analyze the full surface of US federal contracting + spending + regulation + partner-vetting + market data. 144 tools across 48 federal data sources (keyless-first — only 4 sources need a free key). Covers SAM.gov opportunities (active + pre-solicitation, RFP/SOW attachment TEXT, contacting officers), USAspending + FPDS awards/recipients/competition/recompetes, GAO protests, entity vetting (OFAC sanctions, SAM exclusions, FAC single-audit, FDIC bank health, EPA ECHO), SEC EDGAR financials, Federal Register / Regulations.gov / eCFR + FAR/DFARS / Congress / GovInfo, pricing & labor & fiscal (GSA CALC, SCA/DBA wage determinations, BLS CPI/OEWS/QCEW, Treasury, BEA regional GDP, Census CBP market sizing, FRED macro, GSA per-diem), health & research funding (NIH/NSF/ClinicalTrials/CMS/NPPES), cyber compliance (NVD CVE + CISA KEV), trade tariffs (HTS), geo/disaster/state-local open data (Census geocode, FEMA, Socrata, CKAN), lobbying influence (Senate LDA), DOL labor-enforcement, data.gov + SBA size standards. Use for any US federal procurement / spending / regulation / vetting / market-sizing / macro question.
 when_to_use: federal contracting, SAM.gov search, GovCon opportunities, pre-solicitation shaping, RFP attachments / read the SOW text, USAspending awards, FPDS award actions, contracting officer lookup, NAICS / PSC analysis, agency spending, recompete radar, incumbent pressure, capture brief, bid no-bid, set-aside contracts (SDVOSB / 8(a) / WOSB / HUBZone), FAR/DFARS clause lookup, FAR compliance matrix, Section 889 / CMMC, vet a firm, OFAC sanctions, debarment / exclusions, single-audit findings, bank health (FDIC), EPA compliance, SEC EDGAR financials, teaming partners, GAO bid protests, wage determination / SCA / DBA / CALC labor rates, BLS CPI escalation / OEWS wages / QCEW market size, Treasury fiscal data, BEA regional GDP, Census business patterns / market sizing, FRED macro (GDP/CPI/rates), GSA per-diem travel cost, Federal Register / Regulations.gov rules, eCFR, Congress bills, GovInfo, grants.gov / federal grants, CFDA, NIH / NSF / clinical trials / CMS Open Payments / NPPES, CVE / CISA KEV cyber, HTS tariff, FEMA disasters, Socrata / CKAN open data, Senate LDA lobbying, DOL wage-hour / OSHA enforcement, data.gov datasets, SBA size standard, which API keys are set
 disable-model-invocation: false
 user-invocable: true
 ---
 
-# SAM.gov federal-data skill — 120 tools across 37 sources
+# SAM.gov federal-data skill — 144 tools across 48 sources
 
-This skill teaches Claude how to use the **`sam-gov` MCP server** (120 tools wrapped from `@cliwant/mcp-sam-gov`) to answer the full surface of US federal contracting / spending / regulation / vetting / market questions end-to-end — from discovering (and shaping) an opportunity, to **reading the actual RFP/SOW documents**, running a **FAR/DFARS compliance matrix**, **vetting a firm** (sanctions, exclusions, audits, bank health, EPA), **sizing a market** (establishments + wages + regional GDP), pricing the bid against statutory wage floors, and pulling **macro context** for escalation.
+This skill teaches Claude how to use the **`sam-gov` MCP server** (144 tools wrapped from `@cliwant/mcp-sam-gov`) to answer the full surface of US federal contracting / spending / regulation / vetting / market questions end-to-end — from discovering (and shaping) an opportunity, to **reading the actual RFP/SOW documents**, running a **FAR/DFARS compliance matrix**, **vetting a firm** (sanctions, exclusions, audits, bank health, EPA), **sizing a market** (establishments + wages + regional GDP), pricing the bid against statutory wage floors, and pulling **macro context** for escalation.
 
 > **Setup:** the `sam-gov` MCP server must be reachable. `/plugin install cliwant/mcp-sam-gov` registers it automatically; otherwise see the [repo README](https://github.com/cliwant/mcp-sam-gov). Host prefixing: Claude Code exposes tools as `mcp__sam-gov__<tool>`; bare MCP hosts use just `<tool>`. Use whichever your host gives you.
 
-## Tool inventory — 120 tools, keyless-first
+## Tool inventory — 144 tools, keyless-first
 
-**Keyless-first: 33 of 37 sources need no key. Only 4 sources require a free key** (marked 🔑 below): Census CBP (`census_business_patterns`), FRED (`fred_search_series`, `fred_series_observations`), BEA (`bea_regional_data`), and DOL's *data* endpoint (`dol_get_dataset`; DOL's catalog is keyless). Those 4 tools **throw** an honest config error without a key. A handful of others take an *optional* free key for higher limits (see the Keys section). The server is **the only source of truth** — never invent notice IDs, officer names, award amounts, NAICS codes, or regulation citations.
+**Keyless-first: 44 of 48 sources need no key. Only 4 sources require a free key** (marked 🔑 below): Census CBP (`census_business_patterns`), FRED (`fred_search_series`, `fred_series_observations`), BEA (`bea_regional_data`), and DOL's *data* endpoint (`dol_get_dataset`; DOL's catalog is keyless). Those 4 tools **throw** an honest config error without a key. A handful of others take an *optional* free key for higher limits (see the Keys section). The server is **the only source of truth** — never invent notice IDs, officer names, award amounts, NAICS codes, or regulation citations.
 
 ### Opportunities & solicitations — SAM.gov + Grants.gov (10)
 - `sam_search_opportunities` — search active SAM.gov contracting opportunities (filters: query, ncode/NAICS, organizationName, state, setAside, limit).
@@ -94,7 +94,8 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (120 tools wra
 - `regulations_search_documents` — search Regulations.gov documents (rules, proposed rules, notices).
 - `regulations_search_comments` — search public comments on rulemakings.
 - `regulations_get_docket` — one Regulations.gov docket by id.
-- `ecfr_search` — full-text search across all of CFR (titleNumber=48 for FAR). For an EXACT clause number use `far_clause_lookup` (full-text mis-ranks GSAM).
+- `ecfr_search` — full-text search across all of CFR (titleNumber=48 for FAR); returns ranked SNIPPETS. For the FULL text of a hit: `far_clause_lookup` (FAR/DFARS clause) or `ecfr_get_section` (any other title); or open its ecfrUrl.
+- `ecfr_get_section` — the **FULL in-force text of one CFR section** by citation (e.g. title 2 §200.1 grants, title 29 labor). For FAR/DFARS (title 48) prefer `far_clause_lookup`.
 - `ecfr_list_titles` — all 50 CFR titles + last-amended dates.
 - `far_clause_lookup` — **authoritative FAR/DFARS clause text + its prescription** ("As prescribed in…") for an exact clause number. Carries `farOverhaulRisk` currency caveat.
 - `far_search` — FAR/DFARS-scoped topic search (excludes GSAM, collapses to current in-force version). Feeds `far_clause_lookup`.
@@ -165,6 +166,29 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (120 tools wra
 
 ### Server utilities — key discovery (1)
 - `api_key_status` — list every key the server can use, required vs optional, signup URL, what it unlocks, and whether each is currently set (a boolean — the value is NEVER shown). The live source of truth for key config.
+
+### Product safety & recalls — openFDA · NHTSA · CPSC (6)
+- `openfda_enforcement` — drug/device/food recalls & FDA enforcement (recalling firm, Class I/II/III, reason, state).
+- `openfda_device_clearances` — FDA 510(k) medical-device clearances (applicant, device, K-number).
+- `openfda_drug_approvals` — Drugs@FDA approved applications (sponsor, products, submissions).
+- `nhtsa_recalls` — NHTSA vehicle recalls by make/model/modelYear.
+- `nhtsa_complaints` — NHTSA consumer safety complaints by make/model/modelYear.
+- `cpsc_recalls` — CPSC consumer-product recalls.
+
+### Litigation & courts — CourtListener (1)
+- `courtlistener_search_opinions` — US federal court opinions (COFC bid-protest / contract-claim, CAFC). Free Law Project (non-`.gov`; provenance disclosed).
+
+### Nonprofit vendors — IRS 990 via ProPublica (2)
+- `nonprofit_search` — tax-exempt orgs by name/state/NTEE (IRS Form 990). Provenance: ProPublica (non-`.gov`).
+- `nonprofit_financials` — a nonprofit's 990 financials by EIN.
+
+### Other recent additions
+- `nist_800_53_controls` — NIST SP 800-53 Rev5 security controls (baseline for FedRAMP / CMMC / 889 mapping).
+- `nws_active_alerts` — live National Weather Service alerts (disaster-readiness, pairs with FEMA).
+- `cbp_border_wait_times` — live CBP border-crossing wait times.
+- `search_gov_domains` — the authoritative CISA get.gov registry (resolve which org owns a `.gov`; map SLED entities).
+- **SLED local procurement** — `socrata_query` / `socrata_discover_datasets` now reach 22 curated hosts incl. **city/county + major-city portals** (NYC City Record, Chicago/SF/LA contracts & checkbook) — contracts, vendors, checkbook at the local tier.
+- `feedback` — build a PREFILLED GitHub issue link (bug / feature / wrong_output) for the USER to open & submit (the server never posts). Use when the user reports a problem or wants a missing capability. `schema_drift` / `upstream_unavailable` errors also carry a `report` URL.
 
 ## Standard workflows
 
