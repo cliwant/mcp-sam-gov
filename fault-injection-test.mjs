@@ -43,7 +43,7 @@ import zlib from "node:zlib";
 // when argv[1] === dist/server.js (a direct `node dist/server.js` / the bin /
 // smoke's spawn), never on an import like this one. §9/§12/§13 call this real
 // runTool over a mocked fetch so a regression in the real wrapper turns RED.
-import { runTool, TOOLS } from "./dist/server.js";
+import { runTool, TOOLS, zodToJsonSchema } from "./dist/server.js";
 import { maybeAttachReport, reportUrlForError } from "./dist/feedback.js";
 import { checkForUpdate, isNewerVersion } from "./dist/update-check.js";
 import { apiKeyStatus, loadDotEnv, KEY_REGISTRY } from "./dist/keys.js";
@@ -21116,6 +21116,26 @@ async function testW31UsasHonesty() {
   ok("W3-1 M2 usas_search_expiring_contracts: inputSchema has NO `fiscalYear` (removed — re-adding a validated-then-discarded arg ⇒ RED) while monthsUntilExpiry + naics remain",
     !("fiscalYear" in expiringShape) && "monthsUntilExpiry" in expiringShape && "naics" in expiringShape,
     JSON.stringify(Object.keys(expiringShape)));
+
+  // ── M3: PUBLISHED JSON schema integrity (dogfood fix 2026-07-20). Every tool
+  // takes an object input, so its serialized inputSchema (what tools/list emits
+  // to a schema-driven MCP client) MUST be type:"object" with `properties` — a
+  // degenerate {type:"string"} means the serializer dropped the shape and the
+  // client cannot construct a call. NON-VACUITY: the 7 `.refine()`-wrapped tools
+  // (ZodEffects) serialized to {type:"string"} until zodToJsonSchema learned to
+  // unwrap `_def.schema` — reverting that branch ⇒ these RED again.
+  {
+    const bad = TOOLS
+      .map((t) => ({ name: t.name, js: zodToJsonSchema(t.inputSchema) }))
+      .filter(({ js }) => js.type !== "object" || typeof js.properties !== "object");
+    ok(`W3-1 M3 every published tool inputSchema serializes to type:"object" with properties (no degenerate {type:"string"} — the ZodEffects/.refine() serialization gap) — ${TOOLS.length} tools checked`,
+      bad.length === 0, JSON.stringify(bad.map((b) => b.name)));
+    // Spot-check a refine()-wrapped tool keeps its real properties + a cross-field arg.
+    const fac = zodToJsonSchema(TOOLS.find((t) => t.name === "fac_get_findings").inputSchema);
+    ok("W3-1 M3 refine()-wrapped fac_get_findings publishes real properties (auditeeUei/reportId), not a bare string",
+      fac.type === "object" && fac.properties && "auditeeUei" in fac.properties && "reportId" in fac.properties,
+      JSON.stringify(fac.properties ? Object.keys(fac.properties) : fac));
+  }
 
   // ── M4: usas_search_awards — description no longer over-promises "+ count". The
   // spending_by_category/recipient endpoint returns amount ONLY (the code already

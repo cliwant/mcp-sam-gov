@@ -28,5 +28,9 @@ type ToolDef = {
 };
 export declare const TOOLS: ToolDef[];
 export declare function runTool(name: string, args: Record<string, unknown>, sam: SamGovClient): Promise<unknown>;
+/**
+ * Hand-rolled Zod → JSON Schema converter (subset we use).
+ */
+export declare function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown>;
 export {};
 //# sourceMappingURL=server.d.ts.map

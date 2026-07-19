@@ -6811,7 +6811,7 @@ export async function runTool(
 /**
  * Hand-rolled Zod → JSON Schema converter (subset we use).
  */
-function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
+export function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
   const def = (schema as unknown as { _def: { typeName: string } })._def;
   const tn = def.typeName;
   const description = (schema as unknown as { description?: string }).description;
@@ -6860,6 +6860,19 @@ function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
   if (tn === "ZodOptional" || tn === "ZodDefault" || tn === "ZodNullable") {
     const inner = (schema as unknown as { _def: { innerType: z.ZodTypeAny } })
       ._def.innerType;
+    const innerSchema = zodToJsonSchema(inner);
+    return description ? { ...innerSchema, description } : innerSchema;
+  }
+  if (tn === "ZodEffects") {
+    // .refine() / .superRefine() / .transform() wrap the REAL schema at
+    // `_def.schema` (used for cross-field rules like "npi OR state required").
+    // Without this branch these fall through to the {type:"string"} default,
+    // publishing a degenerate object-less inputSchema that a schema-driven MCP
+    // client cannot construct a call against — even though the runtime Zod still
+    // demands the full object. Unwrap so the published schema keeps its real
+    // properties / required / enums.
+    const inner = (schema as unknown as { _def: { schema: z.ZodTypeAny } })._def
+      .schema;
     const innerSchema = zodToJsonSchema(inner);
     return description ? { ...innerSchema, description } : innerSchema;
   }
