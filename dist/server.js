@@ -38,6 +38,7 @@ import * as ckan from "./ckan.js";
 import * as echo from "./echo.js";
 import * as datagov from "./datagov.js";
 import * as datagovCatalog from "./datagov-catalog.js";
+import * as arcgisHub from "./arcgis-hub.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
@@ -2507,6 +2508,34 @@ const DatagovSearchDatasetsInput = z.object({
         .regex(datagovCatalog.DATAGOV_CURSOR_RE)
         .optional()
         .describe("Opaque continuation cursor (→ after) — pass back the _meta.nextCursor from the previous page. Pagination is a cursor, NOT a numeric offset (offset/nextOffset are null); nextCursor:null means the last page. A bad token (spaces/'../'/'%') ⇒ invalid_input pre-fetch."),
+});
+// ─── ArcGIS Hub (hub.arcgis.com — keyless SLED dataset discovery) ─
+// Loop cycle 9. A GLOBAL, OPEN publishing platform (non-US / non-gov publishers
+// included) — DISCOVERY ONLY, provenance surfaced per-row + disclosed every
+// response. Fixed-host SSRF (no per-jurisdiction host vector). q ≥ 2 chars.
+const ArcgisHubDiscoverInput = z.object({
+    query: z
+        .string()
+        .min(2)
+        .max(500)
+        .describe("Keyword search over ArcGIS Hub datasets (→ q), e.g. 'procurement contract', 'zoning permits'. REQUIRED, ≥2 non-whitespace chars (a broad scan of the whole global Hub is refused)."),
+    openDataOnly: z
+        .boolean()
+        .default(true)
+        .describe("When true (default), filter to items the publisher designated as open data (→ filter[openData]=true) — the B2G-relevant subset. Set false to broaden to ALL shared items (vet the publisher even more)."),
+    limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe("Datasets per page (→ page[size]), 1..100, default 20."),
+    offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("0-based record offset (→ page[start]=offset+1). Page with _meta.pagination.nextOffset; totalAvailable is the exact Hub match count."),
 });
 // ─── GovInfo (api.govinfo.gov — the api.data.gov keyed trio's 3rd API) ─
 // ADR-0010. Same DATA_GOV_API_KEY/DEMO_KEY/X-Api-Key discipline as the datagov
@@ -5077,6 +5106,21 @@ export const TOOLS = [
         description: "Search the data.gov DATASET CATALOG for federal open datasets across all publishing agencies (api.gsa.gov v4 Catalog API, keyed — DATA_GOV_API_KEY or the shared DEMO_KEY) — the replacement for the CKAN package_search endpoint data.gov RETIRED in 2025, restoring federal dataset DISCOVERY. Input `query` (→_q free-text), `organization` (publisher slug, e.g. 'epa-gov'), `limit` (1..100, def 20 → _size), `cursor` (the OPAQUE continuation → after). Returns { datasets:[{ id (slug), title, organization, description, accessLevel, license, landingPage, modified, lastHarvested, keywords, themes, distributions:[{ title, format }], identifier }] } + honest _meta. HONESTY: the v4 API reports NO total match count ⇒ totalAvailable is NULL (NEVER results.length, NEVER a fabricated total — a note discloses it); pagination is an OPAQUE cursor (offset/nextOffset null; nextCursor = the `after` token passed back verbatim as `cursor`; nextCursor:null / hasMore:false = last page). accessLevel is surfaced VERBATIM (public / restricted public / non-public) — the openness signal, null-when-absent (this tool DISCOVERS datasets; it does not ingest distributions). A genuine no-match (results:[], no cursor) ⇒ complete:true/returned:0; a 429 (DEMO_KEY ~10 req/hr, hit quickly) ⇒ rate_limited THROWS; a 5xx/timeout ⇒ upstream_unavailable THROWS; a 200 non-JSON / a non-array results ⇒ schema_drift (never a fake empty). DEMO_KEY ~10 req/hr shared ceiling — set DATA_GOV_API_KEY (free at api.data.gov/signup) for 1000/hr. The key rides ONLY in the X-Api-Key header (never the URL/_meta).",
         inputSchema: DatagovSearchDatasetsInput,
         handler: (input) => datagovCatalog.searchDatasets(input),
+    }),
+    // ━━━ ArcGIS Hub (hub.arcgis.com) — keyless SLED dataset DISCOVERY (loop cycle 9) ━━━
+    // A NEW discovery platform: much US state/local/regional/tribal (SLED) open data
+    // — GIS/infrastructure/permits/boundaries/procurement — lives on ArcGIS Hub, NOT
+    // Socrata/CKAN. Fixed-host SSRF (no per-jurisdiction host vector). ★PROVENANCE: the
+    // Hub is GLOBAL + OPEN (non-US/non-gov publishers), so this is a DISCOVERY aid, not
+    // a curated official-source allowlist — per-row owner/orgName/source/region are
+    // surfaced for vetting + the disclosure rides every response. P1: totalAvailable =
+    // meta.total (exact Hub count). DISCOVERY ONLY (row-query on arbitrary ArcGIS hosts
+    // is a planned, separately-guarded addition).
+    defineTool({
+        name: "arcgis_hub_discover_datasets",
+        description: "Discover ArcGIS Hub datasets by keyword — the SLED/GIS open-data layer that Socrata and CKAN do NOT cover (keyless; hub.arcgis.com/api/v3/datasets). Much US state/local/regional/tribal open data (GIS, infrastructure, permits, zoning, boundaries, procurement) is published on ArcGIS Hub. Input `query` (→q, REQUIRED, ≥2 non-whitespace chars — a broad whole-Hub scan is refused), `openDataOnly` (default TRUE → filter[openData]=true, the B2G-relevant designated-open-data subset; false broadens to all shared items), `limit` (1..100, def 20 → page[size]), `offset` (0-based → page[start]=offset+1). Returns { query, openDataOnly, datasets:[{ id, name, description, owner, orgName, source, region, type, sector, keywords, downloadable, hasApi, created, modified, landingPage, itemId }] } + honest _meta. ★PROVENANCE (the crux — a DIFFERENT trust posture from our other sources): ArcGIS Hub is a GLOBAL, OPEN publishing platform — results include NON-US and NON-GOVERNMENTAL publishers. This is a DISCOVERY aid, NOT a curated official-source allowlist (unlike socrata_query): the per-row owner/orgName/source/region are surfaced VERBATIM so you can VET the publisher before relying on the data, and the global-platform caveat rides EVERY response. DISCOVERY ONLY — metadata + links; to read rows follow the dataset on its own ArcGIS endpoint (a guarded row-query tool is a planned addition). HONESTY: totalAvailable = the EXACT Hub match count (meta.total, NEVER data.length — P1); pagination is a 0-based offset (nextOffset when more remain); every scalar null-never-empty, booleans null-preserving, counts null-never-0; a genuine no-match ⇒ complete:true/returned:0; a 429 ⇒ rate_limited / 5xx/timeout ⇒ upstream_unavailable THROWS (never a fake empty); a 200 non-JSON / non-array data ⇒ schema_drift.",
+        inputSchema: ArcgisHubDiscoverInput,
+        handler: (input) => arcgisHub.discoverDatasets(input),
     }),
     // ━━━ GovInfo (api.govinfo.gov) — the api.data.gov keyed trio's 3rd API (3) ━━━ ADR-0010
     // GPO-authoritative bulk publications (BILLS/PLAW/USCODE/CREC/CFR-FR editions/
