@@ -13355,7 +13355,7 @@ async function testArcgisFeatureHonesty() {
   });
 
   // ── num parity. ──
-  ok("45AR services allowlist ≥20 + every base is https on a curated ArcGIS host (maps2.dcgis.dc.gov OR services*.arcgis.com) + has a key (multi-gov incl. state DOTs: Texas/Alaska/Iowa/Oklahoma DOT + DC/Asheville/Bellevue/Miami-Dade/Suffolk/Mat-Su/Las Vegas/Baltimore/Naperville/Worcester)", ARCGIS_SERVICES.length >= 20 && ARCGIS_SERVICES.every((s) => s.base.startsWith("https://") && s.key && /(^https:\/\/maps2\.dcgis\.dc\.gov\/|^https:\/\/services\d*\.arcgis\.com\/)/.test(s.base)), JSON.stringify(ARCGIS_SERVICES.filter((s) => !/(maps2\.dcgis\.dc\.gov|services\d*\.arcgis\.com)/.test(s.base)).map((s) => s.key)));
+  ok("45AR services allowlist ≥20 + every base is https on a curated ArcGIS host (maps2.dcgis.dc.gov OR services*.arcgis.com) + has a key (multi-gov incl. state DOTs: Texas/Alaska/Iowa/Oklahoma DOT + DC/Asheville/Bellevue/Miami-Dade/Suffolk/Mat-Su/Las Vegas/Baltimore/Naperville/Worcester)", ARCGIS_SERVICES.length >= 22 && ARCGIS_SERVICES.every((s) => s.base.startsWith("https://") && s.key && /(^https:\/\/maps2\.dcgis\.dc\.gov\/|^https:\/\/services\d*\.arcgis\.com\/)/.test(s.base)), JSON.stringify(ARCGIS_SERVICES.filter((s) => !/(maps2\.dcgis\.dc\.gov|services\d*\.arcgis\.com)/.test(s.base)).map((s) => s.key)));
   eq("45AR num('25104') ⇒ 25104", arcfeatNum("25104"), 25104);
   ok("45AR arcgis-feature.num === coerce.num (one shared audited impl)", arcfeatNum === coerceNum, "arcgis-feature.num diverged from coerce.num");
 }
