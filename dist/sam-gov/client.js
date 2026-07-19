@@ -312,11 +312,20 @@ export class SamGovClient {
     }
     async searchPublic(filters) {
         const url = new URL(`${PUBLIC_BASE}/sgs/v1/search/`);
+        // Keyless HAL pagination is by PAGE (page × size), not a row offset — the
+        // list endpoint pages correctly (VERIFIED LIVE 2026-07: page=0 and page=1
+        // return disjoint result sets for the same query). Map the caller's row
+        // `offset` onto the page grid; a non-page-aligned offset snaps DOWN to its
+        // page boundary and we return the SERVED offset (page × size) so `_meta`
+        // never claims an offset the upstream didn't honor. (The authenticated path,
+        // buildAuthSearchUrl, honors an arbitrary `offset` directly.)
+        const size = filters.limit ?? 25;
+        const page = Math.max(0, Math.floor((filters.offset ?? 0) / size));
         url.searchParams.set("index", "opp");
-        url.searchParams.set("page", "0");
+        url.searchParams.set("page", String(page));
         url.searchParams.set("mode", "search");
         url.searchParams.set("sort", "-modifiedDate");
-        url.searchParams.set("size", String(filters.limit ?? 25));
+        url.searchParams.set("size", String(size));
         url.searchParams.set("is_active", "true");
         // Keyless HAL facet params — VERIFIED LIVE (2026-07). The list endpoint
         // honors these server-side: result counts drop correctly AND every returned
@@ -402,8 +411,8 @@ export class SamGovClient {
         });
         return {
             totalRecords,
-            limit: filters.limit ?? 25,
-            offset: filters.offset ?? 0,
+            limit: size,
+            offset: page * size, // the SERVED offset (page-aligned), never the raw request
             opportunitiesData: data,
         };
     }

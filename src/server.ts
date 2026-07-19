@@ -4895,6 +4895,21 @@ export const TOOLS: ToolDef[] = [
             "The organization-name filter is NOT supported by the keyless endpoint and was ignored (results are unfiltered on organization). Set SAM_GOV_API_KEY to filter by organization, or filter client-side on the returned `agency` field.",
           );
         }
+        // Pagination honesty: the keyless HAL endpoint pages by PAGE (page × size),
+        // not an arbitrary row offset, so a requested offset that is not a multiple
+        // of `limit` snaps DOWN to its page boundary. Disclose the snap so the AI
+        // never believes it read rows [offset..offset+limit) when it actually got
+        // the page-aligned window. (An aligned offset — the default paging pattern
+        // of incrementing by `limit` — is served exactly, so no note.)
+        {
+          const reqOffset = input.offset ?? 0;
+          const size = input.limit ?? 25;
+          if (reqOffset % size !== 0) {
+            notes.push(
+              `Keyless SAM pagination is page-based (page × ${size}); the requested offset ${reqOffset} was snapped DOWN to the page boundary ${Math.floor(reqOffset / size) * size}. Page through by incrementing offset in multiples of limit (set SAM_GOV_API_KEY for exact row offsets).`,
+            );
+          }
+        }
         notes.push(...enrichmentNotes);
 
         // freshness is surfaced structurally in `data` (the ResponseMeta type
