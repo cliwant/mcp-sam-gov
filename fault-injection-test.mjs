@@ -180,6 +180,7 @@ import { searchDatasets as dgSearchDatasets, DATAGOV_CATALOG_HOST } from "./dist
 import { num as arcgisNum, discoverDatasets as ahDiscover, ARCGIS_HUB_HOST } from "./dist/arcgis-hub.js";
 import { num as opengovNum, listGovernments as ogList, searchSolicitations as ogSearch, OPENGOV_HOST } from "./dist/opengov.js";
 import { num as bonfireNum, listOrganizations as bfList, searchOpportunities as bfSearch, BONFIRE_ORGS } from "./dist/bonfire.js";
+import { num as arcfeatNum, featureQuery as afQuery, ARCGIS_SERVICES } from "./dist/arcgis-feature.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
@@ -13271,6 +13272,94 @@ async function testBonfireHonesty() {
   ok("45BF bonfire.num === coerce.num (one shared audited impl)", bonfireNum === coerceNum, "bonfire.num diverged from coerce.num");
 }
 
+// §45AR: ArcGIS REST feature query (curated allowlist, SLED bid campaign) — P1
+// (count companion, NEVER page length) + service-enum SSRF + ArcGIS {error} body
+// classification (Failed-to-execute⇒invalid_input / Unable-to-complete⇒upstream
+// retryable) + P2 outage/empty + P4 non-array drift + epoch-ms date note (OFFLINE).
+const isArRows = (u) => /maps2\.dcgis\.dc\.gov.*\/query\?/.test(u) && /resultRecordCount=/.test(u);
+const isArCount = (u) => /maps2\.dcgis\.dc\.gov.*\/query\?/.test(u) && /returnCountOnly=true/.test(u);
+const arFeats = (n) => ({ features: Array.from({ length: n }, (_, i) => ({ attributes: { SOLICITATIONNUMBER: `SOL-${i}`, SOLICITATIONTITLE: `Title ${i}`, DUE_DATE: 1750000000000 + i, NIGPCODE: 91823 } })) });
+const arRowsCount = (n, count) => (u) => {
+  if (isArCount(u)) return mockResponse({ status: 200, json: { count } });
+  if (isArRows(u)) return mockResponse({ status: 200, json: arFeats(n) });
+  return failClosed()();
+};
+
+async function testArcgisFeatureHonesty() {
+  section("45AR. ArcGIS REST feature query (curated allowlist, SLED bid campaign) — P1 (returnCountOnly companion ≠ page length) + service-enum SSRF + {error} classification (Failed-to-execute⇒invalid_input / Unable-to-complete⇒upstream retryable) + P2 outage/empty + P4 non-array drift + epoch-ms date note (OFFLINE)");
+  const sam = new SamGovClient({});
+
+  // ── P1: totalAvailable = the returnCountOnly companion (25104), NOT features.length. ──
+  await withFetch(arRowsCount(2, 25104), async (calls) => {
+    const r = await runTool("arcgis_feature_query", { service: "dc_pass_solicitations", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45AR-P1 totalAvailable = returnCountOnly companion 25104 with returned 2 — mutate to features.length ⇒ 2 ≠ 25104 ⇒ RED (the forbidden total===page-size class)",
+      m.totalAvailable === 25104 && m.returned === 2 && m.pagination.hasMore === true, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    ok("45AR-P1 records = attributes VERBATIM (SOLICITATIONNUMBER/SOLICITATIONTITLE/DUE_DATE surfaced as-is) + epoch-ms date note present",
+      r.data.records[0].SOLICITATIONNUMBER === "SOL-0" && r.data.records[0].DUE_DATE === 1750000000000 && m.notes.some((n) => /epoch MILLISECONDS/i.test(n)), JSON.stringify({ rec0: r.data.records[0], hasNote: m.notes.some((n) => /epoch/i.test(n)) }));
+    const rowsUrl = new URL(calls.find((c) => isArRows(c.url)).url);
+    ok("45AR-ssrf rows fetch on the ALLOWLISTED host maps2.dcgis.dc.gov (https), where/outFields/returnGeometry=false in params, redirect:error (service enum is the SSRF core)",
+      rowsUrl.hostname === "maps2.dcgis.dc.gov" && rowsUrl.searchParams.get("returnGeometry") === "false" && calls[0].init.redirect === "error", JSON.stringify({ host: rowsUrl.hostname, redir: calls[0].init.redirect }));
+  });
+
+  // ── unknown service ⇒ invalid_input, 0 fetch. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("arcgis_feature_query", { service: "not_a_real_service" }, sam));
+    ok("45AR-ssrf unknown service ⇒ invalid_input (Zod enum), 0 fetch (a free host/service can never reach fetch)", (threw && toToolError(error).kind === "invalid_input" && calls.length === before), JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+
+  // ── {error} classification: "Failed to execute query." (bad query) ⇒ invalid_input. ──
+  await withFetch((u) => (isArRows(u) ? mockResponse({ status: 200, json: { error: { code: 400, message: "Failed to execute query." } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_feature_query", { service: "dc_pass_solicitations", where: "BADCOL=1" }, sam));
+    ok("45AR-err ArcGIS {error 400 'Failed to execute query.'} ⇒ invalid_input, non-retryable (a bad where/field is the caller's query — surfaced, NEVER a fake empty)",
+      threw && toToolError(error).kind === "invalid_input" && toToolError(error).retryable === false, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+  // ── "Unable to complete operation." (ambiguous/transient) ⇒ upstream_unavailable, RETRYABLE. ──
+  await withFetch((u) => (isArRows(u) ? mockResponse({ status: 200, json: { error: { code: 400, message: "Unable to complete operation." } } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_feature_query", { service: "dc_pass_solicitations" }, sam));
+    ok("45AR-err ArcGIS {error 400 'Unable to complete operation.'} ⇒ upstream_unavailable, RETRYABLE (ambiguous — could be a transient server blip on a valid query; misclassifying it as invalid_input would falsely blame the caller ⇒ RED)",
+      threw && toToolError(error).kind === "upstream_unavailable" && toToolError(error).retryable === true, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", ry: threw ? toToolError(error).retryable : null }));
+  });
+
+  // ── P2: genuine empty (features:[], count 0) ⇒ honest empty; 503 ⇒ upstream throw. ──
+  await withFetch(arRowsCount(0, 0), async () => {
+    const r = await runTool("arcgis_feature_query", { service: "dc_pass_solicitations", where: "1=2" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45AR-P2 genuine no-match (features:[], count:0) ⇒ returned:0, totalAvailable:0, complete:true (honest empty, NOT thrown)", r.data.records.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify(m));
+  });
+  await withFetch((u) => (isArRows(u) ? mockResponse({ status: 503 }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_feature_query", { service: "dc_pass_contracts" }, sam));
+    ok("45AR-P2 rows HTTP 503 ⇒ upstream_unavailable THROWS (a DOWN service is NEVER a returned:0)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── P1 best-effort count: count companion fails ⇒ totalAvailable null + note, rows KEPT. ──
+  await withFetch((u) => (isArCount(u) ? mockResponse({ status: 503 }) : (isArRows(u) ? mockResponse({ status: 200, json: arFeats(2) }) : failClosed()())), async () => {
+    const r = await runTool("arcgis_feature_query", { service: "dc_pass_solicitations", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45AR-P1 count companion FAILS (503) ⇒ totalAvailable:null + a disclosing note, but the ROWS are STILL returned (never lose good data, never fake a total)",
+      m.totalAvailable === null && r.data.records.length === 2 && m.notes.some((n) => /returnCountOnly companion failed/i.test(n)), JSON.stringify({ ta: m.totalAvailable, n: r.data.records.length }));
+  });
+
+  // ── P4: features non-array (no error) ⇒ schema_drift. ──
+  await withFetch((u) => (isArRows(u) ? mockResponse({ status: 200, json: { features: {} } }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_feature_query", { service: "dc_pass_solicitations" }, sam));
+    ok("45AR-P4 features non-array (an object, no error) ⇒ schema_drift (container-guarded, never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── exceededTransferLimit ⇒ hasMore even without a count. ──
+  await withFetch((u) => (isArCount(u) ? mockResponse({ status: 200, json: {} }) : (isArRows(u) ? mockResponse({ status: 200, json: { ...arFeats(2), exceededTransferLimit: true } }) : failClosed()())), async () => {
+    const r = await runTool("arcgis_feature_query", { service: "dc_pass_payments", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45AR-more exceededTransferLimit:true (count unknown) ⇒ hasMore:true/truncated:true (the server signaled more rows exist — honest partial)", m.pagination.hasMore === true && m.complete === false, JSON.stringify(m.pagination));
+  });
+
+  // ── num parity. ──
+  ok("45AR services allowlist non-empty + every base is https maps2.dcgis.dc.gov (curated)", ARCGIS_SERVICES.length >= 1 && ARCGIS_SERVICES.every((s) => s.base.startsWith("https://") && s.key), JSON.stringify(ARCGIS_SERVICES.map((s) => s.key)));
+  eq("45AR num('25104') ⇒ 25104", arcfeatNum("25104"), 25104);
+  ok("45AR arcgis-feature.num === coerce.num (one shared audited impl)", arcfeatNum === coerceNum, "arcgis-feature.num diverged from coerce.num");
+}
+
 // §45E: GSA Federal Travel Per-Diem (api.gsa.gov, ADR-0050) — a NEW travel-cost lane
 // on the SAME api.gsa.gov host + SAME api.data.gov key seam (datagovKey.ts, X-Api-Key
 // header) as §45C. Covers: [INPUT] EITHER (city+state) OR zip — both/neither ⇒
@@ -21261,6 +21350,7 @@ async function main() {
   await testArcgisHubHonesty();
   await testOpengovHonesty();
   await testBonfireHonesty();
+  await testArcgisFeatureHonesty();
   await testGsaPerdiemHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
