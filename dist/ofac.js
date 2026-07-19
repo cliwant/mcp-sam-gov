@@ -176,7 +176,16 @@ export function classifyMatch(queryNorm, entryNorm) {
     const allEinQ = et.length > 0 && et.every((t) => qSet.has(t));
     if (allQinE || allEinQ)
         return "strong";
-    if (entryNorm.includes(queryNorm) || queryNorm.includes(entryNorm)) {
+    // Substring containment is "strong" ONLY when the CONTAINED (shorter) string is
+    // a substantial fragment. Without a floor, a tiny sub-word substring graded
+    // "strong" ("TS" ⊂ "WIDGETS", "IBB" ⊂ "QUIBBLEFARB", "D" ⊂ "WIDGETS") —
+    // overstating confidence and flooding nearly every input with false "strong"
+    // matches (alert fatigue). Whole-token containment is already handled above by
+    // allQinE/allEinQ; this mid-word tier is for the space-stripped joined form and
+    // must clear the same ≥3 bar the token "weak" tier uses — here a slightly higher
+    // floor since a contiguous substring is a weaker signal than a shared whole token.
+    if (Math.min(queryNorm.length, entryNorm.length) >= 5 &&
+        (entryNorm.includes(queryNorm) || queryNorm.includes(entryNorm))) {
         return "strong";
     }
     for (const t of qt) {

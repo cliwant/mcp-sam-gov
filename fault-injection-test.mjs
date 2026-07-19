@@ -1160,6 +1160,40 @@ async function testCheckExclusions() {
     },
   );
 
+  // ── F2 (dogfood fix 2026-07-20): _meta.totalAvailable must be the NAME-GATED
+  // total, never the raw free-text hit count. A page of loose text hits
+  // (totalElements=252) with 0 name-matches ⇒ totalAvailable:null (surfacing 252
+  // read as "0 of 252 matches, incomplete" — overstating availability in a
+  // vetting tool). Non-vacuity: reverting to `totalAvailable: totalElements` ⇒ RED.
+  await withFetch(
+    (u) => (isSgs(u)
+      ? sgs([
+          { title: "Urban Partners LLC", isActive: true, ueiSam: "U1", cageCode: "C1" },
+          { title: "KZOO Partners LLC", isActive: true, ueiSam: "U2", cageCode: "C2" },
+        ], 252)
+      : failClosed()()),
+    async () => {
+      const res = await checkExclusions({ query: "VISIONARY CONSULTING PARTNERS" });
+      const m = buildMeta(res.meta);
+      ok("F2 loose-hits page (totalElements 252, 0 name-matches) ⇒ totalAvailable:null (NOT 252 — never surface the free-text total as the match count)",
+        res.data.matchCount === 0 && m.totalAvailable === null,
+        JSON.stringify({ mc: res.data.matchCount, ta: m.totalAvailable }));
+    },
+  );
+  // ── F2b: a GENUINELY empty free-text result (0 hits) ⇒ truncated:false,
+  // complete:true — never assert incompleteness over an empty set (the old
+  // `truncated || postFiltered` forced truncated:true even here, a contradiction).
+  await withFetch(
+    (u) => (isSgs(u) ? sgs([], 0) : failClosed()()),
+    async () => {
+      const res = await checkExclusions({ query: "Xqzptvkwj Nonexistent Firm" });
+      const m = buildMeta(res.meta);
+      ok("F2b genuinely-empty free-text (0 hits, 0 matches) ⇒ totalAvailable:null + truncated:false + complete:true (no incompleteness over an empty set)",
+        res.data.matchCount === 0 && m.totalAvailable === null && m.truncated === false && m.complete === true,
+        JSON.stringify({ ta: m.totalAvailable, tr: m.truncated, c: m.complete }));
+    },
+  );
+
   // ── EXACT NAME MATCH: a record whose NORMALIZED name equals the query (suffix
   // "LLC" stripped on both sides) ⇒ excluded:true, matchCount:1.
   await withFetch(
@@ -23373,6 +23407,17 @@ async function testOfacScreen() {
   ok("63ofac classifyMatch exact", ofacClassifyMatch(ofacNormName("BANCO NACIONAL DE CUBA"), ofacNormName("BANCO NACIONAL DE CUBA")) === "exact");
   ok("63ofac classifyMatch strong (token subset)", ofacClassifyMatch(ofacNormName("BANCO NACIONAL"), ofacNormName("BANCO NACIONAL DE CUBA")) === "strong");
   ok("63ofac classifyMatch null (no shared token) ⇒ a nonsense query does NOT match", ofacClassifyMatch(ofacNormName("ZZZQXNONEXISTENT"), ofacNormName("BANCO NACIONAL DE CUBA")) === null);
+  // F3 (dogfood fix 2026-07-20): the substring-containment "strong" tier must not
+  // fire on a tiny sub-word fragment — that flooded nearly every input with false
+  // "strong" matches (alert fatigue). A <5-char contained string falls through to
+  // the token tier (and to null when it isn't even a shared ≥3 token). Non-vacuity:
+  // removing the `Math.min(...) >= 5` floor makes "TS"⊂"WIDGETS" return "strong" ⇒ RED.
+  ok("63ofac F3: tiny sub-word substring is NOT 'strong' ('TS'⊂'WIDGETS', 'IBB'⊂'QUIBBLEFARB', 'D'⊂'WIDGETS' ⇒ null, not a false strong)",
+    ofacClassifyMatch("TS", "WIDGETS") === null && ofacClassifyMatch("IBB", "QUIBBLEFARB") === null && ofacClassifyMatch("D", "WIDGETS") === null,
+    JSON.stringify({ ts: ofacClassifyMatch("TS", "WIDGETS"), ibb: ofacClassifyMatch("IBB", "QUIBBLEFARB"), d: ofacClassifyMatch("D", "WIDGETS") }));
+  ok("63ofac F3: a SUBSTANTIAL contiguous substring (≥5) is STILL 'strong' (legit name-fragment match preserved — 'ACMECORP'⊂'ACMECORPINTERNATIONAL')",
+    ofacClassifyMatch("ACMECORP", "ACMECORPINTERNATIONAL") === "strong",
+    JSON.stringify(ofacClassifyMatch("ACMECORP", "ACMECORPINTERNATIONAL")));
 
   // isOfacS3Host — M4 partition/region pin.
   ok("63ofac-M4 isOfacS3Host GovCloud exact ⇒ true", isOfacS3Host(OFAC_S3_HOST) === true);
