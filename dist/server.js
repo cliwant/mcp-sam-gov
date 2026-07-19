@@ -40,6 +40,7 @@ import * as datagov from "./datagov.js";
 import * as datagovCatalog from "./datagov-catalog.js";
 import * as arcgisHub from "./arcgis-hub.js";
 import * as opengov from "./opengov.js";
+import * as bonfire from "./bonfire.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
@@ -2566,6 +2567,26 @@ const OpengovSearchSolicitationsInput = z.object({
         .describe("The OpenGov portal slug (from opengov_list_governments `code`), e.g. 'santacruzca', 'orlando', 'u-46'. REQUIRED. Lowercase alnum/hyphen; a bad slug ⇒ invalid_input pre-fetch."),
     limit: z.number().int().min(1).max(100).default(50).describe("Solicitations per page, 1..100, default 50 (→ API page size)."),
     offset: z.number().int().min(0).default(0).describe("0-based offset (snapped to the API's fixed page boundary). Page with _meta.pagination.nextOffset."),
+});
+// ─── Bonfire (Euna) — keyless per-org open-opportunity RSS (SLED bids) ─
+// SLED bid campaign. Thousands of US state/local govs on Bonfire expose a keyless
+// RSS of open opportunities at {org}.bonfirehub.com/opportunities/rss. Ships a
+// curated 187-org seed directory. Fixed-suffix SSRF. org = charclass slug.
+const BonfireListOrganizationsInput = z.object({
+    state: z.string().length(2).optional().describe("2-letter US state filter (client-side), e.g. 'TX', 'CA'. Optional."),
+    query: z.string().min(1).max(120).optional().describe("Case-insensitive name substring filter (client-side), e.g. 'county', 'ISD'. Optional."),
+    limit: z.number().int().min(1).max(200).default(50).describe("Orgs per page, 1..200, default 50."),
+    offset: z.number().int().min(0).default(0).describe("0-based offset; page with _meta.pagination.nextOffset."),
+});
+const BonfireSearchOpportunitiesInput = z.object({
+    org: z
+        .string()
+        .min(1)
+        .max(64)
+        .regex(bonfire.BONFIRE_ORG_RE)
+        .describe("The Bonfire org subdomain slug (from bonfire_list_organizations `org`), e.g. 'harriscountytx', 'broward', 'u-46'. REQUIRED. Lowercase alnum/hyphen; a bad slug ⇒ invalid_input pre-fetch."),
+    limit: z.number().int().min(1).max(200).default(50).describe("Opportunities per page, 1..200, default 50. The RSS is the complete open set; this pages over it."),
+    offset: z.number().int().min(0).default(0).describe("0-based offset; page with _meta.pagination.nextOffset. totalAvailable = the exact open-opportunity count."),
 });
 // ─── GovInfo (api.govinfo.gov — the api.data.gov keyed trio's 3rd API) ─
 // ADR-0010. Same DATA_GOV_API_KEY/DEMO_KEY/X-Api-Key discipline as the datagov
@@ -5169,6 +5190,23 @@ export const TOOLS = [
         description: "List a government's public solicitations on OpenGov Procurement (keyless; api.procurement.opengov.com, POST /project/list with the required publicView gate). Input `governmentCode` (the portal slug from opengov_list_governments, e.g. 'santacruzca', 'orlando', 'u-46'; REQUIRED), `limit`(1..100)/`offset`. Returns { governmentCode, solicitations:[{ id, title, solicitationNumber, status, type, department, releaseDate, proposalDeadline, contactName, link }] } + honest _meta. ★STATUS: `status` is surfaced VERBATIM — **open = currently ACCEPTING responses**; pending/evaluation/closed are ALSO returned (publicView shows all public projects), so filter status==='open' for live bids. `link` is the public portal page. HONESTY: totalAvailable = the API's `count` = the org's TOTAL public-project count (all statuses), NEVER the page length and NOT an open-only count (a note discloses this); pagination is the API's fixed page (offset is snapped to the page boundary, disclosed); a genuine no-match ⇒ complete:true/returned:0; a 429/5xx/timeout THROWS (never a fake empty); a non-array `projects` ⇒ schema_drift; a bad `governmentCode` ⇒ invalid_input pre-fetch. Genuinely keyless (the key-gated official API is NOT used).",
         inputSchema: OpengovSearchSolicitationsInput,
         handler: (input) => opengov.searchSolicitations(input),
+    }),
+    // ━━━ Bonfire (Euna) — keyless per-org open-opportunity RSS (SLED bids) ━━━
+    // SLED bid campaign. Thousands of US state/local govs on Bonfire expose a keyless
+    // RSS of open opportunities. Ships a curated 187-org live-verified seed directory
+    // (Bonfire's authoritative org API is auth-gated → out of bounds). Fixed-suffix
+    // SSRF (.bonfirehub.com). RSS = the complete open set (totalAvailable honest).
+    defineTool({
+        name: "bonfire_list_organizations",
+        description: "List US governments on the Bonfire (Euna) eProcurement platform — the directory for bonfire_search_opportunities (keyless). Bonfire hosts thousands of US state/local governments' open-bid portals, each with a keyless RSS feed. Filter the curated seed by `state` (2-letter) / `query` (case-insensitive name substring); `limit`(1..200)/`offset`. Output: { organizations:[{ org, name, state }] }. Feed a result's `org` to bonfire_search_opportunities. ★HONESTY: this is a CURATED, live-verified SEED of 187 US orgs — Bonfire has NO keyless org-list API (its authoritative directory is auth-gated, out of bounds), and Euna markets up to ~900 US orgs, so the seed is PARTIAL (disclosed in _meta); probe `{slug}.bonfirehub.com/opportunities/rss` to extend. totalAvailable = the exact filtered seed count.",
+        inputSchema: BonfireListOrganizationsInput,
+        handler: (input) => bonfire.listOrganizations(input),
+    }),
+    defineTool({
+        name: "bonfire_search_opportunities",
+        description: "List a government's currently-OPEN solicitations on Bonfire (keyless; {org}.bonfirehub.com/opportunities/rss, RSS 2.0). Input `org` (the subdomain slug from bonfire_list_organizations, e.g. 'harriscountytx', 'broward', 'u-46'; REQUIRED), `limit`(1..200)/`offset`. Returns { org, opportunities:[{ referenceNumber, name, description, closeDate, link, pubDate }] } + honest _meta. HONESTY: the RSS is the COMPLETE set of the org's currently-open opportunities (no server pagination), so totalAvailable = the exact open-opportunity count (never a page length) and this tool pages over it client-side; an empty feed (returned 0) means no open opportunities right now (honest empty, complete:true); `closeDate` is parsed best-effort from the description; a 429/5xx/404/timeout THROWS (never a fake empty); a 200 non-RSS body ⇒ schema_drift; a bad `org` ⇒ invalid_input pre-fetch. Fixed-suffix SSRF (.bonfirehub.com) + redirect:error. Keyless (Bonfire's auth-gated directory API is NOT used).",
+        inputSchema: BonfireSearchOpportunitiesInput,
+        handler: (input) => bonfire.searchOpportunities(input),
     }),
     // ━━━ GovInfo (api.govinfo.gov) — the api.data.gov keyed trio's 3rd API (3) ━━━ ADR-0010
     // GPO-authoritative bulk publications (BILLS/PLAW/USCODE/CREC/CFR-FR editions/
