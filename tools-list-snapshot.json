@@ -4229,7 +4229,13 @@
             "data.cityofchicago.org",
             "data.sfgov.org",
             "controllerdata.lacity.org",
-            "opendata.usac.org"
+            "opendata.usac.org",
+            "data.kcmo.org",
+            "data.brla.gov",
+            "www.dallasopendata.com",
+            "data.lacity.org",
+            "data.ramseycountymn.gov",
+            "data.richmondgov.com"
           ],
           "description": "Optional: scope discovery to ONE allowlisted portal. Omit to search the whole allowlist. NOTE: the federated catalog does not index every host (e.g. USAC E-rate returns 0) — those remain queryable via socrata_query with a known 4x4."
         },
@@ -4279,7 +4285,13 @@
             "data.cityofchicago.org",
             "data.sfgov.org",
             "controllerdata.lacity.org",
-            "opendata.usac.org"
+            "opendata.usac.org",
+            "data.kcmo.org",
+            "data.brla.gov",
+            "www.dallasopendata.com",
+            "data.lacity.org",
+            "data.ramseycountymn.gov",
+            "data.richmondgov.com"
           ],
           "description": "Which allowlisted Socrata portal to query (curated .gov hosts + USAC E-rate .org; the SSRF host allowlist — no free host). e.g. data.ny.gov, data.texas.gov, data.wa.gov, opendata.usac.org."
         },
