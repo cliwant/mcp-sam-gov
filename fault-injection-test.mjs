@@ -9018,7 +9018,9 @@ async function testSocrataHonesty() {
     // Trust-boundary policy: every host is either .gov OR one of the DOCUMENTED
     // official non-.gov portals (USAC + the four major-city portals). A random/
     // unofficial host slipping in ⇒ RED (the curated allowlist is the SSRF core).
-    const NON_GOV_ALLOWED = new Set(["opendata.usac.org", "data.cityofnewyork.us", "data.cityofchicago.org", "data.sfgov.org", "controllerdata.lacity.org"]);
+    const NON_GOV_ALLOWED = new Set(["opendata.usac.org", "data.cityofnewyork.us", "data.cityofchicago.org", "data.sfgov.org", "controllerdata.lacity.org",
+      // county/city procurement sweep (cycle 17, 2026-07-20) — official municipal portals on .org/.com:
+      "data.kcmo.org", "www.dallasopendata.com", "data.lacity.org", "data.richmondgov.com"]);
     ok("42a+ allowlist = .gov OR a documented official non-.gov portal (no unofficial host slipped in)",
       SOCRATA_DOMAINS.every((h) => h.endsWith(".gov") || NON_GOV_ALLOWED.has(h)),
       JSON.stringify(SOCRATA_DOMAINS.filter((h) => !h.endsWith(".gov") && !NON_GOV_ALLOWED.has(h))));

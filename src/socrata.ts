@@ -182,6 +182,18 @@ export const SOCRATA_DOMAINS = [
   "data.sfgov.org", // San Francisco / DataSF (.org, official) — e.g. cqi5-hm2d (Supplier Contracts)
   "controllerdata.lacity.org", // LA City Controller (.org, official) — e.g. pggv-e4fn (Checkbook L.A.)
   "opendata.usac.org", // USAC E-rate (.org, m6) — e.g. avi8-svp9
+  // ── County/city procurement sweep (loop cycle 17, 2026-07-20). Discovered via
+  //    the Socrata federated catalog (api.us.socrata.com) filtered to procurement/
+  //    bid/contract datasets, then each host-scoped $select=count(*) + /resource
+  //    200 bare-array live-verified. US local govs only (Canada/AU + demo/test +
+  //    off-theme aggregate hosts filtered out). Mix of official .gov/.org/.com
+  //    municipal portals (same documented non-.gov trust-boundary as above). ──
+  "data.kcmo.org", // Kansas City MO (.org, official) — e.g. 4mdg-usvj (Vendor Payments ~144k; 22 procurement datasets)
+  "data.brla.gov", // Baton Rouge / East Baton Rouge Parish LA (.gov) — e.g. e5pk-us93 (Upcoming Procurement Opportunities; 19 procurement datasets)
+  "www.dallasopendata.com", // Dallas TX (.com, official) — e.g. x5ih-idh7 (Vendor Payments FY2019–present ~166k)
+  "data.lacity.org", // Los Angeles CA (.org, official) — e.g. hf3r-utnq (RAMP Open Bid Opportunities — live bids)
+  "data.ramseycountymn.gov", // Ramsey County MN (.gov) — e.g. iu7r-dzmj (Solicitations & Addenda, with due_date/download_url ~516)
+  "data.richmondgov.com", // Richmond VA (.com, official) — e.g. xqn7-jvv2 (City Contracts: contract_value/supplier/procurement_type ~1,387)
 ] as const;
 
 export type SocrataDomain = (typeof SOCRATA_DOMAINS)[number];
