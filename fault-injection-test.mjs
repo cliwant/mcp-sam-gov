@@ -9003,12 +9003,17 @@ async function testSocrataHonesty() {
     // 42a+ (loop cycle 1, 2026-07-18): the SLED city/county tier is wired into the
     // allowlist (single source of truth). Non-vacuous: a typo/removal in a new host
     // fails membership; a non-.gov sneaking in fails the TLD principle.
-    const NEW_SLED = ["data.austintexas.gov", "data.kingcounty.gov", "data.montgomerycountymd.gov", "data.mesaaz.gov", "data.cambridgema.gov"];
-    ok("42a+ 5 new SLED city/county hosts are in SOCRATA_DOMAINS (allowlist single-source wired)",
+    const NEW_SLED = ["data.austintexas.gov", "data.kingcounty.gov", "data.montgomerycountymd.gov", "data.mesaaz.gov", "data.cambridgema.gov",
+      "data.cityofnewyork.us", "data.cityofchicago.org", "data.sfgov.org", "controllerdata.lacity.org"];
+    ok("42a+ SLED city/county + major-city hosts are in SOCRATA_DOMAINS (allowlist single-source wired)",
       NEW_SLED.every((h) => SOCRATA_DOMAINS.includes(h)), JSON.stringify(NEW_SLED.filter((h) => !SOCRATA_DOMAINS.includes(h))));
-    ok("42a+ allowlist stays all-.gov (the one .org exception is USAC only — no unofficial host slipped in)",
-      SOCRATA_DOMAINS.every((h) => h.endsWith(".gov") || h === "opendata.usac.org"),
-      JSON.stringify(SOCRATA_DOMAINS.filter((h) => !h.endsWith(".gov") && h !== "opendata.usac.org")));
+    // Trust-boundary policy: every host is either .gov OR one of the DOCUMENTED
+    // official non-.gov portals (USAC + the four major-city portals). A random/
+    // unofficial host slipping in ⇒ RED (the curated allowlist is the SSRF core).
+    const NON_GOV_ALLOWED = new Set(["opendata.usac.org", "data.cityofnewyork.us", "data.cityofchicago.org", "data.sfgov.org", "controllerdata.lacity.org"]);
+    ok("42a+ allowlist = .gov OR a documented official non-.gov portal (no unofficial host slipped in)",
+      SOCRATA_DOMAINS.every((h) => h.endsWith(".gov") || NON_GOV_ALLOWED.has(h)),
+      JSON.stringify(SOCRATA_DOMAINS.filter((h) => !h.endsWith(".gov") && !NON_GOV_ALLOWED.has(h))));
     // A lookalike of a NEW host is still rejected pre-fetch (guard covers new hosts).
     {
       const before = calls.length;

@@ -5,6 +5,12 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Socrata SLED — major-city portals** — the 4 largest municipal procurement markets added to the curated Socrata allowlist: **NYC OpenData** (`data.cityofnewyork.us` — City Record procurement notices, ~1.1M rows), **Chicago** (`data.cityofchicago.org` — contracts, ~186k), **DataSF** (`data.sfgov.org` — supplier contracts, ~48k), **LA City Controller** (`controllerdata.lacity.org` — checkbook, ~6.4M). Each host-scoped-catalog + `/resource/<4x4>.json` 200-verified. These are the first documented non-`.gov` municipal portals (the official city open-data sites); the SSRF core stays the frozen curated allowlist (not the TLD), and the fault suite now asserts the `.gov`-or-documented-exception policy.
+
 ## [1.9.0] — 2026-07-18 (SLED Socrata city/county expansion + eCFR full-section tool — keyless, 143 → 144 tools)
 
 Additive minor release (autonomous improvement loop, cycles 1 + 3). Extends SLED coverage down to the local tier and adds full CFR section text for any title.
