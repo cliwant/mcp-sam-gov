@@ -4243,7 +4243,16 @@
             "data.framinghamma.gov",
             "data.fultoncountyga.gov",
             "atlanta.data.socrata.com",
-            "opendata.cityofmesquite.com"
+            "opendata.cityofmesquite.com",
+            "datahub.usac.org",
+            "performance.ci.janesville.wi.us",
+            "datahub.austintexas.gov",
+            "cthru.data.socrata.com",
+            "data.macoupincountyil.gov",
+            "data.oaklandca.gov",
+            "data.princegeorgescountymd.gov",
+            "data.cstx.gov",
+            "datahub.transportation.gov"
           ],
           "description": "Optional: scope discovery to ONE allowlisted portal. Omit to search the whole allowlist. NOTE: the federated catalog does not index every host (e.g. USAC E-rate returns 0) — those remain queryable via socrata_query with a known 4x4."
         },
@@ -4307,7 +4316,16 @@
             "data.framinghamma.gov",
             "data.fultoncountyga.gov",
             "atlanta.data.socrata.com",
-            "opendata.cityofmesquite.com"
+            "opendata.cityofmesquite.com",
+            "datahub.usac.org",
+            "performance.ci.janesville.wi.us",
+            "datahub.austintexas.gov",
+            "cthru.data.socrata.com",
+            "data.macoupincountyil.gov",
+            "data.oaklandca.gov",
+            "data.princegeorgescountymd.gov",
+            "data.cstx.gov",
+            "datahub.transportation.gov"
           ],
           "description": "Which allowlisted Socrata portal to query (curated .gov hosts + USAC E-rate .org; the SSRF host allowlist — no free host). e.g. data.ny.gov, data.texas.gov, data.wa.gov, opendata.usac.org."
         },

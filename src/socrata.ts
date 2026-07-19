@@ -205,6 +205,20 @@ export const SOCRATA_DOMAINS = [
   "data.fultoncountyga.gov", // Fulton County GA (.gov) — e.g. mxhc-krcg (Vendor Payments/disbursements ~217k)
   "atlanta.data.socrata.com", // City of Atlanta GA (Socrata-hosted official portal) — e.g. jmke-icfi (Open Checkbook Ledger ~1.78M)
   "opendata.cityofmesquite.com", // Mesquite TX (.com, official) — e.g. 6tva-azs5 (Check Register ~144k)
+  // ── County/city procurement sweep, wave 3 (loop cycle 20, 2026-07-20). Expanded
+  //    federated-catalog queries (rfp/rfq/disbursement/expenditure/commodity) +
+  //    offset paging. Provenance confirmed via /api/views attribution or the gov
+  //    domain itself; hosts with only an individual-name attribution on a generic
+  //    *.data.socrata.com subdomain (washoe, newcastle) were DEFERRED. ──
+  "datahub.usac.org", // USAC E-Rate (.org, same org as opendata.usac.org) — e.g. 39tn-hjzv (E-Rate Open Competitive Bidding, FCC Form 470 — schools/libraries LIVE bids ~2.2M)
+  "performance.ci.janesville.wi.us", // City of Janesville WI (.us official municipal domain) — e.g. fd4q-2kma (Open Expenditures Ledger ~1.0M)
+  "datahub.austintexas.gov", // Austin TX secondary hub (.gov) — e.g. 3ebq-e9iz (Purchase Order Quantity/Price detail, commodity/goods procurements ~318k)
+  "cthru.data.socrata.com", // Commonwealth of Massachusetts, Office of the Comptroller — CTHRU statewide spending (attribution-confirmed) — e.g. kv7m-35wn (Budget/Actual + spending authorizations ~48k)
+  "data.macoupincountyil.gov", // Macoupin County IL (.gov) — e.g. wysn-7qcg (Open Expenditures Ledger ~156k)
+  "data.oaklandca.gov", // Oakland CA (.gov) — e.g. 4ewt-5m6f (budget expenditures ~66k)
+  "data.princegeorgescountymd.gov", // Prince George's County MD (.gov) — e.g. csi4-9jzc (Spending Information: payee_name/agency/amount ~62k)
+  "data.cstx.gov", // College Station TX (.gov) — e.g. i5cx-63zy (Open Budget Expenditures ~42k)
+  "datahub.transportation.gov", // US DOT secondary hub (.gov) — e.g. 255k-mnvp (Disbursements by States for Highways SF-2 ~15k)
 ] as const;
 
 export type SocrataDomain = (typeof SOCRATA_DOMAINS)[number];
