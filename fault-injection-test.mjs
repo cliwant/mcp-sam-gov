@@ -179,6 +179,7 @@ import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy,
 import { searchDatasets as dgSearchDatasets, DATAGOV_CATALOG_HOST } from "./dist/datagov-catalog.js";
 import { num as arcgisNum, discoverDatasets as ahDiscover, ARCGIS_HUB_HOST } from "./dist/arcgis-hub.js";
 import { num as opengovNum, listGovernments as ogList, searchSolicitations as ogSearch, OPENGOV_HOST } from "./dist/opengov.js";
+import { num as bonfireNum, listOrganizations as bfList, searchOpportunities as bfSearch, BONFIRE_ORGS } from "./dist/bonfire.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
@@ -13190,6 +13191,86 @@ async function testOpengovHonesty() {
   ok("45OG opengov.num === coerce.num (one shared audited impl)", opengovNum === coerceNum, "opengov.num diverged from coerce.num");
 }
 
+// §45BF: Bonfire (Euna) per-org open-opportunity RSS (SLED bid campaign) —
+// directory-seed filter + RSS parse (title Reference#/Name, closeDate, complete
+// set ⇒ totalAvailable=item count) + P2 outage/empty + P4 non-RSS drift + SSRF
+// fixed-suffix + org charclass (OFFLINE, deterministic).
+const isBf = (org) => (u) => new RegExp(`https://${org}\\.bonfirehub\\.com/opportunities/rss`).test(u);
+const bfRss = (items) => `<?xml version="1.0"?><rss version="2.0"><channel><title>Open Public Opportunities</title>${items.map((it) => `<item><title>${it.title}</title><link>${it.link}</link><pubDate>${it.pub}</pubDate><description>${it.desc}</description></item>`).join("")}</channel></rss>`;
+const bfMock = (org, body, status = 200) => (u) => (isBf(org)(u) ? mockResponse({ status, json: body }) : failClosed()());
+
+async function testBonfireHonesty() {
+  section("45BF. Bonfire (Euna) per-org open-opportunity RSS (SLED bid campaign) — seed directory filter + RSS parse (Reference#/Name/closeDate) + complete-set totalAvailable + P2 outage/empty + P4 non-RSS schema_drift + fixed-suffix SSRF + org charclass (OFFLINE)");
+  const sam = new SamGovClient({});
+
+  // ── Directory seed filter (offline, no fetch). ──
+  const tx = await runTool("bonfire_list_organizations", { state: "TX", limit: 5 }, sam);
+  const mtx = buildMeta(tx.meta);
+  ok("45BF-dir state=TX ⇒ only TX seed orgs; totalAvailable = filtered seed count (>0) and every returned row is TX",
+    tx.data.organizations.length > 0 && tx.data.organizations.every((o) => o.state === "TX") && mtx.totalAvailable >= tx.data.organizations.length, JSON.stringify({ n: tx.data.organizations.length, ta: mtx.totalAvailable }));
+  const ca = await runTool("bonfire_list_organizations", { state: "CA", limit: 1 }, sam);
+  ok("45BF-dir state A/B (TX≠CA) ⇒ different filtered totals (the seed filter is honored, not ignored)", buildMeta(ca.meta).totalAvailable !== mtx.totalAvailable, JSON.stringify({ tx: mtx.totalAvailable, ca: buildMeta(ca.meta).totalAvailable }));
+  ok("45BF-dir the seed is disclosed as CURATED/PARTIAL (not an exhaustive directory)", mtx.notes.some((n) => /curated.*seed|partial/i.test(n)), JSON.stringify(mtx.notes));
+
+  // ── RSS parse + P1 (complete set ⇒ totalAvailable = item count). ──
+  const items = [
+    { title: "Reference #: 26/0206. Name: ITB - Drainage Improvements", link: "https://harriscountytx.bonfirehub.com/opportunities/240830", pub: "Fri, 26 Jun 2026 11:00:00 -0500", desc: "Description: Drainage work Project closes Jul 20, 2026 2:00 PM CDT" },
+    { title: "Reference #: 26/0170. Name: RFP - Consulting", link: "https://harriscountytx.bonfirehub.com/opportunities/238394", pub: "Thu, 25 Jun 2026 09:00:00 -0500", desc: "Description: Consulting closes Aug 1, 2026 5:00 PM CDT" },
+  ];
+  await withFetch(bfMock("harriscountytx", bfRss(items)), async (calls) => {
+    const r = await runTool("bonfire_search_opportunities", { org: "harriscountytx", limit: 1 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45BF-sol P1: totalAvailable = 2 (the COMPLETE open set item count) with returned:1 ⇒ hasMore/truncated:true — the RSS has no page, so item-count IS the total (mutate to returned ⇒ 1≠2 ⇒ RED)",
+      m.totalAvailable === 2 && m.returned === 1 && m.pagination.hasMore === true, JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore }));
+    const o = r.data.opportunities[0];
+    ok("45BF-sol RSS item parsed: referenceNumber='26/0206' + name (from 'Reference #: X. Name: Y') + link + closeDate (from 'closes …' in description)",
+      o.referenceNumber === "26/0206" && /Drainage Improvements/.test(o.name || "") && o.link === "https://harriscountytx.bonfirehub.com/opportunities/240830" && /Jul 20, 2026/.test(o.closeDate || ""), JSON.stringify(o));
+    const u = new URL(calls[0].url);
+    ok("45BF-sol fixed-suffix SSRF: fetch hits {org}.bonfirehub.com/opportunities/rss (hostname===org+.bonfirehub.com, https), redirect:error",
+      u.hostname === "harriscountytx.bonfirehub.com" && u.pathname === "/opportunities/rss" && u.protocol === "https:" && calls[0].init.redirect === "error", JSON.stringify({ host: u.hostname, redir: calls[0].init.redirect }));
+  });
+
+  // ── P2: empty channel ⇒ honest empty; 503 ⇒ upstream_unavailable; 429 ⇒ rate_limited. ──
+  await withFetch(bfMock("solanocounty", bfRss([])), async () => {
+    const r = await runTool("bonfire_search_opportunities", { org: "solanocounty" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45BF-P2 empty channel (0 items) ⇒ returned:0, totalAvailable:0, complete:true (org has no open opportunities now — honest empty, NOT thrown)", r.data.opportunities.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify(m));
+  });
+  await withFetch(bfMock("downorg", "", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bonfire_search_opportunities", { org: "downorg" }, sam));
+    ok("45BF-P2 HTTP 503 ⇒ upstream_unavailable THROWS (a DOWN feed is NEVER a returned:0)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(bfMock("rlorg", "", 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bonfire_search_opportunities", { org: "rlorg" }, sam));
+    ok("45BF-P2 HTTP 429 ⇒ rate_limited THROWS (never a swallowed-429 fake empty)", threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── P4: a 200 non-RSS (HTML) body ⇒ schema_drift (never parsed as empty). ──
+  await withFetch(bfMock("htmlorg", "<!DOCTYPE html><html><body>Not found</body></html>"), async () => {
+    const { threw, error } = await expectThrow(() => runTool("bonfire_search_opportunities", { org: "htmlorg" }, sam));
+    ok("45BF-P4 a 200 NON-RSS body (HTML, no <rss><channel>) ⇒ schema_drift (never read as an empty opportunity set)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── SSRF: a bad org slug ⇒ invalid_input, 0 fetch (Zod + direct handler re-guard). ──
+  for (const bad of ["BAD/../x", "Up Per", "org.evil.com", "a b"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("bonfire_search_opportunities", { org: bad }, sam));
+      ok(`45BF-ssrf org ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (charclass ^[a-z0-9-]$ — a dot/slash/space can never reach the subdomain)`, threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+    });
+  }
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => bfSearch({ org: "org.evil.com" }));
+    ok("45BF-ssrf DIRECT handler org:'org.evil.com' (Zod-BYPASSING) ⇒ invalid_input, 0 fetch (in-handler charclass re-guard — a dot can't inject a foreign host)", threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+
+  // ── seed integrity + num parity. ──
+  ok("45BF seed directory is non-empty, all slugs charclass-valid, all .gov-adjacent US states", BONFIRE_ORGS.length > 150 && BONFIRE_ORGS.every((o) => /^[a-z0-9-]{1,64}$/.test(o.org) && o.name && o.state), JSON.stringify({ n: BONFIRE_ORGS.length, bad: BONFIRE_ORGS.filter((o) => !/^[a-z0-9-]+$/.test(o.org)).map((o) => o.org).slice(0, 3) }));
+  eq("45BF num('48') ⇒ 48", bonfireNum("48"), 48);
+  ok("45BF bonfire.num === coerce.num (one shared audited impl)", bonfireNum === coerceNum, "bonfire.num diverged from coerce.num");
+}
+
 // §45E: GSA Federal Travel Per-Diem (api.gsa.gov, ADR-0050) — a NEW travel-cost lane
 // on the SAME api.gsa.gov host + SAME api.data.gov key seam (datagovKey.ts, X-Api-Key
 // header) as §45C. Covers: [INPUT] EITHER (city+state) OR zip — both/neither ⇒
@@ -21179,6 +21260,7 @@ async function main() {
   await testDatagovCatalogHonesty();
   await testArcgisHubHonesty();
   await testOpengovHonesty();
+  await testBonfireHonesty();
   await testGsaPerdiemHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
