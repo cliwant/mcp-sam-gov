@@ -177,6 +177,7 @@ import {
 } from "./dist/usitc.js";
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { searchDatasets as dgSearchDatasets, DATAGOV_CATALOG_HOST } from "./dist/datagov-catalog.js";
+import { num as arcgisNum, discoverDatasets as ahDiscover, ARCGIS_HUB_HOST } from "./dist/arcgis-hub.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
@@ -12956,6 +12957,132 @@ async function testDatagovCatalogHonesty() {
   });
 }
 
+// §45AH: ArcGIS Hub dataset discovery (hub.arcgis.com/api/v3/datasets, loop cycle 9)
+// — P1 REAL total (meta.total, NEVER data.length) + offset pagination + P2 no-match/
+// outage + P4 schema_drift ladder + provenance disclosure + openDataOnly A/B + q≥2 +
+// fixed-host SSRF (OFFLINE, deterministic).
+const isAh = (u) => /hub\.arcgis\.com\/api\/v3\/datasets/.test(u);
+const ahRow = (i, over = {}) => ({ id: `id${i}`, type: "dataset", attributes: { name: `Dataset ${i}`, source: `City of Testville ${i}`, region: "US", owner: `owner${i}`, orgName: `Org ${i}`, type: "CSV", sector: "Government", tags: ["contract", "procurement"], downloadable: true, hasApi: false, created: "1600000000000", modified: "1700000000000", searchDescription: `Desc ${i}`, landingPage: `https://x/${i}`, itemId: `item${i}`, ...over } });
+const ahRows = (n) => Array.from({ length: n }, (_, i) => ahRow(i + 1));
+const ahBody = (rows, total) => ({ data: rows, meta: total === undefined ? {} : { total, stats: { totalCount: total }, page: { start: 1, size: rows.length } } });
+const ahMock = (body, status = 200) => (u) => (isAh(u) ? mockResponse({ status, json: body }) : failClosed()());
+const ahQuery = (calls) => new URL(calls.find((x) => isAh(x.url)).url).searchParams;
+
+async function testArcgisHubHonesty() {
+  section("45AH. ArcGIS Hub dataset discovery (hub.arcgis.com/api/v3/datasets, loop cycle 9) — P1 REAL total (meta.total, NEVER data.length) + 0-based offset pagination + P2 no-match/outage + P4 schema_drift ladder + GLOBAL-platform provenance disclosure + openDataOnly A/B + q≥2 guard + fixed-host SSRF (OFFLINE)");
+  const sam = new SamGovClient({});
+
+  // ── P1: totalAvailable = meta.total (the EXACT Hub count), NEVER data.length.
+  //    NON-VACUITY: mutate the module to data.length ⇒ 2 ≠ 4134 ⇒ RED. ──
+  await withFetch(ahMock(ahBody(ahRows(2), 4134)), async (calls) => {
+    const r = await runTool("arcgis_hub_discover_datasets", { query: "procurement contract", limit: 2, offset: 0 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45AH-P1 totalAvailable = meta.total 4134 (the EXACT Hub match count) with returned:2 — mutate the module to use data.length for the total ⇒ 2 ≠ 4134 ⇒ RED (the forbidden total===page-size class)",
+      m.totalAvailable === 4134 && m.returned === 2, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    ok("45AH-P1 returned 2 < total 4134 ⇒ truncated:true, complete:false, hasMore:true, nextOffset:2 (0-based offset pagination) — compute hasMore from anything but offset+returned<total ⇒ RED",
+      m.truncated === true && m.complete === false && m.pagination.hasMore === true && m.pagination.nextOffset === 2 && m.pagination.offset === 0, JSON.stringify(m.pagination));
+    const q = ahQuery(calls);
+    ok("45AH-P1 query MODULE-BUILT on the FIXED host: q, page[size], page[start]=offset+1 (1-based), filter[openData]=true (openDataOnly default) — the host is a compile-time literal, no raw passthrough",
+      new URL(calls[0].url).hostname === "hub.arcgis.com" && q.get("q") === "procurement contract" && q.get("page[size]") === "2" && q.get("page[start]") === "1" && q.get("filter[openData]") === "true" && calls[0].init.redirect === "error", JSON.stringify({ host: new URL(calls[0].url).hostname, q: q.get("q"), size: q.get("page[size]"), start: q.get("page[start]"), od: q.get("filter[openData]") }));
+    const d = r.data.datasets[0];
+    ok("45AH-map curated row: id, name, source/region/owner/orgName (publisher-vetting fields VERBATIM), keywords[], booleans preserved, landingPage",
+      d.id === "id1" && d.name === "Dataset 1" && d.source === "City of Testville 1" && d.region === "US" && d.owner === "owner1" && JSON.stringify(d.keywords) === '["contract","procurement"]' && d.downloadable === true && d.hasApi === false && d.landingPage === "https://x/1", JSON.stringify(d));
+    ok("45AH-prov the GLOBAL-platform provenance caveat rides EVERY response (results include non-US/non-gov publishers; DISCOVERY aid not a curated allowlist) — drop it ⇒ RED",
+      m.notes.some((n) => /GLOBAL, OPEN publishing platform/i.test(n) && /VET/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── P1: offset ⇒ page[start]=offset+1; nextOffset accounts for offset. ──
+  await withFetch(ahMock(ahBody(ahRows(2), 4134)), async (calls) => {
+    const r = await runTool("arcgis_hub_discover_datasets", { query: "zoning", limit: 2, offset: 10 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45AH-page offset 10 ⇒ page[start]=11 (1-based) + nextOffset=12 (offset+returned) + hasMore (12<4134)",
+      ahQuery(calls).get("page[start]") === "11" && m.pagination.nextOffset === 12 && m.pagination.hasMore === true, JSON.stringify({ start: ahQuery(calls).get("page[start]"), no: m.pagination.nextOffset }));
+  });
+
+  // ── P1: total absent (no meta.total/stats) ⇒ totalAvailable null (NEVER data.length),
+  //    completeness inferred from page fullness + a disclosing note. ──
+  await withFetch(ahMock(ahBody(ahRows(2))), async () => {
+    const r = await runTool("arcgis_hub_discover_datasets", { query: "permits", limit: 20 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45AH-P1 meta.total ABSENT ⇒ totalAvailable:null (NEVER data.length), returned 2 < limit 20 ⇒ hasMore:false/complete:true (short-page inference) + a null-total note",
+      m.totalAvailable === null && m.pagination.hasMore === false && m.complete === true && m.notes.some((n) => /totalAvailable is unknown/i.test(n)), JSON.stringify({ ta: m.totalAvailable, pg: m.pagination }));
+  });
+
+  // ── openDataOnly A/B: true ⇒ filter[openData]=true + in filtersApplied; false ⇒ absent. ──
+  await withFetch(ahMock(ahBody(ahRows(1), 5)), async (calls) => {
+    const r = await runTool("arcgis_hub_discover_datasets", { query: "budget", openDataOnly: false, limit: 1 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45AH-ab openDataOnly=false ⇒ NO filter[openData] param sent + 'openDataOnly' NOT in filtersApplied (the filter is HONORED, not silently applied/ignored) — hardcode the filter ⇒ RED",
+      ahQuery(calls).get("filter[openData]") === null && !m.filtersApplied.includes("openDataOnly") && m.filtersApplied.includes("query"), JSON.stringify({ od: ahQuery(calls).get("filter[openData]"), fa: m.filtersApplied }));
+  });
+
+  // ── P2: genuine no-match (data:[], total:0) ⇒ honest empty (NOT thrown). ──
+  await withFetch(ahMock(ahBody([], 0)), async () => {
+    const r = await runTool("arcgis_hub_discover_datasets", { query: "zzzxqywvunobtainium99999" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45AH-P2 genuine no-match (data:[], total:0) ⇒ returned:0, datasets:[], totalAvailable:0, complete:true (an honest exact empty — NOT thrown, NOT a fabricated non-zero)",
+      r.data.datasets.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify(m));
+  });
+  // ── P2: 503 ⇒ upstream_unavailable THROW; 429 ⇒ rate_limited THROW (never fake empty). ──
+  await withFetch(ahMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_hub_discover_datasets", { query: "roads" }, sam));
+    ok("45AH-P2 HTTP 503 ⇒ upstream_unavailable THROWS (a DOWN hub.arcgis.com is NEVER a returned:0)",
+      threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ahMock("Rate limited", 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_hub_discover_datasets", { query: "roads" }, sam));
+    ok("45AH-P2 HTTP 429 ⇒ rate_limited THROWS (never a swallowed-429 fake empty)",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── P4: data non-array / absent ⇒ schema_drift (never a fake empty, never a TypeError). ──
+  await withFetch(ahMock({ data: {}, meta: { total: 3 } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_hub_discover_datasets", { query: "roads" }, sam));
+    ok("45AH-P4 data non-array ({}) ⇒ schema_drift (container-guarded — a TypeError must never mask drift as upstream_unavailable, never a fake empty)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ahMock({ meta: { total: 3 } }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_hub_discover_datasets", { query: "roads" }, sam));
+    ok("45AH-P4 data ABSENT ⇒ schema_drift (never read as an empty result set)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4: a 200 non-JSON body ⇒ schema_drift VIA the catch-ladder (SyntaxError rung). ──
+  await withFetch((u) => (isAh(u) ? { ok: true, status: 200, headers: { get: () => "text/html" }, json: async () => { throw new SyntaxError("Unexpected token < in JSON at position 0"); }, text: async () => "<html>maintenance</html>" } : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_hub_discover_datasets", { query: "roads" }, sam));
+    ok("45AH-P4 a 200 NON-JSON body (HTML masquerade) ⇒ schema_drift via the catch-ladder (SyntaxError→driftError) — never a fake empty",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4 ladder ordering: a 429 THROUGH the ladder STAYS rate_limited (ToolErrorCarrier-first). ──
+  await withFetch(ahMock("Rate limited", 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("arcgis_hub_discover_datasets", { query: "roads", limit: 5 }, sam));
+    ok("45AH-P4 ladder ordering: a 429 propagating THROUGH the catch-ladder STAYS rate_limited (ToolErrorCarrier rethrow FIRST) — reorder to catch-all→schema_drift ⇒ RED",
+      threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── q≥2 guard: a <2-char / whitespace query ⇒ invalid_input, 0 fetch (Zod + direct re-guard). ──
+  for (const bad of ["x", " ", "  "]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("arcgis_hub_discover_datasets", { query: bad }, sam));
+      ok(`45AH-guard query ${JSON.stringify(bad)} (<2 non-ws chars) ⇒ invalid_input, 0 fetch (a whole-Hub scan is refused BEFORE the network) — drop the guard ⇒ RED`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
+  // Direct-handler re-guard (bypassing Zod): the in-handler length check still fires.
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => ahDiscover({ query: " " }));
+    ok("45AH-guard DIRECT handler call query:' ' (Zod-BYPASSING) ⇒ invalid_input, 0 fetch (the in-handler re-guard closes it) — remove it ⇒ it reaches hub.arcgis.com ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+
+  // ── num parity: the shared audited coercion. ──
+  eq("45AH num('4134') ⇒ 4134", arcgisNum("4134"), 4134);
+  eq("45AH num('null') ⇒ null (data-absence honesty — never 0)", arcgisNum("null"), null);
+  eq("45AH num('') ⇒ null (Number('') is 0 — must be caught)", arcgisNum(""), null);
+  ok("45AH arcgis.num === coerce.num (one shared audited impl — a num regression fails §40e/§42m/§44n/§45j/§45AH together)", arcgisNum === coerceNum, "arcgis.num diverged from coerce.num");
+}
+
 // §45E: GSA Federal Travel Per-Diem (api.gsa.gov, ADR-0050) — a NEW travel-cost lane
 // on the SAME api.gsa.gov host + SAME api.data.gov key seam (datagovKey.ts, X-Api-Key
 // header) as §45C. Covers: [INPUT] EITHER (city+state) OR zip — both/neither ⇒
@@ -20943,6 +21070,7 @@ async function main() {
   await testDatagovHonesty();
   await testDatagovDocketsHonesty();
   await testDatagovCatalogHonesty();
+  await testArcgisHubHonesty();
   await testGsaPerdiemHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
