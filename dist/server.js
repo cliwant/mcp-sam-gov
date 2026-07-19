@@ -86,7 +86,7 @@ import { realpathSync } from "node:fs";
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
 // Keep in sync with package.json "version" (asserted at release; see CHANGELOG).
-const SERVER_VERSION = "1.8.0";
+const SERVER_VERSION = "1.9.0";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
     query: z.string().optional().describe("Free-text title query"),
@@ -456,6 +456,21 @@ const EcfrSearchInput = z.object({
     perPage: z.number().min(1).max(20).optional(),
 });
 const EcfrListTitlesInput = z.object({});
+const EcfrGetSectionInput = z.object({
+    titleNumber: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .describe("CFR title (1–50). e.g. 2 = federal financial assistance (grants), 29 = Labor, 26 = IRS. For FAR/DFARS (title 48) prefer far_clause_lookup."),
+    section: z
+        .string()
+        .describe("The section citation, e.g. '200.1' (2 CFR 200.1) or '52.204-21' — the part number is the pre-dot integer. Charclass-validated (^[0-9]{1,3}\\.[0-9]{1,4}(-[0-9]{1,4})?$)."),
+    date: z
+        .string()
+        .optional()
+        .describe("Optional eCFR issue date YYYY-MM-DD; omit to use the title's LATEST issue (disclosed in _meta)."),
+});
 // FAR / DFARS clause lookup (eCFR versioner full endpoint)
 const FarClauseLookupInput = z.object({
     clauseNumber: z
@@ -4507,12 +4522,18 @@ export const TOOLS = [
         inputSchema: FedRegPublicInspectionInput,
         handler: (input) => fedreg.publicInspection(input),
     }),
-    // ━━━ eCFR (5) ━━━
+    // ━━━ eCFR (6) ━━━
     defineTool({
         name: "ecfr_search",
-        description: "Full-text search across the entire CFR (Code of Federal Regulations). Use for compliance questions — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns excerpt + section path + ecfrUrl.",
+        description: "Full-text search across the entire CFR (Code of Federal Regulations). Use for DISCOVERY — pass titleNumber=48 for FAR (Federal Acquisition Regulation), titleNumber=2 for federal financial assistance, etc. Returns a ranked EXCERPT (snippet, not full text) + section path + ecfrUrl per hit. To then read the COMPLETE text of a hit: for a FAR/DFARS clause (title 48) use far_clause_lookup (adds prescription + revision); for any other title's section use ecfr_get_section; or open the ecfrUrl.",
         inputSchema: EcfrSearchInput,
         handler: (input) => ecfr.search(input),
+    }),
+    defineTool({
+        name: "ecfr_get_section",
+        description: "Get the FULL in-force text of ONE CFR section by citation (the companion to ecfr_search, which returns only snippets). Input titleNumber (1–50) + section (e.g. '200.1' → 2 CFR 200.1, uniform grants guidance; '1601.1' → 29 CFR labor) + optional issue date (default = the title's latest). Returns { citation, alternateReference, heading, fullText, issueDate, ecfrUrl }. ★For a FAR/DFARS clause (title 48) prefer far_clause_lookup — it adds the prescription, revision, and FAR-overhaul-risk this generic tool does not; use ecfr_get_section for the OTHER 49 titles (grants/labor/IRS/SBA/…). HONESTY: text is the eCFR's own, de-XMLed (no fabrication); a nonexistent section ⇒ not_found (never a fake/wrong section); the resolved issue date is disclosed (the title's latest is a moving target); a bad section format ⇒ invalid_input (SSRF charclass); an outage ⇒ throws. Keyless.",
+        inputSchema: EcfrGetSectionInput,
+        handler: (input) => ecfr.getSection(input),
     }),
     defineTool({
         name: "ecfr_list_titles",

@@ -22,6 +22,20 @@ export declare function listTitles(): Promise<import("./meta.js").MetaBundle<{
         reserved: boolean;
     }[];
 }>>;
+export declare function getSection(args: {
+    titleNumber: number;
+    section: string;
+    date?: string;
+}): Promise<import("./meta.js").MetaBundle<{
+    titleNumber: number;
+    section: string;
+    citation: string | null;
+    alternateReference: string | null;
+    heading: string | null;
+    fullText: string;
+    issueDate: string;
+    ecfrUrl: string;
+}>>;
 export declare function search(args: {
     query: string;
     titleNumber?: number;

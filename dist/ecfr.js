@@ -12,7 +12,7 @@
  *
  * Both keyless. Documented at https://www.ecfr.gov/developers/.
  */
-import { fetchWithRetry } from "./errors.js";
+import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
 import { driftError } from "./datasource.js";
 import { memoize } from "./cache.js";
 import { withMeta } from "./meta.js";
@@ -57,6 +57,132 @@ export async function listTitles() {
                 "Complete canonical list of all CFR titles — the endpoint returns every title in a single response (no pagination or filtering).",
             ],
         });
+    });
+}
+// ─── ecfr_get_section — full in-force text of one CFR section ──────────────
+// The eval-found gap: ecfr_search returns ranked SNIPPETS; there was no way to pull
+// a clause's COMPLETE text. This fetches one section from the versioner `full`
+// endpoint (a per-section XML, ~5KB), de-XMLed to plain text. A bespoke individual
+// source (not the search API) — mode-2 discovery.
+const ECFR_SECTION_RE = /^[0-9]{1,3}\.[0-9]{1,4}(-[0-9]{1,4})?$/;
+const ECFR_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+async function fetchXmlText(url) {
+    const r = await fetchWithRetry(url, { headers: { Accept: "application/xml" }, signal: AbortSignal.timeout(20_000) }, `ecfr:${url.split("/api/")[1] ?? url}`);
+    return await r.text();
+}
+function decodeXmlEntities(s) {
+    return s
+        .replace(/&quot;/g, '"')
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&#39;/g, "'")
+        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+        .replace(/&amp;/g, "&");
+}
+// De-XML a section body to readable plain text: block tags → newlines, strip the
+// rest, decode entities, drop empty lines. No fabrication — the eCFR's own text.
+function xmlToPlainText(xml) {
+    return decodeXmlEntities(xml
+        .replace(/<\/(P|HD1|HD2|HD3|HD4|HEAD|FP|GID|GPOTABLE|ROW)>/gi, "\n")
+        .replace(/<[^>]+>/g, ""))
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .join("\n");
+}
+export async function getSection(args) {
+    // SSRF/injection: `section` (+ derived `part`) interpolate into the URL query, so
+    // the charclass is the load-bearing guard. `titleNumber` is numeric (schema).
+    // `\s` reject is load-bearing: JS `$` also matches BEFORE a trailing "\n", so the
+    // charclass alone would admit "52.204-21\n". No valid section carries whitespace.
+    if (!ECFR_SECTION_RE.test(args.section) || /\s/.test(args.section)) {
+        throw new ToolErrorCarrier({
+            kind: "invalid_input",
+            retryable: false,
+            message: `Invalid section ${JSON.stringify(args.section)} — expected a CFR section like "52.204-21" or "12.301" (^[0-9]{1,3}\\.[0-9]{1,4}(-[0-9]{1,4})?$, no whitespace).`,
+            upstreamEndpoint: "ecfr:versioner/full",
+        });
+    }
+    let issueDate = args.date;
+    if (issueDate !== undefined && !ECFR_DATE_RE.test(issueDate)) {
+        throw new ToolErrorCarrier({
+            kind: "invalid_input",
+            retryable: false,
+            message: `Invalid date ${JSON.stringify(args.date)} — expected an eCFR issue date YYYY-MM-DD (omit to use the title's latest).`,
+            upstreamEndpoint: "ecfr:versioner/full",
+        });
+    }
+    if (!issueDate) {
+        // Resolve the title's latest issue date (memoized titles list) — DISCLOSED below.
+        const t = (await listTitles()).data.titles.find((x) => x.number === args.titleNumber);
+        issueDate = t?.latestIssueDate;
+        if (!issueDate) {
+            throw new ToolErrorCarrier({
+                kind: "invalid_input",
+                retryable: false,
+                message: `Title ${args.titleNumber} is not a known CFR title (or has no issue date). Verify it via ecfr_list_titles.`,
+                upstreamEndpoint: "ecfr:versioner/full",
+            });
+        }
+    }
+    const part = args.section.split(".")[0];
+    const url = `${ECFR}/versioner/v1/full/${issueDate}/title-${args.titleNumber}.xml?part=${encodeURIComponent(part)}&section=${encodeURIComponent(args.section)}`;
+    const xml = await fetchXmlText(url);
+    // Locate the SECTION DIV8 for EXACTLY this section (the endpoint may return the
+    // enclosing part). Absent ⇒ honest not_found, NEVER a fabricated empty/wrong text.
+    const escaped = args.section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const div = xml.match(new RegExp(`<DIV8 N="${escaped}"[^>]*TYPE="SECTION"[^>]*>([\\s\\S]*?)</DIV8>`, "i"));
+    if (!div) {
+        throw new ToolErrorCarrier({
+            kind: "not_found",
+            retryable: false,
+            message: `Section ${args.section} not found in CFR title ${args.titleNumber} as of the ${issueDate} issue. Verify the citation (e.g. via ecfr_search); the part number (${part}) must actually contain the section.`,
+            upstreamEndpoint: "ecfr:versioner/full",
+        });
+    }
+    const body = div[1];
+    const headMatch = body.match(/<HEAD>([\s\S]*?)<\/HEAD>/i);
+    const heading = headMatch ? xmlToPlainText(headMatch[1]).replace(/\n+/g, " ").trim() : null;
+    let citation = null;
+    let alternateReference = null;
+    const meta = xml.match(/hierarchy_metadata="([^"]*)"/i);
+    if (meta) {
+        try {
+            const hm = JSON.parse(decodeXmlEntities(meta[1]));
+            citation = hm.citation ?? null;
+            alternateReference = hm.alternate_reference ?? null;
+        }
+        catch {
+            /* metadata is advisory — its absence never blocks the text */
+        }
+    }
+    const fullText = xmlToPlainText(body);
+    if (fullText.length === 0) {
+        // A 200 with a section shell but no readable text ⇒ schema drift, not a fake empty.
+        throw driftError("ecfr:versioner/full", `The section ${args.section} DIV8 carried no extractable text — eCFR XML shape drift, never a fabricated empty section.`);
+    }
+    const ecfrUrl = `https://www.ecfr.gov/current/title-${args.titleNumber}/section-${args.section}`;
+    return withMeta({
+        titleNumber: args.titleNumber,
+        section: args.section,
+        citation,
+        alternateReference,
+        heading,
+        fullText,
+        issueDate,
+        ecfrUrl,
+    }, {
+        source: "ecfr.gov/api (versioner/v1/full)",
+        keylessMode: true,
+        returned: 1,
+        totalAvailable: 1,
+        truncated: false,
+        filtersApplied: ["titleNumber", "section"],
+        filtersDropped: [],
+        fieldsUnavailable: [],
+        notes: [
+            `Full in-force text of ${citation ?? `${args.titleNumber} CFR ${args.section}`} as of the ${issueDate} eCFR issue (the title's LATEST unless a date was supplied — a moving target). De-XMLed to plain text; no content fabricated — open ecfrUrl for the authoritative rendering.`,
+        ],
     });
 }
 export async function search(args) {
