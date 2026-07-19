@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`bonfire_search_opportunities` — `<item>` attribute tolerance (dogfood hardening)** — the RSS item extractor matched only a bare `<item>` opening tag, inconsistent with the `<channel[\s>]` schema-drift guard and the inner tag matcher (both attribute-tolerant). A namespaced/extended Bonfire feed emitting `<item …attrs>` would have had those items **silently dropped**, undercounting `totalAvailable` (a latent P1 risk surfaced by an adversarial dogfooding pass; not reproducible on any live feed today, since RSS 2.0 `<item>` has no standard attributes). The extractor now tolerates attributes on the opening tag (`<item(?:\s[^>]*)?>`). +1 fault assertion (an `<item xmlns:ext ext:flag="1">` item is still parsed ⇒ totalAvailable:1, not 0).
+
 ### Changed
 
 - **SKILL.md currency refresh (v1.10.0 surface)** — the bundled agent skill was stale at "144 tools / 48 sources"; refreshed to the actual **150 / 52**, added a dedicated **SLED bid-platforms** section for the six new tools (`opengov_list_governments`/`opengov_search_solicitations`, `bonfire_list_organizations`/`bonfire_search_opportunities`, `arcgis_hub_discover_datasets`, `arcgis_feature_query`), and rewrote the SLED-local-procurement routing note to cover the **53-host Socrata allowlist** (state + major-city + county/city sweep) plus the OpenGov/Bonfire live-solicitation feeds and the ArcGIS-REST feature layers. Zero hallucinated tool names (every backticked tool reference verified against the live 150-tool registry; the 4 non-registry tokens are error-kinds / feedback categories / an `integrityFlag` field value, not tool claims). Docs-only — improves agent tool selection for the SLED bid surface.

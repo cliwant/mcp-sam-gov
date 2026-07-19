@@ -184,7 +184,11 @@ export async function searchOpportunities(args) {
     if (!/<rss[\s>]/i.test(body) || !/<channel[\s>]/i.test(body)) {
         throw driftError(bonfireLabel(org), "Bonfire returned a non-RSS body at HTTP 200 — schema drift (expected an <rss><channel> feed).");
     }
-    const items = body.match(/<item>[\s\S]*?<\/item>/gi) ?? [];
+    // Tolerate attributes on the opening <item …> tag (consistent with the <channel[\s>]
+    // drift guard and the inner tag() matcher). RSS 2.0 <item> has no standard attributes,
+    // but a namespaced/extended feed could add them — a bare-<item> regex would silently
+    // DROP such items and undercount totalAvailable (a latent P1 risk caught in dogfooding).
+    const items = body.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi) ?? [];
     const all = items.map(mapItem);
     // P1: the RSS is the COMPLETE open set ⇒ totalAvailable = item count (true total).
     const totalAvailable = all.length;
