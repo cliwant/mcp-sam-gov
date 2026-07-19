@@ -2112,6 +2112,11 @@ export async function getAgencyProfile(toptierCode: string) {
     website: json.website,
     subtierAgencyCount: json.subtier_agency_count,
     congressionalJustificationUrl: json.congressional_justification_url,
+    // #4 (agent-eval 2026-07-18): this endpoint carries NO spending total, and an
+    // agent asked "how much did agency X obligate?" dead-ends here. Point it to
+    // where obligations actually live (account-level vs award-level vs contracts).
+    spendingNote:
+      "This profile has NO obligation/spending figure. For this agency's obligations use: usas_get_agency_awards_summary(toptierCode) = AWARD-level obligations for a fiscal year; usas_list_toptier_agencies → this agency's `obligatedAmount` = ACCOUNT-level total (all spending, higher than award-level). For CONTRACTS-only, usas_spending_over_time / usas_search_*_spending by the agency's canonical name.",
   };
 }
 
@@ -2169,6 +2174,7 @@ export async function getAgencyAwardsSummary(args: {
     filtersApplied: ["toptierCode", "fiscalYear"],
     notes: [
       "SCOPE: `obligations` and `transactionCount` cover ALL award types (contracts, grants, direct payments incl. benefits, loans) for this agency — NOT prime contracts only. For a benefit-heavy agency (VA/SSA/HHS) direct benefit payments DOMINATE this figure (VA FY2024: ~$238B all-awards vs ~$67B prime contract awards A/B/C/D); for a procurement-heavy agency (DoD/DHS) obligations closely tracks contract spending. For the CONTRACTS-only obligation use usas_spending_over_time (contractObligations) or usas_search_*_spending — those filter by the agency's canonical NAME, so first resolve it from this toptierCode via usas_get_agency_profile (→ name).",
+      "LEVEL: this is AWARD-level obligations (award transactions). It is LOWER than the agency's ACCOUNT-LEVEL total in usas_list_toptier_agencies.obligatedAmount, which counts ALL obligations, not just awards (e.g. VA ~$205B award-level here vs ~$298B account-level there) — pick the one your question means.",
     ],
   });
 }
@@ -2842,7 +2848,9 @@ export async function listToptierAgencies(args: { limit?: number }) {
         totalAvailable: results.length,
         limitHonored: false,
         extraNotes: [
-          "The toptier_agencies endpoint returns the COMPLETE list of ~111 toptier agencies regardless of the `limit` value (limit is ignored upstream).",
+          "The toptier_agencies endpoint returns the COMPLETE list of ~111 toptier agencies regardless of the `limit` value (limit is ignored upstream) — the returned count IS the total.",
+          "The list is ordered ALPHABETICALLY by name, NOT by spending — for 'top N agencies by obligation', sort the returned rows by obligatedAmount client-side (there is no server-side ranking).",
+          "`obligatedAmount` is each agency's ACCOUNT-LEVEL total obligations for its active fiscal year (ALL spending). This is HIGHER than usas_get_agency_awards_summary.obligations, which counts AWARD transactions only (e.g. VA ~$298B account-level vs ~$205B award-level) — do not conflate the two.",
         ],
       }),
       // P5 provenance — threaded ONLY when NON-live ⇒ live stays byte-identical.

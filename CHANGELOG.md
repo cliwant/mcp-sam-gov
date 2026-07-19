@@ -5,6 +5,19 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] — 2026-07-18 (Agent-eval-driven disclosure fixes — keyless, no tool changes)
+
+Additive minor release. Clarity improvements surfaced by a new agent-level eval (an LLM agent given only the tools, on realistic B2G tasks). No tool/schema changes (still **143**) — all `_meta`/disclosure.
+
+### Changed
+
+- **"obligations" disambiguation** — an agent conflated two same-named figures. `usas_list_toptier_agencies` (`obligatedAmount` = **account-level** total, all spending) and `usas_get_agency_awards_summary` (`obligations` = **award-level** only) now each disclose the distinction and cross-reference the other in `_meta` (e.g. VA ~$298B account-level vs ~$205B award-level).
+- **`usas_get_agency_profile`** now returns a `spendingNote` pointing to where obligation figures live — the profile has no spending total, and an agent asking "how much did agency X obligate?" was dead-ending here.
+- **`usas_list_toptier_agencies`** `_meta` now notes the list is alphabetical (sort client-side for top-N by spending) and that `limit` is ignored upstream (the returned count is the total).
+- **`ecfr_search`** `_meta` now notes each `excerpt` is a ranked snippet (not full section text — open the row's `ecfrUrl`) and that a section recurs once per historical version.
+
+2 new non-vacuous fault-injection assertions (3274 → 3276).
+
 ## [1.7.0] — 2026-07-18 (Stay-current: startup update notice + auto GitHub Releases — keyless, no telemetry)
 
 Additive minor release. Two "keep installed users current" changes; no tool changes (still **143**).
