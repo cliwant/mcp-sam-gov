@@ -216,6 +216,11 @@ export const SOCRATA_DOMAINS = [
     "data.princegeorgescountymd.gov", // Prince George's County MD (.gov) — e.g. csi4-9jzc (Spending Information: payee_name/agency/amount ~62k)
     "data.cstx.gov", // College Station TX (.gov) — e.g. i5cx-63zy (Open Budget Expenditures ~42k)
     "datahub.transportation.gov", // US DOT secondary hub (.gov) — e.g. 255k-mnvp (Disbursements by States for Highways SF-2 ~15k)
+    // ── County/city procurement sweep, wave 4 / tail (loop cycle 21, 2026-07-20).
+    //    Diminishing returns (most remaining catalog hits are Canada/AU, demo/test,
+    //    duplicates, or off-theme); these two are the clean US wins. ──
+    "citydata.mesaaz.gov", // Mesa AZ secondary hub (.gov, attr "Office of Management and Budget") — e.g. vdg8-dx96 (City Expenditures ~15.4M)
+    "data.weho.org", // City of West Hollywood CA (.org, official portal) — e.g. atdr-sk64 (Active Contracts: contract_number/contractor_name/status/type — live/current ~1,030)
 ];
 const SOCRATA_DOMAIN_SET = new Set(SOCRATA_DOMAINS);
 const CATALOG_HOST = "api.us.socrata.com";
