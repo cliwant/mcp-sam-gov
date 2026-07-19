@@ -9022,7 +9022,9 @@ async function testSocrataHonesty() {
       // county/city procurement sweep (cycle 17, 2026-07-20) — official municipal portals on .org/.com:
       "data.kcmo.org", "www.dallasopendata.com", "data.lacity.org", "data.richmondgov.com",
       // county/city sweep wave 2 (cycle 19) — Atlanta's Socrata-hosted official portal + Mesquite TX .com:
-      "atlanta.data.socrata.com", "opendata.cityofmesquite.com"]);
+      "atlanta.data.socrata.com", "opendata.cityofmesquite.com",
+      // county/city sweep wave 3 (cycle 20) — USAC datahub (.org), Janesville WI (.us municipal), MA Comptroller CTHRU (Socrata-hosted, attribution-confirmed):
+      "datahub.usac.org", "performance.ci.janesville.wi.us", "cthru.data.socrata.com"]);
     ok("42a+ allowlist = .gov OR a documented official non-.gov portal (no unofficial host slipped in)",
       SOCRATA_DOMAINS.every((h) => h.endsWith(".gov") || NON_GOV_ALLOWED.has(h)),
       JSON.stringify(SOCRATA_DOMAINS.filter((h) => !h.endsWith(".gov") && !NON_GOV_ALLOWED.has(h))));
