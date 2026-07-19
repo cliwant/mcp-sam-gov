@@ -1,5 +1,5 @@
 /**
- * Socrata / SODA — keyless open data for state / local (SLED) + E-rate portals.
+ * Socrata / SODA — keyless open data for state / local (SLED) + federal + E-rate portals.
  *
  * First SLED source (ADR-0004); 3rd consumer of the fetch/map/meta shape after
  * treasury.ts / edgar.ts. Fully PUBLIC, KEYLESS. ONE connector reaches ~a dozen
@@ -67,8 +67,10 @@
  * wrong shape (possible upstream API change). A hard schema_drift throw is
  * reserved for a PRIMARY query (rows / catalog), NEVER the secondary count.
  *
- * ALLOWLIST — LIVE-VERIFIED 2026-07-10 (each carries a real sample 4x4). All
- * `.gov` except `opendata.usac.org`:
+ * ALLOWLIST — each entry carries a real sample 4x4, live-verified on its tier's
+ * date (base state slice 2026-07-10; local + major-city + federal 2026-07-18).
+ * All `.gov` except the documented non-.gov exceptions: `opendata.usac.org` and
+ * the four major-city portals (.us/.org — see the inline blocks below):
  *   m6 — `opendata.usac.org` is a `.org` (USAC, a Congress-designated non-profit;
  *        E-rate). It is on the periodic re-verification checklist. NOTE: the
  *        federated discovery catalog (api.us.socrata.com) does NOT index USAC
@@ -136,6 +138,21 @@ export const SOCRATA_DOMAINS = [
     "data.montgomerycountymd.gov", // Montgomery County MD — e.g. vmu2-pnrc (Contracts)
     "data.mesaaz.gov", // Mesa AZ (city) — e.g. j7s9-qiuq (Vendor Payments)
     "data.cambridgema.gov", // Cambridge MA (city) — e.g. gp98-ja4f (Contracts bid list)
+    // ── Federal open-data portal tier (loop cycle 7, 2026-07-18). The FIRST
+    //    federal Socrata hosts (prior tiers were state + local only); all .gov,
+    //    host-scoped catalog + /resource/<4x4>.json 200 bare-array + count(*)
+    //    companion live-verified. High-value B2G federal datasets (carrier/company
+    //    census, transportation infrastructure & stats, public health).
+    //    CAVEAT (same class as USAC/Mesa, m6): the FEDERATED discovery catalog
+    //    (api.us.socrata.com) UNDER-INDEXES these hosts — e.g. DOT surfaces 3
+    //    datasets federated vs 1,873 host-scoped — so `socrata_discover_datasets`
+    //    under-reports federal datasets (an HONEST partial from the upstream
+    //    federated index, NOT our bug). `socrata_query` works normally with a known
+    //    4x4. (LIVING BACKLOG: switch discover to the per-host `search_context`
+    //    catalog to fix the under-index globally.) ──────────────────────────────
+    "data.transportation.gov", // US DOT — e.g. az4n-8mr2 (Company Census File, ~4.47M carriers)
+    "data.cdc.gov", // US CDC — e.g. 9bhg-hcku (Provisional COVID-19 Deaths)
+    "data.bts.gov", // US BTS (DOT) — e.g. keg4-3bc2 (Border Crossing Entry Data)
     // ── Major-city OFFICIAL portals (loop cycle 5, 2026-07-18). NON-.gov but the
     //    unambiguously-official municipal open-data portals for the largest local
     //    procurement markets (NYC OpenData / Chicago / DataSF / LA Controller) —

@@ -1,5 +1,5 @@
 /**
- * Socrata / SODA — keyless open data for state / local (SLED) + E-rate portals.
+ * Socrata / SODA — keyless open data for state / local (SLED) + federal + E-rate portals.
  *
  * First SLED source (ADR-0004); 3rd consumer of the fetch/map/meta shape after
  * treasury.ts / edgar.ts. Fully PUBLIC, KEYLESS. ONE connector reaches ~a dozen
@@ -67,8 +67,10 @@
  * wrong shape (possible upstream API change). A hard schema_drift throw is
  * reserved for a PRIMARY query (rows / catalog), NEVER the secondary count.
  *
- * ALLOWLIST — LIVE-VERIFIED 2026-07-10 (each carries a real sample 4x4). All
- * `.gov` except `opendata.usac.org`:
+ * ALLOWLIST — each entry carries a real sample 4x4, live-verified on its tier's
+ * date (base state slice 2026-07-10; local + major-city + federal 2026-07-18).
+ * All `.gov` except the documented non-.gov exceptions: `opendata.usac.org` and
+ * the four major-city portals (.us/.org — see the inline blocks below):
  *   m6 — `opendata.usac.org` is a `.org` (USAC, a Congress-designated non-profit;
  *        E-rate). It is on the periodic re-verification checklist. NOTE: the
  *        federated discovery catalog (api.us.socrata.com) does NOT index USAC
@@ -103,7 +105,7 @@
 import { num } from "./coerce.js";
 import { type MetaBundle } from "./meta.js";
 export { num };
-export declare const SOCRATA_DOMAINS: readonly ["data.ny.gov", "data.colorado.gov", "data.ct.gov", "data.texas.gov", "data.wa.gov", "opendata.maryland.gov", "data.vermont.gov", "data.nj.gov", "data.oregon.gov", "data.pa.gov", "data.mo.gov", "data.delaware.gov", "data.austintexas.gov", "data.kingcounty.gov", "data.montgomerycountymd.gov", "data.mesaaz.gov", "data.cambridgema.gov", "data.cityofnewyork.us", "data.cityofchicago.org", "data.sfgov.org", "controllerdata.lacity.org", "opendata.usac.org"];
+export declare const SOCRATA_DOMAINS: readonly ["data.ny.gov", "data.colorado.gov", "data.ct.gov", "data.texas.gov", "data.wa.gov", "opendata.maryland.gov", "data.vermont.gov", "data.nj.gov", "data.oregon.gov", "data.pa.gov", "data.mo.gov", "data.delaware.gov", "data.austintexas.gov", "data.kingcounty.gov", "data.montgomerycountymd.gov", "data.mesaaz.gov", "data.cambridgema.gov", "data.transportation.gov", "data.cdc.gov", "data.bts.gov", "data.cityofnewyork.us", "data.cityofchicago.org", "data.sfgov.org", "controllerdata.lacity.org", "opendata.usac.org"];
 export type SocrataDomain = (typeof SOCRATA_DOMAINS)[number];
 export type SocrataRow = Record<string, unknown>;
 /**
