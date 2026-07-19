@@ -5,11 +5,14 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.9.0] — 2026-07-18 (SLED Socrata city/county expansion + eCFR full-section tool — keyless, 143 → 144 tools)
+
+Additive minor release (autonomous improvement loop, cycles 1 + 3). Extends SLED coverage down to the local tier and adds full CFR section text for any title.
 
 ### Added
 
 - **Socrata SLED expansion (city/county tier)** — 5 live-verified `.gov` municipal open-data hosts added to the curated Socrata allowlist: **Austin TX, King County WA, Montgomery County MD, Mesa AZ, Cambridge MA**. Each carries keyless B2G procurement/vendor/contract data (e.g. Austin purchase orders ~318k rows; King County procurement contracts ~4.8k), reachable via `socrata_query` / `socrata_discover_datasets`. Extends SLED coverage from state portals down to the fragmented local (city/county) tier — the layer most B2G buyers must track. Host-scoped catalog + `/resource/<4x4>.json` 200 bare-array verified per host; SSRF allowlist (single source of truth) + all-`.gov` principle preserved; 3 new fault assertions.
+- **`ecfr_get_section`** (144th tool, keyless) — the FULL in-force text of any CFR section by citation, the companion to `ecfr_search` (which returns only ranked snippets). Fills an agent-eval gap (an agent couldn't retrieve a clause's complete text). For FAR/DFARS (title 48) it defers to `far_clause_lookup` (richer — adds prescription/revision); it is the full-text path for the **other 49 titles** (grants title 2, labor 29, IRS 26, …). `ecfr_search` now discloses both full-text routes. HONESTY: text is the eCFR's own (de-XMLed, no fabrication); a nonexistent section ⇒ `not_found`; a bad citation ⇒ `invalid_input` (SSRF charclass, incl. the JS `$` trailing-newline trap); the resolved issue date is disclosed. 6 new fault assertions.
 
 ## [1.8.0] — 2026-07-18 (Agent-eval-driven disclosure fixes — keyless, no tool changes)
 

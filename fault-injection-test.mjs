@@ -56,7 +56,7 @@ import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js"
 import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards, searchRecipients, glossary, autocompleteRecipient, autocompleteNaics } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
-import { search as ecfrSearch } from "./dist/ecfr.js";
+import { search as ecfrSearch, getSection as ecfrGetSection } from "./dist/ecfr.js";
 import { searchGrants, getGrant } from "./dist/grants.js";
 import { searchDocuments as fedRegSearch, getDocument as fedRegGet, listAgencies as fedRegListAgencies, publicInspection as fedRegPI, computeLeadDays as fedRegLeadDays, buildPublicInspectionUrl as fedRegBuildPIUrl, assertFedRegHost, PRE_PUBLICATION_CAVEAT, LEADDAYS_METHOD_NOTE, SPECIAL_REGULAR_NOTE } from "./dist/federal-register.js";
 import { searchWageDeterminations, getWageRates, benchmarkLaborRates } from "./dist/pricing.js";
@@ -20722,6 +20722,40 @@ async function testFeedbackLoop() {
 // ── startup update notice (update-check.ts): opt-out, fail-silent, stderr-only ──
 // Reaches ALREADY-installed users without telemetry. OFFLINE, deterministic,
 // non-vacuous: every branch pins a specific outcome; a broken guarantee WOULD fail.
+// ── ecfr_get_section (loop cycle 3) — full section text from versioner/full ──
+// OFFLINE, deterministic, non-vacuous: parse a real DIV8 shape, honest not_found on
+// a missing section, SSRF charclass on a bad citation.
+async function testEcfrGetSection() {
+  section("ecfr_get_section — full section text (versioner/full): parse + honest not_found + SSRF");
+  const sam = new SamGovClient({});
+  const SECTION_XML =
+    '<?xml version="1.0" encoding="UTF-8"?><DIV8 N="52.204-21" TYPE="SECTION" hierarchy_metadata="{&quot;citation&quot;:&quot;48 CFR 52.204-21&quot;,&quot;alternate_reference&quot;:&quot;FAR 52.204-21&quot;}"><HEAD>52.204-21 Basic Safeguarding of Covered Contractor Information Systems.</HEAD><P>(a) <I>Definitions.</I></P><EXTRACT><P>(b)(1) The Contractor shall apply the following basic safeguarding requirements to covered contractor information systems.</P></EXTRACT></DIV8>';
+  const isFull = (u) => /versioner\/v1\/full\//.test(u);
+  // (a) 200 section XML ⇒ citation/heading/fullText de-XMLed; issueDate (given) disclosed.
+  await withFetch((u) => (isFull(u) ? mockResponse({ status: 200, json: SECTION_XML }) : failClosed()()), async () => {
+    const r = await ecfrGetSection({ titleNumber: 48, section: "52.204-21", date: "2026-07-08" });
+    ok("ecfr_get_section 200 ⇒ citation + heading + fullText parsed (de-XMLed) + issueDate disclosed",
+      r.data.citation === "48 CFR 52.204-21" && r.data.alternateReference === "FAR 52.204-21" &&
+      /Basic Safeguarding/.test(r.data.heading) && /basic safeguarding requirements/i.test(r.data.fullText) &&
+      r.data.issueDate === "2026-07-08" && r.meta.returned === 1, JSON.stringify({ c: r.data.citation, h: r.data.heading?.slice(0, 30) }));
+  });
+  // (b) a 200 that does NOT contain the section's DIV8 ⇒ not_found (never a fabricated/wrong section).
+  await withFetch((u) => (isFull(u) ? mockResponse({ status: 200, json: '<?xml version="1.0"?><DIV6 TYPE="PART" N="52"></DIV6>' }) : failClosed()()), async () => {
+    const { threw, error } = await expectThrow(() => ecfrGetSection({ titleNumber: 48, section: "52.999-9", date: "2026-07-08" }));
+    ok("ecfr_get_section no matching DIV8 ⇒ not_found (honest — never a fabricated empty/wrong section)",
+      threw && toToolError(error).kind === "not_found", JSON.stringify({ kind: toToolError(error).kind }));
+  });
+  // (c) SSRF charclass: a bad section ⇒ invalid_input BEFORE any fetch (incl. the JS `$` trailing-\n trap).
+  await withFetch(failClosed(), async (calls) => {
+    for (const bad of ["../etc", "52.204-21\n", "abc", "52.204-21; rm"]) {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => ecfrGetSection({ titleNumber: 48, section: bad, date: "2026-07-08" }));
+      ok(`ecfr_get_section bad section ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (SSRF charclass + no-whitespace)`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+  });
+}
+
 async function testUpdateCheck() {
   section("update notice: opt-out, fail-silent, quiet-when-current version check");
 
@@ -20906,6 +20940,7 @@ async function main() {
   await testApiKeysDoc();
   await testFeedbackLoop();
   await testUpdateCheck();
+  await testEcfrGetSection();
 
   // Prove the harness bites.
   await selfCheck();
