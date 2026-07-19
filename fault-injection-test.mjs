@@ -9014,6 +9014,20 @@ async function testSocrataHonesty() {
     ok("42a+ allowlist = .gov OR a documented official non-.gov portal (no unofficial host slipped in)",
       SOCRATA_DOMAINS.every((h) => h.endsWith(".gov") || NON_GOV_ALLOWED.has(h)),
       JSON.stringify(SOCRATA_DOMAINS.filter((h) => !h.endsWith(".gov") && !NON_GOV_ALLOWED.has(h))));
+    // 42a-fed (loop cycle 7, 2026-07-18): the FEDERAL Socrata portal tier — the
+    // first federal hosts (all .gov, so covered by the .gov principle above with
+    // NO new non-.gov exception). Non-vacuous: a typo/removal fails membership.
+    const FED_TIER = ["data.transportation.gov", "data.cdc.gov", "data.bts.gov"];
+    ok("42a-fed federal Socrata hosts (DOT/CDC/BTS) are in SOCRATA_DOMAINS + all .gov (new tier, no non-.gov exception added)",
+      FED_TIER.every((h) => SOCRATA_DOMAINS.includes(h) && h.endsWith(".gov")),
+      JSON.stringify(FED_TIER.filter((h) => !SOCRATA_DOMAINS.includes(h) || !h.endsWith(".gov"))));
+    {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() =>
+        runTool("socrata_query", { domain: "data.transportation.gov.evil.com", datasetId: "az4n-8mr2" }, sam));
+      ok("42a-fed federal-host lookalike 'data.transportation.gov.evil.com' ⇒ invalid_input, 0 fetch (SSRF tight on the federal tier too)",
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind }));
+    }
     // A lookalike of a NEW host is still rejected pre-fetch (guard covers new hosts).
     {
       const before = calls.length;
