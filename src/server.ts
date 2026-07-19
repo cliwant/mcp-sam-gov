@@ -49,6 +49,7 @@ import * as echo from "./echo.js";
 import * as datagov from "./datagov.js";
 import * as datagovCatalog from "./datagov-catalog.js";
 import * as arcgisHub from "./arcgis-hub.js";
+import * as opengov from "./opengov.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
@@ -3003,6 +3004,37 @@ const ArcgisHubDiscoverInput = z.object({
     .min(0)
     .default(0)
     .describe("0-based record offset (→ page[start]=offset+1). Page with _meta.pagination.nextOffset; totalAvailable is the exact Hub match count."),
+});
+
+// ─── OpenGov Procurement (api.procurement.opengov.com — keyless SLED bids) ─
+// SLED bid campaign. 525+ US state/local portals' live solicitations via the
+// public portal's own anonymous backend API (the key-gated api-key API is NOT
+// used). Fixed-host SSRF. governmentCode = the portal slug from list_governments.
+const OpengovListGovernmentsInput = z.object({
+  state: z
+    .string()
+    .length(2)
+    .optional()
+    .describe("2-letter US state filter (client-side), e.g. 'CA', 'FL'. Optional."),
+  query: z
+    .string()
+    .min(1)
+    .max(120)
+    .optional()
+    .describe("Case-insensitive name substring filter (client-side), e.g. 'county', 'school'. Optional."),
+  limit: z.number().int().min(1).max(200).default(50).describe("Portals per page, 1..200, default 50."),
+  offset: z.number().int().min(0).default(0).describe("0-based offset; page with _meta.pagination.nextOffset. totalAvailable = exact filtered portal count."),
+});
+
+const OpengovSearchSolicitationsInput = z.object({
+  governmentCode: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(opengov.OPENGOV_CODE_RE)
+    .describe("The OpenGov portal slug (from opengov_list_governments `code`), e.g. 'santacruzca', 'orlando', 'u-46'. REQUIRED. Lowercase alnum/hyphen; a bad slug ⇒ invalid_input pre-fetch."),
+  limit: z.number().int().min(1).max(100).default(50).describe("Solicitations per page, 1..100, default 50 (→ API page size)."),
+  offset: z.number().int().min(0).default(0).describe("0-based offset (snapped to the API's fixed page boundary). Page with _meta.pagination.nextOffset."),
 });
 
 // ─── GovInfo (api.govinfo.gov — the api.data.gov keyed trio's 3rd API) ─
@@ -6075,6 +6107,26 @@ export const TOOLS: ToolDef[] = [
       "Discover ArcGIS Hub datasets by keyword — the SLED/GIS open-data layer that Socrata and CKAN do NOT cover (keyless; hub.arcgis.com/api/v3/datasets). Much US state/local/regional/tribal open data (GIS, infrastructure, permits, zoning, boundaries, procurement) is published on ArcGIS Hub. Input `query` (→q, REQUIRED, ≥2 non-whitespace chars — a broad whole-Hub scan is refused), `openDataOnly` (default TRUE → filter[openData]=true, the B2G-relevant designated-open-data subset; false broadens to all shared items), `limit` (1..100, def 20 → page[size]), `offset` (0-based → page[start]=offset+1). Returns { query, openDataOnly, datasets:[{ id, name, description, owner, orgName, source, region, type, sector, keywords, downloadable, hasApi, created, modified, landingPage, itemId }] } + honest _meta. ★PROVENANCE (the crux — a DIFFERENT trust posture from our other sources): ArcGIS Hub is a GLOBAL, OPEN publishing platform — results include NON-US and NON-GOVERNMENTAL publishers. This is a DISCOVERY aid, NOT a curated official-source allowlist (unlike socrata_query): the per-row owner/orgName/source/region are surfaced VERBATIM so you can VET the publisher before relying on the data, and the global-platform caveat rides EVERY response. DISCOVERY ONLY — metadata + links; to read rows follow the dataset on its own ArcGIS endpoint (a guarded row-query tool is a planned addition). HONESTY: totalAvailable = the EXACT Hub match count (meta.total, NEVER data.length — P1); pagination is a 0-based offset (nextOffset when more remain); every scalar null-never-empty, booleans null-preserving, counts null-never-0; a genuine no-match ⇒ complete:true/returned:0; a 429 ⇒ rate_limited / 5xx/timeout ⇒ upstream_unavailable THROWS (never a fake empty); a 200 non-JSON / non-array data ⇒ schema_drift.",
     inputSchema: ArcgisHubDiscoverInput,
     handler: (input) => arcgisHub.discoverDatasets(input),
+  }),
+  // ━━━ OpenGov Procurement (api.procurement.opengov.com) — keyless SLED bids ━━━
+  // SLED bid campaign (from the exhaustive US state+local bid-site research). 525+
+  // state/local government portals' LIVE solicitations, via the public portal's OWN
+  // anonymous backend REST API — the key-gated official api-key API is NOT touched
+  // (genuinely keyless, live-verified). Fixed-host SSRF. Two tools: a directory
+  // (one keyless GET returns all ~560 orgs) + per-org solicitations.
+  defineTool({
+    name: "opengov_list_governments",
+    description:
+      "List the government portals on OpenGov Procurement (formerly ProcureNow) — the directory for opengov_search_solicitations (keyless; api.procurement.opengov.com). OpenGov Procurement hosts the live open-solicitation portals of 525+ US state/local governments (cities, counties, school & special districts across 42 states + DC). The WHOLE directory arrives in ONE keyless GET and is filtered client-side: `state` (2-letter), `query` (case-insensitive name substring); `limit`(1..200)/`offset`. Only ACTIVE, non-internal portals are returned. Output: { governments:[{ code, name, city, state, website }] } + honest _meta. Feed a result's `code` to opengov_search_solicitations. HONESTY: this consumes ONLY the anonymous endpoints the public portal itself calls (the official key-gated api-key API is NOT used) — genuinely keyless; totalAvailable is the EXACT filtered portal count (never the page length); a 429/5xx/timeout THROWS (never a fake empty); a non-array body ⇒ schema_drift.",
+    inputSchema: OpengovListGovernmentsInput,
+    handler: (input) => opengov.listGovernments(input),
+  }),
+  defineTool({
+    name: "opengov_search_solicitations",
+    description:
+      "List a government's public solicitations on OpenGov Procurement (keyless; api.procurement.opengov.com, POST /project/list with the required publicView gate). Input `governmentCode` (the portal slug from opengov_list_governments, e.g. 'santacruzca', 'orlando', 'u-46'; REQUIRED), `limit`(1..100)/`offset`. Returns { governmentCode, solicitations:[{ id, title, solicitationNumber, status, type, department, releaseDate, proposalDeadline, contactName, link }] } + honest _meta. ★STATUS: `status` is surfaced VERBATIM — **open = currently ACCEPTING responses**; pending/evaluation/closed are ALSO returned (publicView shows all public projects), so filter status==='open' for live bids. `link` is the public portal page. HONESTY: totalAvailable = the API's `count` = the org's TOTAL public-project count (all statuses), NEVER the page length and NOT an open-only count (a note discloses this); pagination is the API's fixed page (offset is snapped to the page boundary, disclosed); a genuine no-match ⇒ complete:true/returned:0; a 429/5xx/timeout THROWS (never a fake empty); a non-array `projects` ⇒ schema_drift; a bad `governmentCode` ⇒ invalid_input pre-fetch. Genuinely keyless (the key-gated official API is NOT used).",
+    inputSchema: OpengovSearchSolicitationsInput,
+    handler: (input) => opengov.searchSolicitations(input),
   }),
   // ━━━ GovInfo (api.govinfo.gov) — the api.data.gov keyed trio's 3rd API (3) ━━━ ADR-0010
   // GPO-authoritative bulk publications (BILLS/PLAW/USCODE/CREC/CFR-FR editions/
