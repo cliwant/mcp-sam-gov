@@ -4,7 +4,7 @@
 
 ### **$4 trillion of public federal data, one `npm install` away.**
 
-The most comprehensive **keyless-first** MCP server for US federal contracting + spending + regulation + partner vetting. **144 tools across 48 federal data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 44 need none. Works today, in any AI agent.
+The most comprehensive **keyless-first** MCP server for US federal **and state/local (SLED)** contracting + spending + regulation + partner vetting. **150 tools across 52 data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 48 need none. Works today, in any AI agent.
 
 [![npm](https://img.shields.io/npm/v/@cliwant/mcp-sam-gov?color=cb3837&label=%40cliwant%2Fmcp-sam-gov&logo=npm)](https://www.npmjs.com/package/@cliwant/mcp-sam-gov)
 [![mcp-registry](https://img.shields.io/badge/MCP%20Registry-active-2ea44f?logo=anthropic)](https://registry.modelcontextprotocol.io/v0/servers?search=cliwant)
@@ -50,7 +50,7 @@ The most comprehensive **keyless-first** MCP server for US federal contracting +
 |---|---|
 | GovWin: $30K-$100K/yr per seat | Free, MIT license |
 | API key registration → wait 24h → quota tier shopping | `npm install` → working in 60s |
-| 5+ separate vendor APIs / scrapers | 1 unified surface, 144 tools across 48 sources |
+| 5+ separate vendor APIs / scrapers | 1 unified surface, 150 tools across 52 sources |
 | LLMs hallucinate NAICS codes / agency names | Anti-hallucination autocomplete guards built-in |
 | Brittle scraping breaks weekly | Daily live smoke test ([badge above](#)) |
 | Procurement officer → IT ticket → 3-week wait | Claude Desktop double-click install |
@@ -77,9 +77,10 @@ The federal data this wraps is **public domain**. There is no good reason it sho
 | 🏥 **Health & research funding** | "NIH/NSF grants on this topic; recruiting clinical trials; industry payments to this physician" | NIH RePORTER, NSF, ClinicalTrials.gov, CMS Open Payments, NPPES |
 | 🛡 **Cyber compliance** | "Is this CVE on the CISA KEV must-patch list?" | NVD, CISA KEV |
 | 🌐 **Trade, geo & disaster** | "HTS tariff for this product; Census tract for this address; FEMA declarations in this state" | USITC HTS, US Census, FEMA, Socrata, CKAN |
+| 🏙 **State/local procurement bids (SLED)** | "What's open on this city's/county's procurement portal right now? Their checkbook, awarded contracts, vendor payments; state DOT bid/award registers" | OpenGov Procurement (525+ govs), Bonfire, ArcGIS (feature + Hub), Socrata (53 hosts) |
 | 🎓 **Grants & datasets** | "Cybersecurity grants posted in the last 30 days; discover federal open datasets" | Grants.gov, data.gov |
 
-**144 tools across 48 federal data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 44 need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
+**150 tools across 52 data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 48 need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
 
 ---
 
@@ -106,7 +107,7 @@ If you already use Claude Code (the CLI):
 /plugin install cliwant/mcp-sam-gov
 ```
 
-This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 144 tools.
+This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 150 tools.
 
 ### 🔵 Path 3 — Manual install for any MCP host (Codex, Cursor, Continue, Gemini)
 
@@ -174,7 +175,7 @@ Then point your host config at the absolute path:
 
 (Or skip this entirely — use Path 1's `.mcpb` and it auto-configures.)
 
-Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (144 tools)".
+Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (150 tools)".
 
 ### Claude Code
 
@@ -399,7 +400,7 @@ This server is built to **improve from real usage**. Because an AI agent (not a 
 
 You can also open one directly: [**New issue**](https://github.com/cliwant/mcp-sam-gov/issues/new/choose) — bug / feature / wrong-output templates.
 
-## Tool catalog (144 tools)
+## Tool catalog (150 tools)
 
 Grouped by workflow. Keyless-first — most tools need no key; Census business-patterns, FRED, BEA, and DOL's data endpoint require a free key, and a handful of others gain higher limits from an optional free key (noted above). Descriptions are condensed — each tool's own `inputSchema` carries the full contract and honesty caveats.
 
@@ -604,9 +605,20 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 - `fema_search_hazard_mitigation` — FEMA Hazard Mitigation Assistance projects (HMGP/FMA/PDM/BRIC mitigation grants to state/local/tribal subrecipients; disaster-resilience, distinct from Public Assistance recovery)
 - `nws_active_alerts` — currently-active NWS weather alerts (watches/warnings/advisories; disaster/climate readiness, pairs with the FEMA tools)
 - `socrata_discover_datasets` — find Socrata dataset 4x4 ids by keyword
-- `socrata_query` — query rows from an allowlisted Socrata/SODA open-data portal
+- `socrata_query` — query rows from an allowlisted Socrata/SODA open-data portal (**53 curated state/county/city + federal hosts** — checkbook, contracts, vendor payments, live solicitations across the SLED tier)
 - `ckan_discover_datasets` — find CKAN datastore resource ids by keyword
 - `ckan_query` — query rows from an allowlisted CKAN datastore resource (state/city spend/checkbook)
+</details>
+
+<details>
+<summary><b>State/local procurement bids (SLED) — OpenGov · Bonfire · ArcGIS (6 tools)</b></summary>
+
+- `opengov_list_governments` — directory of 525+ US state/local governments on **OpenGov Procurement** (filter by state/query)
+- `opengov_search_solicitations` — a government's **live public solicitations** (title, status [open = accepting], deadline, portal link) — keyless anonymous endpoints
+- `bonfire_list_organizations` — curated live-verified 186-org US seed directory of governments on **Bonfire (Euna)**
+- `bonfire_search_opportunities` — an org's currently-open opportunities via keyless RSS (referenceNumber, name, closeDate, link); the RSS is the complete open set (exact total)
+- `arcgis_hub_discover_datasets` — discover ArcGIS Hub datasets by keyword (the SLED GIS/infrastructure/permits/procurement layer Socrata & CKAN don't cover; a discovery aid with publisher surfaced for vetting)
+- `arcgis_feature_query` — query rows from a curated allowlist of **23 US-gov ArcGIS REST feature layers**: DC OCP PASS live solicitations; local-gov checkbooks/contracts; **state DOT bid/award registers (TX / AK / IA / OK)**
 </details>
 
 <details>
