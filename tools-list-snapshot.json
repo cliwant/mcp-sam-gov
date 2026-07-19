@@ -3411,6 +3411,55 @@
     }
   },
   {
+    "name": "opengov_list_governments",
+    "description": "List the government portals on OpenGov Procurement (formerly ProcureNow) — the directory for opengov_search_solicitations (keyless; api.procurement.opengov.com). OpenGov Procurement hosts the live open-solicitation portals of 525+ US state/local governments (cities, counties, school & special districts across 42 states + DC). The WHOLE directory arrives in ONE keyless GET and is filtered client-side: `state` (2-letter), `query` (case-insensitive name substring); `limit`(1..200)/`offset`. Only ACTIVE, non-internal portals are returned. Output: { governments:[{ code, name, city, state, website }] } + honest _meta. Feed a result's `code` to opengov_search_solicitations. HONESTY: this consumes ONLY the anonymous endpoints the public portal itself calls (the official key-gated api-key API is NOT used) — genuinely keyless; totalAvailable is the EXACT filtered portal count (never the page length); a 429/5xx/timeout THROWS (never a fake empty); a non-array body ⇒ schema_drift.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "2-letter US state filter (client-side), e.g. 'CA', 'FL'. Optional."
+        },
+        "query": {
+          "type": "string",
+          "description": "Case-insensitive name substring filter (client-side), e.g. 'county', 'school'. Optional."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Portals per page, 1..200, default 50."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based offset; page with _meta.pagination.nextOffset. totalAvailable = exact filtered portal count."
+        }
+      }
+    }
+  },
+  {
+    "name": "opengov_search_solicitations",
+    "description": "List a government's public solicitations on OpenGov Procurement (keyless; api.procurement.opengov.com, POST /project/list with the required publicView gate). Input `governmentCode` (the portal slug from opengov_list_governments, e.g. 'santacruzca', 'orlando', 'u-46'; REQUIRED), `limit`(1..100)/`offset`. Returns { governmentCode, solicitations:[{ id, title, solicitationNumber, status, type, department, releaseDate, proposalDeadline, contactName, link }] } + honest _meta. ★STATUS: `status` is surfaced VERBATIM — **open = currently ACCEPTING responses**; pending/evaluation/closed are ALSO returned (publicView shows all public projects), so filter status==='open' for live bids. `link` is the public portal page. HONESTY: totalAvailable = the API's `count` = the org's TOTAL public-project count (all statuses), NEVER the page length and NOT an open-only count (a note discloses this); pagination is the API's fixed page (offset is snapped to the page boundary, disclosed); a genuine no-match ⇒ complete:true/returned:0; a 429/5xx/timeout THROWS (never a fake empty); a non-array `projects` ⇒ schema_drift; a bad `governmentCode` ⇒ invalid_input pre-fetch. Genuinely keyless (the key-gated official API is NOT used).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "governmentCode": {
+          "type": "string",
+          "description": "The OpenGov portal slug (from opengov_list_governments `code`), e.g. 'santacruzca', 'orlando', 'u-46'. REQUIRED. Lowercase alnum/hyphen; a bad slug ⇒ invalid_input pre-fetch."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Solicitations per page, 1..100, default 50 (→ API page size)."
+        },
+        "offset": {
+          "type": "number",
+          "description": "0-based offset (snapped to the API's fixed page boundary). Page with _meta.pagination.nextOffset."
+        }
+      },
+      "required": [
+        "governmentCode"
+      ]
+    }
+  },
+  {
     "name": "regulations_get_docket",
     "description": "Fetch ONE Regulations.gov docket by id via /v4/dockets/{docketId} (api.data.gov keyed; DATA_GOV_API_KEY or DEMO_KEY) — the detail view where `rin` lives. Input `docketId` (e.g. 'BLM-2026-0001'; the ONLY path-segment value, charclass-validated — a bad id ⇒ invalid_input, 0 fetch). Returns { docket:{ docketId, title, agencyId, docketType, rin, dkAbstract, keywords, program, shortTitle, effectiveDate, modifyDate, objectId, id } } + single-record _meta (returned:1, totalAvailable:null, complete:true). HONESTY: `rin` (Regulatory Identifier Number) is the cross-source JOIN KEY to the Federal Register (fed_register_search_documents) and the Unified Agenda — null-when-absent (never '', e.g. many Nonrulemaking dockets have no assigned RIN), which is NOT a join failure. A nonexistent id ⇒ not_found (or schema_drift if the API returns a 200 error-envelope) — never a fabricated docket. DEMO_KEY ~10 req/hr; set DATA_GOV_API_KEY for 1000/hr.",
     "inputSchema": {

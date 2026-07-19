@@ -178,6 +178,7 @@ import {
 import { num as ctNum, searchStudies as ctSearchStudies, getStudy as ctGetStudy, facetCounts as ctFacetCounts, tokenizeForDisclosure as ctTok } from "./dist/clinicaltrials.js";
 import { searchDatasets as dgSearchDatasets, DATAGOV_CATALOG_HOST } from "./dist/datagov-catalog.js";
 import { num as arcgisNum, discoverDatasets as ahDiscover, ARCGIS_HUB_HOST } from "./dist/arcgis-hub.js";
+import { num as opengovNum, listGovernments as ogList, searchSolicitations as ogSearch, OPENGOV_HOST } from "./dist/opengov.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
@@ -13097,6 +13098,98 @@ async function testArcgisHubHonesty() {
   ok("45AH arcgis.num === coerce.num (one shared audited impl — a num regression fails §40e/§42m/§44n/§45j/§45AH together)", arcgisNum === coerceNum, "arcgis.num diverged from coerce.num");
 }
 
+// §45OG: OpenGov Procurement (api.procurement.opengov.com, SLED bid campaign) —
+// P1 real totals (directory-filter count / API `count`, NEVER page length) +
+// publicView-gated POST + status surfaced + P2 outage + P4 schema_drift + SSRF
+// (fixed host, slug charclass) (OFFLINE, deterministic).
+const isOgGov = (u) => /api\.procurement\.opengov\.com\/api\/v1\/government\b/.test(u);
+const isOgProj = (u) => /api\.procurement\.opengov\.com\/api\/v1\/project\/list\b/.test(u);
+const ogGovBody = () => ([
+  { name: "County of Santa Cruz", city: "Santa Cruz", state: "CA", website: "https://x", isActive: true, isInternal: false, government: { code: "santacruzcounty", id: 1 } },
+  { name: "City of Orlando", city: "Orlando", state: "FL", isActive: true, isInternal: false, government: { code: "orlando", id: 2 } },
+  { name: "OpenGov Internal", city: "SF", state: "CA", isActive: true, isInternal: true, government: { code: "internaltest", id: 3 } }, // dropped (internal)
+  { name: "Inactive City", city: "Old", state: "CA", isActive: false, isInternal: false, government: { code: "inactive", id: 4 } }, // dropped (inactive)
+]);
+const ogProjBody = (n, count) => ({ count, projects: Array.from({ length: n }, (_, i) => ({ id: 1000 + i, title: `Project ${i}`, financialId: `RFP-${i}`, status: i === 0 ? "open" : "closed", type: "purchase", departmentName: "Public Works", releaseProjectDate: "2026-07-01T00:00:00Z", proposalDeadline: "2026-07-30T19:00:00Z", contactFirstName: "Matt", contactLastName: "Starkey" })) });
+const ogMock = (matcher, body, status = 200) => (u) => (matcher(u) ? mockResponse({ status, json: body }) : failClosed()());
+
+async function testOpengovHonesty() {
+  section("45OG. OpenGov Procurement (api.procurement.opengov.com, SLED bid campaign) — directory P1 (filtered count, active/non-internal) + solicitations P1 (API `count`, NEVER page length) + publicView-gated POST + status verbatim + P2 outage + P4 schema_drift + SSRF fixed-host + slug charclass (OFFLINE)");
+  const sam = new SamGovClient({});
+
+  // ── Directory P1: totalAvailable = filtered count (active/non-internal); state filter honored. ──
+  await withFetch(ogMock(isOgGov, ogGovBody()), async (calls) => {
+    const r = await runTool("opengov_list_governments", { state: "CA", limit: 50 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45OG-dir state=CA ⇒ only ACTIVE non-internal CA portals (internal + inactive DROPPED) ⇒ 1 (santacruzcounty); totalAvailable=1 = filtered count (mutate→body.length 4 ⇒ RED)",
+      r.data.governments.length === 1 && r.data.governments[0].code === "santacruzcounty" && m.totalAvailable === 1, JSON.stringify({ n: r.data.governments.length, ta: m.totalAvailable, first: r.data.governments[0]?.code }));
+    ok("45OG-dir fixed host GET api.procurement.opengov.com/api/v1/government + redirect:error (no key/auth header — keyless)",
+      new URL(calls[0].url).hostname === "api.procurement.opengov.com" && new URL(calls[0].url).pathname === "/api/v1/government" && calls[0].init.redirect === "error" && !("x-api-key" in (calls[0].init.headers || {})) && !("Authorization" in (calls[0].init.headers || {})), JSON.stringify({ host: new URL(calls[0].url).hostname, redir: calls[0].init.redirect }));
+  });
+  await withFetch(ogMock(isOgGov, ogGovBody()), async () => {
+    const r = await runTool("opengov_list_governments", { state: "FL" }, sam);
+    ok("45OG-dir state=FL ⇒ orlando only (state filter A/B honored — CA≠FL)", r.data.governments.length === 1 && r.data.governments[0].code === "orlando", JSON.stringify(r.data.governments.map((g) => g.code)));
+  });
+
+  // ── Solicitations P1: totalAvailable = API `count` (NOT projects.length); status verbatim; link built; publicView POST. ──
+  await withFetch(ogMock(isOgProj, ogProjBody(3, 169)), async (calls) => {
+    const r = await runTool("opengov_search_solicitations", { governmentCode: "santacruzca", limit: 50 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45OG-sol totalAvailable = API count 169 (the org's total PUBLIC projects) with returned 3 — mutate to projects.length ⇒ 3 ≠ 169 ⇒ RED (the forbidden total===page-size class)",
+      m.totalAvailable === 169 && m.returned === 3, JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+    ok("45OG-sol status surfaced VERBATIM (open/closed both returned — publicView shows all; consumer filters); link = public portal page; solicitationNumber = financialId",
+      r.data.solicitations[0].status === "open" && r.data.solicitations[1].status === "closed" && r.data.solicitations[0].link === "https://procurement.opengov.com/portal/santacruzca/projects/1000" && r.data.solicitations[0].solicitationNumber === "RFP-0", JSON.stringify(r.data.solicitations[0]));
+    const sentBody = JSON.parse(calls.find((c) => isOgProj(c.url)).init.body);
+    ok("45OG-sol POST body is MODULE-BUILT { governmentCode, publicView:true (the REQUIRED public gate), page, limit } on the fixed host; redirect:error — drop publicView ⇒ RED",
+      sentBody.governmentCode === "santacruzca" && sentBody.publicView === true && typeof sentBody.page === "number" && new URL(calls[0].url).hostname === "api.procurement.opengov.com" && calls[0].init.redirect === "error", JSON.stringify(sentBody));
+    ok("45OG-sol a status note discloses open=accepting + totalAvailable is all-public not open-only", m.notes.some((n) => /open = currently ACCEPTING/i.test(n)), JSON.stringify(m.notes));
+  });
+
+  // ── P2: genuine empty ⇒ honest; 503 ⇒ upstream_unavailable; 429 ⇒ rate_limited. ──
+  await withFetch(ogMock(isOgProj, ogProjBody(0, 0)), async () => {
+    const r = await runTool("opengov_search_solicitations", { governmentCode: "emptycity" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45OG-P2 genuine no-match (projects:[], count:0) ⇒ returned:0, totalAvailable:0, complete:true (honest empty, NOT thrown)", r.data.solicitations.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify(m));
+  });
+  await withFetch(ogMock(isOgProj, "", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("opengov_search_solicitations", { governmentCode: "downcity" }, sam));
+    ok("45OG-P2 HTTP 503 ⇒ upstream_unavailable THROWS (a DOWN api is NEVER a returned:0)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ogMock(isOgGov, "", 429), async () => {
+    const { threw, error } = await expectThrow(() => runTool("opengov_list_governments", {}, sam));
+    ok("45OG-P2 HTTP 429 ⇒ rate_limited THROWS (never a swallowed-429 fake empty)", threw && toToolError(error).kind === "rate_limited", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── P4: non-array bodies ⇒ schema_drift (never a fabricated empty). ──
+  await withFetch(ogMock(isOgGov, { governments: [] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("opengov_list_governments", {}, sam));
+    ok("45OG-P4 /government non-array (an object) ⇒ schema_drift (container-guarded, never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ogMock(isOgProj, { count: 5 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("opengov_search_solicitations", { governmentCode: "x" }, sam));
+    ok("45OG-P4 /project/list projects ABSENT ⇒ schema_drift (never read as an empty result set)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
+  // ── SSRF: a bad governmentCode slug ⇒ invalid_input, 0 fetch (Zod + direct handler re-guard). ──
+  for (const bad of ["BAD/../x", "Up Per", "has space", "a/../b"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("opengov_search_solicitations", { governmentCode: bad }, sam));
+      ok(`45OG-ssrf governmentCode ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (charclass ^[a-z0-9-]$ BEFORE the POST body)`, threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+    });
+  }
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => ogSearch({ governmentCode: "BAD SLUG" }));
+    ok("45OG-ssrf DIRECT handler call governmentCode:'BAD SLUG' (Zod-BYPASSING) ⇒ invalid_input, 0 fetch (in-handler re-guard)", threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+
+  // ── num parity. ──
+  eq("45OG num('169') ⇒ 169", opengovNum("169"), 169);
+  eq("45OG num('') ⇒ null (Number('') is 0 — must be caught)", opengovNum(""), null);
+  ok("45OG opengov.num === coerce.num (one shared audited impl)", opengovNum === coerceNum, "opengov.num diverged from coerce.num");
+}
+
 // §45E: GSA Federal Travel Per-Diem (api.gsa.gov, ADR-0050) — a NEW travel-cost lane
 // on the SAME api.gsa.gov host + SAME api.data.gov key seam (datagovKey.ts, X-Api-Key
 // header) as §45C. Covers: [INPUT] EITHER (city+state) OR zip — both/neither ⇒
@@ -21085,6 +21178,7 @@ async function main() {
   await testDatagovDocketsHonesty();
   await testDatagovCatalogHonesty();
   await testArcgisHubHonesty();
+  await testOpengovHonesty();
   await testGsaPerdiemHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
