@@ -4296,6 +4296,16 @@ async function testGrantsHonesty() {
       ok("VQ-1 single-word keyword ⇒ NO OR-match broadening note (fires only for multi-word)",
         !(single.meta.notes || []).some((n) => /OR-matches multi-word/i.test(n)),
         JSON.stringify(single.meta.notes));
+      // Dogfood fix 2026-07-20: the agency/CFDA note must describe the ACTUAL
+      // behavior (the filter IS applied server-side → a bad value returns 0
+      // results), NOT the old stale claim that Grants.gov "silently ignores an
+      // unknown code / returns the UNFILTERED set / if too broad, verify" — which
+      // pointed the remedy the wrong way (the real failure mode is empty).
+      const filtered = await searchGrants({ keyword: "flood", agency: "DHS-FEMA", rows: 1 });
+      ok("grants agency/CFDA note describes the REAL behavior (server-side filter ⇒ 0 results on a bad value) and drops the old 'UNFILTERED / too broad' misdescription",
+        (filtered.meta.notes || []).some((n) => /filter server-side/i.test(n) && /0 results/i.test(n)) &&
+        !(filtered.meta.notes || []).some((n) => /UNFILTERED result set|too broad/i.test(n)),
+        JSON.stringify(filtered.meta.notes));
     },
   );
   // VQ-1 F1/F2 (adversarial review, result-aware): a multi-word keyword that returns 0

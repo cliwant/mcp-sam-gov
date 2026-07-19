@@ -92,7 +92,7 @@ export async function searchGrants(args) {
         sent.push("oppStatuses");
     const notes = [];
     if (args.agency || args.cfda) {
-        notes.push("Grants.gov silently ignores an unknown agency code or CFDA number (it returns the UNFILTERED result set instead of an error) and does not confirm which filters were honored — if the result count looks too broad, verify the agency/CFDA value.");
+        notes.push("Grants.gov applies the agency/CFDA filter server-side (live-verified 2026-07-20): a bogus or misspelled value returns 0 results, NOT an error and NOT the unfiltered set — so an unexpectedly EMPTY filtered search most often means the agency/CFDA value is invalid, not that no grants exist. `filtersApplied` reflects that the filter was sent. Verify the agency code / CFDA number if a filtered result is surprisingly empty.");
     }
     // VQ-1 (C82 dogfooding): Grants.gov OR-tokenizes multi-word keywords (matches ANY
     // word) and does NOT support phrase quoting (a quoted "..." keyword returns 0). Live:
