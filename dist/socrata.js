@@ -191,6 +191,17 @@ export const SOCRATA_DOMAINS = [
     "data.lacity.org", // Los Angeles CA (.org, official) — e.g. hf3r-utnq (RAMP Open Bid Opportunities — live bids)
     "data.ramseycountymn.gov", // Ramsey County MN (.gov) — e.g. iu7r-dzmj (Solicitations & Addenda, with due_date/download_url ~516)
     "data.richmondgov.com", // Richmond VA (.com, official) — e.g. xqn7-jvv2 (City Contracts: contract_value/supplier/procurement_type ~1,387)
+    // ── County/city procurement sweep, wave 2 (loop cycle 19, 2026-07-20). Same
+    //    federated-catalog mining + host-scoped count(*) + /resource 200 bare-array
+    //    verification. All large real checkbook/PO/vendor-payment datasets. ──
+    "opendata.howardcountymd.gov", // Howard County MD (.gov) — e.g. mesh-jggc (Vendors Receiving Payments $30k+ ~35k)
+    "data.providenceri.gov", // Providence RI (.gov) — e.g. 425y-pm5m (City & School Dept Purchase Orders ~228k)
+    "fiscalfocus.pittsburghpa.gov", // Pittsburgh PA (.gov) — e.g. t8t2-4b5n (Checkbook Data ~1.01M)
+    "data.coloradosprings.gov", // Colorado Springs CO (.gov) — e.g. yn6y-xikx (Open Checkbook Vendors ~19k)
+    "data.framinghamma.gov", // Framingham MA (.gov) — e.g. cqve-ehkr (Checkbook ~324k)
+    "data.fultoncountyga.gov", // Fulton County GA (.gov) — e.g. mxhc-krcg (Vendor Payments/disbursements ~217k)
+    "atlanta.data.socrata.com", // City of Atlanta GA (Socrata-hosted official portal) — e.g. jmke-icfi (Open Checkbook Ledger ~1.78M)
+    "opendata.cityofmesquite.com", // Mesquite TX (.com, official) — e.g. 6tva-azs5 (Check Register ~144k)
 ];
 const SOCRATA_DOMAIN_SET = new Set(SOCRATA_DOMAINS);
 const CATALOG_HOST = "api.us.socrata.com";
