@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **SKILL.md currency refresh** — the bundled agent skill was stale (advertised "120 tools / 37 sources"); refreshed to the actual **144 / 48**, added the missing capability lanes (product-safety openFDA/NHTSA/CPSC, litigation CourtListener, nonprofit IRS-990, NIST 800-53 controls, NWS/CBP/get.gov, SLED local Socrata, `feedback`), and fixed the eCFR full-text routing (`ecfr_search` snippets → `far_clause_lookup` / `ecfr_get_section`). Zero hallucinated tool names (all 138 verified against the live registry). Improves agent tool selection — the gap that surfaced in the agent-eval.
 
+### Fixed
+
+- **`socrata_discover_datasets` — federated under-index resolved for domain-scoped discovery** — a search with a specific `domain` now queries that portal's OWN catalog (`https://{domain}/api/catalog/v1?search_context=…`) instead of the federated `api.us.socrata.com` aggregator, which under-indexes many hosts. Live impact: **USAC `0 → 21`** (the federated index returned zero for USAC entirely), **DOT `q=safety` → 102**, **DOT `q=contract` `0 → 5`** — datasets the federated index hid are now discoverable. The all-host search (no `domain`, the only cross-host mode) still uses the federated aggregator and now **discloses the under-index in `_meta.notes`**; `_meta.source` names the actual catalog used (host vs federated). SSRF unchanged: the host-catalog fetch reuses the same allowlist + `hostname===domain` + `redirect:"error"` guard as row queries. No tool/schema change (still **144**); 4 new fault assertions (host-scoped vs federated routing).
+
 ## [1.9.0] — 2026-07-18 (SLED Socrata city/county expansion + eCFR full-section tool — keyless, 143 → 144 tools)
 
 Additive minor release (autonomous improvement loop, cycles 1 + 3). Extends SLED coverage down to the local tier and adds full CFR section text for any title.
