@@ -5,6 +5,12 @@ All notable changes to `@cliwant/mcp-sam-gov` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Socrata SLED expansion (city/county tier)** — 5 live-verified `.gov` municipal open-data hosts added to the curated Socrata allowlist: **Austin TX, King County WA, Montgomery County MD, Mesa AZ, Cambridge MA**. Each carries keyless B2G procurement/vendor/contract data (e.g. Austin purchase orders ~318k rows; King County procurement contracts ~4.8k), reachable via `socrata_query` / `socrata_discover_datasets`. Extends SLED coverage from state portals down to the fragmented local (city/county) tier — the layer most B2G buyers must track. Host-scoped catalog + `/resource/<4x4>.json` 200 bare-array verified per host; SSRF allowlist (single source of truth) + all-`.gov` principle preserved; 3 new fault assertions.
+
 ## [1.8.0] — 2026-07-18 (Agent-eval-driven disclosure fixes — keyless, no tool changes)
 
 Additive minor release. Clarity improvements surfaced by a new agent-level eval (an LLM agent given only the tools, on realistic B2G tasks). No tool/schema changes (still **143**) — all `_meta`/disclosure.

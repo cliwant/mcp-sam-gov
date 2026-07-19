@@ -65,7 +65,7 @@ import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
 import { padCik as edgarPadCik, xbrlFrames, filingIndex, parseFullIndex, MAX_INDEX_ROWS, _resetFullIndexCache, dailyFilingIndex, parseDailyIndex, _resetDailyIndexCache, companyConcept, CONCEPT_TAXONOMIES } from "./dist/edgar.js";
-import { num as socrataNum } from "./dist/socrata.js";
+import { num as socrataNum, SOCRATA_DOMAINS } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
 import {
   num as fdicNum,
@@ -8999,6 +8999,23 @@ async function testSocrataHonesty() {
       ok(`42a non-allowlisted domain ${JSON.stringify(domain)} ⇒ invalid_input, 0 fetch calls (SSRF host allowlist — load-bearing)`,
         threw && toToolError(error).kind === "invalid_input" && calls.length === before,
         JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
+    }
+    // 42a+ (loop cycle 1, 2026-07-18): the SLED city/county tier is wired into the
+    // allowlist (single source of truth). Non-vacuous: a typo/removal in a new host
+    // fails membership; a non-.gov sneaking in fails the TLD principle.
+    const NEW_SLED = ["data.austintexas.gov", "data.kingcounty.gov", "data.montgomerycountymd.gov", "data.mesaaz.gov", "data.cambridgema.gov"];
+    ok("42a+ 5 new SLED city/county hosts are in SOCRATA_DOMAINS (allowlist single-source wired)",
+      NEW_SLED.every((h) => SOCRATA_DOMAINS.includes(h)), JSON.stringify(NEW_SLED.filter((h) => !SOCRATA_DOMAINS.includes(h))));
+    ok("42a+ allowlist stays all-.gov (the one .org exception is USAC only — no unofficial host slipped in)",
+      SOCRATA_DOMAINS.every((h) => h.endsWith(".gov") || h === "opendata.usac.org"),
+      JSON.stringify(SOCRATA_DOMAINS.filter((h) => !h.endsWith(".gov") && h !== "opendata.usac.org")));
+    // A lookalike of a NEW host is still rejected pre-fetch (guard covers new hosts).
+    {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() =>
+        runTool("socrata_query", { domain: "data.austintexas.gov.evil.com", datasetId: "3ebq-e9iz" }, sam));
+      ok("42a+ new-host lookalike 'data.austintexas.gov.evil.com' ⇒ invalid_input, 0 fetch (SSRF still tight on new hosts)",
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: toToolError(error).kind }));
     }
   });
 
