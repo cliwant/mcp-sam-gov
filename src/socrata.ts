@@ -139,6 +139,16 @@ export const SOCRATA_DOMAINS = [
   "data.montgomerycountymd.gov", // Montgomery County MD — e.g. vmu2-pnrc (Contracts)
   "data.mesaaz.gov", // Mesa AZ (city) — e.g. j7s9-qiuq (Vendor Payments)
   "data.cambridgema.gov", // Cambridge MA (city) — e.g. gp98-ja4f (Contracts bid list)
+  // ── Major-city OFFICIAL portals (loop cycle 5, 2026-07-18). NON-.gov but the
+  //    unambiguously-official municipal open-data portals for the largest local
+  //    procurement markets (NYC OpenData / Chicago / DataSF / LA Controller) —
+  //    host-scoped catalog + /resource 200 bare-array verified. Trust-boundary
+  //    (like the USAC .org exception): the SSRF guard is the CURATED, FROZEN
+  //    allowlist, not the TLD; these five are the documented non-.gov entries. ──
+  "data.cityofnewyork.us", // NYC OpenData (.us, official) — e.g. dg92-zbpx (City Record: procurement notices)
+  "data.cityofchicago.org", // Chicago (.org, official) — e.g. rsxa-ify5 (Contracts)
+  "data.sfgov.org", // San Francisco / DataSF (.org, official) — e.g. cqi5-hm2d (Supplier Contracts)
+  "controllerdata.lacity.org", // LA City Controller (.org, official) — e.g. pggv-e4fn (Checkbook L.A.)
   "opendata.usac.org", // USAC E-rate (.org, m6) — e.g. avi8-svp9
 ] as const;
 
