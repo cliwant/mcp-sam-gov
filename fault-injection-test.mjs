@@ -2708,6 +2708,42 @@ async function testSearchOutageHonesty() {
     },
   );
 
+  // ── (d2) OFFSET→PAGE mapping (dogfood fix 2026-07-20): the keyless HAL pages by
+  // PAGE (page × size), so a row `offset` MUST map to `page = floor(offset/size)`
+  // (was hardcoded page=0 ⇒ every offset returned the SAME first page — a silent
+  // wrong answer). Verify the fetched URL carries the mapped page + size, the
+  // result echoes the SERVED (page-aligned) offset, and a NON-aligned offset both
+  // snaps down AND is disclosed in the wrapper's _meta notes.
+  {
+    let seenUrl = null;
+    await withFetch(
+      (u) => { if (isSgs(u)) { seenUrl = u; return sgsPage([oppRow("P1")], 300); } return failClosed()(); },
+      async () => {
+        const r = await client().searchOpportunities({ query: "widgets", limit: 5, offset: 10 });
+        const q = new URL(seenUrl).searchParams;
+        ok("offset:10 limit:5 ⇒ keyless URL carries page=2 & size=5 (offset→page mapping; NOT the old hardcoded page=0)",
+          q.get("page") === "2" && q.get("size") === "5", JSON.stringify({ page: q.get("page"), size: q.get("size") }));
+        ok("offset:10 limit:5 ⇒ result echoes the SERVED page-aligned offset 10 (page 2 × size 5), never a raw offset the upstream didn't honor",
+          r.offset === 10 && r.limit === 5, JSON.stringify({ off: r.offset, lim: r.limit }));
+      },
+    );
+    seenUrl = null;
+    await withFetch(
+      (u) => { if (isSgs(u)) { seenUrl = u; return sgsPage([oppRow("P2")], 300); } return failClosed()(); },
+      async () => {
+        const sam = new SamGovClient({});
+        const r = await client().searchOpportunities({ query: "widgets", limit: 5, offset: 7 });
+        const q = new URL(seenUrl).searchParams;
+        ok("NON-aligned offset:7 limit:5 ⇒ snaps DOWN to page=1 (served offset 5), never silently claims offset 7",
+          q.get("page") === "1" && r.offset === 5, JSON.stringify({ page: q.get("page"), served: r.offset }));
+        const bundle = await runSearch({ query: "widgets", limit: 5, offset: 7 }, sam);
+        const disclosed = metaForSearch(bundle).notes.some((n) => /snapped DOWN to the page boundary 5/.test(n));
+        ok("NON-aligned offset ⇒ the wrapper _meta DISCLOSES the snap (offset 7 → page boundary 5) — never a silent page shift",
+          disclosed, JSON.stringify(metaForSearch(bundle).notes));
+      },
+    );
+  }
+
   // ── (e) HEALTHY NON-EMPTY: a normal page with rows ⇒ returned AS-IS, NO
   // `.degraded`, totalRecords honored, rows mapped (sanity: the happy path is
   // byte-unchanged by the fix).
