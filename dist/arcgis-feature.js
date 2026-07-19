@@ -49,6 +49,14 @@ export const ARCGIS_SERVICES = [
     { key: "dc_pass_contracts", base: "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/37", label: "DC OCP PASS — Contracts", note: "DC awarded contracts. ~50k." },
     { key: "dc_pass_purchase_orders", base: "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/16", label: "DC OCP PASS — Purchase Orders", note: "DC purchase orders. ~275k." },
     { key: "dc_pass_payments", base: "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/17", label: "DC OCP PASS — Payments", note: "DC vendor payments. ~1.55M." },
+    // ── Additional US local-gov procurement layers (loop, 2026-07-19) — found via
+    //    arcgis_hub_discover_datasets, each on a reachable Esri-hosted services*.
+    //    arcgis.com endpoint (NOT WAF-gated) + live-verified returnCountOnly. ──
+    { key: "asheville_purchase_orders", base: "https://services.arcgis.com/aJ16ENn1AaqdFlqx/ArcGIS/rest/services/Financials/FeatureServer/9", label: "Asheville NC — Purchase Order Line Items", note: "City of Asheville NC purchase-order line items. ~62.8k." },
+    { key: "asheville_po_summary", base: "https://services.arcgis.com/aJ16ENn1AaqdFlqx/ArcGIS/rest/services/Financials/FeatureServer/8", label: "Asheville NC — Purchase Order Summary", note: "City of Asheville NC purchase-order summary. ~18.7k." },
+    { key: "bellevue_vendor_payments", base: "https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/YTD_Vendor_Payments/FeatureServer/0", label: "Bellevue WA — YTD Vendor Payments", note: "City of Bellevue WA year-to-date vendor payments. ~15.8k." },
+    { key: "bellevue_awarded_contracts", base: "https://services1.arcgis.com/EYzEZbDhXZjURPbP/arcgis/rest/services/Annual_Awarded_Contracts/FeatureServer/0", label: "Bellevue WA — Annual Awarded Contracts", note: "City of Bellevue WA annual awarded contracts. ~2.0k." },
+    { key: "miamidade_purchase_orders_2017", base: "https://services.arcgis.com/8Pc9XBTAsYuxx9Ny/arcgis/rest/services/miamidade_procurement_data_2017/FeatureServer/0", label: "Miami-Dade County FL — Purchase Orders (ADPICS) 2017", note: "Miami-Dade County FL purchase orders — a 2017 snapshot (historical, disclosed). ~94.8k." },
 ];
 const SERVICE_BY_KEY = new Map(ARCGIS_SERVICES.map((s) => [s.key, s]));
 const DATE_NOTE = "ArcGIS date fields are epoch MILLISECONDS (e.g. DUE_DATE, OPENDATE, CLOSEDATE); a negative/sentinel value (≈ year 1900) is a placeholder, not a real date — surfaced verbatim, parse client-side.";
