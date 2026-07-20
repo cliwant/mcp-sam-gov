@@ -1,0 +1,49 @@
+# Publish server.json to the official MCP Registry (registry.modelcontextprotocol.io).
+#
+# Auth: GitHub OIDC — no stored secret. The `id-token: write` permission lets
+# `mcp-publisher login github-oidc` prove this workflow runs inside the cliwant org,
+# which authorizes publishing under the `io.github.cliwant/*` namespace.
+#
+# The npm package itself is published separately by release.yml; this only registers
+# the server metadata that clients (Claude Desktop, Cursor, Cline, Codex, …) discover.
+#
+# Triggers:
+#   * workflow_dispatch — publish the current server.json on demand
+#     (`gh workflow run mcp-registry-publish.yml`).
+#   * release: published — keep the registry in lockstep with every GitHub release
+#     (the release tag pins server.json's version so it always matches the npm version).
+name: Publish to MCP Registry
+
+on:
+  workflow_dispatch: {}
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC auth to the MCP Registry (no secret required)
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # On a release, pin server.json to the released version (vX.Y.Z → X.Y.Z) so the
+      # registry version always matches the just-published npm version.
+      - name: Sync server.json version to the release tag
+        if: github.event_name == 'release'
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp && mv server.tmp server.json
+          echo "server.json pinned to $VERSION"
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
