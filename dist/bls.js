@@ -504,6 +504,11 @@ export async function timeseries(args) {
     if (parsed.messages.length > 0) {
         notes.push(`BLS returned top-level message(s): ${parsed.messages.join(" | ")}.`);
     }
+    // P1: a batch-of-series request has NO single upstream "total match count", so
+    // totalAvailable is null — NEVER the requested-series count (which also counts a
+    // nonexistent/typo'd raw seriesId that BLS merely STUBS as an empty series with an
+    // "Invalid Series" message, so it would over-report the real series available).
+    notes.push("totalAvailable is null: this is a batch fetch of exactly the series you requested (BLS reports no 'total matching series' count). `returned` is the number of series in the response; a nonexistent/typo'd seriesId comes back as an empty series with an upstream 'Invalid Series' disclosure — it is NOT a real available series.");
     // filtersApplied = the resolved series descriptors + the (possibly clamped) span (P4).
     const filtersApplied = [
         ...resolved.map((r) => (r.key ? `${r.key}=${r.seriesId}` : r.seriesId)),
@@ -513,7 +518,7 @@ export async function timeseries(args) {
         source: blsSource(),
         keylessMode: usingKeylessV1(),
         returned: seriesOut.length,
-        totalAvailable: resolved.length,
+        totalAvailable: null, // a batch-series request has no upstream "total" (see the note); never resolved.length (counts stubbed invalid ids)
         filtersApplied,
         filtersDropped: [],
         fieldsUnavailable,
