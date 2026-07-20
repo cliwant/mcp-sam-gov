@@ -37,6 +37,10 @@ import {
   readOpenfdaError,
   luceneQuote,
   openfdaApiKey,
+  openfdaPageMeta,
+  openfdaEmptyTotal,
+  OPENFDA_CEILING_NOTE,
+  OPENFDA_OVERSKIP_NOTE,
 } from "./openfda.js";
 
 const DEFAULT_LIMIT = 25;
@@ -241,10 +245,10 @@ export async function drugApprovals(args: DrugApprovalsArgs): Promise<MetaBundle
   const rawTotal = metaResults.total;
   const totalAvailable =
     typeof rawTotal === "number" && Number.isFinite(rawTotal) ? rawTotal : null;
-  const hasMore = totalAvailable !== null && skip + returned < totalAvailable;
-  const nextOffset = hasMore ? skip + returned : null;
+  const { hasMore, nextOffset, ceilingHit } = openfdaPageMeta(skip, returned, totalAvailable);
 
   const notes: string[] = [NOT_DETERMINATION_NOTE, MARKETING_NOTE, keyNote(key !== undefined)];
+  if (ceilingHit) notes.push(OPENFDA_CEILING_NOTE);
   if (filtersApplied.length === 0) notes.push(NO_FILTER_NOTE);
 
   return withMeta(
@@ -284,13 +288,15 @@ function emptyResult(
       })`,
       keylessMode: true,
       returned: 0,
-      totalAvailable: 0,
+      totalAvailable: openfdaEmptyTotal(skip),
       filtersApplied,
       filtersDropped: [],
       fieldsUnavailable: [],
       pagination: { offset: skip, limit, hasMore: false, nextOffset: null },
       notes: [
-        "No Drugs@FDA applications matched this query (openFDA returned HTTP 404 NOT_FOUND — the source's honest no-match). This is an exact empty, not an error.",
+        skip === 0
+          ? "No Drugs@FDA applications matched this query (openFDA returned HTTP 404 NOT_FOUND at skip 0 — the source's honest no-match). This is an exact empty (total 0), not an error."
+          : OPENFDA_OVERSKIP_NOTE,
         NOT_DETERMINATION_NOTE,
         keyNote(hasKey),
       ],

@@ -435,11 +435,10 @@ export async function enforcement(
   const rawTotal = metaResults.total;
   const totalAvailable =
     typeof rawTotal === "number" && Number.isFinite(rawTotal) ? rawTotal : null;
-  const hasMore =
-    totalAvailable !== null && skip + returned < totalAvailable;
-  const nextOffset = hasMore ? skip + returned : null;
+  const { hasMore, nextOffset, ceilingHit } = openfdaPageMeta(skip, returned, totalAvailable);
 
   const notes: string[] = [NOT_DETERMINATION_NOTE, keyNote(key !== undefined)];
+  if (ceilingHit) notes.push(OPENFDA_CEILING_NOTE);
   if (!hasStructuredFilter) notes.push(NO_FILTER_NOTE);
   if (categoryDefaulted) notes.push(CATEGORY_DEFAULT_NOTE);
 
@@ -476,8 +475,11 @@ function emptyResult(
   hasKey: boolean,
   categoryDefaulted: boolean,
 ): MetaBundle {
+  const emptyTotal = openfdaEmptyTotal(skip);
   const notes = [
-    "No recall/enforcement records matched this query (openFDA returned HTTP 404 NOT_FOUND — the source's honest no-match). This is an exact empty, not an error.",
+    skip === 0
+      ? "No recall/enforcement records matched this query (openFDA returned HTTP 404 NOT_FOUND at skip 0 — the source's honest no-match). This is an exact empty (total 0), not an error."
+      : OPENFDA_OVERSKIP_NOTE,
     NOT_DETERMINATION_NOTE,
     keyNote(hasKey),
   ];
@@ -493,7 +495,7 @@ function emptyResult(
       })`,
       keylessMode: true,
       returned: 0,
-      totalAvailable: 0,
+      totalAvailable: emptyTotal,
       filtersApplied,
       filtersDropped: [],
       fieldsUnavailable: [],
@@ -516,3 +518,43 @@ function clampSkip(v: unknown): number {
   const n = Math.floor(v);
   return n < 0 ? 0 : n;
 }
+
+// ─── Shared pagination-honesty helpers (used by all three openFDA modules) ──
+/** openFDA caps `skip` at 25000 (skip>25000 → HTTP 400 "Skip value must 25000 or less").
+ *  The last reachable page is skip=25000, so at most ~25000+limit records are enumerable
+ *  via offset paging — datasets larger than that have an UNREACHABLE tail. */
+export const OPENFDA_MAX_SKIP = 25000;
+
+/** Ceiling- and empty-aware pagination. `hasMore` is false on an empty page (returned:0,
+ *  the fema/nvd guard) OR when the next offset would exceed OPENFDA_MAX_SKIP (advertising a
+ *  skip>25000 nextOffset is a poison cursor — following it 400s). `ceilingHit` is true when
+ *  more rows exist upstream but lie beyond the reachable skip window (must be disclosed). */
+export function openfdaPageMeta(
+  skip: number,
+  returned: number,
+  totalAvailable: number | null,
+): { hasMore: boolean; nextOffset: number | null; ceilingHit: boolean } {
+  const candidateNext = skip + returned;
+  const moreUpstream = totalAvailable !== null && candidateNext < totalAvailable;
+  const withinWindow = candidateNext <= OPENFDA_MAX_SKIP;
+  const hasMore = returned > 0 && moreUpstream && withinWindow;
+  return {
+    hasMore,
+    nextOffset: hasMore ? candidateNext : null,
+    ceilingHit: returned > 0 && moreUpstream && !withinWindow,
+  };
+}
+
+/** The ceiling disclosure (records beyond the skip window are permanently unreachable). */
+export const OPENFDA_CEILING_NOTE =
+  `openFDA caps pagination at skip=${OPENFDA_MAX_SKIP}: records beyond ~${OPENFDA_MAX_SKIP}+limit are NOT reachable via this API, so totalAvailable exceeds the paginable window here and the tail is unreachable. Narrow the query (add filters or a date range) to bring the matching set within the first ${OPENFDA_MAX_SKIP} records.`;
+
+/** Skip-aware total for a 404 NOT_FOUND: openFDA returns the SAME 404 for a genuine
+ *  zero-match (only provable at skip 0) and an OVER-SKIP (skip past the end). So skip===0
+ *  ⇒ a true total of 0; a skip>0 404 is AMBIGUOUS ⇒ totalAvailable unknown (null). */
+export function openfdaEmptyTotal(skip: number): number | null {
+  return skip === 0 ? 0 : null;
+}
+/** Disclosure for a skip>0 404 (ambiguous over-skip vs no-match; total unknown). */
+export const OPENFDA_OVERSKIP_NOTE =
+  "Returned 0 at this offset: the skip is at/past the end of the result set (or a genuine no-match). openFDA returns an IDENTICAL HTTP 404 for both, so the true total is UNKNOWN at a non-zero skip (totalAvailable is null, not 0) — re-query at skip:0 for the exact total. This is NOT a confirmed empty result set.";
