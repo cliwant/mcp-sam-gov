@@ -4309,6 +4309,37 @@ async function testGrantsHonesty() {
     },
   );
 
+  // 3b. oppStatuses DEFAULT disclosure (2026-07-20 fix): the tool ALWAYS sends oppStatuses
+  //     (default forecasted|posted) as a server-side filter, so a DEFAULTED call must
+  //     DISCLOSE the effective status set in filtersApplied + a note that CLOSED/ARCHIVED
+  //     are excluded from results AND totalAvailable — else totalAvailable (a status-filtered
+  //     subset) reads as unfiltered (live: 235 forecasted|posted vs 2008 all-statuses).
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { errorcode: 0, data: { hitCount: 235, oppHits: [] } } }) : failClosed()()),
+    async (calls) => {
+      const res = await searchGrants({ keyword: "cybersecurity" });
+      const sentBody = JSON.parse(calls.find((c) => isSearch(c.url)).init.body);
+      ok("14-oppstatus DEFAULT: tool SENDS oppStatuses='forecasted|posted' even when the caller omits it (an applied server-side filter — drop the default ⇒ RED)",
+        sentBody.oppStatuses === "forecasted|posted", JSON.stringify({ sent: sentBody.oppStatuses }));
+      ok("14-oppstatus DEFAULT: filtersApplied DISCLOSES oppStatuses(forecasted|posted) + a note says CLOSED/ARCHIVED are EXCLUDED from results AND totalAvailable (omit ⇒ 235 reads as unfiltered ⇒ RED)",
+        res.meta.filtersApplied.some((f) => /oppStatuses\(forecasted\|posted\)/.test(f)) &&
+          res.meta.notes.some((n) => /CLOSED and ARCHIVED/i.test(n) && /totalAvailable/i.test(n)),
+        JSON.stringify({ fa: res.meta.filtersApplied, note: res.meta.notes.filter((n) => /CLOSED/i.test(n)) }));
+    },
+  );
+  await withFetch(
+    (u) => (isSearch(u) ? mockResponse({ status: 200, json: { errorcode: 0, data: { hitCount: 2008, oppHits: [] } } }) : failClosed()()),
+    async (calls) => {
+      const res = await searchGrants({ keyword: "cybersecurity", oppStatuses: ["forecasted", "posted", "closed", "archived"] });
+      const sentBody = JSON.parse(calls.find((c) => isSearch(c.url)).init.body);
+      ok("14-oppstatus CALLER-SUPPLIED: sends + discloses the EXACT set and NO 'defaulted' note fires (a false defaulted note when the caller DID supply statuses ⇒ RED)",
+        sentBody.oppStatuses === "forecasted|posted|closed|archived" &&
+          res.meta.filtersApplied.some((f) => /oppStatuses\(forecasted\|posted\|closed\|archived\)/.test(f)) &&
+          !res.meta.notes.some((n) => /No oppStatuses supplied/i.test(n)),
+        JSON.stringify({ sent: sentBody.oppStatuses, fa: res.meta.filtersApplied }));
+    },
+  );
+
   // 4. 200 with results ⇒ maps + totalAvailable = hitCount, truncated when returned < total.
   // GRANT-2: search2 returns the real agency NAME in `agency` (agencyName is empty),
   // so agencyName must map from `agency`. The mock mirrors the live shape.
