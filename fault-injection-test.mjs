@@ -9306,6 +9306,21 @@ async function testSocrataHonesty() {
       calls.length >= 2 && calls.every((c) => c.init && c.init.redirect === "error"),
       JSON.stringify(calls.map((c) => c.init?.redirect)));
   });
+
+  // (d-agg) ★v1.12.0 — an AGGREGATE / DISTINCT $select skips the count(*) companion:
+  //  its raw-row total would be FALSE for aggregate result rows (e.g. `distinct
+  //  state` returns 54 rows, but count(*) counts 137,700 SOURCE rows → a wrong
+  //  totalAvailable AND a hasMore livelock paging forever over empty pages). The
+  //  companion is not even fetched → totalAvailable:null + a disclosing note +
+  //  page-fullness hasMore.
+  await withFetch(socrataRowsAndCount([{ state: "AK" }, { state: "AL" }, { state: "AR" }], 137700), async (calls) => {
+    const r = await runTool("socrata_query", { domain: "data.cdc.gov", datasetId: "9bhg-hcku", select: "distinct state", limit: 3 }, sam);
+    const m = buildMeta(r.meta);
+    ok("42d-agg ★$select='distinct state' ⇒ the count(*) companion is SKIPPED (never fetched), so totalAvailable is NULL — NOT the false raw-row 137700 ⇒ drop `distinct`/function-call from AGGREGATE_SELECT_RE ⇒ companion runs ⇒ totalAvailable 137700 ⇒ RED",
+      m.totalAvailable === null && !calls.some((c) => isSocrataCount(c.url)), JSON.stringify({ ta: m.totalAvailable, countFetched: calls.some((c) => isSocrataCount(c.url)) }));
+    ok("42d-agg ★aggregate $select ⇒ a note discloses the raw-row total is unknown (count-companion skipped) + hasMore from PAGE-FULLNESS (returned===limit=3 ⇒ true), never a livelock over a fabricated total",
+      m.notes.some((n) => /aggregate|count\(\*\) companion|raw-row/i.test(n)) && m.pagination.hasMore === true, JSON.stringify({ notes: m.notes.length, hm: m.pagination.hasMore }));
+  });
   // ...and the catalog fetch too.
   await withFetch((u) => (isSocrataCatalog(u) ? mockResponse({ status: 200, json: { results: [], resultSetSize: 0 } }) : failClosed()()), async (calls) => {
     await runTool("socrata_discover_datasets", { q: "42d-redirect-catalog-unique", domain: "data.ny.gov" }, sam);

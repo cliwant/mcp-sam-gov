@@ -238,14 +238,21 @@ const CATALOG_URL = `https://${CATALOG_HOST}/api/catalog/v1`;
 // regex `$` alone would admit ("abcd-1234\n" passes /…$/ in JS).
 const DATASET_ID_RE = /^[a-z0-9]{4}-[a-z0-9]{4}$/;
 
-// D2 — an AGGREGATE $select projection. Matches a SoQL aggregate function
-// (count/sum/avg/min/max) applied via `fn(` — the `\b…\s*\(` shape avoids false
-// hits on column names like `max_temperature` (no paren) or `xmax(` (no word
-// boundary) — OR an explicit `group by`/`$group`. Case-insensitive. When the
-// caller's own $select is aggregate, the count(*) companion is skipped (its
-// raw-row total would be false for aggregate result rows). See `query`.
+// D2 — a cardinality-CHANGING $select projection: ANY function call (`word(` —
+// count/sum/avg/min/max/median/stddev/count_distinct/percentile/…), the bare
+// `distinct` keyword, or an explicit `group by`/`$group`. Case-insensitive. The
+// `\b\w+\s*\(` shape matches a real function CALL (a word followed by a paren),
+// never a plain column name like `max_temperature` (no paren). When the caller's
+// own $select is one of these, the result rows are NOT raw records, so the
+// count(*) companion (which counts SOURCE rows) would be a FALSE total — e.g.
+// `$select=distinct state` returns 54 rows but count(*) is 137,700 → a wrong total
+// AND a hasMore livelock (paging forever over empty pages). So we skip the
+// companion (totalAvailable:null + page-fullness hasMore). A plain comma-separated
+// column list is NOT matched and keeps its real count(*) total. (A per-row
+// function like `upper(x)` also matches → a conservative null-total, an honest
+// "unknown" rather than risking a wrong one.) See `query`.
 const AGGREGATE_SELECT_RE =
-  /\b(?:count|sum|avg|min|max)\s*\(|\bgroup\s+by\b|\$group\b/i;
+  /\b\w+\s*\(|\bdistinct\b|\bgroup\s+by\b|\$group\b/i;
 
 // ─── HONESTY-CRITICAL coercions (null, never 0, for absent) ───────
 // `num`/`str` are the shared, audited null-never-0 coercions in ./coerce.js
