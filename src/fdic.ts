@@ -523,7 +523,7 @@ export async function searchInstitutions(args: {
   const records = env.records.map(mapInstitution);
   const returned = records.length;
   const totalAvailable = env.totalAvailable;
-  const hasMore = offset + returned < totalAvailable;
+  const hasMore = returned > 0 && offset + returned < totalAvailable;
   const nextOffset = hasMore ? offset + returned : null;
 
   const filtersApplied: string[] = [];
@@ -618,7 +618,7 @@ export async function institutionFinancials(args: {
   const records = env.records.map(mapFinancials);
   const returned = records.length;
   const totalAvailable = env.totalAvailable;
-  const hasMore = offset + returned < totalAvailable;
+  const hasMore = returned > 0 && offset + returned < totalAvailable;
   const nextOffset = hasMore ? offset + returned : null;
 
   const notes: string[] = [freshnessNote(env.indexName, env.indexCreated), ASSET_NOTE];
@@ -862,7 +862,7 @@ export async function bankFailures(args: {
   const records = env.records.map(mapFailure);
   const returned = records.length;
   const totalAvailable = env.totalAvailable;
-  const hasMore = offset + returned < totalAvailable;
+  const hasMore = returned > 0 && offset + returned < totalAvailable;
   const nextOffset = hasMore ? offset + returned : null;
 
   const filtersApplied: string[] = [];
@@ -1184,7 +1184,7 @@ export async function institutionHistory(args: {
   const records = env.records.map(mapHistory);
   const returned = records.length;
   const totalAvailable = env.totalAvailable;
-  const hasMore = offset + returned < totalAvailable;
+  const hasMore = returned > 0 && offset + returned < totalAvailable;
   const nextOffset = hasMore ? offset + returned : null;
 
   const filtersApplied: string[] = [];
@@ -1524,7 +1524,7 @@ export async function industrySummary(args: {
   const records = env.records.map(mapSummary);
   const returned = records.length;
   const totalAvailable = env.totalAvailable;
-  const hasMore = offset + returned < totalAvailable;
+  const hasMore = returned > 0 && offset + returned < totalAvailable;
   const nextOffset = hasMore ? offset + returned : null;
 
   const filtersApplied: string[] = [];
@@ -1820,7 +1820,7 @@ export async function riskRatios(args: {
   const records = env.records.map(mapRiskRatios);
   const returned = records.length;
   const totalAvailable = env.totalAvailable;
-  const hasMore = offset + returned < totalAvailable;
+  const hasMore = returned > 0 && offset + returned < totalAvailable;
   const nextOffset = hasMore ? offset + returned : null;
 
   const filtersApplied: string[] = ["cert"];
@@ -2013,7 +2013,7 @@ export async function branchDeposits(args: {
   const records = env.records.map(mapBranchDeposit);
   const returned = records.length;
   const totalAvailable = env.totalAvailable;
-  const hasMore = offset + returned < totalAvailable;
+  const hasMore = returned > 0 && offset + returned < totalAvailable;
   const nextOffset = hasMore ? offset + returned : null;
 
   const filtersApplied: string[] = [];
