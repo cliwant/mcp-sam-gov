@@ -6633,6 +6633,7 @@ async function main() {
         name: t.name,
         description: t.description,
         inputSchema: zodToJsonSchema(t.inputSchema),
+        annotations: toolAnnotations(t.name),
       })),
     };
   });
@@ -6806,6 +6807,53 @@ export async function runTool(
     return await entry.handler(input, { sam });
   }
   throw new Error(`Unknown tool: ${name}`);
+}
+
+// ─── MCP tool annotations ────────────────────────────────────────────────────
+// Every tool advertises a human-friendly `title` plus behaviour hints, per the MCP
+// spec and the Anthropic Connectors Directory requirement (title + readOnlyHint).
+// EVERY tool in this server is strictly READ-ONLY (queries public data; none mutate
+// upstream state) and OPEN-WORLD (calls external government/public APIs), so those
+// two hints are uniform. `title` is derived from the tool name via a source-prefix
+// map so e.g. `sam_search_opportunities` → "SAM.gov: Search Opportunities".
+const TOOL_SOURCE_LABELS: Record<string, string> = {
+  sam: "SAM.gov", usas: "USAspending", edgar: "SEC EDGAR", fdic: "FDIC", cms: "CMS",
+  treasury: "Treasury", regulations: "Regulations.gov", openfda: "openFDA",
+  govinfo: "GovInfo", fema: "FEMA", far: "FAR/DFARS", ecfr: "eCFR", census: "Census",
+  clinicaltrials: "ClinicalTrials.gov", bls: "BLS", socrata: "Socrata", opengov: "OpenGov",
+  nsf: "NSF", nonprofit: "Nonprofit", nhtsa: "NHTSA", gsa: "GSA", grants: "Grants.gov",
+  fred: "FRED", fac: "FAC", echo: "EPA ECHO", dol: "DOL", congress: "Congress.gov",
+  ckan: "data.gov", bonfire: "Bonfire", arcgis: "ArcGIS", sba: "SBA", ofac: "OFAC",
+  nws: "NWS", nppes: "NPPES", nist: "NIST", nih: "NIH", lda: "Senate LDA", hts: "USITC HTS",
+  bea: "BEA", cbp: "CBP", cpsc: "CPSC", nvd: "NVD", courtlistener: "CourtListener",
+  fpds: "FPDS", gao: "GAO", epa: "EPA", nsn: "NSN",
+};
+const TOOL_ACRONYMS = new Set([
+  "naics", "psc", "cfda", "npi", "cve", "csv", "id", "url", "rss", "api", "hts", "sic",
+  "dmepos", "cbp", "sam", "fdic", "epa", "ofac", "far", "dfars", "irs", "usc", "cfr",
+]);
+export function humanizeToolTitle(name: string): string {
+  const tokens = name.split("_");
+  // `fed_register_*` is a two-token source label.
+  let source = tokens[0] ?? "";
+  let rest = tokens.slice(1);
+  if (source === "fed" && tokens[1] === "register") {
+    source = "fed_register";
+    rest = tokens.slice(2);
+  }
+  const label = source === "fed_register" ? "Federal Register" : TOOL_SOURCE_LABELS[source];
+  const words = (label ? rest : tokens)
+    .map((w) => (TOOL_ACRONYMS.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(" ");
+  return label ? (words ? `${label}: ${words}` : label) : words;
+}
+/** Uniform MCP annotations for a tool: derived title + read-only / open-world hints. */
+export function toolAnnotations(name: string): {
+  title: string;
+  readOnlyHint: true;
+  openWorldHint: true;
+} {
+  return { title: humanizeToolTitle(name), readOnlyHint: true, openWorldHint: true };
 }
 
 /**
