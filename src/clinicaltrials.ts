@@ -543,18 +543,30 @@ export async function searchStudies(args: CtSearchArgs): Promise<MetaBundle> {
       "clinicaltrials shape drift — /studies response.studies must be an array.",
     );
   }
-  // countTotal=true was sent, so totalCount MUST be a finite number — its absence
-  // is drift, NEVER a silently-null total, NEVER studies.length (§Honesty #1).
-  if (typeof b.totalCount !== "number" || !Number.isFinite(b.totalCount)) {
-    throw driftError(
-      CT_LABEL,
-      "clinicaltrials shape drift — /studies totalCount missing/non-number on a countTotal=true request (typeof-checked BEFORE num() so a non-number can't silently parse; NEVER fall back to studies.length).",
-    );
-  }
+  // §Honesty #1: totalCount is returned ONLY on the FIRST page of a cursor sequence —
+  // ClinicalTrials.gov v2 OMITS it on every pageToken CONTINUATION, even with
+  // countTotal=true (live-verified: page 1 carries totalCount, every subsequent
+  // pageToken call omits it). So its absence is drift ONLY on the first page; on a
+  // continuation an absent total is EXPECTED (handled at the totalAvailable step below).
+  const isContinuation = args.pageToken !== undefined;
 
   const studies = (b.studies as unknown[]).map((s) => mapStudy(s, false));
   const returned = studies.length;
-  const totalAvailable = num(b.totalCount) as number; // EXACT (genuine 0 → 0)
+  // First page: totalCount MUST be a finite number (typeof-checked BEFORE num() so a
+  // non-number can't silently parse; NEVER studies.length) — its absence is drift.
+  // Continuation page: totalCount is legitimately omitted ⇒ totalAvailable:null (the
+  // first page's total still describes the whole set; disclosed in a note).
+  let totalAvailable: number | null;
+  if (typeof b.totalCount === "number" && Number.isFinite(b.totalCount)) {
+    totalAvailable = num(b.totalCount) as number; // EXACT (genuine 0 → 0)
+  } else if (isContinuation) {
+    totalAvailable = null;
+  } else {
+    throw driftError(
+      CT_LABEL,
+      "clinicaltrials shape drift — /studies totalCount missing/non-number on a FIRST-page countTotal=true request (typeof-checked BEFORE num(); NEVER fall back to studies.length).",
+    );
+  }
 
   // ── Opaque-cursor honesty (§Honesty #2). Terminal = token ABSENT. The token is
   //    surfaced VERBATIM (never fabricated/derived). Phantom-empty guard: 0
@@ -576,6 +588,11 @@ export async function searchStudies(args: CtSearchArgs): Promise<MetaBundle> {
   // ── Notes: the mandatory caveat + cursor + data-currency always; the
   //    conditional facet/tokenization disclosures; the unscoped recommendation. ──
   const notes: string[] = [CT_TRIAL_CAVEAT, CT_CURSOR_NOTE];
+  if (isContinuation && totalAvailable === null) {
+    notes.push(
+      "totalAvailable is null on this continuation page — ClinicalTrials.gov reports the study total ONLY on the first page of a cursor sequence (it is omitted on every pageToken continuation, even with countTotal=true). The total from the first page still describes the whole result set.",
+    );
+  }
   notes.push(...andNotes);
   // Emit the sponsor-broadening note ONLY for a SINGLE-token sponsor. For a
   // MULTI-token sponsor CT AND-split and NARROWED (the andNotes AND-note fired),

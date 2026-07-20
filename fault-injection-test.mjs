@@ -16760,6 +16760,28 @@ async function testClinicaltrialsHonesty() {
       threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
   });
 
+  // ── (b2) CONTINUATION page (pageToken sent) OMITS totalCount ⇒ NOT drift (2026-07-20 fix).
+  //    ClinicalTrials.gov v2 returns totalCount ONLY on the FIRST page; every pageToken
+  //    continuation omits it even with countTotal=true. The old guard threw schema_drift
+  //    on EVERY page ≥2, so the tool's OWN advertised nextCursor→pageToken flow crashed
+  //    (live: `condition=diabetes` page 2 threw). A continuation with no totalCount must be
+  //    totalAvailable:null + a note — NEVER a throw. ──
+  await withFetch(ctMock({ studies: ctRows(3), nextPageToken: "NEXT_TOK_2" }), async () => {
+    const r = await runTool("clinicaltrials_search_studies", { "query.term": "cancer", pageToken: "SOME_CURSOR", pageSize: 3 }, sam);
+    const m = buildMeta(r.meta);
+    ok("53b2 CONTINUATION (pageToken) with NO totalCount ⇒ NO throw: returned:3, totalAvailable:null, nextCursor advertised + a first-page-only-total note (revert to the unconditional totalCount guard ⇒ page ≥2 throws schema_drift ⇒ RED — the tool's own cursor flow crashes)",
+      r.data.studies.length === 3 && m.totalAvailable === null && r.meta.nextCursor === "NEXT_TOK_2" &&
+        m.notes.some((n) => /reports the study total ONLY on the first page/i.test(n)),
+      JSON.stringify({ ret: r.data.studies.length, ta: m.totalAvailable, nc: r.meta.nextCursor }));
+  });
+  // (b2') FIRST page (no pageToken) still REQUIRES totalCount — the relaxation is
+  //       continuation-ONLY, so a page-1 absent total is still genuine drift.
+  await withFetch(ctMock({ studies: ctRows(2), nextPageToken: "T" }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { "query.term": "cancer" }, sam));
+    ok("53b2 FIRST page (no pageToken) with MISSING totalCount ⇒ STILL schema_drift (continuation-only relaxation — a page-1 absent total is real drift)",
+      threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+
   // ── (c) a bad token / HTTP 400 ⇒ THROWS (never read as empty). ──
   await withFetch(ctMock("Incorrect pageToken format", 400), async () => {
     const { threw, error } = await expectThrow(() => runTool("clinicaltrials_search_studies", { "query.term": "cancer", pageToken: "GARBAGETOKENXYZ" }, sam));
