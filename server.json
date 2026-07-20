@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cliwant/mcp-sam-gov",
-  "description": "Keyless-first MCP: 150 tools for US federal + state/local (SLED) contracting, spending, regulation & partner vetting.",
+  "description": "Keyless MCP: 150 tools for US federal + state/local (SLED) contracting, spending & regulation",
   "repository": {
     "url": "https://github.com/cliwant/mcp-sam-gov",
     "source": "github"
@@ -16,19 +16,84 @@
         "type": "stdio"
       },
       "environmentVariables": [
-        { "name": "SAM_GOV_API_KEY", "description": "Optional. SAM.gov key for higher rate limits + archives older than 12 months. Keyless by default.", "isSecret": true, "isRequired": false },
-        { "name": "CENSUS_API_KEY", "description": "Optional free key for Census business-patterns tools.", "isSecret": true, "isRequired": false },
-        { "name": "FRED_API_KEY", "description": "Optional free key for FRED economic-series tools.", "isSecret": true, "isRequired": false },
-        { "name": "BEA_API_KEY", "description": "Optional free key for BEA regional/industry economic tools.", "isSecret": true, "isRequired": false },
-        { "name": "BLS_API_KEY", "description": "Optional free key for BLS labor-statistics tools (raises rate limits).", "isSecret": true, "isRequired": false },
-        { "name": "DOL_API_KEY", "description": "Optional free key for DOL data-endpoint tools.", "isSecret": true, "isRequired": false },
-        { "name": "DATA_GOV_API_KEY", "description": "Optional free api.data.gov key (raises DEMO_KEY limits for DOL/govinfo tools).", "isSecret": true, "isRequired": false },
-        { "name": "NVD_API_KEY", "description": "Optional free NVD key (raises CVE rate limits).", "isSecret": true, "isRequired": false },
-        { "name": "OPENFDA_API_KEY", "description": "Optional free openFDA key (raises rate limits).", "isSecret": true, "isRequired": false },
-        { "name": "SOCRATA_APP_TOKEN", "description": "Optional Socrata app token (raises rate limits on SLED Socrata hosts).", "isSecret": true, "isRequired": false },
-        { "name": "COURTLISTENER_API_TOKEN", "description": "Optional CourtListener (Free Law Project) token (raises rate limits).", "isSecret": true, "isRequired": false },
-        { "name": "LDA_API_KEY", "description": "Optional Senate LDA lobbying-disclosure key (raises rate limits).", "isSecret": true, "isRequired": false },
-        { "name": "EDGAR_USER_AGENT", "description": "Optional SEC EDGAR User-Agent string (courtesy identification; a sensible default is used otherwise).", "isSecret": false, "isRequired": false }
+        {
+          "name": "SAM_GOV_API_KEY",
+          "description": "Optional. SAM.gov key for higher rate limits + archives older than 12 months. Keyless by default.",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "CENSUS_API_KEY",
+          "description": "Optional free key for Census business-patterns tools.",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "FRED_API_KEY",
+          "description": "Optional free key for FRED economic-series tools.",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "BEA_API_KEY",
+          "description": "Optional free key for BEA regional/industry economic tools.",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "BLS_API_KEY",
+          "description": "Optional free key for BLS labor-statistics tools (raises rate limits).",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "DOL_API_KEY",
+          "description": "Optional free key for DOL data-endpoint tools.",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "DATA_GOV_API_KEY",
+          "description": "Optional free api.data.gov key (raises DEMO_KEY limits for DOL/govinfo tools).",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "NVD_API_KEY",
+          "description": "Optional free NVD key (raises CVE rate limits).",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "OPENFDA_API_KEY",
+          "description": "Optional free openFDA key (raises rate limits).",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "SOCRATA_APP_TOKEN",
+          "description": "Optional Socrata app token (raises rate limits on SLED Socrata hosts).",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "COURTLISTENER_API_TOKEN",
+          "description": "Optional CourtListener (Free Law Project) token (raises rate limits).",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "LDA_API_KEY",
+          "description": "Optional Senate LDA lobbying-disclosure key (raises rate limits).",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "EDGAR_USER_AGENT",
+          "description": "Optional SEC EDGAR User-Agent string (courtesy identification; a sensible default is used otherwise).",
+          "isSecret": false,
+          "isRequired": false
+        }
       ]
     }
   ]
