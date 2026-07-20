@@ -317,10 +317,8 @@ export async function buildIndexFromFile(
   let headerSeen = false;
   let rowCount = 0;
 
-  const rl = createInterface({
-    input: createReadStream(csvPath, { encoding: "utf8" }),
-    crlfDelay: Infinity,
-  });
+  const stream = createReadStream(csvPath, { encoding: "utf8" });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
   const asm = makeRecordAssembler((rec) => {
     if (!headerSeen) {
       headerSeen = true; // first logical record is the 47-column header
@@ -350,8 +348,17 @@ export async function buildIndexFromFile(
     notices[noticeId.toLowerCase()] = fieldsFromRecord(rec);
   });
 
-  for await (const line of rl) asm.push(line);
-  asm.flush();
+  try {
+    for await (const line of rl) asm.push(line);
+    asm.flush();
+  } finally {
+    // Release the OS file handle on ALL exit paths (including the header-drift
+    // throw, which aborts mid-stream). Windows holds a lock on an open read
+    // stream, so a caller deleting the file right after a throw hits
+    // ENOTEMPTY/EBUSY unless the handle is closed here first.
+    rl.close();
+    stream.destroy();
+  }
 
   return { notices, rowCount };
 }
