@@ -6285,6 +6285,40 @@ async function testRecompeteWindowScan() {
     const awardCalls = calls.filter((c) => /spending_by_award(?!_count)/.test(c.url)).length;
     ok("31b scanned the full budget (2 pages) before giving up", awardCalls === 2, `awardCalls=${awardCalls}`);
   });
+
+  // (c) LIVELOCK GUARD (2026-07-20 fix): when the scan budget truncates WITH some
+  //     in-window rows collected, the cursor may advance ONLY within the SCANNED
+  //     rows. Paging PAST totalInWindow must emit hasMore:true + nextOffset:null
+  //     (the note tells the caller to raise scanBudgetPages) — NEVER an advancing
+  //     cursor into empty pages, which re-runs the whole upstream scan forever. The
+  //     old code forced `nextOffset = startIdx + pageSize` whenever hasMore (i.e.
+  //     unconditionally under scanTruncated) → an unbounded loop of empty pages.
+  //     LIVE-REPRODUCED on DoD (scanBudgetPages 1, page 20): returned:0, hasMore:true,
+  //     nextOffset:100 (advancing from offset 95). Every OTHER tool in this module
+  //     emits nextOffset:null for the same "not offset-reachable" reason (W3-7/8).
+  //     6 in-window rows over a truncating scan (hasNext never stops, no past-window
+  //     break) ⇒ scanTruncated=true, totalInWindow=6.
+  const inWin = (pageNo) => Array.from({ length: 3 }, (_, i) => row(400 - (pageNo - 1) * 3 - i, 5e6, `S${(pageNo - 1) * 3 + i}`)); // all d in-window, DESC
+  const ogPaged = (u, init) => {
+    if (!/spending_by_award(?!_count)/.test(u)) return failClosed()();
+    const body = JSON.parse(init.body);
+    return mockResponse({ status: 200, json: { results: inWin(body.page), page_metadata: { hasNext: true, page: body.page } } });
+  };
+  await withFetch(ogPaged, async () => {
+    const p1 = await searchRecompetes({ agency: "Department of Defense", scanBudgetPages: 2, pageSize: 3, page: 1 });
+    ok("31c-1 within-scanned page advances NORMALLY: page 1 (startIdx 0 of 6) ⇒ returned 3, hasMore true, nextOffset 3 (moreInScanned — the legit cursor still works)",
+      p1.data.recompetes.length === 3 && p1.meta.pagination.hasMore === true && p1.meta.pagination.nextOffset === 3, JSON.stringify(p1.meta.pagination));
+  });
+  await withFetch(ogPaged, async () => {
+    const p2 = await searchRecompetes({ agency: "Department of Defense", scanBudgetPages: 2, pageSize: 3, page: 2 });
+    ok("31c-2 LAST scanned page under truncation: page 2 (startIdx 3 of 6) ⇒ returned 3, hasMore true (more beyond budget) BUT nextOffset NULL + totalAvailable null — the un-scanned tail is NOT offset-reachable (revert to `hasMore?startIdx+pageSize:null` ⇒ nextOffset 6 ⇒ RED)",
+      p2.data.recompetes.length === 3 && p2.meta.pagination.hasMore === true && p2.meta.pagination.nextOffset === null && p2.meta.totalAvailable === null, JSON.stringify(p2.meta.pagination));
+  });
+  await withFetch(ogPaged, async () => {
+    const p3 = await searchRecompetes({ agency: "Department of Defense", scanBudgetPages: 2, pageSize: 3, page: 3 });
+    ok("31c-3 ★LIVELOCK: page PAST totalInWindow (page 3, startIdx 6 of 6) ⇒ returned 0, hasMore true BUT nextOffset NULL — NEVER an advancing cursor into empty pages (revert ⇒ nextOffset 9, an infinite empty-page re-scan loop ⇒ RED; the exact live DoD livelock)",
+      p3.data.recompetes.length === 0 && p3.meta.pagination.hasMore === true && p3.meta.pagination.nextOffset === null, JSON.stringify(p3.meta.pagination));
+  });
 }
 
 // §32: usas_spending_over_time contract-only truthfulness (SOT-1, DA-1 class).
