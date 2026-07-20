@@ -19,16 +19,20 @@
  *   entirely — never surfaced, logged, or stored. The B2G value is the
  *   manufacturer / component / safety signal, NOT the VIN.
  *
- * ★ THE HONESTY PILLARS (P1-P4, live-verified 2026-07-15):
+ * ★ THE HONESTY PILLARS (P1/P3/P4 live-verified 2026-07-15; P2 corrected +
+ *   re-verified 2026-07-20):
  *   P1: totalAvailable = `Count` (recalls) / `count` (complaints) — the REAL total.
  *       NHTSA returns the COMPLETE filtered set (no pagination), so in the normal
  *       case Count === results.length ⇒ complete:true. totalAvailable is NEVER
  *       fabricated: a PRESENT numeric Count is trusted verbatim; a MISSING Count
  *       falls back to results.length WITH an honest note (never invented).
- *   P2: results:[] (Count 0) ⇒ an HONEST EMPTY (returned:0, complete:true) — a bad
- *       make/model that returns 200+Count 0 is an honest no-match, NOT an error. A
- *       4xx ⇒ invalid_input; a 5xx/timeout ⇒ THROW (never a fake empty); a 200
- *       non-JSON body ⇒ schema_drift.
+ *   P2: ★NHTSA returns HTTP 400 (NOT 200) + {Count/count:0, results:[]} (Message
+ *       "Results returned successfully") for a VALID make/model/year that simply
+ *       has ZERO records (live-verified 2026-07-20). getNhtsa reads the body and
+ *       reclassifies THAT idiom as an HONEST EMPTY (returned:0, totalAvailable:0,
+ *       complete:true) with a note; any OTHER 400 ⇒ invalid_input, a 404 ⇒
+ *       not_found, a 5xx/timeout ⇒ THROW (never a fake empty), a 200 non-JSON
+ *       body ⇒ schema_drift.
  *   P3: booleans (crash/fire/parkIt/parkOutSide/overTheAirUpdate) preserved AS
  *       booleans (a non-boolean ⇒ null, never a fabricated false); counts
  *       (numberOfInjuries/numberOfDeaths) via `num` (a genuine 0 stays 0, NEVER
@@ -41,8 +45,8 @@
  *       ^\d{4}$; make/model are charclass-validated (letters/digits/space/hyphen,
  *       so a `../` or `%` can never reach the fixed path).
  */
-import { ToolErrorCarrier } from "./errors.js";
-import { getJson, driftError } from "./datasource.js";
+import { ToolErrorCarrier, errorFromResponse } from "./errors.js";
+import { driftError, isRedirectError } from "./datasource.js";
 import { num, str } from "./coerce.js";
 import { withMeta } from "./meta.js";
 // ─── Fixed endpoint (SSRF core — compile-time CONSTANTS) ──────────
@@ -92,10 +96,31 @@ function validateVehicleArgs(args, label) {
 }
 // ─── SSRF-guarded fetch (fixed host + hostname assertion + redirect) ──
 /**
- * GET one NHTSA JSON resource on the FIXED host. Builds
- * `https://api.nhtsa.gov${path}?${params}`, asserts the CONSTRUCTED URL's
- * hostname === the fixed host over https (belt-and-suspenders), and sets
- * `redirect:"error"` (fail closed on any off-host 3xx). Keyless — no header/token.
+ * ★ NHTSA's "400-for-empty" idiom. A VALID make/model/year that simply has ZERO
+ * records returns HTTP 400 with a body `{Count/count:0, ..., results:[]}` and
+ * `Message/message:"Results returned successfully"` (live-verified 2026-07-20:
+ * `make=tesla&model=model 3&modelYear=2015` → HTTP 400, Count 0). Recalls use
+ * `Count`/`Message`, complaints use lowercase `count`/`message` — accept either.
+ * This is a genuine no-match, NOT a bad request; the caller reclassifies it to an
+ * honest empty. (A 400 that is NOT this idiom stays a real invalid_input.)
+ */
+function isNhtsaEmptyIdiom(body) {
+    if (body === null || typeof body !== "object")
+        return false;
+    const b = body;
+    const rawCount = b.Count ?? b.count;
+    return num(rawCount) === 0 && Array.isArray(b.results) && b.results.length === 0;
+}
+/**
+ * GET one NHTSA JSON resource on the FIXED host. Bespoke `fetch` (NOT the shared
+ * getJson) because we must READ a non-2xx body: NHTSA returns HTTP 400 for a valid
+ * query with zero records (the ★400-for-empty idiom above), and getJson would
+ * throw invalid_input and DISCARD the body — turning "zero recalls" (a valid,
+ * high-value answer) into a phantom "Bad request". Asserts the constructed URL's
+ * hostname === the fixed host over https (belt-and-suspenders) + `redirect:"error"`
+ * (fail closed on any off-host 3xx). Keyless — no header/token. Non-2xx that is NOT
+ * the empty idiom keeps the standard taxonomy (400→invalid_input, 404→not_found,
+ * 429→rate_limited, 5xx→upstream_unavailable); a 200 non-JSON body ⇒ schema_drift.
  */
 async function getNhtsa(path, label, params) {
     const url = `https://${NHTSA_HOST}${path}?${params.toString()}`;
@@ -108,7 +133,55 @@ async function getNhtsa(path, label, params) {
             upstreamEndpoint: label,
         });
     }
-    return getJson(url, { label, redirect: "error" });
+    let res;
+    try {
+        res = await fetch(built.toString(), {
+            redirect: "error",
+            signal: AbortSignal.timeout(15_000),
+        });
+    }
+    catch (e) {
+        if (isRedirectError(e)) {
+            throw driftError(label, `NHTSA returned an off-host redirect (redirect:"error") while fetching ${label} — refusing to follow it (SSRF safety).`);
+        }
+        if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
+            throw new ToolErrorCarrier({
+                kind: "upstream_unavailable",
+                retryable: false,
+                message: `Request to ${label} timed out.`,
+                upstreamEndpoint: label,
+            });
+        }
+        throw new ToolErrorCarrier({
+            kind: "upstream_unavailable",
+            retryable: true,
+            retryAfterSeconds: 30,
+            message: `Network error reaching ${label}: ${e instanceof Error ? e.message : String(e)}`,
+            upstreamEndpoint: label,
+        });
+    }
+    if (!res.ok) {
+        // ★P2 CRUX: read the body — a 400 that is NHTSA's empty idiom is an HONEST
+        // no-match (returned via resolveTotal as Count 0 → total 0), NOT an error.
+        let body = null;
+        try {
+            body = await res.json();
+        }
+        catch {
+            body = null;
+        }
+        if (res.status === 400 && isNhtsaEmptyIdiom(body))
+            return body;
+        // Any other non-2xx keeps the standard taxonomy (never a fabricated empty).
+        // errorFromResponse returns a plain ToolError → wrap it in the carrier to throw.
+        throw new ToolErrorCarrier(errorFromResponse(res, label));
+    }
+    try {
+        return await res.json();
+    }
+    catch {
+        throw driftError(label, `NHTSA ${label} returned a non-JSON body at HTTP 200 — schema drift (never read as an empty result).`);
+    }
 }
 /** Build the shared make/model/modelYear query (module-built; no raw passthrough). */
 function vehicleParams(args) {
@@ -119,22 +192,13 @@ function vehicleParams(args) {
     return params;
 }
 /**
- * Fetch + parse a NHTSA resource, mirroring datagov-catalog's catch-ladder: a
- * ToolErrorCarrier (host-assert / 4xx-5xx taxonomy) rethrows FIRST (preserving its
- * kind); a 200 non-JSON `.json()` SyntaxError reclassifies to schema_drift; a bare
- * error rethrows LAST.
+ * Build the vehicle query and fetch through getNhtsa, which fully classifies the
+ * response: the ★400-for-empty idiom → an honest empty; every other non-2xx → the
+ * standard taxonomy; a 200 non-JSON body → schema_drift. A thin wrapper — getNhtsa
+ * owns the error contract.
  */
 async function fetchNhtsa(path, label, args) {
-    try {
-        return await getNhtsa(path, label, vehicleParams(args));
-    }
-    catch (e) {
-        if (e instanceof ToolErrorCarrier)
-            throw e;
-        if (e instanceof SyntaxError)
-            throw driftError(label, `NHTSA ${label} returned a non-JSON body at HTTP 200 — schema drift (never read as an empty result).`);
-        throw e;
-    }
+    return await getNhtsa(path, label, vehicleParams(args));
 }
 /**
  * Resolve the total from a Count/count field (P1/P4). A PRESENT numeric value is

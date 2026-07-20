@@ -19547,11 +19547,15 @@ async function testNhtsaVehicleSafety() {
       row.component === null && row.remedy === null && row.parkIt === null, JSON.stringify({ component: row.component, remedy: row.remedy, parkIt: row.parkIt }));
   });
 
-  // ── [P2] recalls: Count 0 / results:[] ⇒ HONEST EMPTY (returned:0, complete:true). ──
-  await withFetch(nhtsaRecallsMock(nhtsaRecallsBody(0, [])), async () => {
-    const r = await runTool("nhtsa_recalls", { make: "zzz", model: "notacar", modelYear: "1999" }, sam);
+  // ── [P2] ★recalls: NHTSA's 400-for-empty idiom — HTTP 400 + {Count:0,
+  //    Message:"Results returned successfully", results:[]} for a VALID vehicle
+  //    that simply has ZERO records (live-verified 2026-07-20: tesla/model 3/2015
+  //    → HTTP 400, Count 0). getNhtsa reads the body and reclassifies it to an
+  //    HONEST EMPTY (returned:0, complete:true), NOT a thrown phantom "Bad request". ──
+  await withFetch(nhtsaRecallsMock(nhtsaRecallsBody(0, []), 400), async () => {
+    const r = await runTool("nhtsa_recalls", { make: "tesla", model: "model 3", modelYear: "2015" }, sam);
     const m = buildMeta(r.meta);
-    ok("57-nhtsa-recalls-P2 Count 0 / results:[] (a bad make/model that returns 200) ⇒ recalls:[], returned:0, totalAvailable:0, complete:true — an HONEST EMPTY, NOT an error ⇒ throw on empty ⇒ RED",
+    ok("57-nhtsa-recalls-P2 ★HTTP 400 + Count 0 + results:[] (NHTSA's 400-for-empty idiom) ⇒ recalls:[], returned:0, totalAvailable:0, complete:true — an HONEST 'zero recalls', NOT a phantom invalid_input ⇒ route the 400 through the shared getJson (which throws + discards the body) ⇒ RED",
       r.data.recalls.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.recalls.length, ta: m.totalAvailable, c: m.complete }));
   });
 
@@ -19643,11 +19647,13 @@ async function testNhtsaVehicleSafety() {
       row.odiNumber === "11374558" && row.component === "ELECTRICAL SYSTEM" && row.summary.startsWith("The vehicle") && typeof row.dateOfIncident === "string" && row.dateOfIncident === "2020-06-15" && row.dateComplaintFiled === "2020-07-01", JSON.stringify(row));
   });
 
-  // ── [P2] complaints: count 0 / results:[] ⇒ honest empty; 503 ⇒ upstream; non-JSON ⇒ drift. ──
-  await withFetch(nhtsaComplaintsMock(nhtsaComplaintsBody(0, [])), async () => {
-    const r = await runTool("nhtsa_complaints", { make: "zzz", model: "notacar", modelYear: "1999" }, sam);
+  // ── [P2] ★complaints: HTTP 400 + {count:0, message:"Results returned
+  //    successfully", results:[]} (NHTSA's 400-for-empty idiom, lowercase for
+  //    complaints) ⇒ honest empty; 503 ⇒ upstream; non-JSON ⇒ drift. ──
+  await withFetch(nhtsaComplaintsMock(nhtsaComplaintsBody(0, []), 400), async () => {
+    const r = await runTool("nhtsa_complaints", { make: "tesla", model: "model 3", modelYear: "2015" }, sam);
     const m = buildMeta(r.meta);
-    ok("57-nhtsa-complaints-P2 count 0 / results:[] ⇒ complaints:[], returned:0, totalAvailable:0, complete:true — an HONEST EMPTY, NOT an error ⇒ throw on empty ⇒ RED",
+    ok("57-nhtsa-complaints-P2 ★HTTP 400 + count 0 + results:[] (400-for-empty idiom) ⇒ complaints:[], returned:0, totalAvailable:0, complete:true — an HONEST 'zero complaints', NOT a phantom invalid_input ⇒ route the 400 through the shared getJson ⇒ RED",
       r.data.complaints.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.complaints.length, ta: m.totalAvailable, c: m.complete }));
   });
   await withFetch(nhtsaComplaintsMock("", 503), async () => {
