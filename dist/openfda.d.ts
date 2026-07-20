@@ -130,4 +130,25 @@ export type OpenfdaEnforcementArgs = OpenfdaFilters & {
  * NOT_FOUND) ⇒ an honest empty, never a throw.
  */
 export declare function enforcement(args: OpenfdaEnforcementArgs): Promise<MetaBundle>;
+/** openFDA caps `skip` at 25000 (skip>25000 → HTTP 400 "Skip value must 25000 or less").
+ *  The last reachable page is skip=25000, so at most ~25000+limit records are enumerable
+ *  via offset paging — datasets larger than that have an UNREACHABLE tail. */
+export declare const OPENFDA_MAX_SKIP = 25000;
+/** Ceiling- and empty-aware pagination. `hasMore` is false on an empty page (returned:0,
+ *  the fema/nvd guard) OR when the next offset would exceed OPENFDA_MAX_SKIP (advertising a
+ *  skip>25000 nextOffset is a poison cursor — following it 400s). `ceilingHit` is true when
+ *  more rows exist upstream but lie beyond the reachable skip window (must be disclosed). */
+export declare function openfdaPageMeta(skip: number, returned: number, totalAvailable: number | null): {
+    hasMore: boolean;
+    nextOffset: number | null;
+    ceilingHit: boolean;
+};
+/** The ceiling disclosure (records beyond the skip window are permanently unreachable). */
+export declare const OPENFDA_CEILING_NOTE = "openFDA caps pagination at skip=25000: records beyond ~25000+limit are NOT reachable via this API, so totalAvailable exceeds the paginable window here and the tail is unreachable. Narrow the query (add filters or a date range) to bring the matching set within the first 25000 records.";
+/** Skip-aware total for a 404 NOT_FOUND: openFDA returns the SAME 404 for a genuine
+ *  zero-match (only provable at skip 0) and an OVER-SKIP (skip past the end). So skip===0
+ *  ⇒ a true total of 0; a skip>0 404 is AMBIGUOUS ⇒ totalAvailable unknown (null). */
+export declare function openfdaEmptyTotal(skip: number): number | null;
+/** Disclosure for a skip>0 404 (ambiguous over-skip vs no-match; total unknown). */
+export declare const OPENFDA_OVERSKIP_NOTE = "Returned 0 at this offset: the skip is at/past the end of the result set (or a genuine no-match). openFDA returns an IDENTICAL HTTP 404 for both, so the true total is UNKNOWN at a non-zero skip (totalAvailable is null, not 0) \u2014 re-query at skip:0 for the exact total. This is NOT a confirmed empty result set.";
 //# sourceMappingURL=openfda.d.ts.map

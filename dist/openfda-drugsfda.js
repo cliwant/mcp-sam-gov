@@ -30,7 +30,7 @@ import { ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import { driftError } from "./datasource.js";
 import { str } from "./coerce.js";
 import { withMeta } from "./meta.js";
-import { OPENFDA_HOST, fetchOpenfda, readOpenfdaError, luceneQuote, openfdaApiKey, } from "./openfda.js";
+import { OPENFDA_HOST, fetchOpenfda, readOpenfdaError, luceneQuote, openfdaApiKey, openfdaPageMeta, openfdaEmptyTotal, OPENFDA_CEILING_NOTE, OPENFDA_OVERSKIP_NOTE, } from "./openfda.js";
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 /** host+path-only label (→ ToolError.upstreamEndpoint); NEVER carries the key. */
@@ -173,9 +173,10 @@ export async function drugApprovals(args) {
     const returned = applications.length;
     const rawTotal = metaResults.total;
     const totalAvailable = typeof rawTotal === "number" && Number.isFinite(rawTotal) ? rawTotal : null;
-    const hasMore = totalAvailable !== null && skip + returned < totalAvailable;
-    const nextOffset = hasMore ? skip + returned : null;
+    const { hasMore, nextOffset, ceilingHit } = openfdaPageMeta(skip, returned, totalAvailable);
     const notes = [NOT_DETERMINATION_NOTE, MARKETING_NOTE, keyNote(key !== undefined)];
+    if (ceilingHit)
+        notes.push(OPENFDA_CEILING_NOTE);
     if (filtersApplied.length === 0)
         notes.push(NO_FILTER_NOTE);
     return withMeta({ applications }, {
@@ -199,13 +200,15 @@ function emptyResult(limit, skip, filtersApplied, hasKey) {
         source: `${OPENFDA_HOST} /drug/drugsfda (openFDA Drugs@FDA approvals; ${hasKey ? "OPENFDA_API_KEY rate-limit key applied" : "keyless"})`,
         keylessMode: true,
         returned: 0,
-        totalAvailable: 0,
+        totalAvailable: openfdaEmptyTotal(skip),
         filtersApplied,
         filtersDropped: [],
         fieldsUnavailable: [],
         pagination: { offset: skip, limit, hasMore: false, nextOffset: null },
         notes: [
-            "No Drugs@FDA applications matched this query (openFDA returned HTTP 404 NOT_FOUND — the source's honest no-match). This is an exact empty, not an error.",
+            skip === 0
+                ? "No Drugs@FDA applications matched this query (openFDA returned HTTP 404 NOT_FOUND at skip 0 — the source's honest no-match). This is an exact empty (total 0), not an error."
+                : OPENFDA_OVERSKIP_NOTE,
             NOT_DETERMINATION_NOTE,
             keyNote(hasKey),
         ],

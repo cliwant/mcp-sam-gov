@@ -19464,6 +19464,23 @@ async function testOpenfdaEnforcement() {
         r.data.recalls.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.notes.some((n) => /no.match|NOT_FOUND/i.test(n)), JSON.stringify({ n: r.data.recalls.length, ta: m.totalAvailable, c: m.complete }));
     });
 
+    // ── [D1 2026-07-20] enforcement over-skip 404 (skip>0) ⇒ totalAvailable:null + over-skip
+    //    note (shared openfdaEmptyTotal wired into enforcement); skip:0 stays total:0 (above). ──
+    await withFetch(openfdaMock({ error: { code: "NOT_FOUND", message: "No matches found!" } }, 404), async () => {
+      const r = await runTool("openfda_enforcement", { category: "drug", firm: "pfizer", skip: 30, limit: 10 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-openfda-D1 enforcement OVER-SKIP 404 (skip:30 past the end) ⇒ totalAvailable:NULL (NOT 0) + over-skip note — the shared skip-aware total is wired into enforcement ⇒ keep total:0 for skip>0 ⇒ RED",
+        r.data.recalls.length === 0 && m.totalAvailable === null && m.notes.some((n) => /past the end|UNKNOWN at a non-zero skip/i.test(n)), JSON.stringify({ ta: m.totalAvailable }));
+    });
+    // ── [D2 2026-07-20] enforcement skip-ceiling: skip 24950 + 100 rows ⇒ next 25050 > 25000 ⇒
+    //    hasMore:false, nextOffset:null + ceiling note (no poison cursor). ──
+    await withFetch(openfdaMock(openfdaBody(39519, Array.from({ length: 100 }, () => openfdaRecallRow()), 24950, 100)), async () => {
+      const r = await runTool("openfda_enforcement", { category: "device", skip: 24950, limit: 100 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-openfda-D2 enforcement near the ceiling (skip 24950 + 100 ⇒ next 25050 > 25000) ⇒ hasMore:false, nextOffset:null + skip-ceiling note (never a nextOffset>25000 poison cursor) ⇒ RED if nextOffset:25050",
+        m.pagination.hasMore === false && m.pagination.nextOffset === null && m.notes.some((n) => /caps pagination at skip=25000/i.test(n)), JSON.stringify(m.pagination));
+    });
+
     // ── [P2] a NON-NOT_FOUND 404 ⇒ not_found THROW (never a fake-empty). ──
     await withFetch(openfdaMock({ error: { code: "SERVER_ERROR", message: "boom" } }, 404), async () => {
       const { threw, error } = await expectThrow(() => runTool("openfda_enforcement", { category: "drug" }, sam));
@@ -19655,6 +19672,40 @@ async function testOpenfdaDeviceClearances() {
         r.data.clearances.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.notes.some((n) => /no.match|NOT_FOUND/i.test(n)), JSON.stringify({ n: r.data.clearances.length, ta: m.totalAvailable, c: m.complete }));
     });
 
+    // ── [D1 2026-07-20] an OVER-SKIP 404 (skip>0 past the end) is AMBIGUOUS: openFDA returns
+    //    the SAME 404 NOT_FOUND for a genuine no-match and an over-skip, so a skip>0 404 must
+    //    NOT claim totalAvailable:0 (a fabricated exact total for e.g. a 17-row set addressed
+    //    at skip 25). skip>0 404 ⇒ totalAvailable:null + an over-skip note; skip:0 stays 0. ──
+    await withFetch(openfdaDeviceMock({ error: { code: "NOT_FOUND", message: "No matches found!" } }, 404), async () => {
+      const r = await runTool("openfda_device_clearances", { applicant: "medtronic", skip: 25, limit: 25 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-openfda-device-D1 OVER-SKIP 404 (skip:25 past the end) ⇒ totalAvailable:NULL (NOT 0 — a skip>0 404 is an ambiguous over-skip/no-match; claiming 0 fabricates an exact empty) + an over-skip note (re-query at skip:0) ⇒ keep totalAvailable:0 for skip>0 ⇒ RED",
+        r.data.clearances.length === 0 && m.totalAvailable === null && m.notes.some((n) => /past the end|UNKNOWN at a non-zero skip/i.test(n)), JSON.stringify({ ta: m.totalAvailable, note: m.notes.filter((n) => /past the end/i.test(n)) }));
+    });
+    await withFetch(openfdaDeviceMock({ error: { code: "NOT_FOUND", message: "No matches found!" } }, 404), async () => {
+      const r = await runTool("openfda_device_clearances", { applicant: "zzznone", skip: 0 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-openfda-device-D1 a skip:0 404 no-match ⇒ totalAvailable:0 EXACT preserved (the relaxation is skip>0-only — a genuine skip-0 empty is a true total 0) ⇒ null a skip-0 empty ⇒ RED",
+        m.totalAvailable === 0 && r.data.clearances.length === 0, JSON.stringify({ ta: m.totalAvailable }));
+    });
+
+    // ── [D2 2026-07-20] openFDA caps skip at 25000; a nextOffset>25000 is a POISON cursor
+    //    (following it 400s "Skip value must 25000 or less"). At skip 24950 (limit 100) the
+    //    next offset would be 25050 > 25000 ⇒ hasMore:false + nextOffset:null + a ceiling note
+    //    (never advertise the unreachable tail); within the window paging still advances. ──
+    await withFetch(openfdaDeviceMock(openfdaDeviceBody(175507, Array.from({ length: 100 }, () => openfda510kRow()), 24950, 100)), async () => {
+      const r = await runTool("openfda_device_clearances", { applicant: "medtronic", skip: 24950, limit: 100 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-openfda-device-D2 near the ceiling (skip 24950 + 100 rows ⇒ next offset 25050 > 25000) ⇒ hasMore:false, nextOffset:null (NEVER a nextOffset>25000 poison cursor that 400s) + a skip-ceiling note ⇒ emit nextOffset:25050 ⇒ RED",
+        m.pagination.hasMore === false && m.pagination.nextOffset === null && m.notes.some((n) => /caps pagination at skip=25000/i.test(n)), JSON.stringify({ pg: m.pagination, note: m.notes.some((n) => /caps pagination/i.test(n)) }));
+    });
+    await withFetch(openfdaDeviceMock(openfdaDeviceBody(175507, Array.from({ length: 100 }, () => openfda510kRow()), 100, 100)), async () => {
+      const r = await runTool("openfda_device_clearances", { applicant: "medtronic", skip: 100, limit: 100 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-openfda-device-D2 within the window (skip 100 + 100 ⇒ next 200 ≤ 25000) ⇒ hasMore:true, nextOffset:200, NO ceiling note (normal in-window paging intact)",
+        m.pagination.hasMore === true && m.pagination.nextOffset === 200 && !m.notes.some((n) => /caps pagination/i.test(n)), JSON.stringify(m.pagination));
+    });
+
     // ── [P2] a NON-NOT_FOUND 404 ⇒ not_found THROW (never a fake-empty). ──
     await withFetch(openfdaDeviceMock({ error: { code: "SERVER_ERROR", message: "boom" } }, 404), async () => {
       const { threw, error } = await expectThrow(() => runTool("openfda_device_clearances", {}, sam));
@@ -19791,6 +19842,22 @@ async function testOpenfdaDrugApprovals() {
       const m = buildMeta(r.meta);
       ok("55-drugsfda-P2 ★CRUX 404 {error:{code:'NOT_FOUND'}} ⇒ applications:[], returned:0, total:0, complete:true — HONEST EMPTY, not thrown ⇒ RED if it throws",
         r.data.applications.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true && m.notes.some((n) => /no.match|NOT_FOUND/i.test(n)), JSON.stringify({ n: r.data.applications.length, ta: m.totalAvailable }));
+    });
+    // ── [D1 2026-07-20] drugsfda over-skip 404 (skip>0) ⇒ totalAvailable:null + over-skip note
+    //    (shared openfdaEmptyTotal wired into drugsfda); the skip:0 CRUX above stays total:0. ──
+    await withFetch(openfdaDrugsfdaMock({ error: { code: "NOT_FOUND", message: "No matches found!" } }, 404), async () => {
+      const r = await runTool("openfda_drug_approvals", { brandName: "LIPITOR", skip: 200, limit: 25 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-drugsfda-D1 OVER-SKIP 404 (skip:200 past the end) ⇒ totalAvailable:NULL (NOT 0) + over-skip note — the shared skip-aware total is wired into drugsfda ⇒ keep total:0 for skip>0 ⇒ RED",
+        r.data.applications.length === 0 && m.totalAvailable === null && m.notes.some((n) => /past the end|UNKNOWN at a non-zero skip/i.test(n)), JSON.stringify({ ta: m.totalAvailable }));
+    });
+    // ── [D2 2026-07-20] drugsfda skip-ceiling (total 29218 > 25000): skip 24950 + 100 rows ⇒
+    //    next 25050 > 25000 ⇒ hasMore:false, nextOffset:null + ceiling note (no poison cursor). ──
+    await withFetch(openfdaDrugsfdaMock(drugsfdaBody(29218, Array.from({ length: 100 }, () => drugsfdaRow()), 24950, 100)), async () => {
+      const r = await runTool("openfda_drug_approvals", { brandName: "LIPITOR", skip: 24950, limit: 100 }, sam);
+      const m = buildMeta(r.meta);
+      ok("55-drugsfda-D2 near the ceiling (skip 24950 + 100 ⇒ next 25050 > 25000) ⇒ hasMore:false, nextOffset:null + skip-ceiling note (never a nextOffset>25000 poison cursor) ⇒ RED if nextOffset:25050",
+        m.pagination.hasMore === false && m.pagination.nextOffset === null && m.notes.some((n) => /caps pagination at skip=25000/i.test(n)), JSON.stringify(m.pagination));
     });
     // 5xx ⇒ upstream_unavailable THROW (never a fake empty).
     await withFetch(openfdaDrugsfdaMock("", 503), async () => {
