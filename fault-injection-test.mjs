@@ -22607,6 +22607,28 @@ async function testNppesHonesty() {
       m.totalAvailable === 7 && m.totalIsLowerBound === undefined && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.complete === true,
       JSON.stringify({ ta: m.totalAvailable, lb: m.totalIsLowerBound, pg: m.pagination }));
   });
+  // (8c) OVER-SKIP (2026-07-20 fix): an EMPTY page PAST skip 0 must NOT report skip as
+  //   the total. `skip + 0 = skip` is an arbitrary overstatement (live: skip 56 over a
+  //   6-match query ⇒ a false "56 available", while the same response says "no match").
+  //   An empty page proves only that the true total is ≤ skip (an UPPER bound), never a
+  //   count ⇒ totalAvailable:null + truncated:true + overshoot note. NON-VACUITY: revert
+  //   to `totalAvailable = skip + returned` ⇒ 56 (a fabricated total) ⇒ RED.
+  await withFetch(nppesMock(nppesBody(0, [])), async () => {
+    const r = await runTool("nppes_lookup_provider", { last_name: "Smith", limit: 10, skip: 56 }, sam);
+    const m = buildMeta(r.meta);
+    ok("65-8 [b] OVER-SKIP (returned 0, skip 56) ⇒ totalAvailable:null (NOT 56 = skip), NO totalIsLowerBound, truncated:true, hasMore:false, nextOffset:null + an overshoot note — report skip+0 as the total ⇒ 56 ⇒ RED (the live 6-match/'56' lie)",
+      m.totalAvailable === null && m.totalIsLowerBound === undefined && m.truncated === true && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.notes.some((n) => /past the end of the result set/i.test(n)),
+      JSON.stringify({ ta: m.totalAvailable, lb: m.totalIsLowerBound, tr: m.truncated, pg: m.pagination }));
+  });
+  // (8d) GENUINE ZERO at skip 0 (returned 0, skip 0) must stay an honest EXACT 0 — the
+  //   over-skip null must NOT swallow a real no-match. NON-VACUITY: null it here ⇒ RED.
+  await withFetch(nppesMock(nppesBody(0, [])), async () => {
+    const r = await runTool("nppes_lookup_provider", { last_name: "Zzzznomatch", limit: 10, skip: 0 }, sam);
+    const m = buildMeta(r.meta);
+    ok("65-8 [b] GENUINE ZERO (returned 0, skip 0) ⇒ totalAvailable:0 (exact honest zero, NOT null), complete:true + honest-zero note — a real no-match stays distinct from an over-skip",
+      m.totalAvailable === 0 && m.pagination.hasMore === false && m.complete === true && m.notes.some((n) => /honest zero/i.test(n)),
+      JSON.stringify({ ta: m.totalAvailable, c: m.complete }));
+  });
   // Full page whose next skip would exceed the ≤1000 policy cap ⇒ hasMore:false + disclosure.
   await withFetch(nppesMock(nppesBody(200, Array.from({ length: 200 }, () => NPPES_NPI1))), async () => {
     const r = await runTool("nppes_lookup_provider", { last_name: "Smith", limit: 200, skip: 1000 }, sam);
