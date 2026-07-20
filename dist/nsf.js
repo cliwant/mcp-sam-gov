@@ -140,6 +140,11 @@ const UEI_JOIN_NOTE = "awardee.ueiNumber is the EXACT join key to SAM entities a
 const AMOUNTS_NOTE = "amounts.fundsObligatedAmt = funds obligated to date; amounts.estimatedTotalAmt = estimated total award value over its life (labeled distinctly). Both arrive as strings and are coerced null-never-0 (a real $0 stays 0; an absent amount is null, never a fabricated 0). amounts.fundsObligatedByYear is a verbatim display-only array.";
 /** A conservative data-currency note (not API-verifiable). */
 const DATA_CURRENCY_NOTE = "NSF updates awards on a rolling basis; per-record refresh lag is not API-verifiable.";
+/** Unstable-order disclosure: NSF exposes no stable server-side sort/tiebreaker, so
+ *  paging by offset can overlap (duplicate) or skip rows across pages. Fires whenever
+ *  the result set spans more than one page (hasMore, or the caller is already past
+ *  offset 0). Live-verified: repeated identical requests reorder; adjacent windows overlap. */
+const NSF_ORDER_UNSTABLE_NOTE = "NSF returns results in an order that is NOT stably sorted (no server-side stable sort/tiebreaker), so paging by offset across multiple pages can DUPLICATE or SKIP rows (live-verified: repeated identical requests reorder, and adjacent offset windows overlap). totalAvailable is the reliable COUNT — do NOT enumerate by walking offsets; to list an exact set, narrow the query (state / keyword / PI / date / UEI) so the whole result fits one page (offset 0).";
 /** Live-verified date-filter semantics (Open-Q6 — do not assume). */
 const DATE_SEMANTICS_NOTE = "dateStart / dateEnd filter on the award ACTION date (the initial award / obligation date — the `date` / initAmendmentDate field, live-verified 2026-07-12), NOT the project startDate or expDate. Format is STRICT mm/dd/yyyy; a yyyy-mm-dd (or any other format) is silently mis-parsed by NSF (not an error), so it is rejected client-side.";
 /** #1 — the 10,000 saturation lower-bound disclosure. */
@@ -479,6 +484,10 @@ export async function searchAwards(args) {
         notes.push(orSemanticsNote(multiWordKeyword)); // M1
     if (totalIsLowerBound)
         notes.push(LOWER_BOUND_NOTE);
+    // Unstable-order disclosure: fire whenever the result spans >1 page (offset paging is
+    // in play), so an agent never silently double-counts/skips rows by walking offsets.
+    if (hasMore || offset > 0)
+        notes.push(NSF_ORDER_UNSTABLE_NOTE);
     if (rpp < limit)
         notes.push(clampNote(rpp));
     if (args.dateStart !== undefined || args.dateEnd !== undefined)

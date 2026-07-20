@@ -15684,6 +15684,10 @@ async function testNsfHonesty() {
     const m = buildMeta(r.meta);
     ok("52f within-window: offset 0, returned 25, total 200 ⇒ hasMore:true, nextOffset:25, truncated:true (exact total drives it)",
       m.pagination.hasMore === true && m.pagination.nextOffset === 25 && m.truncated === true, JSON.stringify(m.pagination));
+    // (order) 2026-07-20: a multi-page result ⇒ the unstable-order disclosure FIRES — NSF
+    // has no stable server-side sort, so walking offsets can duplicate/skip rows.
+    ok("52f-order multi-page (hasMore) ⇒ the unstable-order disclosure note FIRES (NSF has no stable sort; offset-walking may dup/skip — omit ⇒ an agent silently double-counts/skips ⇒ RED)",
+      m.notes.some((n) => /NOT stably sorted/i.test(n) && /DUPLICATE or SKIP/i.test(n)), JSON.stringify(m.notes.filter((n) => /stably/i.test(n))));
   });
   // Whole exact set fits ⇒ nextOffset null, complete.
   await withFetch(nsfMock(nsfBody(20, nsfRows(20))), async () => {
@@ -15691,6 +15695,10 @@ async function testNsfHonesty() {
     const m = buildMeta(r.meta);
     ok("52f candidateNext = 0+20 ≥ exact total 20 ⇒ nextOffset:null, hasMore:false, complete:true (the whole set, within window)",
       m.pagination.nextOffset === null && m.pagination.hasMore === false && m.complete === true, JSON.stringify({ pg: m.pagination, c: m.complete }));
+    // (order) a single-page fit (hasMore:false, offset 0) ⇒ NO unstable-order note —
+    // pagination is not in play, so the dup/skip warning would over-warn.
+    ok("52f-order single-page fit (hasMore:false, offset 0) ⇒ NO unstable-order note (offset paging not in play — a false warning here ⇒ RED)",
+      !m.notes.some((n) => /NOT stably sorted/i.test(n)), JSON.stringify(m.notes.filter((n) => /stably/i.test(n))));
   });
 
   // ── Window pre-fetch guard: offset≥10000 ⇒ invalid_input, 0 fetch. ──
