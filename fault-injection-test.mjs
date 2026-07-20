@@ -11147,6 +11147,20 @@ async function testFemaHonesty() {
       m.totalAvailable === 250 && m.pagination.hasMore === false && m.pagination.nextOffset === null, JSON.stringify(m.pagination));
   });
 
+  // (l2) PHANTOM-TAIL LIVELOCK (2026-07-20 fix): OpenFEMA's metadata.count can EXCEED the
+  //      rows it serves via $skip/$top (live: the ~822k public_assistance set stops serving
+  //      well before its count). A near-end offset returns 0 rows while offset < count;
+  //      without a `returned > 0` guard that yields hasMore:true + nextOffset === offset — a
+  //      non-advancing cursor an agent following nextOffset re-requests forever.
+  await withFetch(femaMock(PA, [], 822779), async () => {
+    const r = await runTool("fema_search_public_assistance", { state: "LA", limit: 100, offset: 822279 }, sam);
+    const m = buildMeta(r.meta);
+    ok("52l2 phantom tail (returned:0, offset 822279 < count 822779) ⇒ hasMore:false, nextOffset:null (TERMINATES — drop the `returned>0` guard ⇒ hasMore:true, nextOffset:822279 === offset ⇒ RED, the live PA livelock)",
+      r.data.rows.length === 0 && m.pagination.hasMore === false && m.pagination.nextOffset === null, JSON.stringify(m.pagination));
+    ok("52l2 phantom tail ⇒ a note discloses metadata.count can EXCEED the pageable rows (count is not a reachable target)",
+      m.notes.some((n) => /can exceed the rows actually pageable/i.test(n)), JSON.stringify(m.notes.filter((n) => /exceed/i.test(n))));
+  });
+
   // (m) deep-offset (>100000) disclosure note (OQ2).
   await withFetch(femaMock(PA, [{ disasterNumber: 1 }], 803904), async () => {
     const r = await runTool("fema_search_public_assistance", { state: "LA", offset: 100001 }, sam);

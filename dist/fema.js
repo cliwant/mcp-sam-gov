@@ -338,7 +338,13 @@ function shapeResponse(args) {
     const totalAvailable = num(b.metadata.count);
     const rows = coerceAmounts(rawRows, def.amountFields);
     const returned = rows.length;
-    const hasMore = totalAvailable !== null && args.offset + returned < totalAvailable;
+    // `returned > 0` guard (matches nvd/usaspending): an EMPTY page MUST terminate the
+    // walk. OpenFEMA's metadata.count can EXCEED the rows it will actually serve via
+    // $skip/$top (live: the ~822k-row public_assistance set stops serving rows well
+    // before its count), so without this guard a near-end offset yields returned:0 while
+    // offset < count ⇒ hasMore:true, nextOffset === offset — a non-advancing cursor an
+    // agent following nextOffset re-requests forever (empty page, re-scan, repeat).
+    const hasMore = returned > 0 && totalAvailable !== null && args.offset + returned < totalAvailable;
     const nextOffset = hasMore ? args.offset + returned : null;
     const notes = [SHAPE_NOTE];
     if (def.amountFields.length > 0)
@@ -349,6 +355,12 @@ function shapeResponse(args) {
     // remain — metadata.count is authoritative, so page via $skip.
     if (returned < args.limit && hasMore) {
         notes.push("This page returned fewer rows than the requested limit while more remain (OpenFEMA byte-truncates a wide page below $top); metadata.count is authoritative — page with a larger offset ($skip).");
+    }
+    // Phantom tail: OpenFEMA returned 0 rows though metadata.count is higher — its count
+    // can exceed the rows it will serve via pagination, so the walk is COMPLETE here even
+    // though returned:0 < count. Disclose it so the count is not read as a reachable target.
+    if (returned === 0 && totalAvailable !== null && args.offset > 0 && args.offset < totalAvailable) {
+        notes.push(`OpenFEMA served 0 rows at offset ${args.offset} although metadata.count is ${totalAvailable} — its count can exceed the rows actually pageable via $skip/$top, so pagination is COMPLETE here (do not treat count as a reachable row target; narrow the filter for an exact set).`);
     }
     // Deep-offset caveat on the ~800k PA set (ADR-0016 OQ2).
     if (args.offset > 100000) {
