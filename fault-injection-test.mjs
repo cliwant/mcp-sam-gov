@@ -13619,6 +13619,25 @@ async function testBonfireHonesty() {
     ok("45BF-P4 a 200 NON-RSS body (HTML, no <rss><channel>) ⇒ schema_drift (never read as an empty opportunity set)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
   });
 
+  // ── REDIRECT (2026-07-20 fix): a drifted seed slug whose Bonfire portal has moved
+  //    returns a 3xx (LIVE-observed 307 on sanantonio / kingcounty / rutgers). With
+  //    retry:false + redirectMessage the redirect:"error" TypeError is a NON-retryable
+  //    schema_drift ("slug drifted — re-discover"), NOT the retryable upstream_unavailable
+  //    that fetchWithRetry would emit (a "retry in 30s" that never recovers, since the
+  //    redirect is deterministic). NON-VACUITY: drop retry:false ⇒ the redirect routes
+  //    through fetchWithRetry's generic network-catch ⇒ upstream_unavailable/retryable ⇒ RED.
+  await withFetch((u) => {
+    if (!isBf("driftedorg")(u)) return failClosed()();
+    const e = new TypeError("fetch failed");
+    e.cause = new Error("unexpected redirect");
+    throw e;
+  }, async () => {
+    const { threw, error } = await expectThrow(() => runTool("bonfire_search_opportunities", { org: "driftedorg" }, sam));
+    const te = threw ? toToolError(error) : {};
+    ok("45BF-redirect a drifted slug's 3xx (redirect:'error' TypeError) ⇒ schema_drift + retryable:false + a 'drifted/redirected' disclosure (NEVER a retryable upstream_unavailable — drop retry:false ⇒ RED)",
+      threw && te.kind === "schema_drift" && te.retryable === false && /drifted|redirected/i.test(te.message || ""), JSON.stringify(threw ? { kind: te.kind, retryable: te.retryable } : "no-throw"));
+  });
+
   // ── SSRF: a bad org slug ⇒ invalid_input, 0 fetch (Zod + direct handler re-guard). ──
   for (const bad of ["BAD/../x", "Up Per", "org.evil.com", "a b"]) {
     await withFetch(failClosed(), async (calls) => {
