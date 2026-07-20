@@ -1570,10 +1570,15 @@ export async function searchRecompetes(args: {
   // (early-stop fired). If the scan budget truncated, it is unknown → null,
   // and the returned set is a lower bound.
   const totalAvailable = scanTruncated ? null : totalInWindow;
-  const nextOffset = startIdx + pageSize;
-  const hasMore = scanTruncated
-    ? true // more may exist beyond the scanned pages
-    : nextOffset < totalInWindow;
+  // `nextOffset` may ONLY advance into rows we ACTUALLY scanned. The un-scanned
+  // remainder (scanTruncated) is NOT offset-reachable: paging past totalInWindow
+  // re-runs the whole bounded scan and returns EMPTY pages forever — the
+  // "re-fetch the SAME page" livelock every other tool in this module emits
+  // nextOffset:null to avoid. So advance the cursor only while more SCANNED rows
+  // remain; signal the un-scanned tail via hasMore:true + nextOffset:null (the
+  // notes already tell the caller to raise scanBudgetPages, not to paginate).
+  const moreInScanned = startIdx + pageSize < totalInWindow;
+  const hasMore = moreInScanned || scanTruncated;
   const truncated = hasMore || scanTruncated;
 
   const notes: string[] = [
@@ -1612,7 +1617,7 @@ export async function searchRecompetes(args: {
     pagination: {
       offset: startIdx,
       limit: pageSize,
-      nextOffset: hasMore ? nextOffset : null,
+      nextOffset: moreInScanned ? startIdx + pageSize : null,
       hasMore,
     },
     filtersApplied,
