@@ -52,7 +52,7 @@ import { tmpdir } from "node:os";
 import { join as pathJoin } from "node:path";
 import { toToolError, ToolErrorCarrier, fetchWithRetry } from "./dist/errors.js";
 import { buildMeta, isMetaBundle } from "./dist/meta.js";
-import { parseRecordFields, enrichSearchOpportunities } from "./dist/gsa-csv.js";
+import { parseRecordFields, enrichSearchOpportunities, buildIndexFromFile as gsaBuildIndex } from "./dist/gsa-csv.js";
 import { analyzeIncumbent, getAwardDetail, lookupAgency, searchAwardsByRecipient, searchIndividualAwards, searchAwards, searchSubAgencySpending, searchCfdaSpending, searchRecompetes, spendingOverTime, getRecipientProfile, getAgencyProfile, getAgencyBudgetFunction, getAgencyAwardsSummary, naicsHierarchy, searchSubawards, searchRecipients, glossary, autocompleteRecipient, autocompleteNaics } from "./dist/usaspending.js";
 import { checkExclusions, integrityLookup, searchTeamingPartners } from "./dist/integrity.js";
 import { farClauseLookup, farComplianceMatrix, farSearch } from "./dist/far.js";
@@ -545,7 +545,7 @@ function testBuildMeta() {
 // ══════════════════════════════════════════════════════════════════════════
 // 2. GSA-CSV parser (RFC-4180) + enrichment merge (pure — no fetch)
 // ══════════════════════════════════════════════════════════════════════════
-function testGsaCsvParser() {
+async function testGsaCsvParser() {
   section("2a. GSA-CSV RFC-4180 parser (pure)");
 
   // Embedded comma inside quotes stays ONE field.
@@ -611,6 +611,39 @@ function testGsaCsvParser() {
       closed.inQuotes === false);
     eq("after the multi-line record, col0 is STILL the original NoticeId",
       closed.fields[0], "AAAA0000AAAA0000AAAA0000AAAA0001");
+  }
+
+  // ── ★v1.12.0 header-drift guard: buildIndexFromFile asserts the expected column
+  //    NAME at each fixed COL index before indexing any data row. A valid 47-col
+  //    header indexes the row; a renamed/shifted column (so a COL index no longer
+  //    reads its expected name) throws schema_drift — NOT a silent wrong-position
+  //    index or a false "not in the current snapshot" empty.
+  {
+    const COLMAP = { 0: "NoticeId", 1: "Title", 10: "Type", 14: "SetASideCode", 15: "SetASide", 16: "ResponseDeadLine", 17: "NaicsCode", 20: "PopCity", 21: "PopState", 22: "PopZip", 23: "PopCountry", 24: "Active" };
+    const names = Array.from({ length: 47 }, (_, i) => `col${i}`);
+    for (const [i, n] of Object.entries(COLMAP)) names[Number(i)] = n;
+    const mkHeader = (ns) => ns.map((n) => `"${n}"`).join(",");
+    const ID = "abcdef0123456789abcdef0123456789";
+    const rowFields = Array.from({ length: 47 }, () => "");
+    rowFields[0] = ID; rowFields[1] = "My Title";
+    const ROW = rowFields.join(",");
+    const dir = mkdtempSync(pathJoin(tmpdir(), "mcp-gsacsv-"));
+    try {
+      const goodPath = pathJoin(dir, "good.csv");
+      writeFileSync(goodPath, mkHeader(names) + "\n" + ROW + "\n", "utf8");
+      const good = await gsaBuildIndex(goodPath);
+      ok("gsa-csv ★valid 47-col header ⇒ the data row is indexed by NoticeId (no false drift)",
+        good.notices[ID] !== undefined && good.rowCount === 1, JSON.stringify({ keys: Object.keys(good.notices), rc: good.rowCount }));
+
+      const badNames = [...names]; badNames[1] = "RenamedTitleColumn";
+      const badPath = pathJoin(dir, "bad.csv");
+      writeFileSync(badPath, mkHeader(badNames) + "\n" + ROW + "\n", "utf8");
+      const { threw, error } = await expectThrow(() => gsaBuildIndex(badPath));
+      ok("gsa-csv ★header drift (COL.Title index no longer reads 'Title') ⇒ schema_drift THROW before indexing — drop the header-name guard ⇒ RED (silent wrong-position index)",
+        threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 }
 
@@ -21509,7 +21542,7 @@ async function main() {
 
   // Pure, no-fetch suites first.
   testBuildMeta();
-  testGsaCsvParser();
+  await testGsaCsvParser();
   testGsaCsvEnrichment();
   testShapingHelpers();
 

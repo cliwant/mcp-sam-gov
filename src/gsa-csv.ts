@@ -61,6 +61,7 @@ import { pipeline } from "node:stream/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
+import { driftError } from "./datasource.js";
 import { withMeta } from "./meta.js";
 
 // ─── Source + config ─────────────────────────────────────────────
@@ -309,7 +310,7 @@ function fieldsFromRecord(rec: string[]): NoticeFields {
  * loads the whole file into memory — readline yields one physical line at a
  * time and the assembler holds at most one in-progress (quote-spanning) record.
  */
-async function buildIndexFromFile(
+export async function buildIndexFromFile(
   csvPath: string,
 ): Promise<{ notices: Record<string, NoticeFields>; rowCount: number }> {
   const notices: Record<string, NoticeFields> = Object.create(null);
@@ -323,6 +324,22 @@ async function buildIndexFromFile(
   const asm = makeRecordAssembler((rec) => {
     if (!headerSeen) {
       headerSeen = true; // first logical record is the 47-column header
+      // [P4] The column contract is POSITIONAL (fixed COL indices). If GSA
+      // reorders / inserts / renames a column, trusting the old positions would
+      // serve WRONG-POSITION data as authoritative (or, if NoticeId shifts, skip
+      // every row → a false "not in the current CSV snapshot"). Neither throws
+      // today. Assert the expected header NAME at each COL index before indexing
+      // any data row — a mismatch is schema drift, never a fake-empty (mirrors the
+      // census-economic.ts header guard). Each COL key IS its expected header name.
+      for (const [expectedName, idx] of Object.entries(COL)) {
+        const got = (rec[idx] ?? "").trim();
+        if (got !== expectedName) {
+          throw driftError(
+            "gsa:csv",
+            `GSA Contract-Opportunities CSV header drift — column ${idx} is ${JSON.stringify(got)}, expected ${JSON.stringify(expectedName)}. The positional column contract changed; refusing to index (a silent column shift would serve wrong-position data as authoritative, or skip every row as a false "not in the current snapshot").`,
+          );
+        }
+      }
       return;
     }
     rowCount++;
