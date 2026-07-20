@@ -612,13 +612,25 @@ export async function lookupProvider(args) {
     const candidateNext = skip + returned;
     const nextSkip = pageFull && candidateNext <= NPPES_MAX_SKIP ? candidateNext : null;
     const hasMore = nextSkip !== null;
-    const totalAvailable = skip + returned;
+    // P1: NPPES exposes no grand total. `skip + returned` is the total ONLY when the
+    // page actually held rows — a partial/last page ⇒ EXACT, a full page ⇒ a lower
+    // bound (flagged below). An EMPTY page past skip 0 proves only that the true total
+    // is ≤ skip (an UPPER bound), NEVER a count: reporting skip + 0 = skip would
+    // fabricate an arbitrary total (e.g. skip 56 over a 6-match query ⇒ a false "56").
+    // At skip 0 an empty page is the genuine zero.
+    const overSkipped = returned === 0 && skip > 0;
+    const totalAvailable = overSkipped ? null : skip + returned;
     const notes = [];
     if (pageFull) {
-        notes.push(lowerBoundNote(totalAvailable));
+        // pageFull ⇒ returned === limit ≥ 1 ⇒ overSkipped false ⇒ totalAvailable is the
+        // numeric lower bound skip + returned (pass it directly so the type stays number).
+        notes.push(lowerBoundNote(skip + returned));
         if (nextSkip === null) {
             notes.push(`A full page was returned but the next page would exceed the skip ≤ ${NPPES_MAX_SKIP} policy cap — additional matches exist but are NOT reachable via this tool. Narrow your filters for a complete set.`);
         }
+    }
+    else if (overSkipped) {
+        notes.push(`No providers at skip=${skip}: the skip offset is past the end of the result set. An empty page proves only that the true total is ≤ ${skip} (an upper bound), not a count — so totalAvailable is unknown (null). Page back (a lower skip) to reach the last populated page and its exact total.`);
     }
     else if (returned === 0) {
         notes.push(`No NPPES providers matched (found:false / empty — an honest zero, distinct from an outage or a body-level error). Not a fitness determination.`);
@@ -627,8 +639,9 @@ export async function lookupProvider(args) {
     const meta = {
         source: SOURCE,
         keylessMode: true,
-        // A full page is never complete (more may exist, reachable or not).
-        truncated: pageFull,
+        // A full page (more may exist) OR an over-skip empty page (matches exist at a
+        // LOWER skip, not here) is not complete; only skip-0 / a partial last page is.
+        truncated: pageFull || overSkipped,
         returned,
         totalAvailable,
         filtersApplied,
