@@ -4927,6 +4927,36 @@ async function testGaoHonesty() {
         JSON.stringify(res.meta));
     },
   );
+
+  // 4. ★D1 a 200 body that is NOT the RSS feed (GAO's Cloudflare/WAF edge served a
+  //    challenge or maintenance interstitial — no <rss>/<channel>/<item>) ⇒ throws
+  //    upstream_unavailable, NEVER parsed into a fabricated empty decisions[]
+  //    (P2/P4 — parseFeed's <item> regex yields [] on any non-RSS body, which
+  //    would read as "no recent bid protests").
+  await withFetch(
+    (u) => (isFeed(u) ? mockResponse({ status: 200, json: "<!DOCTYPE html><html><head><title>Just a moment…</title></head><body>Checking your browser before accessing www.gao.gov</body></html>" }) : failClosed()()),
+    async () => {
+      const { threw, error } = await expectThrow(() => gaoProtestLookup({}));
+      ok("gao ★D1 a 200 non-RSS body (WAF/maintenance interstitial) ⇒ throws upstream_unavailable — NOT a fabricated empty 'no protests' ⇒ drop the shape guard (parseFeed→[]) ⇒ RED",
+        threw && error?.toolError?.kind === "upstream_unavailable", JSON.stringify({ threw, kind: error?.toolError?.kind }));
+    },
+  );
+
+  // 5. ★D2 outcome filter + enrich where EVERY per-decision page fails (403 — GAO
+  //    product pages are intermittently WAF-blocked) ⇒ the undetermined (outcome
+  //    null) decisions are DISCLOSED as excluded, not silently dropped as
+  //    "≠ outcome" (which would read returned:0 as "no denied protests EXIST").
+  const protestItem2 = `<item><title>Beta LLC</title><link>https://www.gao.gov/products/b-421235</link><description>Beta LLC protests the award of a services contract.</description><pubDate>Tue, 02 Jul 2024 00:00:00 GMT</pubDate></item>`;
+  await withFetch(
+    (u) => (isFeed(u) ? mockResponse({ status: 200, json: rss(protestItem + protestItem2) }) : mockResponse({ status: 403 })),
+    async () => {
+      const res = await gaoProtestLookup({ outcome: "denied", enrich: true });
+      ok("gao ★D2 outcome filter + all-enrich-failed ⇒ returned:0 (neither outcome readable) BUT a note DISCLOSES N decision(s) EXCLUDED as UNDETERMINED ⇒ silently drop the null-outcome decisions ⇒ RED",
+        res.data.decisions.length === 0 && res.meta.notes.some((n) => /EXCLUDED from the outcome=.*UNDETERMINED/i.test(n)), JSON.stringify(res.meta.notes));
+      ok("gao ★D2 the undetermined note tells the caller a 0 result means 'could not determine', NOT 'none exist' (honest-interpretation guard) ⇒ omit the note ⇒ RED",
+        res.meta.notes.some((n) => /NOT "none exist"/i.test(n)), JSON.stringify(res.meta.notes));
+    },
+  );
 }
 
 // Deterministic seeded PRNG (mulberry32) — reproducible fuzz in CI (Math.random
