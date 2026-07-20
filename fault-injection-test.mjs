@@ -11381,6 +11381,19 @@ async function testFdicHonesty() {
       m.totalAvailable === 169 && m.pagination.hasMore === false && m.pagination.nextOffset === null, JSON.stringify(m.pagination));
   });
 
+  // (g2) DEFENSE-IN-DEPTH livelock guard (2026-07-20): `limit` is Zod-clamped to ≥1 for MCP
+  //      callers, but a DIRECT handler call (Zod-bypassing) — or a future count>pageable
+  //      case — can yield returned:0 with a full total. Without a `returned > 0` guard,
+  //      hasMore = offset+0 < total = true and nextOffset = offset+0 = offset — a
+  //      non-advancing cursor (the same class caught in fema/nvd/usaspending). The guard
+  //      makes an empty page TERMINATE. Live-reproduced via the direct handler at limit:0.
+  await withFetch(fdicInstMock({ records: [], total: 595 }), async () => {
+    const r = await fdicSearchInstitutions({ state: "VA", limit: 0, offset: 0 });
+    const m = buildMeta(r.meta);
+    ok("58g2 empty page (returned:0, total 595) via the DIRECT handler (Zod-bypassing limit:0) ⇒ hasMore:false, nextOffset:null (drop the `returned>0` guard ⇒ hasMore:true, nextOffset:0 === offset ⇒ RED livelock)",
+      r.data.institutions.length === 0 && m.totalAvailable === 595 && m.pagination.hasMore === false && m.pagination.nextOffset === null, JSON.stringify(m.pagination));
+  });
+
   // (h) ★P2 3-envelope drift-guard — every NON-success envelope THROWS, never a
   // fake empty. 400 errors[] ⇒ invalid_input, the raw ES `detail` NOT leaked.
   const SECRET_DETAIL = "search_phase_execution_exception PARSE_LEAK_9k";
