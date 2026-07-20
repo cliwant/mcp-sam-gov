@@ -15965,6 +15965,17 @@ async function testBlsHonesty() {
       s.coveredRange.from === 2025 && s.coveredRange.to === 2025 && s.observationCount === 2, JSON.stringify(s.coveredRange));
   });
 
+  // ── Fixture 1b (2026-07-20): totalAvailable is NULL for a batch-series request. A raw
+  //    seriesId BLS STUBS (a nonexistent id ⇒ an empty series) must NOT inflate a total —
+  //    totalAvailable:null (never resolved.length, which counts the stubbed invalid id) +
+  //    an explain note. NON-VACUITY: revert to resolved.length ⇒ total 2 ⇒ RED. ──
+  await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [CPI_REAL]), blsSeries("ZZZZ0000XX0", [])])), async () => {
+    const r = await runTool("bls_timeseries", { seriesId: ["CUUR0000SA0", "ZZZZ0000XX0"] }, sam);
+    const m = buildMeta(r.meta);
+    ok("62bls-1b batch-series totalAvailable === null (NOT resolved.length 2 — which would count the STUBBED nonexistent ZZZZ id as a real available series) + returned:2 + a null-explain note ⇒ set totalAvailable=resolved.length ⇒ RED",
+      m.totalAvailable === null && m.returned === 2 && m.notes.some((n) => /totalAvailable is null: this is a batch fetch/i.test(n)), JSON.stringify({ ta: m.totalAvailable, r: m.returned }));
+  });
+
   // ── Fixture 2: REQUEST_NOT_PROCESSED (the v1 daily limit) ⇒ rate_limited THROW
   //    with the tier disclosure (kills c, g). ──
   await withFetch(blsMock({ status: "REQUEST_NOT_PROCESSED", responseTime: 0, message: ["Request could not be serviced due to daily threshold."], Results: {} }), async () => {
