@@ -1,8 +1,10 @@
 /**
  * cbp-border.ts — CBP Border Wait Times (bwt.cbp.gov, KEYLESS) — the FREIGHT /
- * LOGISTICS lane. Live commercial-vehicle (and passenger) wait times at every US
+ * LOGISTICS lane. Live COMMERCIAL-VEHICLE (freight-truck) wait times at every US
  * land border port (Canadian + Mexican): per-port lane delays, operational status,
- * and open-lane counts. Answers "what's the current commercial-truck delay at port
+ * and open-lane counts. (The raw feed also carries passenger/pedestrian lanes, but
+ * this tool surfaces ONLY the commercial-vehicle lanes — the freight lane.)
+ * Answers "what's the current commercial-truck delay at port
  * X" — real-time freight-crossing situational awareness for logistics/trade vendors.
  *
  * SOURCE: CBP's official Border Wait Times API (bwt.cbp.gov/api/bwtnew) — a .gov host,
@@ -80,21 +82,35 @@ async function loadPorts() {
 }
 // ─── Tool: cbp_border_wait_times ──────────────────────────────────
 /**
- * List CBP land-border-port commercial-vehicle (+ passenger) wait times, optionally
- * filtered by border (Canadian/Mexican) and/or port name (substring). Client-side
- * filter over the live feed; honest `_meta` (exact match total + real-time freshness).
+ * List CBP land-border-port COMMERCIAL-VEHICLE (freight-truck) wait times, optionally
+ * filtered by border (Canadian/Mexican) and/or port name (substring, applied
+ * CLIENT-SIDE over the full fetched set and disclosed as such). Passenger/pedestrian
+ * lanes are NOT surfaced (freight lane only). Honest `_meta` (exact match total +
+ * real-time freshness).
  */
 export async function borderWaitTimes(args) {
     const limit = args.limit ?? 100;
     const offset = args.offset ?? 0;
     const all = await loadPorts();
     const filtersApplied = [];
+    const filtersDropped = [];
     const borderQ = args.border?.trim().toLowerCase();
     const portQ = args.portName?.trim().toLowerCase();
-    if (args.border !== undefined)
-        filtersApplied.push("border");
-    if (args.portName !== undefined)
-        filtersApplied.push("portName");
+    // [filter honesty] Only claim a filter APPLIED when its query is non-empty — a
+    // border:"" / portName:"" (or whitespace) narrows nothing, so reporting it as
+    // applied while returning every port would be a false filtersApplied.
+    if (args.border !== undefined) {
+        if (borderQ)
+            filtersApplied.push("border");
+        else
+            filtersDropped.push("border(empty)");
+    }
+    if (args.portName !== undefined) {
+        if (portQ)
+            filtersApplied.push("portName");
+        else
+            filtersDropped.push("portName(empty)");
+    }
     const matched = all.filter((p) => {
         if (borderQ && !(p.border ?? "").toLowerCase().includes(borderQ))
             return false;
@@ -107,6 +123,10 @@ export async function borderWaitTimes(args) {
     const returned = page.length;
     const hasMore = offset + returned < totalAvailable;
     const nextOffset = hasMore ? offset + returned : null;
+    const notes = [PROVENANCE_NOTE, FRESHNESS_NOTE];
+    if (filtersApplied.length > 0) {
+        notes.push("border / portName are applied CLIENT-SIDE over the full live port set (fetched in ONE request — the CBP feed has no server-side filter); totalAvailable is the EXACT matched count over that full set.");
+    }
     return withMeta({ ports: page }, {
         source: "bwt.cbp.gov Border Wait Times (keyless)",
         keylessMode: true,
@@ -114,10 +134,10 @@ export async function borderWaitTimes(args) {
         totalAvailable,
         truncated: hasMore,
         filtersApplied,
-        filtersDropped: [],
+        filtersDropped,
         fieldsUnavailable: [],
         pagination: { offset, limit, hasMore, nextOffset },
-        notes: [PROVENANCE_NOTE, FRESHNESS_NOTE],
+        notes,
     });
 }
 //# sourceMappingURL=cbp-border.js.map
