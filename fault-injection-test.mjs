@@ -642,10 +642,13 @@ async function testGsaCsvParser() {
       ok("gsa-csv ★header drift (COL.Title index no longer reads 'Title') ⇒ schema_drift THROW before indexing — drop the header-name guard ⇒ RED (silent wrong-position index)",
         threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
     } finally {
-      // maxRetries: on Windows the readline/createReadStream file handle can lag a
-      // few ms after buildIndexFromFile's throw path unwinds, so an immediate
-      // recursive rmdir hits ENOTEMPTY/EBUSY — retry briefly (Node's built-in).
-      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      // Best-effort temp cleanup. The production buildIndexFromFile now AWAITS the
+      // stream 'close' (fd released) before returning, so this should succeed; the
+      // maxRetries + swallow are belt-and-suspenders — an ephemeral CI temp dir
+      // must never fail the run on a residual Windows file-lock.
+      try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      } catch { /* ephemeral temp dir — ignore */ }
     }
   }
 }

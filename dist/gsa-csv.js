@@ -56,6 +56,7 @@
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
+import { once } from "node:events";
 import { pipeline } from "node:stream/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -283,11 +284,17 @@ export async function buildIndexFromFile(csvPath) {
     }
     finally {
         // Release the OS file handle on ALL exit paths (including the header-drift
-        // throw, which aborts mid-stream). Windows holds a lock on an open read
-        // stream, so a caller deleting the file right after a throw hits
-        // ENOTEMPTY/EBUSY unless the handle is closed here first.
+        // throw, which aborts mid-stream). destroy() is ASYNC — the fd is not freed
+        // until the 'close' event — so AWAIT it; otherwise a caller deleting the file
+        // immediately after (Windows holds a lock on an open read stream) hits
+        // ENOTEMPTY/EBUSY. On the normal EOF path the stream auto-destroys, so guard
+        // on `.destroyed` and set the listener BEFORE destroy() to catch its 'close'.
         rl.close();
-        stream.destroy();
+        if (!stream.destroyed) {
+            const closed = once(stream, "close");
+            stream.destroy();
+            await closed.catch(() => { });
+        }
     }
     return { notices, rowCount };
 }
