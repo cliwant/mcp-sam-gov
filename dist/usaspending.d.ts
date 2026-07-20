@@ -286,7 +286,7 @@ export declare function searchRecompetes(args: {
         awardId: string;
         generatedInternalId: string;
         incumbent: string;
-        amount: number;
+        amount: number | null;
         currentEndDate: string;
         daysUntilCurrentEnd: number;
         potentialEndDate?: string | null;
@@ -320,7 +320,7 @@ export declare function searchExpiringContracts(args: {
     contracts: {
         awardId: string;
         recipient: string;
-        amount: number;
+        amount: number | null;
         endDate: string;
         potentialEndDate: string | null;
         awardingAgency: string;

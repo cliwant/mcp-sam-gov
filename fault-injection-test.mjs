@@ -6319,6 +6319,32 @@ async function testRecompeteWindowScan() {
     ok("31c-3 ★LIVELOCK: page PAST totalInWindow (page 3, startIdx 6 of 6) ⇒ returned 0, hasMore true BUT nextOffset NULL — NEVER an advancing cursor into empty pages (revert ⇒ nextOffset 9, an infinite empty-page re-scan loop ⇒ RED; the exact live DoD livelock)",
       p3.data.recompetes.length === 0 && p3.meta.pagination.hasMore === true && p3.meta.pagination.nextOffset === null, JSON.stringify(p3.meta.pagination));
   });
+
+  // (d) P3 null-never-0 (2026-07-20 fix): an in-window award with an ABSENT "Award
+  //     Amount" must emit amount:null (NOT a fabricated $0) — matching every sibling
+  //     search tool ("an ABSENT Award Amount → null, NEVER a fabricated $0") — while a
+  //     GENUINE $0 award is preserved as 0. The old `?? 0` collapsed absent→0
+  //     (indistinguishable from a real $0 award). NON-VACUITY: revert the EMIT to
+  //     `?? 0` ⇒ NA amount 0 ⇒ RED; over-correct to `|| null` ⇒ genuine-$0 nulled ⇒
+  //     RED. Both directions are pinned. (Sort/filter still coerce null→0 internally.)
+  const naRow = { "Award ID": "NA", "Recipient Name": "INC-NA", "End Date": iso(200), "Start Date": iso(-1000), "Awarding Agency": "Department of Defense", "Awarding Sub Agency": "A", NAICS: { code: "541512" }, PSC: { code: "R425" }, "Contract Award Type": "DEFINITIVE CONTRACT", generated_internal_id: "GID-NA" }; // NO "Award Amount" key
+  const p3page = [
+    naRow,               // in-window, ABSENT amount → null
+    row(150, 0, "Z0"),   // in-window, GENUINE $0 → preserved as 0
+    row(100, 5e6, "R5"), // in-window, real $5M
+    row(-200, 4e6, "P1"), // past-window → break (early-stop, exact total)
+  ];
+  await withFetch((u) => {
+    if (!/spending_by_award(?!_count)/.test(u)) return failClosed()();
+    return mockResponse({ status: 200, json: { results: p3page, page_metadata: { hasNext: true, page: 1 } } });
+  }, async () => {
+    const res = await searchRecompetes({ agency: "Department of Defense", scanBudgetPages: 3 });
+    const byId = Object.fromEntries(res.data.recompetes.map((r) => [r.awardId, r.amount]));
+    ok("31d P3 absent Award Amount ⇒ amount:null (NOT a fabricated $0 — revert EMIT to `?? 0` ⇒ 0 ⇒ RED)",
+      byId.NA === null, JSON.stringify(byId));
+    ok("31d P3 GENUINE $0 award ⇒ amount:0 PRESERVED + real $5M intact (over-correct to `|| null` ⇒ Z0 null ⇒ RED)",
+      byId.Z0 === 0 && byId.R5 === 5e6, JSON.stringify(byId));
+  });
 }
 
 // §32: usas_spending_over_time contract-only truthfulness (SOT-1, DA-1 class).

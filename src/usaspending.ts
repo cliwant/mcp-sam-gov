@@ -1468,7 +1468,7 @@ export async function searchRecompetes(args: {
     awardId: string;
     generatedInternalId: string;
     incumbent: string;
-    amount: number;
+    amount: number | null;
     currentEndDate: string;
     daysUntilCurrentEnd: number;
     potentialEndDate?: string | null;
@@ -1515,8 +1515,11 @@ export async function searchRecompetes(args: {
         pastWindow = true;
         break;
       }
-      const amount = row["Award Amount"] ?? 0;
-      if (amount < minAwardValue) continue;
+      // Filter/sort on a numeric view (absent = 0 for COMPARISON only), but EMIT the
+      // raw value below so an ABSENT amount stays null — P3 null-never-0, matching every
+      // sibling search tool ("an ABSENT Award Amount → null, NEVER a fabricated $0").
+      const amountNum = row["Award Amount"] ?? 0;
+      if (amountNum < minAwardValue) continue;
       const potentialEnd = includePotentialEnd
         ? row["Period of Performance Potential End Date"] ?? null
         : undefined;
@@ -1529,7 +1532,7 @@ export async function searchRecompetes(args: {
         awardId: row["Award ID"] ?? "",
         generatedInternalId: row.generated_internal_id ?? "",
         incumbent: row["Recipient Name"] ?? "",
-        amount,
+        amount: row["Award Amount"] ?? null,
         currentEndDate: end as string,
         daysUntilCurrentEnd: d,
         ...(includePotentialEnd
@@ -1557,7 +1560,10 @@ export async function searchRecompetes(args: {
   results.sort((a, b) => {
     if (a.daysUntilCurrentEnd !== b.daysUntilCurrentEnd)
       return a.daysUntilCurrentEnd - b.daysUntilCurrentEnd;
-    if (b.amount !== a.amount) return b.amount - a.amount;
+    // A null amount (P3 — absent, not $0) sorts as 0 for this tiebreak ONLY; it is
+    // never surfaced as 0 in the output.
+    const av = a.amount ?? 0, bv = b.amount ?? 0;
+    if (bv !== av) return bv - av;
     return a.awardId.localeCompare(b.awardId);
   });
 
