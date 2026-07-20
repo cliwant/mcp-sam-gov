@@ -56,10 +56,12 @@
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
+import { once } from "node:events";
 import { pipeline } from "node:stream/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fetchWithRetry, ToolErrorCarrier } from "./errors.js";
+import { driftError } from "./datasource.js";
 import { withMeta } from "./meta.js";
 // ─── Source + config ─────────────────────────────────────────────
 /** The GSA daily bulk CSV (keyless). Space in the path is URL-encoded. */
@@ -243,17 +245,28 @@ function fieldsFromRecord(rec) {
  * loads the whole file into memory — readline yields one physical line at a
  * time and the assembler holds at most one in-progress (quote-spanning) record.
  */
-async function buildIndexFromFile(csvPath) {
+export async function buildIndexFromFile(csvPath) {
     const notices = Object.create(null);
     let headerSeen = false;
     let rowCount = 0;
-    const rl = createInterface({
-        input: createReadStream(csvPath, { encoding: "utf8" }),
-        crlfDelay: Infinity,
-    });
+    const stream = createReadStream(csvPath, { encoding: "utf8" });
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
     const asm = makeRecordAssembler((rec) => {
         if (!headerSeen) {
             headerSeen = true; // first logical record is the 47-column header
+            // [P4] The column contract is POSITIONAL (fixed COL indices). If GSA
+            // reorders / inserts / renames a column, trusting the old positions would
+            // serve WRONG-POSITION data as authoritative (or, if NoticeId shifts, skip
+            // every row → a false "not in the current CSV snapshot"). Neither throws
+            // today. Assert the expected header NAME at each COL index before indexing
+            // any data row — a mismatch is schema drift, never a fake-empty (mirrors the
+            // census-economic.ts header guard). Each COL key IS its expected header name.
+            for (const [expectedName, idx] of Object.entries(COL)) {
+                const got = (rec[idx] ?? "").trim();
+                if (got !== expectedName) {
+                    throw driftError("gsa:csv", `GSA Contract-Opportunities CSV header drift — column ${idx} is ${JSON.stringify(got)}, expected ${JSON.stringify(expectedName)}. The positional column contract changed; refusing to index (a silent column shift would serve wrong-position data as authoritative, or skip every row as a false "not in the current snapshot").`);
+                }
+            }
             return;
         }
         rowCount++;
@@ -264,9 +277,25 @@ async function buildIndexFromFile(csvPath) {
             return;
         notices[noticeId.toLowerCase()] = fieldsFromRecord(rec);
     });
-    for await (const line of rl)
-        asm.push(line);
-    asm.flush();
+    try {
+        for await (const line of rl)
+            asm.push(line);
+        asm.flush();
+    }
+    finally {
+        // Release the OS file handle on ALL exit paths (including the header-drift
+        // throw, which aborts mid-stream). destroy() is ASYNC — the fd is not freed
+        // until the 'close' event — so AWAIT it; otherwise a caller deleting the file
+        // immediately after (Windows holds a lock on an open read stream) hits
+        // ENOTEMPTY/EBUSY. On the normal EOF path the stream auto-destroys, so guard
+        // on `.destroyed` and set the listener BEFORE destroy() to catch its 'close'.
+        rl.close();
+        if (!stream.destroyed) {
+            const closed = once(stream, "close");
+            stream.destroy();
+            await closed.catch(() => { });
+        }
+    }
     return { notices, rowCount };
 }
 // ─── Download + refresh ──────────────────────────────────────────
