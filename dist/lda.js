@@ -169,10 +169,20 @@ export async function searchFilings(args) {
     setFilter("lobbyist_name", args.lobbyistName, "lobbyistName");
     setFilter("filing_year", args.filingYear, "filingYear");
     setFilter("filing_type", args.filingType, "filingType");
-    setFilter("government_entity", args.agency, "agency");
     setFilter("filing_specific_lobbying_issues", args.issue, "issue");
     params.set("page", String(page));
     params.set("page_size", String(pageSize));
+    // [filter honesty] `agency` maps to NO server-side filter on /filings/: the LDA
+    // API silently ignores `government_entity` (live-verified — adding it does NOT
+    // narrow `count`; government entities are nested per lobbying activity, not a
+    // top-level filter). So we NEVER send it (an ignored param buys nothing) and
+    // disclose it as DROPPED — reporting it as applied while returning the full
+    // corpus would be a silent-filter-drop lie (filtersApplied + totalAvailable
+    // overstated as if agency-scoped).
+    const filtersDropped = [];
+    if (args.agency !== undefined && args.agency !== "") {
+        filtersDropped.push("agency");
+    }
     const url = `https://${LDA_HOST}${LDA_FILINGS_PATH}?${params.toString()}`;
     // Belt-and-suspenders: the fixed host + strictly-built query leave nothing to
     // steer the authority; assert the built URL cannot have been moved off-host.
@@ -213,8 +223,8 @@ export async function searchFilings(args) {
                 kind: "invalid_input",
                 retryable: false,
                 message: apiMsg
-                    ? `LDA rejected the request (HTTP 400): ${apiMsg}. Check the filter parameters (filingYear, filingType, agency, issue, …).`
-                    : "LDA rejected the request (HTTP 400) — check the filter parameters (filingYear, filingType, agency, issue, …).",
+                    ? `LDA rejected the request (HTTP 400): ${apiMsg}. Check the filter parameters (filingYear, filingType, issue, …).`
+                    : "LDA rejected the request (HTTP 400) — check the filter parameters (filingYear, filingType, issue, …).",
                 upstreamStatus: 400,
                 upstreamEndpoint: LDA_FILINGS_LABEL,
             });
@@ -243,13 +253,16 @@ export async function searchFilings(args) {
     if (hasMore) {
         notes.push(`This is page ${page} (pageSize ${pageSize}) of ~${Math.ceil(totalAvailable / pageSize)} — pass page=${page + 1} for the next page.`);
     }
+    if (filtersDropped.includes("agency")) {
+        notes.push("The `agency` filter was NOT applied: the keyless LDA /filings/ endpoint has no server-side government-entity filter (the API silently ignores it and returns the full corpus), so it is reported in filtersDropped rather than falsely narrowed — totalAvailable and filtersApplied reflect ONLY the filters actually applied. Government entities are nested per lobbying activity: each returned filing's lobbyingActivities[].governmentEntities lists them. To find lobbying that targeted a specific agency, narrow by registrantName/clientName/issue and inspect those nested governmentEntities.");
+    }
     return withMeta({ filings }, {
         source: `${LDA_HOST} /api/v1/filings (US Senate LDA lobbying; keyless)`,
         keylessMode: true, // ★KEYLESS — the optional key only raises the rate limit
         returned,
         totalAvailable,
         filtersApplied,
-        filtersDropped: [],
+        filtersDropped,
         fieldsUnavailable: [],
         pagination: { offset, limit: pageSize, hasMore, nextOffset },
         notes,

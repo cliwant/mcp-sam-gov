@@ -20003,8 +20003,9 @@ async function testBeaRegionalData() {
 //   [P4]       results non-array OR count non-number ⇒ schema_drift.
 //   [K-test]   LDA_API_KEY set ⇒ Authorization: Token … header ONLY, ABSENT from the
 //              serialized {data,_meta} AND the URL; unset ⇒ NO auth header.
-//   [SSRF]     filters ride URLSearchParams (agency→government_entity, issue→
-//              filing_specific_lobbying_issues); filingYear charclass; fixed host.
+//   [SSRF]     filters ride URLSearchParams (issue→filing_specific_lobbying_issues;
+//              agency is a NON-FILTER — never sent, disclosed in filtersDropped);
+//              filingYear charclass; fixed host.
 const LDA_RE = /lda\.senate\.gov\/api\/v1\/filings/;
 const isLda = (u) => LDA_RE.test(u);
 const ldaMock = (body, status = 200, headers = {}) => (u) => (isLda(u) ? mockResponse({ status, json: body, headers }) : failClosed()());
@@ -20068,14 +20069,22 @@ async function testLdaSearchFilings() {
         m.totalAvailable === 2 && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.complete === true, JSON.stringify({ ta: m.totalAvailable, hm: m.pagination.hasMore, c: m.complete }));
     });
 
-    // ── [filters mapping + SSRF] agency→government_entity, issue→
-    //    filing_specific_lobbying_issues, page/page_size; special chars ride
-    //    URLSearchParams (encoded, no host steer). ──
+    // ── [filters mapping + SSRF] the SUPPORTED filters map to their LDA query
+    //    params; `agency` maps to NO server param (the LDA API silently ignores
+    //    government_entity — live-verified 2026-07-20: adding it does NOT narrow
+    //    `count`), so it is NEVER sent and is disclosed in filtersDropped;
+    //    issue→filing_specific_lobbying_issues; special chars ride URLSearchParams
+    //    (encoded, no host steer). ──
     await withFetch(ldaMock(ldaBody(0, [])), async (calls) => {
-      await runTool("lda_search_filings", { registrantName: "A & B / C", clientName: "Google", lobbyistName: "Jane Doe", filingYear: "2024", filingType: "Q1", agency: "DEPARTMENT OF DEFENSE", issue: "x=1&y=2", page: 3, pageSize: 10 }, sam);
+      const r = await runTool("lda_search_filings", { registrantName: "A & B / C", clientName: "Google", lobbyistName: "Jane Doe", filingYear: "2024", filingType: "Q1", agency: "DEPARTMENT OF DEFENSE", issue: "x=1&y=2", page: 3, pageSize: 10 }, sam);
       const q = ldaQuery(calls);
-      ok("55e-map every filter maps to its LDA query param (registrant_name/client_name/lobbyist_name/filing_year/filing_type/government_entity(agency)/filing_specific_lobbying_issues(issue)) + page/page_size ⇒ rename a mapping ⇒ RED",
-        q.get("registrant_name") === "A & B / C" && q.get("client_name") === "Google" && q.get("lobbyist_name") === "Jane Doe" && q.get("filing_year") === "2024" && q.get("filing_type") === "Q1" && q.get("government_entity") === "DEPARTMENT OF DEFENSE" && q.get("filing_specific_lobbying_issues") === "x=1&y=2" && q.get("page") === "3" && q.get("page_size") === "10", ldaUrl(calls));
+      const m = buildMeta(r.meta);
+      ok("55e-map every SUPPORTED filter maps to its LDA query param (registrant_name/client_name/lobbyist_name/filing_year/filing_type/filing_specific_lobbying_issues(issue)) + page/page_size ⇒ rename a mapping ⇒ RED",
+        q.get("registrant_name") === "A & B / C" && q.get("client_name") === "Google" && q.get("lobbyist_name") === "Jane Doe" && q.get("filing_year") === "2024" && q.get("filing_type") === "Q1" && q.get("filing_specific_lobbying_issues") === "x=1&y=2" && q.get("page") === "3" && q.get("page_size") === "10", ldaUrl(calls));
+      ok("55e-★agency is a NON-FILTER: government_entity is NEVER sent on the wire (the LDA API silently ignores it — sending it would falsely imply an agency-scoped total) + `agency` itself is not a query param ⇒ re-add setFilter('government_entity', args.agency) ⇒ RED",
+        q.get("government_entity") === null && q.get("agency") === null, ldaUrl(calls));
+      ok("55e-★agency honesty: filtersApplied does NOT include 'agency' AND filtersDropped includes 'agency' AND a note discloses it was NOT applied (nested governmentEntities workaround) ⇒ report agency as applied ⇒ RED",
+        !(m.filtersApplied ?? []).includes("agency") && (m.filtersDropped ?? []).includes("agency") && m.notes.some((n) => /was NOT applied|no server-side government-entity filter/i.test(n)), JSON.stringify({ fa: m.filtersApplied, fd: m.filtersDropped }));
       ok("55e-ssrf special-char values (& / =) round-trip through URLSearchParams WITHOUT steering the host — the request stays on lda.senate.gov over https ⇒ raw string concat instead of URLSearchParams ⇒ RED",
         new URL(ldaUrl(calls)).hostname === "lda.senate.gov" && new URL(ldaUrl(calls)).protocol === "https:", ldaUrl(calls));
     });
