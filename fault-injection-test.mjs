@@ -17481,8 +17481,10 @@ async function testCensusBusinessPatterns() {
       const serialized = JSON.stringify({ data: r.data, _meta: m });
       ok("55b-Ktest the key value is ABSENT from the serialized {data,_meta} (never in source/notes/label — the K-test) ⇒ leak the key into _meta.source or a note ⇒ RED",
         !serialized.includes(KEY) && m.source.includes("CENSUS_API_KEY") && m.keylessMode === false, JSON.stringify({ leaked: serialized.includes(KEY), source: m.source }));
-      ok("55b-key the request is to api.census.gov/data/2022/cbp over https (fixed host; default year 2022) + get=NAME,NAICS2017_LABEL,ESTAB,EMP,PAYANN,GEO_ID + for=state:06 + NAICS2017=5415",
-        new URL(cbpUrl(calls)).hostname === "api.census.gov" && new URL(cbpUrl(calls)).protocol === "https:" && /\/data\/2022\/cbp/.test(cbpUrl(calls)) && q.get("for") === "state:06" && q.get("NAICS2017") === "5415" && q.get("get") === "NAME,NAICS2017_LABEL,ESTAB,EMP,PAYANN,GEO_ID", cbpUrl(calls));
+      ok("55b-key the request is to api.census.gov/data/2023/cbp over https (fixed host; default year 2023) + get=NAME,NAICS2017_LABEL,ESTAB,EMP,PAYANN,GEO_ID + for=state:06 + NAICS2017=5415",
+        new URL(cbpUrl(calls)).hostname === "api.census.gov" && new URL(cbpUrl(calls)).protocol === "https:" && /\/data\/2023\/cbp/.test(cbpUrl(calls)) && q.get("for") === "state:06" && q.get("NAICS2017") === "5415" && q.get("get") === "NAME,NAICS2017_LABEL,ESTAB,EMP,PAYANN,GEO_ID", cbpUrl(calls));
+      ok("55b-key ★no year supplied ⇒ a note DISCLOSES the year defaulted to the latest published CBP vintage (2023) ⇒ omit the defaulted-vintage disclosure ⇒ RED",
+        m.notes.some((n) => /defaulted to 2023 .*latest PUBLISHED CBP vintage/i.test(n)), JSON.stringify(m.notes.length));
     });
 
     // ── [P1] a 2D array with 3 data rows ⇒ returned:3, totalAvailable:3, complete:true
