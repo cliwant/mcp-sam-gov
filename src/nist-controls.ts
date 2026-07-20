@@ -46,8 +46,10 @@ export type NistControl = {
   id: string; // display form, e.g. "AC-2"
   family: string; // e.g. "AC — Access Control"
   title: string;
-  statement: string; // assembled requirement prose (labelled, multi-line)
+  status: string | null; // OSCAL status prop, e.g. "withdrawn"; null when active
+  statement: string | null; // requirement prose; NULL when absent (a WITHDRAWN control has none) — never ""
   guidance: string | null; // discussion prose
+  incorporatedInto: string[]; // withdrawn control ⇒ the control id(s) it was folded into (e.g. ["AC-2","AU-6"])
   enhancements: { id: string; title: string }[]; // e.g. AC-2(1)
 };
 
@@ -60,6 +62,8 @@ type OscalPart = {
 type OscalControl = {
   id?: string;
   title?: string;
+  props?: { name?: string; value?: string }[];
+  links?: { href?: string; rel?: string }[];
   parts?: OscalPart[];
   controls?: OscalControl[];
 };
@@ -100,12 +104,26 @@ function partProse(control: OscalControl, name: string): string | null {
 }
 
 function mapControl(control: OscalControl, family: string): NistControl {
+  const status =
+    (control.props ?? []).find((p) => p.name === "status")?.value?.trim() || null;
+  // A withdrawn control carries `links[] rel="incorporated-into"` → the control(s)
+  // it was folded into (e.g. AC-13 → AC-2, AU-6). Surface them so a withdrawn
+  // control is never mistaken for an active requirement.
+  const incorporatedInto = (control.links ?? [])
+    .filter((l) => l.rel === "incorporated-into" && typeof l.href === "string")
+    .map((l) => displayId(String(l.href).replace(/^#/, "")))
+    .filter((x) => x.length > 0);
   return {
     id: displayId(control.id ?? ""),
     family,
     title: (control.title ?? "").trim(),
-    statement: partProse(control, "statement") ?? "",
+    status,
+    // [P3] absent statement ⇒ null, NEVER "" — a withdrawn control has no
+    // requirement text; "" would misread as "an active control with a blank
+    // requirement".
+    statement: partProse(control, "statement"),
     guidance: partProse(control, "guidance"),
+    incorporatedInto,
     enhancements: (control.controls ?? []).map((e) => ({
       id: displayId(e.id ?? ""),
       title: (e.title ?? "").trim(),
@@ -119,7 +137,12 @@ function mapControl(control: OscalControl, family: string): NistControl {
  * families (else driftError — a truncated catalog is NEVER a fake empty). Enhancements
  * are carried on each control (not indexed as top-level entries).
  */
-async function loadControls(): Promise<NistControl[]> {
+type OscalMetadata = { version: string | null; lastModified: string | null };
+
+async function loadControls(): Promise<{
+  controls: NistControl[];
+  metadata: OscalMetadata;
+}> {
   return memoize(
     "nist:sp800-53r5",
     async () => {
@@ -131,7 +154,12 @@ async function loadControls(): Promise<NistControl[]> {
         label: OSCAL_LABEL,
         redirect: "error",
         timeoutMs: OSCAL_TIMEOUT_MS,
-      })) as { catalog?: { groups?: unknown } };
+      })) as {
+        catalog?: {
+          groups?: unknown;
+          metadata?: { version?: unknown; "last-modified"?: unknown };
+        };
+      };
       const groups = body.catalog?.groups;
       if (!Array.isArray(groups) || groups.length < FAMILY_FLOOR) {
         throw driftError(
@@ -139,12 +167,21 @@ async function loadControls(): Promise<NistControl[]> {
           `OSCAL catalog.groups missing or implausibly small (${Array.isArray(groups) ? groups.length : "not-an-array"} < ${FAMILY_FLOOR} families) — treating as schema drift / truncation, never a fake-empty catalog.`,
         );
       }
+      // [P5 freshness] The OSCAL catalog is a moving static file on the `main`
+      // branch — surface its exact version + last-modified so a compliance caller
+      // knows WHICH point-release (5.1.1 / 5.2.0 …) they are reading.
+      const md = body.catalog?.metadata ?? {};
+      const metadata: OscalMetadata = {
+        version: typeof md.version === "string" ? md.version : null,
+        lastModified:
+          typeof md["last-modified"] === "string" ? md["last-modified"] : null,
+      };
       const controls: NistControl[] = [];
       for (const g of groups as OscalGroup[]) {
         const family = `${(g.id ?? "").toUpperCase()} — ${(g.title ?? "").trim()}`;
         for (const c of g.controls ?? []) controls.push(mapControl(c, family));
       }
-      return controls;
+      return { controls, metadata };
     },
     OSCAL_CACHE_TTL_MS,
   );
@@ -166,7 +203,7 @@ export async function searchControls(args: {
 }): Promise<MetaBundle> {
   const limit = args.limit ?? 25;
   const offset = args.offset ?? 0;
-  const all = await loadControls();
+  const { controls: all, metadata } = await loadControls();
 
   const filtersApplied: string[] = [];
   const idQ = args.controlId !== undefined ? displayId(args.controlId) : undefined;
@@ -189,7 +226,7 @@ export async function searchControls(args: {
       // Search the title + requirement statement AND each enhancement's title, so a
       // term that lives only in an enhancement (e.g. "multi-factor" → IA-2(1)) still
       // surfaces the parent control. filtersApplied still lists 'keyword'.
-      const hay = `${c.title}\n${c.statement}\n${c.enhancements.map((e) => e.title).join("\n")}`.toLowerCase();
+      const hay = `${c.title}\n${c.statement ?? ""}\n${c.enhancements.map((e) => e.title).join("\n")}`.toLowerCase();
       if (!hay.includes(kwQ)) return false;
     }
     return true;
@@ -201,10 +238,22 @@ export async function searchControls(args: {
   const hasMore = offset + returned < totalAvailable;
   const nextOffset = hasMore ? offset + returned : null;
 
+  const versionLabel = metadata.version ? `Rev ${metadata.version}` : "Rev 5";
+  const notes: string[] = [PROVENANCE_NOTE, CLIENT_FILTER_NOTE, REFERENCE_NOTE];
+  notes.push(
+    `OSCAL catalog ${metadata.version ? `version ${metadata.version}` : "revision 5"}${metadata.lastModified ? `, last-modified ${metadata.lastModified.slice(0, 10)}` : ""} — fetched live from the usnistgov/oscal-content \`main\` branch (a MOVING target; control text can change between point releases, e.g. 5.1.1 → 5.2.0). Cite the version above, not just "Rev 5".`,
+  );
+  const withdrawnOnPage = page.filter((c) => c.status === "withdrawn").length;
+  if (withdrawnOnPage > 0) {
+    notes.push(
+      `${withdrawnOnPage} of the returned control(s) are WITHDRAWN (status:"withdrawn") — a withdrawn control has NO requirement text (statement:null) and is NOT an active requirement; see its incorporatedInto for the control(s) that superseded it.`,
+    );
+  }
+
   return withMeta(
     { controls: page },
     {
-      source: "NIST SP 800-53 Rev 5 (OSCAL catalog, keyless)",
+      source: `NIST SP 800-53 ${versionLabel} (OSCAL catalog, keyless)`,
       keylessMode: true,
       returned,
       totalAvailable,
@@ -213,7 +262,7 @@ export async function searchControls(args: {
       filtersDropped: [],
       fieldsUnavailable: [],
       pagination: { offset, limit, hasMore, nextOffset },
-      notes: [PROVENANCE_NOTE, CLIENT_FILTER_NOTE, REFERENCE_NOTE],
+      notes,
     } satisfies Partial<ResponseMeta>,
   );
 }
