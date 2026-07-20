@@ -88,7 +88,12 @@ const GEOGRAPHIES = new Set(["us", "state", "county"]);
 // mechanism; a keyed live verification of CBP's exact withheld-cell encoding is pending
 // (no CENSUS_API_KEY was available at build time). See SUPPRESSED_NOTE.
 const CENSUS_SENTINEL_FLOOR = -100000000;
-const DEFAULT_YEAR = "2022"; // the latest confirmed CBP vintage (ADR-0047)
+// Latest PUBLISHED CBP vintage (live-verified 2026-07-20:
+// api.census.gov/data/2023/cbp/variables.json → 200; /data/2024 → 404). CBP is
+// released with a ~2-year lag and irregularly, so a dynamic "current year − N" is
+// unsafe (it would query an unpublished vintage) — this is a hard-coded latest;
+// bump it (and re-verify) when a newer /data/{year}/cbp appears. ADR-0047.
+const DEFAULT_YEAR = "2023";
 // ─── Honesty notes (ADR-0047 required set) ────────────────────────
 const KEY_REQUIRED_NOTE = "This source REQUIRES a free CENSUS_API_KEY (the Census Data API has no keyless tier). The key is sent ONLY as the &key= query parameter to api.census.gov and is NEVER logged, echoed, or placed in this response.";
 const PAYROLL_UNITS_NOTE = "annualPayrollUsd is ANNUAL payroll in US dollars, converted from the Census PAYANN field's $1,000 units (×1000). establishments and employees are integer counts (as-of the reference year).";
@@ -135,6 +140,7 @@ export async function businessPatterns(args) {
     }
     // ── Validate + default the inputs (belt-and-suspenders behind the server Zod;
     //    a DIRECT handler call bypasses Zod). ──
+    const yearWasDefaulted = args.year === undefined;
     const year = args.year ?? DEFAULT_YEAR;
     if (!YEAR_RE.test(year)) {
         throw new ToolErrorCarrier({
@@ -332,6 +338,9 @@ export async function businessPatterns(args) {
         SUPPRESSED_NOTE,
         NO_PAGINATION_NOTE,
     ];
+    if (yearWasDefaulted) {
+        notes.push(`No \`year\` was supplied, so it defaulted to ${DEFAULT_YEAR} — the latest PUBLISHED CBP vintage as of the last verification (CBP is released with a ~2-year lag). Pass an explicit \`year\` for a different vintage.`);
+    }
     let rows = allRows;
     if (typeof args.limit === "number" &&
         Number.isFinite(args.limit) &&
