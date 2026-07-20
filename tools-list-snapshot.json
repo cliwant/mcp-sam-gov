@@ -5,6 +5,11 @@
     "inputSchema": {
       "type": "object",
       "properties": {}
+    },
+    "annotations": {
+      "title": "API Key Status",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -66,6 +71,11 @@
       "required": [
         "service"
       ]
+    },
+    "annotations": {
+      "title": "ArcGIS: Feature Query",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -94,6 +104,11 @@
       "required": [
         "query"
       ]
+    },
+    "annotations": {
+      "title": "ArcGIS: Hub Discover Datasets",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -132,6 +147,11 @@
         "geoFips",
         "lineCode"
       ]
+    },
+    "annotations": {
+      "title": "BEA: Regional Data",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -194,6 +214,11 @@
           "description": "One or more measures (default [\"annual_mean\"]): annual_mean (dollars/year), annual_median (dollars/year), hourly_mean (dollars/hour), hourly_median (dollars/hour), employment (count jobs). Each row carries measure.units from this map (H3 — never mislabel)."
         }
       }
+    },
+    "annotations": {
+      "title": "BLS: Oews Wages",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -258,6 +283,11 @@
         "year",
         "quarter"
       ]
+    },
+    "annotations": {
+      "title": "BLS: Qcew",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -300,6 +330,11 @@
           "description": "Inclusive end year (1900..2027). Default: the current year. Must be ≥ startYear."
         }
       }
+    },
+    "annotations": {
+      "title": "BLS: Timeseries",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -325,6 +360,11 @@
           "description": "0-based offset; page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "Bonfire: List Organizations",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -349,6 +389,11 @@
       "required": [
         "org"
       ]
+    },
+    "annotations": {
+      "title": "Bonfire: Search Opportunities",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -374,6 +419,11 @@
           "description": "Zero-based page offset (default 0)."
         }
       }
+    },
+    "annotations": {
+      "title": "CBP: Border Wait Times",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -408,6 +458,11 @@
           "description": "OPTIONAL client-side top-N cap on the returned rows. CBP has NO server-side pagination, so this slices AFTER the full set is fetched and DISCLOSES the omission (totalAvailable stays the full count). Omit to return every matching row."
         }
       }
+    },
+    "annotations": {
+      "title": "Census: Business Patterns",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -465,6 +520,11 @@
       "required": [
         "address"
       ]
+    },
+    "annotations": {
+      "title": "Census: Geocode Address",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -531,6 +591,11 @@
           "description": "Geography vintage (default Current_Current — a MOVING vintage; the same address may return a different tract/CD across cycles). The valid vintage set DEPENDS on the benchmark (a matrix — this enum is the UNION across all four benchmarks); an incompatible (benchmark, vintage) pair fails-closed with an HTTP 400 (invalid_input), never a silent mis-resolution. e.g. Census2020_Census2020 (with Public_AR_Census2020), Census2010_Current."
         }
       }
+    },
+    "annotations": {
+      "title": "Census: Geographies By Coordinates",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -572,6 +637,11 @@
           "description": "Zero-based page offset (default 0)."
         }
       }
+    },
+    "annotations": {
+      "title": "Cisa Kev Lookup",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -602,6 +672,11 @@
         "host",
         "q"
       ]
+    },
+    "annotations": {
+      "title": "data.gov: Discover Datasets",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -648,6 +723,11 @@
         "host",
         "resourceId"
       ]
+    },
+    "annotations": {
+      "title": "data.gov: Query",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -680,6 +760,11 @@
       "required": [
         "fields"
       ]
+    },
+    "annotations": {
+      "title": "ClinicalTrials.gov: Facet Counts",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -696,6 +781,11 @@
       "required": [
         "nctId"
       ]
+    },
+    "annotations": {
+      "title": "ClinicalTrials.gov: Get Study",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -759,6 +849,11 @@
           "description": "Opaque continuation cursor — pass back the _meta.nextCursor from the previous page. Pagination is a cursor, NOT a numeric offset (offset/nextOffset are null); nextCursor:null means the last page. A bad token loud-fails at HTTP 400."
         }
       }
+    },
+    "annotations": {
+      "title": "ClinicalTrials.gov: Search Studies",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -784,6 +879,11 @@
           "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "CMS: DMEPOS Suppliers",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -822,6 +922,11 @@
       "required": [
         "facilityType"
       ]
+    },
+    "annotations": {
+      "title": "CMS: Facility Directory",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -851,6 +956,11 @@
           "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "CMS: Hospital Compare",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -884,6 +994,11 @@
           "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "CMS: Medicare Provider Services",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -958,6 +1073,11 @@
       "required": [
         "datasetId"
       ]
+    },
+    "annotations": {
+      "title": "CMS: Query Dataset",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -987,6 +1107,11 @@
           "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "CMS: Revoked Providers",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1008,6 +1133,11 @@
           "description": "0-based pagination offset (default 0), applied client-side against the known catalog length (never a server offset)."
         }
       }
+    },
+    "annotations": {
+      "title": "CMS: Search Datasets",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1044,6 +1174,11 @@
         "billType",
         "billNumber"
       ]
+    },
+    "annotations": {
+      "title": "Congress.gov: Get Bill",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1091,6 +1226,11 @@
           "description": "Records per page, 1..250, default 20."
         }
       }
+    },
+    "annotations": {
+      "title": "Congress.gov: Search Bills",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1128,6 +1268,11 @@
           "description": "Sort order (maps to order_by), default 'dateFiled desc' (most recent first). E.g. 'dateFiled asc', 'score desc'."
         }
       }
+    },
+    "annotations": {
+      "title": "CourtListener: Search Opinions",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1157,6 +1302,11 @@
           "description": "A specific CPSC recall number (optional), e.g. '25088' (→ RecallNumber). Letters/digits/hyphen only (^[A-Za-z0-9-]+$)."
         }
       }
+    },
+    "annotations": {
+      "title": "CPSC: Recalls",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1216,6 +1366,11 @@
           "description": "Zero-based page offset (default 0). Pagination derives from NVD's exact totalResults, never the page length."
         }
       }
+    },
+    "annotations": {
+      "title": "CVE Lookup",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1241,6 +1396,11 @@
           "description": "Opaque continuation cursor (→ after) — pass back the _meta.nextCursor from the previous page. Pagination is a cursor, NOT a numeric offset (offset/nextOffset are null); nextCursor:null means the last page. A bad token (spaces/'../'/'%') ⇒ invalid_input pre-fetch."
         }
       }
+    },
+    "annotations": {
+      "title": "Datagov Search Datasets",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1285,6 +1445,11 @@
         "agency",
         "table"
       ]
+    },
+    "annotations": {
+      "title": "DOL: Get Dataset",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1310,6 +1475,11 @@
           "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "DOL: List Datasets",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1335,6 +1505,11 @@
         "titleNumber",
         "section"
       ]
+    },
+    "annotations": {
+      "title": "eCFR: Get Section",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1343,6 +1518,11 @@
     "inputSchema": {
       "type": "object",
       "properties": {}
+    },
+    "annotations": {
+      "title": "eCFR: List Titles",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1365,6 +1545,11 @@
       "required": [
         "query"
       ]
+    },
+    "annotations": {
+      "title": "eCFR: Search",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1381,6 +1566,11 @@
       "required": [
         "registryId"
       ]
+    },
+    "annotations": {
+      "title": "EPA ECHO: Facility Report",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1483,6 +1673,11 @@
       "required": [
         "state"
       ]
+    },
+    "annotations": {
+      "title": "EPA ECHO: Search Facilities",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1537,6 +1732,11 @@
         "cikOrTicker",
         "concept"
       ]
+    },
+    "annotations": {
+      "title": "SEC EDGAR: Company Concept",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1568,6 +1768,11 @@
       "required": [
         "cikOrTicker"
       ]
+    },
+    "annotations": {
+      "title": "SEC EDGAR: Company Facts",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1607,6 +1812,11 @@
       "required": [
         "cikOrTicker"
       ]
+    },
+    "annotations": {
+      "title": "SEC EDGAR: Company Filings",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1643,6 +1853,11 @@
       "required": [
         "date"
       ]
+    },
+    "annotations": {
+      "title": "SEC EDGAR: Daily Filing Index",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1692,6 +1907,11 @@
         "year",
         "quarter"
       ]
+    },
+    "annotations": {
+      "title": "SEC EDGAR: Filing Index",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1738,6 +1958,11 @@
       "required": [
         "q"
       ]
+    },
+    "annotations": {
+      "title": "SEC EDGAR: Full Text Search",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1754,6 +1979,11 @@
       "required": [
         "query"
       ]
+    },
+    "annotations": {
+      "title": "SEC EDGAR: Lookup Cik",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1799,6 +2029,11 @@
         "tag",
         "period"
       ]
+    },
+    "annotations": {
+      "title": "SEC EDGAR: Xbrl Frames",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1828,6 +2063,11 @@
           "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "EPA: Tri Facilities",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1857,6 +2097,11 @@
           "description": "0-based row offset for pagination (default 0)."
         }
       }
+    },
+    "annotations": {
+      "title": "FAC: Get Findings",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1894,6 +2139,11 @@
           "description": "0-based row offset for pagination (default 0)."
         }
       }
+    },
+    "annotations": {
+      "title": "FAC: Search Audits",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1918,6 +2168,11 @@
       "required": [
         "clauseNumber"
       ]
+    },
+    "annotations": {
+      "title": "FAR/DFARS: Clause Lookup",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1949,6 +2204,11 @@
       "required": [
         "clauses"
       ]
+    },
+    "annotations": {
+      "title": "FAR/DFARS: Compliance Matrix",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -1989,6 +2249,11 @@
       "required": [
         "query"
       ]
+    },
+    "annotations": {
+      "title": "FAR/DFARS: Search",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2038,6 +2303,11 @@
           "description": "Sort direction, default DESC (most-recent failures first)."
         }
       }
+    },
+    "annotations": {
+      "title": "FDIC: Bank Failures",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2083,6 +2353,11 @@
           "description": "Sort direction, default DESC (newest snapshot / largest deposits first)."
         }
       }
+    },
+    "annotations": {
+      "title": "FDIC: Branch Deposits",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2135,6 +2410,11 @@
           "description": "Sort direction, default DESC (newest year / largest first)."
         }
       }
+    },
+    "annotations": {
+      "title": "FDIC: Industry Summary",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2177,6 +2457,11 @@
       "required": [
         "cert"
       ]
+    },
+    "annotations": {
+      "title": "FDIC: Institution Financials",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2228,6 +2513,11 @@
           "description": "Sort direction, default DESC (newest structural change first)."
         }
       }
+    },
+    "annotations": {
+      "title": "FDIC: Institution History",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2275,6 +2565,11 @@
       "required": [
         "cert"
       ]
+    },
+    "annotations": {
+      "title": "FDIC: Risk Ratios",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2333,6 +2628,11 @@
           "description": "Sort direction when sortBy is set, ASC (default) or DESC."
         }
       }
+    },
+    "annotations": {
+      "title": "FDIC: Search Institutions",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2349,6 +2649,11 @@
       "required": [
         "documentNumber"
       ]
+    },
+    "annotations": {
+      "title": "Federal Register: Get Document",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2361,6 +2666,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "Federal Register: List Agencies",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2413,6 +2723,11 @@
           "description": "Page offset (default 0)."
         }
       }
+    },
+    "annotations": {
+      "title": "Federal Register: Public Inspection",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2457,6 +2772,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "Federal Register: Search Documents",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2483,6 +2803,11 @@
           "description": "A short one-line summary for the issue title/body. PUBLIC — never include API keys, personal data, or sensitive query values."
         }
       }
+    },
+    "annotations": {
+      "title": "Feedback",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2541,6 +2866,11 @@
           "description": "0-based row offset ($skip) for pagination, default 0."
         }
       }
+    },
+    "annotations": {
+      "title": "FEMA: Disaster Declarations",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2590,6 +2920,11 @@
           "description": "0-based row offset ($skip) for pagination, default 0."
         }
       }
+    },
+    "annotations": {
+      "title": "FEMA: Search Hazard Mitigation",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2643,6 +2978,11 @@
           "description": "0-based row offset ($skip) for pagination, default 0."
         }
       }
+    },
+    "annotations": {
+      "title": "FEMA: Search Public Assistance",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2696,6 +3036,11 @@
           "description": "0-indexed page start (page size fixed at 10). Keyless deep-paging past ~200K is unreliable."
         }
       }
+    },
+    "annotations": {
+      "title": "FPDS: Search Awards",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2720,6 +3065,11 @@
       "required": [
         "query"
       ]
+    },
+    "annotations": {
+      "title": "FRED: Search Series",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2760,6 +3110,11 @@
       "required": [
         "seriesId"
       ]
+    },
+    "annotations": {
+      "title": "FRED: Series Observations",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2804,6 +3159,11 @@
           "description": "Fetch each decision's page to fill agency/outcome/solicitation/PDF (default true). Set false for a fast feed-only list (those fields will be null)."
         }
       }
+    },
+    "annotations": {
+      "title": "GAO: Protest Lookup",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2820,6 +3180,11 @@
       "required": [
         "packageId"
       ]
+    },
+    "annotations": {
+      "title": "GovInfo: Get Package",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2828,6 +3193,11 @@
     "inputSchema": {
       "type": "object",
       "properties": {}
+    },
+    "annotations": {
+      "title": "GovInfo: List Collections",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2861,6 +3231,11 @@
         "collection",
         "startDate"
       ]
+    },
+    "annotations": {
+      "title": "GovInfo: Search Packages",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2877,6 +3252,11 @@
       "required": [
         "opportunityId"
       ]
+    },
+    "annotations": {
+      "title": "Grants.gov: Get Opportunity",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2917,6 +3297,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "Grants.gov: Search",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2965,6 +3350,11 @@
       "required": [
         "laborCategory"
       ]
+    },
+    "annotations": {
+      "title": "GSA: Benchmark Labor Rates",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -2991,6 +3381,11 @@
         }
       },
       "description": "Look up GSA per-diem rates by EITHER (city + state) OR zip. Supplying both, or neither, ⇒ invalid_input."
+    },
+    "annotations": {
+      "title": "GSA: Perdiem Rates",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3015,6 +3410,11 @@
       "required": [
         "query"
       ]
+    },
+    "annotations": {
+      "title": "USITC HTS: Lookup",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3060,6 +3460,11 @@
           "description": "Filings per page, 1..25 (the LDA API caps at 25), default 25."
         }
       }
+    },
+    "annotations": {
+      "title": "Senate LDA: Search Filings",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3086,6 +3491,11 @@
         "model",
         "modelYear"
       ]
+    },
+    "annotations": {
+      "title": "NHTSA: Complaints",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3112,6 +3522,11 @@
         "model",
         "modelYear"
       ]
+    },
+    "annotations": {
+      "title": "NHTSA: Recalls",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3208,6 +3623,11 @@
           "description": "0-based offset into the result set. HARD-CAPPED at 14,999: NIH caps keyless retrieval at the first 15,000 records (offset 0..14,999), so offset ≥ 15,000 is refused (invalid_input) — narrow criteria to reach records beyond the window. The count (totalAvailable) stays EXACT past the window."
         }
       }
+    },
+    "annotations": {
+      "title": "NIH: Reporter Search Projects",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3237,6 +3657,11 @@
           "description": "Zero-based page offset (default 0)."
         }
       }
+    },
+    "annotations": {
+      "title": "NIST: 800 53 Controls",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3253,6 +3678,11 @@
       "required": [
         "ein"
       ]
+    },
+    "annotations": {
+      "title": "Nonprofit: Financials",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3278,6 +3708,11 @@
           "description": "0-BASED page number (default 0). Page with cur_page+1 from _meta.notes / when _meta.pagination.hasMore."
         }
       }
+    },
+    "annotations": {
+      "title": "Nonprofit: Search",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3393,6 +3828,11 @@
           "description": "0-based pagination offset, 0..1000 (default 0). ★POLICY cap: this vetting tool reaches at most the first ~1,200 matches/query (a deliberate targeted-lookup boundary — NPPES itself no longer enforces a skip ceiling); skip > 1000 ⇒ invalid_input. Search mode only."
         }
       }
+    },
+    "annotations": {
+      "title": "NPPES: Lookup Provider",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3409,6 +3849,11 @@
       "required": [
         "awardId"
       ]
+    },
+    "annotations": {
+      "title": "NSF: Get Award",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3516,6 +3961,11 @@
           "description": "0-based offset. HARD-CAPPED at 9,999: NSF caps keyless retrieval at the first 10,000 records (offset+rpp ≤ 10,000), so offset ≥ 10,000 is refused (invalid_input) — narrow criteria to bring the set under 10,000."
         }
       }
+    },
+    "annotations": {
+      "title": "NSF: Search Awards",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3552,6 +4002,11 @@
           "description": "Zero-based page offset (default 0)."
         }
       }
+    },
+    "annotations": {
+      "title": "NWS: Active Alerts",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3604,6 +4059,11 @@
       "required": [
         "name"
       ]
+    },
+    "annotations": {
+      "title": "OFAC: Screen Entity",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3645,6 +4105,11 @@
           "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "openFDA: Device Clearances",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3678,6 +4143,11 @@
           "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "openFDA: Drug Approvals",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3733,6 +4203,11 @@
           "description": "Row offset for pagination (default 0). Page with _meta.pagination.nextOffset."
         }
       }
+    },
+    "annotations": {
+      "title": "openFDA: Enforcement",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3758,6 +4233,11 @@
           "description": "0-based offset; page with _meta.pagination.nextOffset. totalAvailable = exact filtered portal count."
         }
       }
+    },
+    "annotations": {
+      "title": "OpenGov: List Governments",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3782,6 +4262,11 @@
       "required": [
         "governmentCode"
       ]
+    },
+    "annotations": {
+      "title": "OpenGov: Search Solicitations",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3798,6 +4283,11 @@
       "required": [
         "docketId"
       ]
+    },
+    "annotations": {
+      "title": "Regulations.gov: Get Docket",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3865,6 +4355,11 @@
           "description": "Records per page (page[size]), 5..250, default 25."
         }
       }
+    },
+    "annotations": {
+      "title": "Regulations.gov: Search Comments",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3920,6 +4415,11 @@
           "description": "1-based page number, 1..40 (HARD cap — page[number] max is 40; the reachable window is 40×page[size] ≤ 10,000 records)."
         }
       }
+    },
+    "annotations": {
+      "title": "Regulations.gov: Search Dockets",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -3987,6 +4487,11 @@
           "description": "Records per page (page[size]), 5..250, default 25."
         }
       }
+    },
+    "annotations": {
+      "title": "Regulations.gov: Search Documents",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4003,6 +4508,11 @@
       "required": [
         "resourceId"
       ]
+    },
+    "annotations": {
+      "title": "SAM.gov: Attachment URL",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4046,6 +4556,11 @@
           "description": "Page size (default 25, max 100)."
         }
       }
+    },
+    "annotations": {
+      "title": "SAM.gov: Check Exclusions",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4066,6 +4581,11 @@
       "required": [
         "url"
       ]
+    },
+    "annotations": {
+      "title": "SAM.gov: Fetch Attachment Text",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4082,6 +4602,11 @@
       "required": [
         "noticeId"
       ]
+    },
+    "annotations": {
+      "title": "SAM.gov: Fetch Description",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4098,6 +4623,11 @@
       "required": [
         "noticeId"
       ]
+    },
+    "annotations": {
+      "title": "SAM.gov: Get Opportunity",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4135,6 +4665,11 @@
       "required": [
         "reference"
       ]
+    },
+    "annotations": {
+      "title": "SAM.gov: Get Wage Rates",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4156,6 +4691,11 @@
           "description": "Legal entity name to screen (drives the keyless exclusions text search; normalized-name gated). Provide at least one of uei/cage/name."
         }
       }
+    },
+    "annotations": {
+      "title": "SAM.gov: Integrity Lookup",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4175,6 +4715,11 @@
       "required": [
         "noticeIds"
       ]
+    },
+    "annotations": {
+      "title": "SAM.gov: Lookup Notice Fields",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4191,6 +4736,11 @@
       "required": [
         "organizationId"
       ]
+    },
+    "annotations": {
+      "title": "SAM.gov: Lookup Organization",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4230,6 +4780,11 @@
           "description": "Page offset into the result set (default 0)."
         }
       }
+    },
+    "annotations": {
+      "title": "SAM.gov: Search Opportunities",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4293,6 +4848,11 @@
           "description": "Page size (default 25, max 50)."
         }
       }
+    },
+    "annotations": {
+      "title": "SAM.gov: Search Shaping",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4341,6 +4901,11 @@
       "required": [
         "coverage"
       ]
+    },
+    "annotations": {
+      "title": "SAM.gov: Search Wage Determinations",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4357,6 +4922,11 @@
       "required": [
         "naics"
       ]
+    },
+    "annotations": {
+      "title": "SBA: Size Standard",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4402,6 +4972,11 @@
           "description": "0-based row offset for pagination, default 0."
         }
       }
+    },
+    "annotations": {
+      "title": "Search Gov Domains",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4481,6 +5056,11 @@
       "required": [
         "q"
       ]
+    },
+    "annotations": {
+      "title": "Socrata: Discover Datasets",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4585,6 +5165,11 @@
         "domain",
         "datasetId"
       ]
+    },
+    "annotations": {
+      "title": "Socrata: Query",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4618,6 +5203,11 @@
           "description": "Range mode: 1-based page number, default 1."
         }
       }
+    },
+    "annotations": {
+      "title": "Treasury: Avg Interest Rates",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4647,6 +5237,11 @@
           "description": "Range mode: 1-based page number, default 1."
         }
       }
+    },
+    "annotations": {
+      "title": "Treasury: Debt To Penny",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4676,6 +5271,11 @@
           "description": "1-based page number, default 1."
         }
       }
+    },
+    "annotations": {
+      "title": "Treasury: Monthly Statement",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4721,6 +5321,11 @@
       "required": [
         "dataset"
       ]
+    },
+    "annotations": {
+      "title": "Treasury: Query Dataset",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4745,6 +5350,11 @@
       "required": [
         "generatedInternalId"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Analyze Incumbent",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4763,6 +5373,11 @@
       "required": [
         "searchText"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Autocomplete NAICS",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4781,6 +5396,11 @@
       "required": [
         "searchText"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Autocomplete Recipient",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4817,6 +5437,11 @@
       "required": [
         "defCodes"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Disaster Spending",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4836,6 +5461,11 @@
       "required": [
         "toptierCode"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Get Agency Awards Summary",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4858,6 +5488,11 @@
       "required": [
         "toptierCode"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Get Agency Budget Function",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4874,6 +5509,11 @@
       "required": [
         "toptierCode"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Get Agency Profile",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4890,6 +5530,11 @@
       "required": [
         "generatedInternalId"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Get Award Detail",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4906,6 +5551,11 @@
       "required": [
         "recipientId"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Get Recipient Profile",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4921,6 +5571,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Glossary",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4929,6 +5584,11 @@
     "inputSchema": {
       "type": "object",
       "properties": {}
+    },
+    "annotations": {
+      "title": "USAspending: List Disaster Codes",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4941,6 +5601,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: List Toptier Agencies",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4957,6 +5622,11 @@
       "required": [
         "searchText"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Lookup Agency",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -4970,6 +5640,11 @@
           "description": "Filter to a specific NAICS code subtree, e.g. '541512'"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: NAICS Hierarchy",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5001,6 +5676,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search Agency Spending",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5033,6 +5713,11 @@
           ]
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search Awards",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5060,6 +5745,11 @@
       "required": [
         "recipientName"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Search Awards By Recipient",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5079,6 +5769,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search CFDA Spending",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5103,6 +5798,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search Expiring Contracts",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5125,6 +5825,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search Federal Account Spending",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5160,6 +5865,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search Individual Awards",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5182,6 +5892,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search PSC Spending",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5209,6 +5924,11 @@
       "required": [
         "keyword"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Search Recipients",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5279,6 +5999,11 @@
           "description": "Max 100-row pages to scan before giving up (default 8). If exhausted before the window ends, results are a lower bound and totalAvailable is null."
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search Recompetes",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5301,6 +6026,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search State Spending",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5320,6 +6050,11 @@
       "required": [
         "agency"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Search Subagency Spending",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5344,6 +6079,11 @@
           "type": "number"
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Search Subawards",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5410,6 +6150,11 @@
       "required": [
         "cert"
       ]
+    },
+    "annotations": {
+      "title": "USAspending: Search Teaming Partners",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   },
   {
@@ -5446,6 +6191,11 @@
           ]
         }
       }
+    },
+    "annotations": {
+      "title": "USAspending: Spending Over Time",
+      "readOnlyHint": true,
+      "openWorldHint": true
     }
   }
 ]

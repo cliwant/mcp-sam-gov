@@ -28,6 +28,13 @@ type ToolDef = {
 };
 export declare const TOOLS: ToolDef[];
 export declare function runTool(name: string, args: Record<string, unknown>, sam: SamGovClient): Promise<unknown>;
+export declare function humanizeToolTitle(name: string): string;
+/** Uniform MCP annotations for a tool: derived title + read-only / open-world hints. */
+export declare function toolAnnotations(name: string): {
+    title: string;
+    readOnlyHint: true;
+    openWorldHint: true;
+};
 /**
  * Hand-rolled Zod → JSON Schema converter (subset we use).
  */

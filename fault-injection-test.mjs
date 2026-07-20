@@ -43,7 +43,7 @@ import zlib from "node:zlib";
 // when argv[1] === dist/server.js (a direct `node dist/server.js` / the bin /
 // smoke's spawn), never on an import like this one. §9/§12/§13 call this real
 // runTool over a mocked fetch so a regression in the real wrapper turns RED.
-import { runTool, TOOLS, zodToJsonSchema } from "./dist/server.js";
+import { runTool, TOOLS, zodToJsonSchema, toolAnnotations, humanizeToolTitle } from "./dist/server.js";
 import { maybeAttachReport, reportUrlForError } from "./dist/feedback.js";
 import { checkForUpdate, isNewerVersion } from "./dist/update-check.js";
 import { apiKeyStatus, loadDotEnv, KEY_REGISTRY } from "./dist/keys.js";
@@ -21817,6 +21817,7 @@ async function main() {
   await testFeedbackLoop();
   await testUpdateCheck();
   await testEcfrGetSection();
+  await testToolAnnotations();
 
   // Prove the harness bites.
   await selfCheck();
@@ -24326,6 +24327,47 @@ async function testNvdCveKev() {
   }); // withNvdKey undefined
 
   _resetNvdCacheForTests();
+}
+
+// §66: MCP tool annotations (Anthropic Connectors Directory requirement) — every tool
+// advertises a human `title` + read-only/open-world hints. All tools are READ-ONLY, so
+// the hints are uniform; the title is derived from the source-prefix map. NON-VACUITY:
+// each assertion pins a value that a regression (drop readOnlyHint, break the humanizer,
+// forget to annotate a tool) would flip.
+async function testToolAnnotations() {
+  section("73. MCP tool annotations — title + readOnlyHint/openWorldHint on EVERY tool (Directory requirement; all tools read-only)");
+
+  // (a) Every registered tool gets a non-empty title + readOnlyHint:true + openWorldHint:true.
+  const missing = TOOLS.filter((t) => {
+    const a = toolAnnotations(t.name);
+    return !(a && a.readOnlyHint === true && a.openWorldHint === true && typeof a.title === "string" && a.title.length > 0);
+  }).map((t) => t.name);
+  ok(`66-a all ${TOOLS.length} tools carry annotations {title, readOnlyHint:true, openWorldHint:true} — flip readOnlyHint to false / drop the title ⇒ RED`,
+    missing.length === 0, missing.length ? `un-annotated: ${missing.slice(0, 5).join(", ")}` : "all annotated");
+
+  // (b) readOnlyHint is UNIFORMLY true — this server has NO write/destructive tool. If a
+  //     mutating tool is ever added, this pins the reviewer to set its hint explicitly.
+  ok("73-b readOnlyHint === true for EVERY tool (no tool mutates upstream state) — a false anywhere ⇒ RED",
+    TOOLS.every((t) => toolAnnotations(t.name).readOnlyHint === true), "a tool reported non-read-only");
+
+  // (c) The humanizer maps the source prefix + title-cases the rest (pins exact strings).
+  const titleCases = [
+    ["sam_search_opportunities", "SAM.gov: Search Opportunities"],
+    ["usas_search_awards", "USAspending: Search Awards"],
+    ["fed_register_search_documents", "Federal Register: Search Documents"],
+    ["ecfr_get_section", "eCFR: Get Section"],
+    ["ofac_screen_entity", "OFAC: Screen Entity"],
+    ["nppes_lookup_provider", "NPPES: Lookup Provider"],
+    ["api_key_status", "API Key Status"],
+  ];
+  for (const [name, want] of titleCases) {
+    ok(`73-c humanizeToolTitle(${JSON.stringify(name)}) ⇒ ${JSON.stringify(want)} — break the source-map/acronym logic ⇒ RED`,
+      humanizeToolTitle(name) === want, `got ${JSON.stringify(humanizeToolTitle(name))}`);
+  }
+
+  // (d) An unknown-prefix name still yields a non-empty title-cased string (never empty).
+  ok("73-d humanizeToolTitle of an unknown-prefix name is a non-empty title-cased string (never blank ⇒ Directory rejects a blank title)",
+    humanizeToolTitle("zzz_unknown_thing") === "Zzz Unknown Thing", `got ${JSON.stringify(humanizeToolTitle("zzz_unknown_thing"))}`);
 }
 
 main().catch((e) => {
