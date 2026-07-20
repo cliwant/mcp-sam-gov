@@ -10784,6 +10784,33 @@ async function testCkanHonesty() {
       r.data.results.length === 2 && r.data.results[0].resourceId === CA_UUID && r.data.results[0].datastoreActive === true && r.data.results[0].datasetTitle === "Statewide Purchase Orders" && r.data.results[1].datastoreActive === false && m.totalAvailable === 42,
       JSON.stringify({ res: r.data.results, ta: m.totalAvailable }));
   });
+  // (o-trunc) ★v1.12.0 — complete/truncated tracks DATASETS shown vs matched, NOT
+  //  the per-resource row count. count=3 datasets but the ONE returned package has
+  //  5 resources (5 resource rows ≥ 3) — the old `returned(resources) < total(datasets)`
+  //  (5 < 3 = false) spoofed complete:TRUE while only 1 of 3 datasets were shown.
+  const truncBody = {
+    success: true,
+    result: {
+      count: 3,
+      results: [
+        { title: "Dataset A", resources: [
+          { id: "aaaaaaaa-0000-0000-0000-000000000001", name: "r1", format: "CSV", datastore_active: true },
+          { id: "aaaaaaaa-0000-0000-0000-000000000002", name: "r2", format: "CSV", datastore_active: true },
+          { id: "aaaaaaaa-0000-0000-0000-000000000003", name: "r3", format: "CSV", datastore_active: true },
+          { id: "aaaaaaaa-0000-0000-0000-000000000004", name: "r4", format: "PDF", datastore_active: false },
+          { id: "aaaaaaaa-0000-0000-0000-000000000005", name: "r5", format: "PDF", datastore_active: false },
+        ] },
+      ],
+    },
+  };
+  await withFetch((u) => (isCkanPackageSearch(u) ? mockResponse({ status: 200, json: truncBody }) : failClosed()()), async () => {
+    const r = await runTool("ckan_discover_datasets", { host: CA_HOST, q: "44o-trunc-datasets-unit-unique", limit: 1 }, sam);
+    const m = buildMeta(r.meta);
+    ok("44o-trunc ★count 3 datasets, 1 package w/ 5 resources (5 resource rows ≥ 3) ⇒ complete:FALSE + truncated:true (driven by DATASETS shown 1 < 3, NOT the resource-row count) ⇒ derive truncation from returned(resources) ⇒ complete:true ⇒ RED",
+      r.data.results.length === 5 && m.totalAvailable === 3 && m.complete === false && m.truncated === true, JSON.stringify({ res: r.data.results.length, ta: m.totalAvailable, c: m.complete }));
+    ok("44o-trunc ★a note discloses only N of M datasets shown (raise limit) ⇒ omit the disclosure ⇒ RED",
+      m.notes.some((n) => /Only the first 1 of 3 matching datasets/.test(n)), JSON.stringify(m.notes.length));
+  });
   // m6 on discover: a non-number result.count ⇒ schema_drift on BOTH calls (the
   // drift throw is INSIDE the memoize callback → a bad shape is never cached).
   await withFetch((u) => (isCkanPackageSearch(u) ? mockResponse({ status: 200, json: { success: true, result: { count: "42", results: [] } } }) : failClosed()()), async () => {

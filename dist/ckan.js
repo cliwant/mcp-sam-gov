@@ -356,7 +356,7 @@ export async function discoverDatasets(args) {
     params.set("q", args.q);
     params.set("rows", String(limit));
     const key = `ckan:package_search:${args.host}:${args.q}:${limit}`;
-    const { totalAvailable, results } = await memoize(key, async () => {
+    const { totalAvailable, results, packagesReturned } = await memoize(key, async () => {
         const body = await getCkanPackageSearch(args.host, params);
         const b = (body ?? {});
         if (b.success === false)
@@ -372,13 +372,26 @@ export async function discoverDatasets(args) {
         const total = num(b.result.count);
         const packages = Array.isArray(b.result.results) ? b.result.results : [];
         const rows = packages.flatMap(mapPackageResources);
-        return { totalAvailable: total, results: rows };
+        // packagesReturned = the number of DATASETS on this page. Truncation is a
+        // DATASET question (totalAvailable is a dataset count), NOT a resource-row
+        // one — the two units differ because a dataset can expose several resources.
+        return { totalAvailable: total, results: rows, packagesReturned: packages.length };
     }, 10 * 60 * 1000);
     const returned = results.length;
+    // [truncation honesty] complete/truncated is a DATASET question — compare the
+    // DATASETS returned (packagesReturned) against the dataset total, NOT the
+    // per-resource row count (which can EXCEED the dataset total, e.g. 2 datasets →
+    // 14 resource rows vs count 10, and would spoof complete:true when only 2 of 10
+    // datasets were shown). This tool returns the first `limit` datasets and has no
+    // offset param, so nextOffset is null (raise `limit` to see more).
+    const hasMore = totalAvailable !== null && packagesReturned < totalAvailable;
     const notes = [
         `package_search over ${args.host} (rows=${limit}). Feed a datastoreActive:true result's resourceId to ckan_query; a datastoreActive:false resource is a raw file blob (CSV/PDF/…) NOT in the datastore and is NOT queryable.`,
-        "totalAvailable is the count of matching DATASETS (packages); the rows are per-RESOURCE (a dataset may expose several resources), so returned may differ from totalAvailable.",
+        "totalAvailable is the count of matching DATASETS (packages); the rows are per-RESOURCE (a dataset may expose several resources), so returned (resource rows) may differ from totalAvailable (datasets). complete/truncated tracks DATASETS shown vs matched.",
     ];
+    if (hasMore) {
+        notes.push(`Only the first ${packagesReturned} of ${totalAvailable} matching datasets are shown (this tool returns the first \`limit\` datasets and does not page); raise \`limit\` to retrieve more.`);
+    }
     return withMeta({ host: args.host, query: args.q, results }, {
         source: `${args.host} package_search ${SOURCE_SUFFIX}`,
         keylessMode: true,
@@ -387,6 +400,7 @@ export async function discoverDatasets(args) {
         filtersApplied: ["q"],
         filtersDropped: [],
         fieldsUnavailable: [],
+        pagination: { offset: 0, limit, hasMore, nextOffset: null },
         notes,
     });
 }
