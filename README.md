@@ -737,6 +737,10 @@ is no separate library package. Two earlier repos (`govicon-sam-gov` and
 client code lives in `src/sam-gov/`, `src/usaspending.ts`,
 `src/federal-register.ts`, `src/ecfr.ts`, `src/grants.ts`.
 
+## Privacy Policy
+
+This server runs **locally** and **collects nothing** — no telemetry, no analytics, no accounts. Your prompts and results are processed in memory on your machine and are never sent to Cliwant. Each tool calls the relevant official government API directly over HTTPS; optional API keys stay in your local environment and are sent only to that source. See the full [Privacy Policy](./PRIVACY.md) (contact: seungdo.keum@cliwant.com).
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
