@@ -1,0 +1,46 @@
+{
+  "asOf": "2026-07-20T07:22:01.113Z",
+  "source": "api.fiscaldata.treasury.gov /v2/accounting/od/debt_to_penny (latest)",
+  "license": "us-government-work",
+  "accessLevel": "public",
+  "data": {
+    "data": [
+      {
+        "record_date": "2026-07-16",
+        "tot_pub_debt_out_amt": "39518859758919.12",
+        "debt_held_public_amt": "31818450437358.76",
+        "intragov_hold_amt": "7700409321560.36"
+      }
+    ],
+    "meta": {
+      "count": 1,
+      "labels": {
+        "record_date": "Record Date",
+        "tot_pub_debt_out_amt": "Total Public Debt Outstanding",
+        "debt_held_public_amt": "Debt Held by the Public",
+        "intragov_hold_amt": "Intragovernmental Holdings"
+      },
+      "dataTypes": {
+        "record_date": "DATE",
+        "tot_pub_debt_out_amt": "CURRENCY",
+        "debt_held_public_amt": "CURRENCY",
+        "intragov_hold_amt": "CURRENCY"
+      },
+      "dataFormats": {
+        "record_date": "YYYY-MM-DD",
+        "tot_pub_debt_out_amt": "$10.20",
+        "debt_held_public_amt": "$10.20",
+        "intragov_hold_amt": "$10.20"
+      },
+      "total-count": 8351,
+      "total-pages": 8351
+    },
+    "links": {
+      "self": "&page%5Bnumber%5D=1&page%5Bsize%5D=1",
+      "first": "&page%5Bnumber%5D=1&page%5Bsize%5D=1",
+      "prev": null,
+      "next": "&page%5Bnumber%5D=2&page%5Bsize%5D=1",
+      "last": "&page%5Bnumber%5D=8351&page%5Bsize%5D=1"
+    }
+  }
+}

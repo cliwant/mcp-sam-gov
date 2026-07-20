@@ -1,0 +1,154 @@
+{
+  "asOf": "2026-07-20T07:22:00.325Z",
+  "source": "api.usaspending.gov /api/v2/references/naics (top-level)",
+  "license": "us-government-work",
+  "accessLevel": "public",
+  "data": {
+    "results": [
+      {
+        "naics": "11",
+        "naics_description": "Agriculture, Forestry, Fishing and Hunting",
+        "year_retired": null,
+        "count": 64
+      },
+      {
+        "naics": "21",
+        "naics_description": "Mining, Quarrying, and Oil and Gas Extraction",
+        "year_retired": null,
+        "count": 38
+      },
+      {
+        "naics": "22",
+        "naics_description": "Utilities",
+        "year_retired": null,
+        "count": 15
+      },
+      {
+        "naics": "23",
+        "naics_description": "Construction",
+        "year_retired": null,
+        "count": 31
+      },
+      {
+        "naics": "31",
+        "naics_description": "Manufacturing",
+        "year_retired": null,
+        "count": 136
+      },
+      {
+        "naics": "32",
+        "naics_description": "Manufacturing",
+        "year_retired": null,
+        "count": 139
+      },
+      {
+        "naics": "33",
+        "naics_description": "Manufacturing",
+        "year_retired": null,
+        "count": 279
+      },
+      {
+        "naics": "42",
+        "naics_description": "Wholesale Trade",
+        "year_retired": null,
+        "count": 72
+      },
+      {
+        "naics": "44",
+        "naics_description": "Retail Trade",
+        "year_retired": null,
+        "count": 68
+      },
+      {
+        "naics": "45",
+        "naics_description": "Retail Trade",
+        "year_retired": null,
+        "count": 62
+      },
+      {
+        "naics": "48",
+        "naics_description": "Transportation and Warehousing",
+        "year_retired": null,
+        "count": 50
+      },
+      {
+        "naics": "49",
+        "naics_description": "Transportation and Warehousing",
+        "year_retired": null,
+        "count": 7
+      },
+      {
+        "naics": "51",
+        "naics_description": "Information",
+        "year_retired": null,
+        "count": 59
+      },
+      {
+        "naics": "52",
+        "naics_description": "Finance and Insurance",
+        "year_retired": null,
+        "count": 47
+      },
+      {
+        "naics": "53",
+        "naics_description": "Real Estate and Rental and Leasing",
+        "year_retired": null,
+        "count": 29
+      },
+      {
+        "naics": "54",
+        "naics_description": "Professional, Scientific, and Technical Services",
+        "year_retired": null,
+        "count": 52
+      },
+      {
+        "naics": "55",
+        "naics_description": "Management of Companies and Enterprises",
+        "year_retired": null,
+        "count": 3
+      },
+      {
+        "naics": "56",
+        "naics_description": "Administrative and Support and Waste Management and Remediation Services",
+        "year_retired": null,
+        "count": 45
+      },
+      {
+        "naics": "61",
+        "naics_description": "Educational Services",
+        "year_retired": null,
+        "count": 17
+      },
+      {
+        "naics": "62",
+        "naics_description": "Health Care and Social Assistance",
+        "year_retired": null,
+        "count": 39
+      },
+      {
+        "naics": "71",
+        "naics_description": "Arts, Entertainment, and Recreation",
+        "year_retired": null,
+        "count": 25
+      },
+      {
+        "naics": "72",
+        "naics_description": "Accommodation and Food Services",
+        "year_retired": null,
+        "count": 19
+      },
+      {
+        "naics": "81",
+        "naics_description": "Other Services (except Public Administration)",
+        "year_retired": null,
+        "count": 51
+      },
+      {
+        "naics": "92",
+        "naics_description": "Public Administration",
+        "year_retired": null,
+        "count": 29
+      }
+    ]
+  }
+}

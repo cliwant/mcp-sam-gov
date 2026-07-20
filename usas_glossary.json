@@ -1,0 +1,218 @@
+{
+  "asOf": "2026-07-20T07:22:00.389Z",
+  "source": "api.usaspending.gov /api/v2/references/glossary (default)",
+  "license": "us-government-work",
+  "accessLevel": "public",
+  "data": {
+    "page_metadata": {
+      "page": 1,
+      "count": 151,
+      "next": 2,
+      "previous": null,
+      "hasNext": true,
+      "hasPrevious": false
+    },
+    "results": [
+      {
+        "term": "Submission Period",
+        "slug": "submission-period",
+        "data_act_term": null,
+        "plain": "The submission period shows when federal agencies submit their financial data. It is displayed as a fiscal year (e.g., “FY 2020” or “FY20” for fiscal year 2020, covering October 2019 through September 2020) followed by a month (e.g., “P01” for October, which is the first month of the fiscal year) or quarter (e.g., “Q1” for the first quarter of the fiscal year, covering October through December). For example, “FY19 P10” indicates a submission whose data covers the period of July 2019.\n\nStarting with the June 2020 reporting period, most federal agencies began submitting their account data (Files A, B, and C) to the Treasury DATA Act Broker on a monthly basis rather than on the previous quarterly schedule. As of October 2021 (FY22 Q1), all agencies are required to report on a monthly basis. More information about the agency account data reporting policy is found in OMB’s Memorandum M-20-21 (Appendix A, Section III).",
+        "official": null,
+        "resources": "[Memorandum M-20-21](https://www.whitehouse.gov/wp-content/uploads/2020/04/Implementation-Guidance-for-Supplemental-Funding-Provided-in-Response.pdf)"
+      },
+      {
+        "term": "Task Order Contract",
+        "slug": "task-order-contract",
+        "data_act_term": null,
+        "plain": "An Indefinite Quantity Contract for services (not supplies) is sometimes referred to as a Task Order Contract. With this type of contract, the government promises to buy services over a period of time from a vendor. Instead of an exact amount, it sets a range with a minimum and maximum.",
+        "official": null,
+        "resources": "Learn more from the [FPDS IDC page](https://www.fpds.gov/help/Indefinite_Delivery_Contract.htm)"
+      },
+      {
+        "term": "Transaction",
+        "slug": "transaction",
+        "data_act_term": null,
+        "plain": "A transaction can be the initial contract, grant, loan, or insurance award or any amendment or modification to that award.",
+        "official": null,
+        "resources": null
+      },
+      {
+        "term": "Transaction Description",
+        "slug": "transaction-description",
+        "data_act_term": null,
+        "plain": "A brief description of the purpose of the transaction.",
+        "official": null,
+        "resources": null
+      },
+      {
+        "term": "Treasury Account Symbol (TAS)",
+        "slug": "treasury-account-symbol-tas",
+        "data_act_term": "Treasury Account Symbol",
+        "plain": "Treasury and OMB assign a code to each appropriation, receipt, or fund account. This code is similar to a bank account number. It helps identify financial transactions in the federal government. It also aids in reporting accuracy. TAS are sometimes referred as ‘program source’ in legislation. On this website, we group each set of Treasury Accounts that share an Agency Identifier and Main Account Code into a \"Federal Account\". \n\nSeven components make up the TAS:\n\n- Allocation Transfer Agency Identifier (ex. 089)\n- Agency Identifier (ex. 020)\n- Beginning Period of Availability (ex. 2017)\n- Ending Period of Availability (ex. 2018)\n- Availability Type Code (used if there are not specific beginning/ending years) (ex. X)\n- Main Account Code (ex. 0114)\n- Sub Account Code (ex. 000)\n\nExample TAS:\n\n- 089-020-2017/2018-0114-000\n- 089-020-2017/2017-0114-000\n- 089-020-X-0114-000",
+        "official": "Treasury Account Symbol: The account identification codes assigned by the Department of the Treasury to individual appropriation, receipt, or other fund accounts. All financial transactions of the Federal Government are classified by TAS for reporting to the Department of the Treasury and the Office of Management and Budget.\n\n(defined in OMB Circular A-11)",
+        "resources": "See also:\n\n- [Federal Account](?glossary=federal-account)"
+      },
+      {
+        "term": "Unique Entity Identifier (UEI)",
+        "slug": "unique-entity-identifier-uei",
+        "data_act_term": null,
+        "plain": "The Unique Entity Identifier (UEI) for an awardee or recipient is an alphanumeric code created in the System for Award Management (SAM.gov) that is used to uniquely identify specific commercial, nonprofit, or business entities registered to do business with the federal government.",
+        "official": null,
+        "resources": null
+      },
+      {
+        "term": "Ultimate Parent Legal Entity Name",
+        "slug": "ultimate-parent-legal-entity-name",
+        "data_act_term": "Ultimate Parent Legal Entity Name",
+        "plain": "The name of the ultimate parent of the awardee or recipient.",
+        "official": "The name of the ultimate parent of the awardee or recipient.",
+        "resources": null
+      },
+      {
+        "term": "Unlinked Award",
+        "slug": "unlinked-award",
+        "data_act_term": null,
+        "plain": "There are two distinct datasets transmitted to USAspending for agency awards—File C and Files D. File C is submitted and published on the site on a monthly or quarterly basis from audited agency financial systems. File D1 (procurement) and File D2 (financial assistance) data is generated from award reporting data submitted by agencies to other systems and updated on USAspending as frequently as daily.  Because these data originate from different communities and systems within agencies that are subject to different policies and reporting requirements, there are sometimes gaps between the awards captured in each dataset.\n \nUnlinked awards lack a shared award ID that allows a match between financial system data and award reporting data. As a result, such awards only show up in some parts of the site and are missing their full context. For example, awards found in File C but not in File D lack recipient and CFDA Program information and thus, will not have an Award Summary page.",
+        "official": null,
+        "resources": null
+      },
+      {
+        "term": "Account Balance (File A)",
+        "slug": "account-balance-file-a",
+        "data_act_term": "Account Balance (File A)",
+        "plain": "After the end of every month (or in some select cases every quarter), agencies report the balances that are in their financial systems to USAspending in what is labeled “File A.”  Because this data is based on Treasury Accounts (TAS), it is often referred to as “Account Data” or “Account Spending.” ",
+        "official": "Account Balance data is reported in File A, one of the three files that each agency publishes to USAspending.gov in its financial data submission each month (or quarter for some agencies). The file stems from the agency’s audited financial system and is validated against the Governmentwide Treasury Account Symbol Adjusted Trial Balance System (GTAS). File A includes data on total budgetary resources and total spending, including obligations and outlays, by Treasury Account Symbol (TAS). It also provides the relevant budget function associated with spending. \nWhen you see a reference to Account Balance (File A) on the site, the reference is to the dataset comprising all agency Files A submissions and not one specific agency file.",
+        "resources": "See also:\n\n- [Account Breakdown by Program Activity & Object Class (File B)](?glossary=account-breakdown-by-program-activity-object-class-file-b)\n- [Account Breakdown by Award (File C)](?glossary=account-breakdown-by-award-file-c)\n- [Awards Data (File D)](?glossary=awards-data-file-d)\n\nFor more information on data elements within each Account File, see our [Data Dictionary](https://www.usaspending.gov/data-dictionary)"
+      },
+      {
+        "term": "Account Breakdown by Award (File C)",
+        "slug": "account-breakdown-by-award-file-c",
+        "data_act_term": null,
+        "plain": "Account Breakdown by Award (File C) is one of the three files that each agency publishes to USAspending.gov in its financial data submission each month (or quarter for some agencies). The file stems from the agency’s audited financial system and includes data on award spending only (i.e., excludes non-award spending). Account Breakdown by Award (File C) provides details such as the timing, type, and recipient for each award. \nWhen you see a reference to Account Breakdown by Award (File C) on the site, the reference is to the dataset comprising all agency Files C and not one specific agency file.",
+        "official": null,
+        "resources": "See also:\n\n- [Account Balance (File A)](?glossary=account-balance-file-a)\n- [Account Breakdown by Program Activity & Object Class (File B)](?glossary=account-breakdown-by-program-activity-object-class-file-b)\n- [Awards Data (File D)](?glossary=awards-data-file-d)\n\nFor more information on data elements within each Account File, see our [Data Dictionary](https://www.usaspending.gov/data-dictionary)"
+      },
+      {
+        "term": "Account Breakdown by Program Activity & Object Class (File B)",
+        "slug": "account-breakdown-by-program-activity-object-class-file-b",
+        "data_act_term": null,
+        "plain": "Account Breakdown by Program Activity & Object Class (File B) is one of the three files that each agency publishes to USAspending.gov in its financial data submission each month (or quarter for some agencies). The file stems from the agency’s audited financial system and includes data on total budgetary spending, including obligations and outlays, by Treasury Account Symbol. Like Account Balances (File A), this file provides the relevant budget function associated with spending. In contrast with Account Balances (File A) this file also includes the relevant object class and program activity. \nWhen you see a reference to Account Breakdown by Program Activity & Object Class (File B) on the site, the reference is to the dataset comprising all agency Files B and not one specific agency file.",
+        "official": null,
+        "resources": "See also:\n\n- [Account Balance (File A)](?glossary=account-balance-file-a)\n- [Account Breakdown by Award (File C)](?glossary=account-breakdown-by-award-file-c)\n- [Awards Data (File D)](?glossary=awards-data-file-d)\n\nFor more information on data elements within each Account File, see our [Data Dictionary](https://www.usaspending.gov/data-dictionary)"
+      },
+      {
+        "term": "Acquisition of Assets",
+        "slug": "acquisition-of-assets",
+        "data_act_term": "Acquisition of Assets",
+        "plain": "This major object class includes an agency’s procurement of assets, including those that have lost value (depreciated). Some examples of assets, according to this definition, include equipment, land, physical structures, investments, and loans.",
+        "official": "This major object class covers object classes 31.0 through 33.0. Include\ncapitalized (depreciated) assets and non-capitalized assets. This includes:\n31.0 Equipment\n32.0 Land and structures\n33.0 Investments and loans\n\nEach specific object class is defined in OMB Circular A-11 Section 83.6.",
+        "resources": "Learn More: [Circular No. A-11](https://www.whitehouse.gov/sites/whitehouse.gov/files/omb/assets/a11_current_year/a11_2017.pdf)"
+      },
+      {
+        "term": "Action Date",
+        "slug": "action-date",
+        "data_act_term": "Action Date",
+        "plain": "The date the action being reported (for prime award transactions or sub-awards) was issued or signed by the Government, or a binding agreement was reached. Because award obligations are tied to action dates, any search for spending data on USAspending will search by this data element rather than by Period of Performance dates.",
+        "official": "The date the action being reported (for prime award transactions or sub-awards) was issued or signed by the Government, or a binding agreement was reached. Because award obligations are tied to action dates, any search for spending data on USAspending will search by this data element rather than by Period of Performance dates.",
+        "resources": "See also: [Base Transaction Action Date](?glossary=base-transaction-action-date), [Period of Performance Start Date](?glossary=period-of-performance-start-date), [Period of Performance Current End Date](?glossary=period-of-performance-current-end-date), [Period of Performance Potential End Date](?glossary=period-of-performance-potential-end-date)"
+      },
+      {
+        "term": "Action Type",
+        "slug": "action-type",
+        "data_act_term": "Action Type",
+        "plain": "Provides information on the type of change made to an award. For example, the change may be the result of a continuation, revision, and/or adjustment to completed project.",
+        "official": "Description (and corresponding code) that provides information on any changes made to the Federal prime award. There are typically multiple actions for each award.\n\n(Note: This definition encompasses current data elements ‘Type of Action’ for financial assistance and ‘Reason for Modification’ for procurement)",
+        "resources": null
+      },
+      {
+        "term": "Agency",
+        "slug": "agency",
+        "data_act_term": "Agency",
+        "plain": "On this website, we use the term agency to mean any federal department, commission, or other U.S. government entity. Agencies can have multiple sub-agencies. For example, the National Park Service is a sub-agency of the U.S. Department of the Interior. ",
+        "official": "On this website, we use the term agency to mean any federal department, commission, or other U.S. government entity. Agencies can have multiple sub-agencies. For example, the National Park Service is a sub-agency of the U.S. Department of the Interior. ",
+        "resources": null
+      },
+      {
+        "term": "Agency Identifier",
+        "slug": "agency-identifier",
+        "data_act_term": "Agency Identifier",
+        "plain": "Identifies the agency responsible for a Treasury account. This is a 3-digit number that is a part of a Treasury Account Symbol (TAS).",
+        "official": "The agency code identifies the department or agency that is responsible for the account.",
+        "resources": null
+      },
+      {
+        "term": "Allocation Transfer Agency (ATA) Identifier",
+        "slug": "allocation-transfer-agency-ata-identifier",
+        "data_act_term": "Allocation Transfer Agency (ATA) Identifier",
+        "plain": "Identifies an agency that receives funds through an allocation (non-expenditure) transfer. This is a 3-digit number that is a part of a Treasury Account Symbol (TAS).",
+        "official": "The allocation agency identifies the department or agency that is receiving funds through an allocation (non-expenditure) transfer.",
+        "resources": null
+      },
+      {
+        "term": "Appropriation",
+        "slug": "appropriation",
+        "data_act_term": null,
+        "plain": "The process by which Congress designates and approves spending for a specific purpose (e.g., a project or program). Most government spending is determined through appropriation bills each year. These bills must be passed by Congress and signed by the President. \n\nWhen an appropriation is not passed by Congress before the beginning of the fiscal year, a “continuing resolution” (often referred to as a “CR”) may be enacted to avoid a government shutdown. A CR is a law that provides stopgap funding for agencies until their regular appropriations are passed.",
+        "official": null,
+        "resources": null
+      },
+      {
+        "term": "Appropriation Account",
+        "slug": "appropriation-account",
+        "data_act_term": "Appropriations Account",
+        "plain": "When Congress passes a law, it often gives an agency authority to carry out a project. When this happens, Congress may set aside money for the project. An appropriation account tracks the money, much like a bank account. The appropriation account number (like a bank account number) is called a Treasury Account Symbol (TAS).",
+        "official": "The basic unit of an appropriation generally reflecting each unnumbered paragraph in an appropriation act. An appropriation account typically encompasses a number of activities or projects and may be subject to restrictions or conditions applicable to only the account, the appropriation act, titles within an appropriation act, other appropriation acts, or the Government as a whole.\n\nAn appropriations account is represented by a TAFS created by Treasury in consultation with OMB.\n\n(defined in OMB Circular A-11)",
+        "resources": "Learn More: [Circular No. A-11](https://www.whitehouse.gov/sites/whitehouse.gov/files/omb/assets/a11_current_year/a11_2017.pdf)"
+      },
+      {
+        "term": "Assistance Listings (CFDA Program)",
+        "slug": "assistance-listings-cfda-program",
+        "data_act_term": "Catalog of Federal Domestic Assistance (CFDA) Number and Title",
+        "plain": "Assistance Listings, previously known as \"CFDA programs\", provide a full listing of federal programs that are available to organizations, government agencies (state, local, tribal), U.S. territories, and individuals who are authorized to do business with the government. An Assistance Listing program can be a project, service, or activity. Each program has a unique, 5-digit number in the form of XX.XXX. The first two digits represent the funding agency. The last three digits represent the program.\n\nExamples of Assistance Listings include: \n\n* Social Security Retirement Insurance (96.002) \n* Medicare Supplementary Medical Insurance (93.774) \n* Supplemental Nutrition Assistance Program (10.551) \n* Highway Planning and Construction (20.205) \n* National School Lunch Program (10.555) ",
+        "official": "The number assigned to an Assistance Listing in the Catalog of Federal Domestic Assistance (CFDA) and SAM.gov.\n\nThe title of the Assistance Listing under which the Federal award was funded in the Catalog of Federal Domestic Assistance (CFDA) and SAM.gov.",
+        "resources": "[Visit the Assistance Listing Website](https://sam.gov/content/assistance-listings)"
+      },
+      {
+        "term": "Availability Type Code",
+        "slug": "availability-type-code",
+        "data_act_term": "Availability Type Code",
+        "plain": "Within a Treasury Account Symbol (TAS), this one-letter code Identifies the availability (or time period) for obligations to be made on the appropriation account. A TAS will have an “X” if there is an unlimited or indefinite period to incur new obligations.",
+        "official": "In appropriations accounts, the availability type code identifies an unlimited period to incur new obligations; this is denoted by the letter X.",
+        "resources": null
+      },
+      {
+        "term": "Award",
+        "slug": "award",
+        "data_act_term": null,
+        "plain": "Money the federal government has promised to pay a recipient. Funding may be awarded to a company, organization, government entity (i.e., state, local, tribal, federal, or foreign), or individual. It may be obligated (promised) in the form of a contract, grant, loan, insurance, direct payment, etc.",
+        "official": null,
+        "resources": null
+      },
+      {
+        "term": "Award Amount",
+        "slug": "award-amount",
+        "data_act_term": "Amount of Award",
+        "plain": "The amount that the federal government has promised to pay (obligated) a recipient, because it has signed a contract, awarded a grant, etc. ",
+        "official": "The cumulative amount obligated by the Federal Government for an award, which is calculated by USAspending.gov.\n\nFor procurement and financial assistance awards except loans, this is the sum of Federal Action Obligations.\n\nFor loans or loan guarantees, this is the Original Subsidy Cost.",
+        "resources": "See also:\n\n- [Federal Action Obligation](?glossary=federal-action-obligation)\n- [Loan Subsidy Cost](?glossary=loan-subsidy-cost)\n- [Current Total Value of Award](?glossary=current-award-amount)"
+      },
+      {
+        "term": "Award ID",
+        "slug": "award-id",
+        "data_act_term": "Award Identification Number",
+        "plain": "A unique identification number for each individual award.",
+        "official": "The unique identifier of the specific award being reported, i.e. Federal Award Identification Number (FAIN) for financial assistance and Procurement Instrument Identifier (PIID) for procurement.",
+        "resources": "See also: [FAIN](?glossary=fain), [Procurement Instrument Identifier (PIID)](?glossary=procurement-instrument-identifier-piid), [Parent Award Identification (ID) Number](?glosary=parent-award-identification-id-number), [URI](?glossary=uri)"
+      },
+      {
+        "term": "Base Transaction Description",
+        "slug": "base-transaction-description",
+        "data_act_term": "Base Transaction Description",
+        "plain": "A brief description of the purpose of the award.",
+        "official": "For procurement awards: Per the FPDS data dictionary, a brief, summary level, plain English, description of the contract, award, or modification. Additional information: the description field may also include abbreviations, acronyms, or other information that is not plain English such as that required by OMB policies (CARES Act, etc).\n\nFor financial assistance awards: A plain language description of the Federal award purpose; activities to be performed; deliverables and expected outcomes; intended beneficiary(ies); and subrecipient activities if known/specified at the time of award. ",
+        "resources": null
+      }
+    ]
+  }
+}

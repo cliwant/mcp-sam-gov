@@ -1,0 +1,62 @@
+{
+  "builtAt": "2026-07-20T07:22:01.113Z",
+  "egressReachable": 5,
+  "egressTotal": 5,
+  "keys": [
+    {
+      "key": "usas_toptier_agencies",
+      "source": "api.usaspending.gov /api/v2/references/toptier_agencies",
+      "license": "us-government-work",
+      "accessLevel": "public",
+      "url": "https://api.usaspending.gov/api/v2/references/toptier_agencies/",
+      "asOf": "2026-07-20T07:22:00.220Z",
+      "reachable": true,
+      "bytes": 68873,
+      "httpStatus": 200
+    },
+    {
+      "key": "usas_naics_hierarchy",
+      "source": "api.usaspending.gov /api/v2/references/naics (top-level)",
+      "license": "us-government-work",
+      "accessLevel": "public",
+      "url": "https://api.usaspending.gov/api/v2/references/naics/",
+      "asOf": "2026-07-20T07:22:00.325Z",
+      "reachable": true,
+      "bytes": 3823,
+      "httpStatus": 200
+    },
+    {
+      "key": "usas_glossary",
+      "source": "api.usaspending.gov /api/v2/references/glossary (default)",
+      "license": "us-government-work",
+      "accessLevel": "public",
+      "url": "https://api.usaspending.gov/api/v2/references/glossary/?limit=25",
+      "asOf": "2026-07-20T07:22:00.389Z",
+      "reachable": true,
+      "bytes": 22100,
+      "httpStatus": 200
+    },
+    {
+      "key": "sba_size_standards",
+      "source": "sba.gov naics.json (SBA small-business size standards)",
+      "license": "us-government-work",
+      "accessLevel": "public",
+      "url": "https://www.sba.gov/sites/default/files/data/naics.json",
+      "asOf": "2026-07-20T07:22:00.496Z",
+      "reachable": true,
+      "bytes": 555390,
+      "httpStatus": 200
+    },
+    {
+      "key": "treasury_debt_to_penny_latest",
+      "source": "api.fiscaldata.treasury.gov /v2/accounting/od/debt_to_penny (latest)",
+      "license": "us-government-work",
+      "accessLevel": "public",
+      "url": "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/debt_to_penny?fields=record_date,tot_pub_debt_out_amt,debt_held_public_amt,intragov_hold_amt&sort=-record_date&page[size]=1&page[number]=1",
+      "asOf": "2026-07-20T07:22:01.113Z",
+      "reachable": true,
+      "bytes": 1411,
+      "httpStatus": 200
+    }
+  ]
+}
