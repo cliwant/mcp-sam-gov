@@ -6777,6 +6777,42 @@ async function testNistControls() {
     ok("36d 503 ⇒ upstream_unavailable THROW (a DOWN source is NEVER an empty controls[])",
       threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
   });
+
+  // (f) ★MED-2 withdrawn control + ★MED-1 freshness. A withdrawn control (AC-13:
+  //     props status=withdrawn, NO statement part, incorporated-into links) ⇒
+  //     status:'withdrawn' + statement NULL (never '') + incorporatedInto
+  //     ['AC-2','AU-6'] + a disclosing note; and the catalog metadata (version +
+  //     last-modified) is surfaced in source + a note.
+  _clearCache();
+  const wCat = oscalCatalog(20);
+  wCat.catalog.metadata = { version: "5.2.0", "last-modified": "2026-05-11T16:01:09.00000-00:00" };
+  wCat.catalog.groups[0].controls.push({
+    id: "ac-13",
+    title: "Supervision and Review — Access Control",
+    props: [{ name: "label", value: "AC-13" }, { name: "status", value: "withdrawn" }],
+    links: [{ href: "#ac-2", rel: "incorporated-into" }, { href: "#au-6", rel: "incorporated-into" }],
+    parts: [],
+  });
+  await withFetch(oscalMock(wCat), async () => {
+    const r = await runTool("nist_800_53_controls", { controlId: "AC-13" }, sam);
+    const m = buildMeta(r.meta);
+    const c = r.data.controls[0];
+    ok("36d ★withdrawn AC-13 ⇒ status:'withdrawn' + statement:NULL (never '') + incorporatedInto:['AC-2','AU-6'] ⇒ `partProse ?? ''` or dropping status/links ⇒ RED",
+      c.status === "withdrawn" && c.statement === null && JSON.stringify(c.incorporatedInto) === JSON.stringify(["AC-2", "AU-6"]), JSON.stringify({ status: c.status, stmt: c.statement, inc: c.incorporatedInto }));
+    ok("36d ★withdrawn ⇒ a note DISCLOSES the control is WITHDRAWN (not an active requirement) ⇒ omit the withdrawn note ⇒ RED",
+      m.notes.some((n) => /WITHDRAWN/.test(n)), JSON.stringify(m.notes));
+    ok("36d ★MED-1 freshness: source carries 'Rev 5.2.0' AND a note carries version 5.2.0 + last-modified 2026-05-11 (mutable main branch) ⇒ drop the catalog.metadata read ⇒ RED",
+      /Rev 5\.2\.0/.test(r.meta.source) && m.notes.some((n) => /version 5\.2\.0/.test(n) && /last-modified 2026-05-11/.test(n)), JSON.stringify({ source: r.meta.source }));
+  });
+  // (g) ★an ACTIVE control (AC-2, has a statement) keeps status:null + a non-null
+  //     statement — the null-statement change must NEVER blank an active control.
+  _clearCache();
+  await withFetch(oscalMock(wCat), async () => {
+    const r = await runTool("nist_800_53_controls", { controlId: "AC-2" }, sam);
+    const c = r.data.controls[0];
+    ok("36d ★active AC-2 ⇒ status:null + statement NON-null/non-empty (the withdrawn null-statement rule never blanks an active control) ⇒ RED",
+      c.status === null && typeof c.statement === "string" && c.statement.length > 0, JSON.stringify({ status: c.status, hasStmt: c.statement !== null }));
+  });
 }
 
 // §36e: cbp_border_wait_times (CBP Border Wait Times, added 2026-07-16). Locks: array
