@@ -197,6 +197,7 @@ import { recalls as nhtsaRecalls, complaints as nhtsaComplaints, NHTSA_HOST } fr
 import { recalls as cpscRecalls, CPSC_HOST } from "./dist/cpsc.js";
 import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum } from "./dist/bea.js";
 import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, defaultPerdiemYear, federalFiscalYear } from "./dist/gsa-perdiem.js";
+import { borderWaitTimes as cbpBorderWaitTimes } from "./dist/cbp-border.js";
 import { dolApiKey } from "./dist/dol.js";
 import { searchFilings as ldaSearchFilings, ldaAuthHeader, ldaKeyPresent, nameOf as ldaNameOf, LDA_HOST, num as ldaNum } from "./dist/lda.js";
 import { searchOpinions as clSearchOpinions, courtlistenerAuthHeader, courtlistenerTokenPresent, flattenCitation as clFlattenCitation, extractNextCursor as clExtractNextCursor, COURTLISTENER_HOST, COURTLISTENER_CURSOR_RE } from "./dist/courtlistener.js";
@@ -6864,6 +6865,26 @@ async function testCbpBorder() {
     const { threw, error } = await expectThrow(() => runTool("cbp_border_wait_times", {}, sam));
     ok("36e 503 ⇒ upstream_unavailable THROW (a DOWN feed is NEVER an empty ports[])",
       threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // (e) ★D2 [DIRECT handler call — bypasses the server Zod .min(1) that shadows this
+  //     on the normal tool path; defense-in-depth] an EMPTY-string filter (border:'')
+  //     narrows nothing ⇒ NOT reported as applied (filtersDropped instead), and every
+  //     port is returned.
+  _clearCache();
+  await withFetch(cbpMock(PORTS), async () => {
+    const r = await cbpBorderWaitTimes({ border: "" });
+    const m = buildMeta(r.meta);
+    ok("36e ★D2 (direct call, Zod-bypassing) border:'' ⇒ filtersApplied does NOT include 'border' + filtersDropped includes 'border(empty)' + ALL ports returned (an empty filter narrows nothing) ⇒ push 'border' unconditionally ⇒ RED",
+      !(m.filtersApplied ?? []).includes("border") && (m.filtersDropped ?? []).includes("border(empty)") && r.data.ports.length === 2, JSON.stringify({ fa: m.filtersApplied, fd: m.filtersDropped, n: r.data.ports.length }));
+  });
+  // (f) ★D1 a REAL client-side filter (border:'mexican') ⇒ a note DISCLOSES the
+  //     filter is applied client-side over the full fetched port set.
+  _clearCache();
+  await withFetch(cbpMock(PORTS), async () => {
+    const r = await runTool("cbp_border_wait_times", { border: "mexican" }, sam);
+    const m = buildMeta(r.meta);
+    ok("36e ★D1 border filter applied ⇒ a note DISCLOSES it is applied CLIENT-SIDE over the full port set (the feed has no server-side filter) ⇒ omit the client-side disclosure ⇒ RED",
+      (m.filtersApplied ?? []).includes("border") && m.notes.some((n) => /CLIENT-SIDE/i.test(n)), JSON.stringify(m.notes));
   });
 }
 
