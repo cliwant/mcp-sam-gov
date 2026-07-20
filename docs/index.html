@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mcp-sam-gov — Keyless MCP server for US government contracting data (150 tools)</title>
+<meta name="description" content="Keyless-first MCP server: 150 tools for US federal + state/local (SLED) government contracting, spending, regulation, and partner vetting. SAM.gov, USAspending, Grants.gov, OFAC, FDIC, EPA, CourtListener and 45+ more. No API key. Works in Claude Desktop, Claude Code, Codex CLI, Cursor, and any MCP client." />
+<link rel="canonical" href="https://cliwant.github.io/mcp-sam-gov/" />
+<meta name="robots" content="index, follow" />
+<meta name="keywords" content="MCP, Model Context Protocol, SAM.gov, USAspending, government contracting, govcon, procurement, RFP, SLED, keyless, Claude, Cursor, Codex, MCP server, federal contracting, public data" />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="@cliwant/mcp-sam-gov" />
+<meta property="og:title" content="mcp-sam-gov — Keyless MCP server for US government contracting data" />
+<meta property="og:description" content="150 keyless tools for US federal + state/local government contracting, spending, regulation & partner vetting. No API key. Plug into Claude, Cursor, Codex, or any MCP client." />
+<meta property="og:url" content="https://cliwant.github.io/mcp-sam-gov/" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="mcp-sam-gov — 150 keyless tools for US government contracting data" />
+<meta name="twitter:description" content="Federal + state/local (SLED) contracting, spending, regulation & vetting via MCP. No API key. Honesty-hardened." />
+
+<!-- Structured data: SoftwareApplication + FAQ (SEO rich results) -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "@cliwant/mcp-sam-gov",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Cross-platform (Node.js)",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "license": "https://opensource.org/licenses/MIT",
+  "description": "Keyless-first MCP server with 150 tools for US federal and state/local (SLED) government contracting, spending, regulation, and partner vetting.",
+  "url": "https://cliwant.github.io/mcp-sam-gov/",
+  "downloadUrl": "https://www.npmjs.com/package/@cliwant/mcp-sam-gov",
+  "softwareHelp": "https://github.com/cliwant/mcp-sam-gov#readme",
+  "keywords": "MCP, SAM.gov, USAspending, government contracting, procurement, SLED, keyless"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    { "@type": "Question", "name": "Do I need an API key?", "acceptedAnswer": { "@type": "Answer", "text": "No. All 150 tools work keyless. A handful of sources (Census, FRED, BEA, DOL) accept an optional free key for higher limits, but nothing is required." } },
+    { "@type": "Question", "name": "Which AI clients does it work with?", "acceptedAnswer": { "@type": "Answer", "text": "Any MCP client — Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, and more — via a single npx command." } },
+    { "@type": "Question", "name": "What data does it cover?", "acceptedAnswer": { "@type": "Answer", "text": "US federal and state/local (SLED) contracting opportunities, spending and awards, regulation, and partner vetting: SAM.gov, USAspending, Grants.gov, OFAC, FDIC, EPA, CourtListener, and 45+ more public sources." } }
+  ]
+}
+</script>
+
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1a1f2b; --muted:#5b6472; --card:#f6f8fa; --border:#e2e6ea;
+    --accent:#2b6cb0; --accent-fg:#ffffff; --code-bg:#0d1117; --code-fg:#e6edf3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0d1117; --fg:#e6edf3; --muted:#9aa4b2; --card:#161b22; --border:#2a3038;
+      --accent:#4c9be8; --accent-fg:#07121f; --code-bg:#010409; --code-fg:#e6edf3; }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:940px;margin:0 auto;padding:0 20px}
+  header.hero{padding:64px 20px 40px;text-align:center;border-bottom:1px solid var(--border)}
+  .badge{display:inline-block;font-size:13px;font-weight:600;color:var(--accent);
+    background:var(--card);border:1px solid var(--border);border-radius:999px;padding:4px 14px;margin-bottom:20px}
+  h1{font-size:clamp(28px,5vw,44px);line-height:1.15;margin:0 0 14px;letter-spacing:-.02em}
+  h1 .k{color:var(--accent)}
+  .sub{font-size:clamp(16px,2.4vw,20px);color:var(--muted);max-width:680px;margin:0 auto 28px}
+  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:10px}
+  .btn{display:inline-block;padding:11px 22px;border-radius:9px;font-weight:600;border:1px solid var(--border)}
+  .btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+  .btn.primary:hover{text-decoration:none;opacity:.92}
+  section{padding:44px 0;border-bottom:1px solid var(--border)}
+  h2{font-size:26px;letter-spacing:-.01em;margin:0 0 8px}
+  h2 + .lead{color:var(--muted);margin:0 0 24px}
+  pre{background:var(--code-bg);color:var(--code-fg);border-radius:10px;padding:16px 18px;overflow-x:auto;
+    font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre code{white-space:pre}
+  code.inline{background:var(--card);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:.9em}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px}
+  .card h3{margin:0 0 6px;font-size:17px}
+  .card p{margin:0;color:var(--muted);font-size:14.5px}
+  .card .ex{display:block;margin-top:10px;color:var(--fg);font-size:14px;font-style:italic;opacity:.85}
+  table{width:100%;border-collapse:collapse;font-size:14.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  .pill{font-size:13.5px;font-weight:600;padding:6px 12px;border-radius:8px;background:var(--card);border:1px solid var(--border)}
+  ul.checks{list-style:none;padding:0;margin:0}
+  ul.checks li{padding:7px 0 7px 28px;position:relative;color:var(--fg)}
+  ul.checks li::before{content:"✓";position:absolute;left:0;color:var(--accent);font-weight:700}
+  footer{padding:36px 20px 60px;text-align:center;color:var(--muted);font-size:14px}
+  .kv{color:var(--muted);font-size:13.5px;margin-top:6px}
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="badge">Open source · MIT · Keyless-first</div>
+    <h1><span class="k">150 keyless tools</span> for US government<br/>contracting, spending &amp; vetting — in your AI agent</h1>
+    <p class="sub">A Model Context Protocol (MCP) server that puts SAM.gov, USAspending, Grants.gov, OFAC, FDIC, EPA, CourtListener and 45+ more public sources one <code class="inline">npx</code> away — federal <em>and</em> state/local (SLED). No API key, no signup.</p>
+    <div class="cta">
+      <a class="btn primary" href="#quickstart">Get started</a>
+      <a class="btn" href="https://github.com/cliwant/mcp-sam-gov" rel="noopener">GitHub</a>
+      <a class="btn" href="https://www.npmjs.com/package/@cliwant/mcp-sam-gov" rel="noopener">npm</a>
+    </div>
+    <div class="kv">Listed on the official <a href="https://registry.modelcontextprotocol.io/v0/servers?search=cliwant" rel="noopener">MCP Registry</a> · <code class="inline">io.github.cliwant/mcp-sam-gov</code></div>
+  </div>
+</header>
+
+<section id="quickstart">
+  <div class="wrap">
+    <h2>Quick start</h2>
+    <p class="lead">Add one server entry to your MCP client. It runs locally over stdio — nothing to host, nothing to sign up for.</p>
+    <div class="tabs">
+      <span class="pill">Claude Desktop / Claude Code</span>
+      <span class="pill">Cursor · Continue · Codex CLI</span>
+    </div>
+    <pre><code>{
+  "mcpServers": {
+    "sam-gov": {
+      "command": "npx",
+      "args": ["-y", "@cliwant/mcp-sam-gov"]
+    }
+  }
+}</code></pre>
+    <p class="kv">Then ask your agent, in plain language: <em>“Find active SAM.gov solicitations under NAICS 541512 closing this month.”</em> Prefer to try it first? Run <code class="inline">npx -y @cliwant/mcp-sam-gov</code> in a terminal.</p>
+  </div>
+</section>
+
+<section id="capabilities">
+  <div class="wrap">
+    <h2>What it gives your agent</h2>
+    <p class="lead">Seven domains of US government intelligence, unified behind one tool surface.</p>
+    <div class="grid">
+      <div class="card"><h3>🔍 Opportunities &amp; solicitations</h3><p>Search live federal and SLED bids; read the SOW, points of contact, and attachments.</p><span class="ex">“SAM.gov solicitations under NAICS 541512 closing this month”</span></div>
+      <div class="card"><h3>💰 Spending, awards &amp; competition</h3><p>Who won what, where, and for how much — agencies, recipients, PSC/NAICS, expiring contracts.</p><span class="ex">“Booz Allen wins at the VA last fiscal year”</span></div>
+      <div class="card"><h3>🕵️ Entity &amp; partner vetting</h3><p>Screen a firm across sanctions, exclusions, single-audit findings, bank health, and environmental compliance.</p><span class="ex">“Screen this firm: OFAC, SAM exclusions, EPA compliance”</span></div>
+      <div class="card"><h3>🛒 Product safety &amp; recalls</h3><p>FDA / NHTSA / CPSC recalls and enforcement against a supplier’s products.</p><span class="ex">“Any recalls tied to this supplier?”</span></div>
+      <div class="card"><h3>⚖️ Litigation &amp; courts</h3><p>Court of Federal Claims bid protests and federal opinions involving a contractor.</p><span class="ex">“Bid protests involving this contractor”</span></div>
+      <div class="card"><h3>📜 Regulation &amp; reference</h3><p>eCFR, the Federal Register, FAR/DFARS clauses, NAICS/PSC lookups, NIST 800-53.</p><span class="ex">“What does FAR 52.204-21 require?”</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <h2>Why this exists</h2>
+    <p class="lead">The federal data underneath is public domain. There’s no good reason it should cost a five-figure subscription to query.</p>
+    <table>
+      <tr><th>Status quo</th><th>With this MCP</th></tr>
+      <tr><td>$30K–$100K/yr per seat for a bid platform</td><td>Free, MIT-licensed</td></tr>
+      <tr><td>API-key registration → wait → quota-tier shopping</td><td><code class="inline">npx</code> → working in 60 seconds, keyless</td></tr>
+      <tr><td>5+ separate vendor APIs and scrapers</td><td>1 unified surface, 150 tools across 50+ sources</td></tr>
+      <tr><td>LLMs hallucinate NAICS codes and agency names</td><td>Anti-hallucination autocomplete guards built in</td></tr>
+    </table>
+  </div>
+</section>
+
+<section id="honesty">
+  <div class="wrap">
+    <h2>Engineered not to lie to your agent</h2>
+    <p class="lead">Most tools fail silently — a page size reported as a total, an outage returned as “no results,” a missing value shown as $0. Those quiet lies corrupt an agent’s reasoning. This server holds five honesty invariants, enforced by a 3,400+ assertion fault-injection suite in CI.</p>
+    <ul class="checks">
+      <li><strong>A total is never a page length</strong> — <code class="inline">totalAvailable</code> is the real upstream total or an explicit lower bound, never the row count.</li>
+      <li><strong>An outage throws, an empty result doesn’t</strong> — a 429/5xx/timeout raises a typed error; only a genuine no-match returns empty.</li>
+      <li><strong>Missing is null, never a fabricated zero</strong> — an absent amount is <code class="inline">null</code>; a real $0 stays $0.</li>
+      <li><strong>Shape drift throws</strong> — an unexpected upstream response is surfaced, never fabricated into a partial result.</li>
+      <li><strong>Provenance &amp; freshness are disclosed</strong> — non-government sources, snapshot dates, and client-side filtering are labeled.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="privacy">
+  <div class="wrap">
+    <h2>Keyless &amp; private by design</h2>
+    <p class="lead">The server runs locally and collects nothing.</p>
+    <ul class="checks">
+      <li>No telemetry, no analytics, no accounts — your queries never reach us.</li>
+      <li>Each tool calls the relevant official government API directly over HTTPS.</li>
+      <li>Optional API keys (Census, FRED, BEA, DOL, and a few others for higher limits) stay in your local environment and are sent only to that source.</li>
+    </ul>
+    <p class="kv">See the <a href="https://github.com/cliwant/mcp-sam-gov/blob/main/PRIVACY.md" rel="noopener">full privacy policy</a>.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p><strong>@cliwant/mcp-sam-gov</strong> — built by <a href="https://cliwant.com" rel="noopener">Cliwant</a> · MIT License</p>
+    <p><a href="https://github.com/cliwant/mcp-sam-gov">GitHub</a> · <a href="https://www.npmjs.com/package/@cliwant/mcp-sam-gov">npm</a> · <a href="https://github.com/cliwant/mcp-sam-gov/issues">Report an issue</a></p>
+  </div>
+</footer>
+</body>
+</html>
