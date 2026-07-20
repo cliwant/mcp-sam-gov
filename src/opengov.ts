@@ -238,10 +238,14 @@ export async function searchSolicitations(
     });
   }
 
-  // The API paginates by 0-based `page` + `limit`. Map our offset → page.
-  const page = Math.floor(offset / limit);
-  const servedOffset = page * limit;
-  const payload = JSON.stringify({ governmentCode: code, publicView: true, page, limit });
+  // The OpenGov /project/list `page` param is 1-BASED — `page=0` CLAMPS to page 1
+  // (live-verified 2026-07-20: phoenix offset 0 and offset<limit both returned the
+  // SAME first page → a 0-based send duplicates page 1 and shifts every later page,
+  // silently dropping the tail while totalAvailable still claims the full count).
+  // Map our row `offset` → the 1-based page; servedOffset stays offset-aligned.
+  const apiPage = Math.floor(offset / limit) + 1;
+  const servedOffset = (apiPage - 1) * limit;
+  const payload = JSON.stringify({ governmentCode: code, publicView: true, page: apiPage, limit });
 
   let body: unknown;
   try {

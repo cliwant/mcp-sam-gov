@@ -13437,6 +13437,44 @@ async function testOpengovHonesty() {
     ok("45OG-sol a status note discloses open=accepting + totalAvailable is all-public not open-only", m.notes.some((n) => /open = currently ACCEPTING/i.test(n)), JSON.stringify(m.notes));
   });
 
+  // ── P1-pagination (2026-07-20 live fix): OpenGov `/project/list` `page` is 1-BASED
+  //    — `page=0` CLAMPS to page 1. A 0-based send (`Math.floor(offset/limit)`) thus
+  //    DUPLICATES page 1 at the first two offsets and shifts every later page, silently
+  //    dropping the tail while `count` still claims the full total. This mock REPLICATES
+  //    the upstream clamp (page<1 ⇒ page 1), so a regression to 0-based reproduces the
+  //    exact live phoenix duplicate ([282136,282090,277573] at both offset 0 and 3).
+  {
+    const PAGESIZE = 3, COUNT = 8; // 3 real pages: rows [0..2],[3..5],[6..7 tail]
+    const ogPagedMock = (u, init) => {
+      if (!isOgProj(u)) return failClosed()();
+      const effPage = Math.max(1, Number(JSON.parse(init.body).page)); // upstream CLAMPS page<1 → 1
+      const start = (effPage - 1) * PAGESIZE;
+      const projects = [];
+      for (let i = start; i < Math.min(start + PAGESIZE, COUNT); i++)
+        projects.push({ id: 2000 + i, title: `P${i}`, financialId: `RFP-${i}`, status: "open", type: "purchase", departmentName: "PW", releaseProjectDate: "2026-07-01T00:00:00Z", proposalDeadline: "2026-07-30T19:00:00Z", contactFirstName: "M", contactLastName: "S" });
+      return mockResponse({ status: 200, json: { count: COUNT, projects } });
+    };
+    await withFetch(ogPagedMock, async (calls) => {
+      const p0 = await runTool("opengov_search_solicitations", { governmentCode: "pageco", limit: PAGESIZE, offset: 0 }, sam);
+      const sent0 = JSON.parse(calls.find((c) => isOgProj(c.url)).init.body);
+      ok("45OG-pg offset 0 sends 1-BASED page:1 (NOT 0) — revert to `Math.floor(offset/limit)` ⇒ page:0 ⇒ RED",
+        sent0.page === 1, JSON.stringify({ pageSent: sent0.page }));
+      const p3 = await runTool("opengov_search_solicitations", { governmentCode: "pageco", limit: PAGESIZE, offset: 3 }, sam);
+      const ids0 = p0.data.solicitations.map((s) => s.id);
+      const ids3 = p3.data.solicitations.map((s) => s.id);
+      ok("45OG-pg offset 0 vs offset 3 are DISTINCT pages (no duplicate) — under 0-based BOTH clamp to page 1 ⇒ ids0===ids3 ⇒ RED (the exact live phoenix bug)",
+        JSON.stringify(ids0) === JSON.stringify([2000, 2001, 2002]) && JSON.stringify(ids3) === JSON.stringify([2003, 2004, 2005]), JSON.stringify({ ids0, ids3 }));
+      const m0 = buildMeta(p0.meta), m3 = buildMeta(p3.meta);
+      ok("45OG-pg servedOffset stays offset-aligned (o0⇒0, o3⇒3); nextOffset walks 0→3; hasMore true (8>3)",
+        m0.pagination.offset === 0 && m0.pagination.nextOffset === 3 && m0.pagination.hasMore === true && m3.pagination.offset === 3, JSON.stringify({ o0: m0.pagination, o3: m3.pagination }));
+      // Tail reachability: offset 6 (page 3) must surface the final 2 rows and TERMINATE (no drop, no livelock).
+      const p6 = await runTool("opengov_search_solicitations", { governmentCode: "pageco", limit: PAGESIZE, offset: 6 }, sam);
+      const m6 = buildMeta(p6.meta);
+      ok("45OG-pg TAIL reachable: offset 6 ⇒ ids [2006,2007] (final 2 of 8); pagination TERMINATES (hasMore:false, nextOffset:null — no livelock, no drop); complete:false (a partial last page is not the whole 8-row set) — 0-based dropped this tail entirely",
+        JSON.stringify(p6.data.solicitations.map((s) => s.id)) === JSON.stringify([2006, 2007]) && m6.pagination.hasMore === false && m6.pagination.nextOffset === null && m6.complete === false, JSON.stringify({ ids: p6.data.solicitations.map((s) => s.id), pg: m6.pagination, complete: m6.complete }));
+    });
+  }
+
   // ── P2: genuine empty ⇒ honest; 503 ⇒ upstream_unavailable; 429 ⇒ rate_limited. ──
   await withFetch(ogMock(isOgProj, ogProjBody(0, 0)), async () => {
     const r = await runTool("opengov_search_solicitations", { governmentCode: "emptycity" }, sam);
