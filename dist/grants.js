@@ -25,13 +25,17 @@ async function postJson(endpoint, body) {
     return (await r.json());
 }
 export async function searchGrants(args) {
+    // The tool ALWAYS sends oppStatuses — default forecasted|posted when the caller
+    // omits it — so it is ALWAYS an applied server-side filter (disclosed below).
+    const effOppStatuses = args.oppStatuses ?? ["forecasted", "posted"];
+    const statusDefaulted = args.oppStatuses == null;
     const body = {
         rows: args.rows ?? 10,
         keyword: args.keyword ?? "",
         cfda: args.cfda ?? "",
         agencies: args.agency ?? "",
         oppNum: args.oppNum ?? "",
-        oppStatuses: (args.oppStatuses ?? ["forecasted", "posted"]).join("|"),
+        oppStatuses: effOppStatuses.join("|"),
     };
     const json = await postJson("search2", body);
     if (json.errorcode && json.errorcode !== 0) {
@@ -88,9 +92,15 @@ export async function searchGrants(args) {
         sent.push("agency");
     if (args.oppNum)
         sent.push("oppNum");
-    if (args.oppStatuses?.length)
-        sent.push("oppStatuses");
+    // oppStatuses is ALWAYS sent (default or caller-supplied), so ALWAYS disclose the
+    // EFFECTIVE set — omitting it when defaulted made totalAvailable (a status-filtered
+    // subset) read as unfiltered (live: keyword=cybersecurity → 235 forecasted|posted vs
+    // 2008 all-statuses, a 1773-record closed/archived bucket hidden).
+    sent.push(`oppStatuses(${effOppStatuses.join("|") || "all-statuses"})`);
     const notes = [];
+    if (statusDefaulted) {
+        notes.push("No oppStatuses supplied — DEFAULTED to forecasted|posted, so CLOSED and ARCHIVED opportunities are EXCLUDED from both the results AND totalAvailable (this total is the open/forecasted subset, not all statuses). To count or return every status, pass oppStatuses including 'closed'/'archived'.");
+    }
     if (args.agency || args.cfda) {
         notes.push("Grants.gov applies the agency/CFDA filter server-side (live-verified 2026-07-20): a bogus or misspelled value returns 0 results, NOT an error and NOT the unfiltered set — so an unexpectedly EMPTY filtered search most often means the agency/CFDA value is invalid, not that no grants exist. `filtersApplied` reflects that the filter was sent. Verify the agency code / CFDA number if a filtered result is surprisingly empty.");
     }
