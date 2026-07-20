@@ -137,7 +137,18 @@ async function getBonfireRss(org) {
             upstreamEndpoint: bonfireLabel(org),
         });
     }
-    return getText(url, { label: bonfireLabel(org), redirect: "error" });
+    // Single-fetch path (retry:false) so a redirect is classified as a NON-retryable
+    // schema_drift, NOT a retryable upstream_unavailable. A drifted seed slug whose
+    // Bonfire portal has moved returns a 3xx (live-observed 307 on sanantonio /
+    // kingcounty / rutgers); routed through fetchWithRetry it would masquerade as a
+    // transient outage ("retry in 30s") that never recovers. A 5xx/429/404/timeout
+    // still THROWS honestly on the single attempt (never a fake empty).
+    return getText(url, {
+        label: bonfireLabel(org),
+        redirect: "error",
+        retry: false,
+        redirectMessage: `Bonfire org ${JSON.stringify(org)} redirected off ${host} (an HTTP 3xx) — this seed slug's portal has moved or been retired, so the entry is drifted (retrying will not help). Re-discover the current slug via bonfire_list_organizations or probe {slug}.bonfirehub.com/opportunities/rss.`,
+    });
 }
 export async function listOrganizations(args) {
     const limit = args.limit ?? 50;
