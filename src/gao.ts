@@ -593,6 +593,21 @@ export async function gaoProtestLookup(args: {
 
   // ── Feed path ──────────────────────────────────────────────────────
   const xml = await getText(RSS_URL, "gao:rss");
+  // [P2/P4] A 200 body that isn't the RSS feed (GAO's edge is Cloudflare/WAF — a
+  // challenge or maintenance interstitial returns 200 HTML, NOT the feed) must
+  // NOT be parsed into an empty decision list: parseFeed's <item> regex yields []
+  // on any non-RSS body, which would read as "no recent bid protests" — an
+  // outage-as-empty lie. A real feed always carries <rss>/<channel>/<item> (a
+  // genuinely EMPTY feed still has <channel>, so a 0-item feed passes). Guard the
+  // shape and surface a retryable outage instead of a fabricated empty result.
+  if (!/<(rss|feed|channel|item)\b/i.test(xml)) {
+    throw new ToolErrorCarrier({
+      kind: "upstream_unavailable",
+      retryable: true,
+      message: `GAO RSS returned a 200 body with no <rss>/<channel>/<item> markup (${xml.length} bytes) — GAO's Cloudflare/WAF edge most likely served a challenge or maintenance interstitial instead of the feed. Surfaced as a retryable outage rather than a fabricated empty decision list (which would falsely read as "no recent bid protests"). Retry shortly.`,
+      upstreamEndpoint: "gao:rss",
+    });
+  }
   const rawItems = parseFeed(xml);
   const protests = rawItems.filter(isBidProtest);
 
@@ -653,9 +668,16 @@ export async function gaoProtestLookup(args: {
 
   // Apply the outcome filter now that we (may) have parsed outcomes, then cap.
   const filtersDropped: string[] = [];
+  let outcomeUndetermined = 0;
   if (outcomeFilter) {
     if (enrich) {
       filtersApplied.push("outcome(from decision page)");
+      // [filter honesty] A decision whose page could not be enriched has
+      // outcome=null — UNDETERMINED, not confirmed "≠ outcomeFilter". Dropping
+      // those silently makes returned:0 read as "no <outcome> protests exist"
+      // when the truth is "no outcome could be read" (GAO per-decision pages are
+      // intermittently WAF-blocked). Count them so it is disclosed, not swallowed.
+      outcomeUndetermined = decisions.filter((d) => d.outcome === null).length;
       decisions = decisions.filter((d) => d.outcome === outcomeFilter);
     } else {
       // Can't determine outcome without enrichment → don't silently pretend to.
@@ -670,6 +692,11 @@ export async function gaoProtestLookup(args: {
   if (enrich && enrichFailures > 0) {
     notes.push(
       `${enrichFailures} decision(s) returned feed-level fields only; per-decision page enrichment failed (agency/outcome/solicitation may be null for those).`,
+    );
+  }
+  if (outcomeFilter && enrich && outcomeUndetermined > 0) {
+    notes.push(
+      `${outcomeUndetermined} recent decision(s) were EXCLUDED from the outcome='${outcomeFilter}' filter because their decision page could not be read (enrichment failed) — their outcome is UNDETERMINED, not confirmed to differ. Treat a 0 or low result here as "outcome could not be determined for those", NOT "none exist"; retry (GAO per-decision pages are intermittently WAF-blocked) or drop the outcome filter to list all recent decisions.`,
     );
   }
   if (!enrich) {
