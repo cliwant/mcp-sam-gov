@@ -196,7 +196,7 @@ import { deviceClearances as openfdaDeviceClearances, buildDeviceSearch as openf
 import { recalls as nhtsaRecalls, complaints as nhtsaComplaints, NHTSA_HOST } from "./dist/nhtsa.js";
 import { recalls as cpscRecalls, CPSC_HOST } from "./dist/cpsc.js";
 import { regionalData as beaRegionalData, beaApiKey, beaDataValue, num as beaNum } from "./dist/bea.js";
-import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, DEFAULT_PERDIEM_YEAR } from "./dist/gsa-perdiem.js";
+import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, defaultPerdiemYear, federalFiscalYear } from "./dist/gsa-perdiem.js";
 import { dolApiKey } from "./dist/dol.js";
 import { searchFilings as ldaSearchFilings, ldaAuthHeader, ldaKeyPresent, nameOf as ldaNameOf, LDA_HOST, num as ldaNum } from "./dist/lda.js";
 import { searchOpinions as clSearchOpinions, courtlistenerAuthHeader, courtlistenerTokenPresent, flattenCitation as clFlattenCitation, extractNextCursor as clExtractNextCursor, COURTLISTENER_HOST, COURTLISTENER_CURSOR_RE } from "./dist/courtlistener.js";
@@ -13541,7 +13541,7 @@ async function testGsaPerdiemHonesty() {
       row.city === "District of Columbia" && row.county === "Washington DC" && row.state === "DC" && row.zip === null && row.year === 2025, JSON.stringify(row));
     const url = new URL(gpCall(calls).url);
     ok("45E-P1 the URL rides the FIXED city template on api.gsa.gov over https (city/state/year path segments; NO api_key query)",
-      url.hostname === GSA_PERDIEM_HOST && url.protocol === "https:" && /\/travel\/perdiem\/v2\/rates\/city\/Washington\/state\/DC\/year\/2025$/.test(url.pathname) && !/api_key=/i.test(gpCall(calls).url), url.pathname);
+      url.hostname === GSA_PERDIEM_HOST && url.protocol === "https:" && new RegExp(`/travel/perdiem/v2/rates/city/Washington/state/DC/year/${defaultPerdiemYear()}$`).test(url.pathname) && !/api_key=/i.test(gpCall(calls).url), url.pathname);
   });
 
   // ── P3 both-boolean branches: group1 isOconus/standardRate "false", group2 "true"
@@ -13673,7 +13673,7 @@ async function testGsaPerdiemHonesty() {
     const r = await runTool("gsa_perdiem_rates", { zip: "20001" }, sam);
     const url = new URL(gpCall(calls).url);
     ok("45E-ssrf a VALID zip rides the zip template to the FIXED host api.gsa.gov over https; redirect:'error' (fail-closed off-host 3xx); the zip surfaces in the row",
-      /\/travel\/perdiem\/v2\/rates\/zip\/20001\/year\/2025$/.test(url.pathname) && url.hostname === GSA_PERDIEM_HOST && url.protocol === "https:" && gpCall(calls).init.redirect === "error" && r.data.rates[0].zip === "20001", JSON.stringify({ path: url.pathname, host: url.hostname }));
+      new RegExp(`/travel/perdiem/v2/rates/zip/20001/year/${defaultPerdiemYear()}$`).test(url.pathname) && url.hostname === GSA_PERDIEM_HOST && url.protocol === "https:" && gpCall(calls).init.redirect === "error" && r.data.rates[0].zip === "20001", JSON.stringify({ path: url.pathname, host: url.hostname }));
   });
 
   // ── K-test: the key rides ONLY the X-Api-Key header, NEVER the URL/_meta/output;
@@ -13698,13 +13698,28 @@ async function testGsaPerdiemHonesty() {
     });
   });
 
-  // Sanity: the exported DEFAULT_PERDIEM_YEAR constant is used when year is omitted.
+  // ★Sanity: year omitted ⇒ the CURRENT federal FY (defaultPerdiemYear) rides the
+  //  path — NOT a frozen hard-coded year (the stale-default drift this fixes) — and
+  //  a note discloses the default.
   await withFetch(gpMock(gpBody({ rates: [gpGroup({ rate: [gpRate({ months: gpMonths(twelve) })] })] })), async (calls) => {
-    await runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam);
+    const r = await runTool("gsa_perdiem_rates", { city: "Washington", state: "DC" }, sam);
     const url = new URL(gpCall(calls).url);
-    ok("45E-default year omitted ⇒ DEFAULT_PERDIEM_YEAR rides the path (the module default is honored, not a hardcoded fork)",
-      new RegExp(`/year/${DEFAULT_PERDIEM_YEAR}$`).test(url.pathname), url.pathname);
+    ok("45E-default year omitted ⇒ the CURRENT federal fiscal year (defaultPerdiemYear) rides the path — re-freeze a hard-coded year ⇒ RED",
+      new RegExp(`/year/${defaultPerdiemYear()}$`).test(url.pathname), url.pathname + " vs FY" + defaultPerdiemYear());
+    ok("45E-default year omitted ⇒ a note DISCLOSES the year defaulted to the current U.S. federal fiscal year ⇒ drop the disclosure ⇒ RED",
+      r.meta.notes.some((n) => /defaulted to the CURRENT U\.S\. federal fiscal year/i.test(n)), JSON.stringify(r.meta.notes));
   });
+
+  // ★federalFiscalYear pure rollover (UTC, deterministic): FY begins Oct 1, so
+  //  Oct–Dec ⇒ NEXT calendar year's FY; Jan–Sep ⇒ current; the Sep 30 boundary
+  //  stays in the current FY. A wrong-month cutoff (e.g. >=8 or >=10) turns RED.
+  ok("45E-★federalFiscalYear rollover: 2025-10-01/2025-12-31 ⇒ FY2026, 2026-01-01/2026-09-30 ⇒ FY2026, 2025-09-30 ⇒ FY2025 (Oct-1 cutoff) ⇒ shift the month boundary ⇒ RED",
+    federalFiscalYear(new Date("2025-10-01T00:00:00Z")) === 2026 &&
+    federalFiscalYear(new Date("2025-12-31T00:00:00Z")) === 2026 &&
+    federalFiscalYear(new Date("2026-01-01T00:00:00Z")) === 2026 &&
+    federalFiscalYear(new Date("2026-09-30T00:00:00Z")) === 2026 &&
+    federalFiscalYear(new Date("2025-09-30T00:00:00Z")) === 2025,
+    JSON.stringify({ oct1_25: federalFiscalYear(new Date("2025-10-01T00:00:00Z")), sep30_25: federalFiscalYear(new Date("2025-09-30T00:00:00Z")), jul_26: federalFiscalYear(new Date("2026-07-20T00:00:00Z")) }));
 }
 
 // §46: EPA ECHO REST source (ADR-0009) — the THIRD source on the R2 port. KEYLESS,

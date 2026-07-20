@@ -57,8 +57,26 @@ const GSA_PERDIEM_LABEL = "gsa-perdiem:/travel/perdiem/v2/rates";
 const GSA_PERDIEM_SOURCE = (mode: string) =>
   `${GSA_PERDIEM_HOST} via GSA Federal Travel Per-Diem API (${mode})`;
 
-// The default per-diem fiscal year (ADR-0050 — the current confirmed vintage).
-export const DEFAULT_PERDIEM_YEAR = "2025";
+/**
+ * The US federal fiscal year for a date (ADR-0050). The FY begins Oct 1, so
+ * Oct–Dec belong to the NEXT calendar year's FY (e.g. 2025-11 → FY2026) while
+ * Jan–Sep stay in the current (e.g. 2026-07 → FY2026). Pure + UTC-based so it is
+ * deterministic and timezone-independent (the intra-day rollover instant is
+ * immaterial — per-diem rates do not change within a day).
+ */
+export function federalFiscalYear(d: Date): number {
+  return d.getUTCMonth() >= 9 ? d.getUTCFullYear() + 1 : d.getUTCFullYear();
+}
+
+/**
+ * The default per-diem year when the caller omits `year`: the CURRENT federal
+ * fiscal year. GSA publishes rates per FY; a hard-coded default silently serves
+ * an EXPIRED vintage once the FY rolls over (the drift this replaces — a no-year
+ * lookup must track the live FY, not a frozen year).
+ */
+export function defaultPerdiemYear(): string {
+  return String(federalFiscalYear(new Date()));
+}
 
 // ─── Validation charclasses (SSRF + "verify the input" honesty) ───
 // Each rides in a single PATH segment (encodeURIComponent-escaped), so these are
@@ -158,7 +176,7 @@ async function getGsaPerdiem(path: string): Promise<unknown> {
 
 /**
  * Look up GSA Federal Travel per-diem rates by EITHER (city + state) OR zip, for a
- * given `year` (default 2025). Returns flattened rate rows (each outer state/year
+ * given `year` (default: the current U.S. federal fiscal year). Returns flattened rate rows (each outer state/year
  * group × inner city/rate) + honest `_meta`: totalAvailable = the row count (no
  * pagination — P1), lodging/meals as null-never-0 dollars (P3), standardRate/isOconus
  * as real booleans, the months array preserved as-is. The DEMO_KEY rate disclosure
@@ -168,7 +186,8 @@ export async function perdiemRates(
   args: GsaPerdiemRatesArgs,
 ): Promise<MetaBundle> {
   const label = GSA_PERDIEM_LABEL;
-  const year = args.year ?? DEFAULT_PERDIEM_YEAR;
+  const yearWasDefaulted = args.year === undefined;
+  const year = args.year ?? defaultPerdiemYear();
 
   // ── [INPUT] EITHER (city + state) OR zip — never both, never neither. This is a
   //    caller-shape check (0 fetch): an ambiguous or empty lookup is invalid_input,
@@ -341,6 +360,11 @@ export async function perdiemRates(
 
   const returned = rows.length;
   const notes: string[] = [RATE_MEANING_NOTE, STANDARD_RATE_NOTE, NO_PAGINATION_NOTE];
+  if (yearWasDefaulted) {
+    notes.push(
+      `No \`year\` was supplied, so it defaulted to the CURRENT U.S. federal fiscal year (FY${year}). GSA per-diem ceilings are set per fiscal year (Oct 1–Sep 30); pass an explicit \`year\` for a prior or upcoming FY.`,
+    );
+  }
   pushKeyNote(notes);
 
   return withMeta(
