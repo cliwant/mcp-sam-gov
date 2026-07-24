@@ -182,6 +182,7 @@ import { num as opengovNum, listGovernments as ogList, searchSolicitations as og
 import { num as bonfireNum, listOrganizations as bfList, searchOpportunities as bfSearch, BONFIRE_ORGS } from "./dist/bonfire.js";
 import { num as arcfeatNum, featureQuery as afQuery, ARCGIS_SERVICES } from "./dist/arcgis-feature.js";
 import { viewCsv as tableauViewCsv, TABLEAU_VIEWS } from "./dist/tableau.js";
+import { openCheckbookSearch as ocSearch, OPEN_CHECKBOOK_PORTALS } from "./dist/open-checkbook.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
@@ -13899,6 +13900,92 @@ async function testTableauHonesty() {
     TABLEAU_VIEWS.length >= 1 && TABLEAU_VIEWS.every((v) => /^https:\/\/[^/]+\/t\/[^/]+\/views\//.test(v.base) && v.key), JSON.stringify(TABLEAU_VIEWS.map((v) => v.key)));
 }
 
+// §45OC: Socrata Open Expenditures checkbook (curated portal allowlist, SD dark-
+// state closure — the LAST dark state) — P1 (API `count` ≠ page length) + P3 amount
+// null-never-0 + P2 honest-empty/deep-tail/outage + P4 shape drift + offset→page
+// snap disclosure + gated-SODA-not-touched + sort/portal enum SSRF.
+const isOc = (u) => /southdakota\.spending\.socrata\.com\/api\/checkbook_data\.json/.test(u);
+const ocMock = (json, status = 200) => (u) => (isOc(u) ? mockResponse({ status, json }) : failClosed()());
+async function testOpenCheckbookHonesty() {
+  section("45OC. Socrata Open Expenditures checkbook (curated portal allowlist, SD dark-state closure) — P1 count≠page-length + P3 amount null-never-0 + P2 honest-empty/deep-offset-tail/outage-THROW + P4 shape drift + offset→page snap + gated-SODA-untouched disclosure + sort/portal enum SSRF (OFFLINE)");
+  const sam = new SamGovClient({});
+  const twoRows = { data: [
+    { vendor: "ROBINS WATER CONDITIONING INC", amount: 10, payment_date: "2026-01-16T00:00:00.000", org1: "UNIFIED JUDICIAL SYSTEMS", expense_category: "CONTRACTUAL SERVICES", description: "EQUIPMENT RENTAL", fund: "UJS-OTHER", custom_checkbook_field7: "INV-1", payment_id: "row-aaaa" },
+    { vendor: "ZERO CO", amount: 0, payment_date: "2026-01-10T00:00:00.000", org1: "TRANSPORTATION", expense_category: "SUPPLIES", description: "", fund: "", custom_checkbook_field7: "", payment_id: "row-bbbb" },
+  ], count: 740980, total_amount: 8413895281.59 };
+
+  // ── P1: totalAvailable = the API count (740980), NEVER the page length (2). ──
+  await withFetch(ocMock(twoRows), async (calls) => {
+    const r = await runTool("open_checkbook_search", { portal: "sd", limit: 2, offset: 0 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45OC-P1 totalAvailable = 740980 (the API's own count) with returned:2 ⇒ hasMore:true — mutate to rows.length ⇒ 2≠740980 ⇒ RED (the forbidden total===page-size class)",
+      m.totalAvailable === 740980 && m.returned === 2 && m.pagination.hasMore === true, JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore }));
+    ok("45OC-P3 amount null-never-0: row0.amount === 10 (number) AND row1.amount === 0 (a REAL $0 is 0, NOT null/absent) — coercing $0→null would be a lie",
+      r.data.rows[0].amount === 10 && r.data.rows[1].amount === 0, JSON.stringify(r.data.rows.map((x) => x.amount)));
+    ok("45OC-row fields mapped (vendor/amount/payment_date/org1/expense_category/invoice/payment_id)", r.data.rows[0].vendor === "ROBINS WATER CONDITIONING INC" && r.data.rows[0].invoice === "INV-1" && r.data.rows[0].payment_id === "row-aaaa", JSON.stringify(r.data.rows[0]));
+    const u = new URL(calls[0].url);
+    ok("45OC-ssrf fetch hits the allowlisted host southdakota.spending.socrata.com /api/checkbook_data.json over https, redirect:error (portal enum is the SSRF core; the gated SODA host is NEVER used)",
+      u.hostname === "southdakota.spending.socrata.com" && u.pathname === "/api/checkbook_data.json" && u.protocol === "https:" && calls[0].init.redirect === "error", JSON.stringify({ host: u.hostname, path: u.pathname, redir: calls[0].init.redirect }));
+    ok("45OC-P5 disclosure: a note states the underlying SODA dataset is GATED / this is the public app-proxy + the ~3-year coverage limit (honest provenance)",
+      m.notes.some((n) => /app-proxy|gated|login-gated/i.test(n)) && m.notes.some((n) => /most-recent fiscal years|NOT.*full history/i.test(n)), JSON.stringify(m.notes));
+  });
+  // ── P3 absent amount ⇒ null (never a fabricated 0). ──
+  await withFetch(ocMock({ data: [{ vendor: "NO AMOUNT CO", payment_id: "row-c" }], count: 1 }), async () => {
+    const r = await runTool("open_checkbook_search", { portal: "sd" }, sam);
+    ok("45OC-P3 an ABSENT amount ⇒ null (never a fabricated 0 — distinct from a real $0)", r.data.rows[0].amount === null, JSON.stringify(r.data.rows[0]));
+  });
+  // ── filter honored: org → outgoing org1 param; and offset→page snap disclosed. ──
+  await withFetch(ocMock(twoRows), async (calls) => {
+    const r = await runTool("open_checkbook_search", { portal: "sd", org: "TRANSPORTATION", limit: 2, offset: 3 }, sam);
+    const m = buildMeta(r.meta);
+    const q = new URL(calls[0].url).searchParams;
+    ok("45OC-filter org='TRANSPORTATION' ⇒ outgoing org1=TRANSPORTATION + page=2/limit=2 (offset 3 → page 2, servedOffset 2) + a snap note discloses the served offset",
+      q.get("org1") === "TRANSPORTATION" && q.get("page") === "2" && q.get("limit") === "2" && m.pagination.offset === 2 && m.notes.some((n) => /snapped to 2/.test(n)), JSON.stringify({ org1: q.get("org1"), page: q.get("page"), off: m.pagination.offset }));
+  });
+  // ── P2: bogus filter ⇒ honest empty (count:0), NOT thrown. ──
+  await withFetch(ocMock({ data: [], count: 0 }), async () => {
+    const r = await runTool("open_checkbook_search", { portal: "sd", vendor: "ZZZ_NOPE" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45OC-P2 exact-match miss ⇒ count:0/returned:0/complete:true (honest empty, NOT thrown)", r.data.rows.length === 0 && m.totalAvailable === 0 && m.returned === 0 && m.complete === true, JSON.stringify({ n: r.data.rows.length, ta: m.totalAvailable, c: m.complete }));
+  });
+  // ── P2: deep offset past the end ⇒ returned:0 but the REAL count preserved, hasMore:false (honest tail, not an outage). ──
+  await withFetch(ocMock({ data: [], count: 740980 }), async () => {
+    const r = await runTool("open_checkbook_search", { portal: "sd", limit: 1000, offset: 799000 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45OC-P2 deep offset (799000 > 740980) ⇒ returned:0 with totalAvailable:740980 PRESERVED + hasMore:false (an honest tail, NOT a fake total:0 or an outage)", r.data.rows.length === 0 && m.totalAvailable === 740980 && m.pagination.hasMore === false, JSON.stringify({ n: r.data.rows.length, ta: m.totalAvailable, hm: m.pagination.hasMore }));
+  });
+  // ── P2: 503 ⇒ upstream_unavailable THROWS (a DOWN portal is NEVER a returned:0). ──
+  await withFetch(ocMock({}, 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("open_checkbook_search", { portal: "sd" }, sam));
+    ok("45OC-P2 HTTP 503 ⇒ upstream_unavailable THROWS (never a fake empty)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4: a non-array data ⇒ schema_drift; a missing/non-numeric count ⇒ schema_drift. ──
+  await withFetch(ocMock({ data: "notarray", count: 5 }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("open_checkbook_search", { portal: "sd" }, sam));
+    ok("45OC-P4 data non-array ⇒ schema_drift (container-guarded, never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  await withFetch(ocMock({ data: [] }), async () => {
+    const { threw, error } = await expectThrow(() => runTool("open_checkbook_search", { portal: "sd" }, sam));
+    ok("45OC-P4 missing count ⇒ schema_drift (the total is load-bearing — a null count must NOT be presented as 0)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── SSRF: unknown portal ⇒ invalid_input, 0 fetch. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("open_checkbook_search", { portal: "not_a_portal" }, sam));
+    ok("45OC-ssrf unknown portal ⇒ invalid_input (Zod enum), 0 fetch (a free host can never reach fetch)", threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+  // ── sort guard (Zod-BYPASSING direct handler call): a bad sortBy ⇒ invalid_input, 0 fetch (the in-handler SORT_FIELDS re-guard closes it even if Zod is bypassed). ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => ocSearch({ portal: "sd", sortBy: "amount; DROP" }));
+    ok("45OC-guard DIRECT handler call sortBy='amount; DROP' (Zod-BYPASSING) ⇒ invalid_input, 0 fetch (the in-handler SORT_FIELDS re-guard closes the injection even when Zod is bypassed) — remove it ⇒ it reaches the API ⇒ RED",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+  // ── allowlist structural (SSRF): portals ≥1 + every host is a real domain + has a key. ──
+  ok("45OC portals allowlist ≥1 + every portal has an https-able host + a key (curated Socrata Open-Expenditures checkbook portals)",
+    OPEN_CHECKBOOK_PORTALS.length >= 1 && OPEN_CHECKBOOK_PORTALS.every((p) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(p.host) && p.key && p.label), JSON.stringify(OPEN_CHECKBOOK_PORTALS.map((p) => p.key)));
+}
+
 // §45E: GSA Federal Travel Per-Diem (api.gsa.gov, ADR-0050) — a NEW travel-cost lane
 // on the SAME api.gsa.gov host + SAME api.data.gov key seam (datagovKey.ts, X-Api-Key
 // header) as §45C. Covers: [INPUT] EITHER (city+state) OR zip — both/neither ⇒
@@ -22051,6 +22138,7 @@ async function main() {
   await testBonfireHonesty();
   await testArcgisFeatureHonesty();
   await testTableauHonesty();
+  await testOpenCheckbookHonesty();
   await testGsaPerdiemHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
