@@ -181,6 +181,7 @@ import { num as arcgisNum, discoverDatasets as ahDiscover, ARCGIS_HUB_HOST } fro
 import { num as opengovNum, listGovernments as ogList, searchSolicitations as ogSearch, OPENGOV_HOST } from "./dist/opengov.js";
 import { num as bonfireNum, listOrganizations as bfList, searchOpportunities as bfSearch, BONFIRE_ORGS } from "./dist/bonfire.js";
 import { num as arcfeatNum, featureQuery as afQuery, ARCGIS_SERVICES } from "./dist/arcgis-feature.js";
+import { viewCsv as tableauViewCsv, TABLEAU_VIEWS } from "./dist/tableau.js";
 import { num as censusNum, geocodeAddress as censusGeocode, geographiesByCoordinates as censusCoords, mapGeographies as censusMapGeo, censusGet, CENSUS_BENCHMARKS, CENSUS_VINTAGES } from "./dist/census.js";
 import { findDisclosureSplitViolations as censusDisclosureLint } from "./lint-invariants.mjs";
 import { readFileSync as censusReadFile } from "node:fs";
@@ -13810,6 +13811,94 @@ async function testArcgisFeatureHonesty() {
   ok("45AR arcgis-feature.num === coerce.num (one shared audited impl)", arcfeatNum === coerceNum, "arcgis-feature.num diverged from coerce.num");
 }
 
+// §45TB: Tableau Server Guest view CSV export (curated allowlist, MT dark-state
+// closure, loop cycle 75) — P1 (complete-export row count ≠ page length) +
+// client-side pagination + P2 outage/empty-vs-honest-empty + P4 non-CSV/HTML drift
+// + P3 verbatim (formatted-string amounts) + view-enum SSRF + round-cap disclosure.
+const isTableau = (u) => /tableau-ext\.mt\.gov/.test(u) && /\.csv/.test(u);
+const tMock = (csv, status = 200, ct = "text/csv") => (u) =>
+  isTableau(u) ? mockResponse({ status, json: csv, headers: { "content-type": ct } }) : failClosed()();
+async function testTableauHonesty() {
+  section("45TB. Tableau Server Guest view CSV export (curated allowlist, MT dark-state closure) — P1 complete-export row count (NEVER page length) + client-side limit/offset + P2 5xx THROW / empty+HTML⇒schema_drift (never fake empty) / header-only⇒honest empty + P3 verbatim formatted-string values + view-enum SSRF + round-count cap disclosure (OFFLINE)");
+  const sam = new SamGovClient({});
+  // A 5-row worksheet CSV (header + 5 data rows), incl. a quoted-comma value + a formatted $ amount (verbatim).
+  const csv5 = [
+    `$ Awarded,Award Date,Event Type,Event#,Vendor Name,Agency`,
+    `" $5,879,590.00 ",September 2025,Invitation For Bid,MDT-316189-RP,"CK May Excavating, Inc.",Department of Transportation`,
+    `"$0.00",April 2020,Request for Proposal,COM-RFP-2020-0025LS,Northcentral MT EDD,Department of Commerce`,
+    `"$12,500.00",June 2021,Request for Proposal,SPB-RFP-2021-0100,Acme LLC,Administration`,
+    `"$999.99",July 2022,Invitation For Bid,IFB-2022-42,Beta Corp,Fish Wildlife Parks`,
+    `"$40,000.00",March 2023,Request for Proposal,RFP-2023-07,Gamma Inc,Public Health`,
+  ].join("\n");
+
+  // ── P1: totalAvailable = the COMPLETE export row count (5), NEVER the page length (2). ──
+  await withFetch(tMock(csv5), async (calls) => {
+    const r = await runTool("tableau_view_csv", { view: "mt_contracts_awarded", limit: 2, offset: 0 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45TB-P1 totalAvailable = 5 (the COMPLETE view export row count) with returned:2 ⇒ hasMore:true/nextOffset:2 — mutate to rows.length ⇒ 2≠5 ⇒ RED (the forbidden total===page-size class)",
+      m.totalAvailable === 5 && m.returned === 2 && m.pagination.hasMore === true && m.pagination.nextOffset === 2, JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
+    ok("45TB-cols header parsed (6 columns) + rows are {col:value} objects", r.data.columns.length === 6 && r.data.columns[0] === "$ Awarded" && r.data.rows.length === 2, JSON.stringify({ cols: r.data.columns, n: r.data.rows.length }));
+    const row0 = r.data.rows[0];
+    ok("45TB-P3 values TRIMMED (surrounding spaces removed, content preserved): '$ Awarded'='$5,879,590.00' + quoted-comma 'Vendor Name'='CK May Excavating, Inc.' (CSV parse honored the quotes)",
+      row0["$ Awarded"] === "$5,879,590.00" && row0["Vendor Name"] === "CK May Excavating, Inc.", JSON.stringify(row0));
+    const u = new URL(calls[0].url);
+    ok("45TB-ssrf fetch hits the allowlisted host tableau-ext.mt.gov over https, path .csv, redirect:error (view enum is the SSRF core)",
+      u.hostname === "tableau-ext.mt.gov" && /\.csv$/.test(u.pathname) && u.protocol === "https:" && calls[0].init.redirect === "error", JSON.stringify({ host: u.hostname, path: u.pathname, redir: calls[0].init.redirect }));
+  });
+  // ── Pagination tail: last page ⇒ hasMore:false, nextOffset:null. ──
+  await withFetch(tMock(csv5), async () => {
+    const r = await runTool("tableau_view_csv", { view: "mt_contracts_awarded", limit: 2, offset: 4 }, sam);
+    const m = buildMeta(r.meta);
+    ok("45TB-page tail offset:4/limit:2 ⇒ returned:1 (row 5 of 5), hasMore:false, nextOffset:null (complete)", m.returned === 1 && m.pagination.hasMore === false && m.pagination.nextOffset === null && m.totalAvailable === 5, JSON.stringify(m.pagination));
+  });
+  // ── P3: an EMPTY CSV field ⇒ null (never "" or 0). ──
+  await withFetch(tMock(`$ Awarded,Vendor Name,Agency\n"$5.00",,Department of Transportation`), async () => {
+    const r = await runTool("tableau_view_csv", { view: "mt_contracts_awarded" }, sam);
+    ok("45TB-P3 empty field ('Vendor Name' between two commas) ⇒ null (never \"\" or 0) — the null-never-empty pillar", r.data.rows[0]["Vendor Name"] === null && r.data.rows[0]["$ Awarded"] === "$5.00", JSON.stringify(r.data.rows[0]));
+  });
+  // ── P2: 503 ⇒ upstream_unavailable THROWS (a DOWN Tableau is NEVER a returned:0). ──
+  await withFetch(tMock("", 503), async () => {
+    const { threw, error } = await expectThrow(() => runTool("tableau_view_csv", { view: "mt_contracts_awarded" }, sam));
+    ok("45TB-P2 rows HTTP 503 ⇒ upstream_unavailable THROWS (never a fake empty)", threw && toToolError(error).kind === "upstream_unavailable", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4: an EMPTY 200 body (dashboard-container export) ⇒ schema_drift THROWS (NOT a silent empty). ──
+  await withFetch(tMock(""), async () => {
+    const { threw, error } = await expectThrow(() => runTool("tableau_view_csv", { view: "mt_contracts_awarded" }, sam));
+    ok("45TB-P4 empty 200 body (dashboard container, no worksheet CSV) ⇒ schema_drift THROWS (never a fake empty)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P4: an HTML 200 body (sign-in / error page) ⇒ schema_drift THROWS. ──
+  await withFetch(tMock("<!DOCTYPE html><html><body>Sign in</body></html>", 200, "text/html"), async () => {
+    const { threw, error } = await expectThrow(() => runTool("tableau_view_csv", { view: "mt_contracts_awarded" }, sam));
+    ok("45TB-P4 HTML 200 body (a gated/renamed view's sign-in page) ⇒ schema_drift THROWS (never parsed as CSV rows)", threw && toToolError(error).kind === "schema_drift", JSON.stringify(threw ? toToolError(error).kind : "no-throw"));
+  });
+  // ── P2: a header-only CSV (worksheet with 0 data rows) ⇒ HONEST empty (0/complete), NOT a throw. ──
+  await withFetch(tMock(`$ Awarded,Award Date,Vendor Name,Agency`), async () => {
+    const r = await runTool("tableau_view_csv", { view: "mt_contracts_awarded" }, sam);
+    const m = buildMeta(r.meta);
+    ok("45TB-P2 header-only CSV (0 data rows) ⇒ returned:0, totalAvailable:0, complete:true (an honest empty worksheet, NOT thrown — distinct from the empty-BODY drift case)", r.data.rows.length === 0 && m.returned === 0 && m.totalAvailable === 0 && m.complete === true, JSON.stringify({ n: r.data.rows.length, ta: m.totalAvailable, c: m.complete }));
+  });
+  // ── SSRF: unknown view ⇒ invalid_input (Zod enum), 0 fetch. ──
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("tableau_view_csv", { view: "not_a_view" }, sam));
+    ok("45TB-ssrf unknown view ⇒ invalid_input (Zod enum), 0 fetch (a free host/view can never reach fetch)", threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ kind: threw ? toToolError(error).kind : "no-throw" }));
+  });
+  // ── P1 round-cap disclosure: an EXACTLY-1000-row export ⇒ a note flags a possible Tableau export cap. ──
+  {
+    const header = `$ Awarded,Award Date,Vendor Name,Agency`;
+    const body1000 = [header, ...Array.from({ length: 1000 }, (_, i) => `"$${i}.00",Jan 2025,Vendor ${i},Agency`)].join("\n");
+    await withFetch(tMock(body1000), async () => {
+      const r = await runTool("tableau_view_csv", { view: "mt_contracts_awarded", limit: 1 }, sam);
+      const m = buildMeta(r.meta);
+      ok("45TB-cap totalAvailable:1000 (exact multiple of 1000) ⇒ a note WARNS it may be a Tableau export cap / lower bound (honesty: don't silently present a cap as a true total)",
+        m.totalAvailable === 1000 && m.notes.some((n) => /cap|lower bound/i.test(n)), JSON.stringify({ ta: m.totalAvailable, hasNote: m.notes.some((n) => /cap|lower bound/i.test(n)) }));
+    });
+  }
+  // ── allowlist structural (SSRF): every view base is https + has a key + is a /views/ path. ──
+  ok("45TB views allowlist ≥1 + every base is https with a /t/{site}/views/ path + has a key (curated Tableau Server Guest views)",
+    TABLEAU_VIEWS.length >= 1 && TABLEAU_VIEWS.every((v) => /^https:\/\/[^/]+\/t\/[^/]+\/views\//.test(v.base) && v.key), JSON.stringify(TABLEAU_VIEWS.map((v) => v.key)));
+}
+
 // §45E: GSA Federal Travel Per-Diem (api.gsa.gov, ADR-0050) — a NEW travel-cost lane
 // on the SAME api.gsa.gov host + SAME api.data.gov key seam (datagovKey.ts, X-Api-Key
 // header) as §45C. Covers: [INPUT] EITHER (city+state) OR zip — both/neither ⇒
@@ -21961,6 +22050,7 @@ async function main() {
   await testOpengovHonesty();
   await testBonfireHonesty();
   await testArcgisFeatureHonesty();
+  await testTableauHonesty();
   await testGsaPerdiemHonesty();
   await testEchoHonesty();
   await testGovinfoHonesty();
