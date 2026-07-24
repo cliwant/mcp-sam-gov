@@ -13799,7 +13799,13 @@ async function testArcgisFeatureHonesty() {
   });
 
   // ── num parity. ──
-  ok("45AR services allowlist ≥20 + every base is https on a curated ArcGIS host (maps2.dcgis.dc.gov OR services*.arcgis.com) + has a key (multi-gov incl. state DOTs: Texas/Alaska/Iowa/Oklahoma DOT + DC/Asheville/Bellevue/Miami-Dade/Suffolk/Mat-Su/Las Vegas/Baltimore/Naperville/Worcester)", ARCGIS_SERVICES.length >= 22 && ARCGIS_SERVICES.every((s) => s.base.startsWith("https://") && s.key && /(^https:\/\/maps2\.dcgis\.dc\.gov\/|^https:\/\/services\d*\.arcgis\.com\/)/.test(s.base)), JSON.stringify(ARCGIS_SERVICES.filter((s) => !/(maps2\.dcgis\.dc\.gov|services\d*\.arcgis\.com)/.test(s.base)).map((s) => s.key)));
+  ok("45AR services allowlist ≥26 + every base is https on a curated ArcGIS host (maps2.dcgis.dc.gov OR services*.arcgis.com) + has a key (multi-gov incl. state DOTs: Texas/Alaska/Iowa/Oklahoma/N.Dakota DOT + DC/Asheville/Bellevue/Miami-Dade/Suffolk/Mat-Su/Las Vegas/Baltimore/Naperville/Worcester)", ARCGIS_SERVICES.length >= 26 && ARCGIS_SERVICES.every((s) => s.base.startsWith("https://") && s.key && /(^https:\/\/maps2\.dcgis\.dc\.gov\/|^https:\/\/services\d*\.arcgis\.com\/)/.test(s.base)), JSON.stringify(ARCGIS_SERVICES.filter((s) => !/(maps2\.dcgis\.dc\.gov|services\d*\.arcgis\.com)/.test(s.base)).map((s) => s.key)));
+  // ND dark-state closure (loop cycle 74): the 4 NDDOT Flex-Funding AWARD layers must be present, each a distinct FeatureServer layer on the NDDOT org (services1.arcgis.com/EDijJFsQQwgz8X53) — remove/misconfigure any ⇒ RED (ND falls back to dark; a wrong host = SSRF-allowlist breach).
+  ok("45AR ND closure: 4 NDDOT Flex-Funding award layers present on services1.arcgis.com/EDijJFsQQwgz8X53 (setaside/partner × road/bridge), distinct layer ids", (() => {
+    const nd = ["nddot_flex_setaside_road", "nddot_flex_partner_road", "nddot_flex_setaside_bridge", "nddot_flex_partner_bridge"].map((k) => ARCGIS_SERVICES.find((s) => s.key === k));
+    const ids = new Set(nd.map((s) => s && s.base.match(/\/FeatureServer\/(\d+)$/)?.[1]));
+    return nd.every((s) => s && /^https:\/\/services1\.arcgis\.com\/EDijJFsQQwgz8X53\/arcgis\/rest\/services\/Flex_Funding_Awarded_WFL1\/FeatureServer\/\d+$/.test(s.base)) && ids.size === 4;
+  })(), JSON.stringify(ARCGIS_SERVICES.filter((s) => s.key.startsWith("nddot_")).map((s) => s.key)));
   eq("45AR num('25104') ⇒ 25104", arcfeatNum("25104"), 25104);
   ok("45AR arcgis-feature.num === coerce.num (one shared audited impl)", arcfeatNum === coerceNum, "arcgis-feature.num diverged from coerce.num");
 }

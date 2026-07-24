@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **North Dakota dark-state closure** — `arcgis_feature_query` allowlist +4 NDDOT federal flex-funding **award** layers (`nddot_flex_setaside_road`/`_partner_road`/`_setaside_bridge`/`_partner_bridge`, ~68 awards: recipient local public agency, federal $ awarded, work type; live-verified keyless, no PII). Closes the coverage-ledger's ND gap. ND's authoritative statewide checkbook (omb.nd.gov) and procurement (ndbuys.nd.gov, Ivalua) are keyless-**unreachable** (the state network refuses external connections) / **CAPTCHA+SSO-gated** — recorded as structurally-blocked; this DOT award layer is ND's best-available keyless proxy (disclosed in each service note). ArcGIS services enum 23→27.
+
 ## [1.12.0] — 2026-07-20 (adversarial-dogfood honesty hardening, wave 2: 16 fixes + MCP tool annotations + auto-published registry/docs)
 
 The second large **adversarial-dogfooding honesty pass**. Parallel Claude sub-agents audited the tool surface against LIVE upstreams across five batches; every confirmed defect was fixed under the SDLC (live-reproduced → non-vacuous fault fixture → PR → CI 6-gate → snapshot MATCH). Sixteen honesty fixes — dominated by **pagination honesty** (silent duplicate/skip walks, off-by-one duplicate pages, empty-tail livelocks, over-skip fabricated totals, a skip-ceiling poison cursor, and a hard crash on the advertised cursor continuation) — plus MCP tool annotations on all 150 tools. No new tools (150). Fault assertions 3393 → 3441.
