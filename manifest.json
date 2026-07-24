@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "mcp-sam-gov",
   "display_name": "SAM.gov & US Government Contracting",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Keyless-first: 150 tools for US federal + state/local (SLED) government contracting, spending, regulation & partner vetting.",
   "long_description": "One-click Claude Desktop extension for US-government business intelligence — 150 tools, no API key. Search federal AND state/local (SLED) solicitations (SAM.gov, Grants.gov, OpenGov, Bonfire); analyze spending and awards (USAspending, FPDS); vet a partner across sanctions, exclusions, single-audit findings, bank health, and environmental compliance (OFAC, SAM, FAC, FDIC, EPA); check product recalls (openFDA, NHTSA, CPSC); pull litigation (CourtListener); and read regulation (Federal Register, eCFR, FAR/DFARS, NIST 800-53). Anti-hallucination autocomplete keeps NAICS/agency/recipient answers grounded. Honesty-hardened: totals are never a page length, outages throw instead of returning empty, and a missing value is null (never a fabricated $0). Keyless by default; optional free keys (Census, FRED, BEA, DOL, and others) only raise rate limits.",
   "author": {
@@ -33,13 +33,17 @@
     "ai-tools"
   ],
   "license": "MIT",
-  "privacy_policies": ["https://github.com/cliwant/mcp-sam-gov/blob/main/PRIVACY.md"],
+  "privacy_policies": [
+    "https://github.com/cliwant/mcp-sam-gov/blob/main/PRIVACY.md"
+  ],
   "server": {
     "type": "node",
     "entry_point": "dist/server.js",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/dist/server.js"],
+      "args": [
+        "${__dirname}/dist/server.js"
+      ],
       "env": {
         "SAM_GOV_API_KEY": "${user_config.sam_gov_api_key}",
         "CENSUS_API_KEY": "${user_config.census_api_key}",
@@ -52,35 +56,114 @@
   },
   "tools_generated": true,
   "tools": [
-    { "name": "sam_search_opportunities", "description": "Search SAM.gov federal solicitations (keyless)" },
-    { "name": "sam_get_opportunity", "description": "Full detail for a SAM.gov notice (SOW, POCs, attachments)" },
-    { "name": "grants_search", "description": "Search Grants.gov federal grant opportunities" },
-    { "name": "opengov_search_solicitations", "description": "State/local (SLED) bids on OpenGov Procurement" },
-    { "name": "bonfire_search_opportunities", "description": "State/local (SLED) open bids on Bonfire" },
-    { "name": "usas_search_individual_awards", "description": "Line-item federal contract awards (recipient, amount, state)" },
-    { "name": "usas_search_awards_by_recipient", "description": "A recipient's win history at an agency × NAICS slice" },
-    { "name": "usas_search_expiring_contracts", "description": "Recompete radar — contracts expiring soon" },
-    { "name": "usas_spending_over_time", "description": "Federal spending time-series (year/quarter/month)" },
-    { "name": "usas_search_subawards", "description": "Subcontracts on prime awards — supply-chain map" },
-    { "name": "fpds_search_awards", "description": "FPDS federal procurement award records" },
-    { "name": "ofac_screen_entity", "description": "OFAC sanctions (SDN/consolidated) screening" },
-    { "name": "sam_check_exclusions", "description": "SAM.gov exclusions (debarment) screening" },
-    { "name": "fdic_institution_financials", "description": "FDIC bank health / financials for partner vetting" },
-    { "name": "fac_search_audits", "description": "Federal single-audit (FAC) findings" },
-    { "name": "echo_search_facilities", "description": "EPA ECHO environmental compliance/enforcement" },
-    { "name": "openfda_enforcement", "description": "FDA recalls/enforcement against a supplier's products" },
-    { "name": "nhtsa_recalls", "description": "NHTSA vehicle/equipment recalls" },
-    { "name": "cpsc_recalls", "description": "CPSC consumer-product recalls" },
-    { "name": "courtlistener_search_opinions", "description": "Federal court opinions / bid protests (CourtListener)" },
-    { "name": "fed_register_search_documents", "description": "Search Federal Register rules and notices" },
-    { "name": "ecfr_search", "description": "Full-text CFR search (Title 48 = FAR)" },
-    { "name": "far_clause_lookup", "description": "FAR/DFARS clause text lookup" },
-    { "name": "nist_800_53_controls", "description": "NIST SP 800-53 security & privacy controls (FedRAMP/CMMC)" },
-    { "name": "usas_autocomplete_naics", "description": "Autocomplete NAICS codes — anti-hallucination guard" }
+    {
+      "name": "sam_search_opportunities",
+      "description": "Search SAM.gov federal solicitations (keyless)"
+    },
+    {
+      "name": "sam_get_opportunity",
+      "description": "Full detail for a SAM.gov notice (SOW, POCs, attachments)"
+    },
+    {
+      "name": "grants_search",
+      "description": "Search Grants.gov federal grant opportunities"
+    },
+    {
+      "name": "opengov_search_solicitations",
+      "description": "State/local (SLED) bids on OpenGov Procurement"
+    },
+    {
+      "name": "bonfire_search_opportunities",
+      "description": "State/local (SLED) open bids on Bonfire"
+    },
+    {
+      "name": "usas_search_individual_awards",
+      "description": "Line-item federal contract awards (recipient, amount, state)"
+    },
+    {
+      "name": "usas_search_awards_by_recipient",
+      "description": "A recipient's win history at an agency × NAICS slice"
+    },
+    {
+      "name": "usas_search_expiring_contracts",
+      "description": "Recompete radar — contracts expiring soon"
+    },
+    {
+      "name": "usas_spending_over_time",
+      "description": "Federal spending time-series (year/quarter/month)"
+    },
+    {
+      "name": "usas_search_subawards",
+      "description": "Subcontracts on prime awards — supply-chain map"
+    },
+    {
+      "name": "fpds_search_awards",
+      "description": "FPDS federal procurement award records"
+    },
+    {
+      "name": "ofac_screen_entity",
+      "description": "OFAC sanctions (SDN/consolidated) screening"
+    },
+    {
+      "name": "sam_check_exclusions",
+      "description": "SAM.gov exclusions (debarment) screening"
+    },
+    {
+      "name": "fdic_institution_financials",
+      "description": "FDIC bank health / financials for partner vetting"
+    },
+    {
+      "name": "fac_search_audits",
+      "description": "Federal single-audit (FAC) findings"
+    },
+    {
+      "name": "echo_search_facilities",
+      "description": "EPA ECHO environmental compliance/enforcement"
+    },
+    {
+      "name": "openfda_enforcement",
+      "description": "FDA recalls/enforcement against a supplier's products"
+    },
+    {
+      "name": "nhtsa_recalls",
+      "description": "NHTSA vehicle/equipment recalls"
+    },
+    {
+      "name": "cpsc_recalls",
+      "description": "CPSC consumer-product recalls"
+    },
+    {
+      "name": "courtlistener_search_opinions",
+      "description": "Federal court opinions / bid protests (CourtListener)"
+    },
+    {
+      "name": "fed_register_search_documents",
+      "description": "Search Federal Register rules and notices"
+    },
+    {
+      "name": "ecfr_search",
+      "description": "Full-text CFR search (Title 48 = FAR)"
+    },
+    {
+      "name": "far_clause_lookup",
+      "description": "FAR/DFARS clause text lookup"
+    },
+    {
+      "name": "nist_800_53_controls",
+      "description": "NIST SP 800-53 security & privacy controls (FedRAMP/CMMC)"
+    },
+    {
+      "name": "usas_autocomplete_naics",
+      "description": "Autocomplete NAICS codes — anti-hallucination guard"
+    }
   ],
   "compatibility": {
     "claude_desktop": ">=1.0.0",
-    "platforms": ["darwin", "win32", "linux"],
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
     "runtimes": {
       "node": ">=20.0.0"
     }
