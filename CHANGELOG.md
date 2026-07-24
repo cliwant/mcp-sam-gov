@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-07-20 (adversarial-dogfood honesty hardening, wave 2: 16 fixes + MCP tool annotations + auto-published registry/docs)
+
+The second large **adversarial-dogfooding honesty pass**. Parallel Claude sub-agents audited the tool surface against LIVE upstreams across five batches; every confirmed defect was fixed under the SDLC (live-reproduced → non-vacuous fault fixture → PR → CI 6-gate → snapshot MATCH). Sixteen honesty fixes — dominated by **pagination honesty** (silent duplicate/skip walks, off-by-one duplicate pages, empty-tail livelocks, over-skip fabricated totals, a skip-ceiling poison cursor, and a hard crash on the advertised cursor continuation) — plus MCP tool annotations on all 150 tools. No new tools (150). Fault assertions 3393 → 3441.
+
+### Added
+
+- **MCP tool annotations on every tool** — `tools/list` now advertises `title` + `readOnlyHint: true` + `openWorldHint: true` for all 150 tools (every tool is strictly read-only and calls external government/public APIs). Improves tool-picker UX in every MCP client and satisfies the Anthropic Connectors Directory requirement. (#254)
+- **GitHub Pages guide site + auto-published MCP Registry** — a self-contained landing/quickstart page (SEO: Open Graph, JSON-LD, sitemap) plus a GitHub-OIDC workflow that keeps the official MCP Registry listing in lockstep with each release. (#251, #253)
+
+### Fixed
+
+- **`opengov_search_solicitations` — 1-based pagination (was 0-based → duplicate page + dropped tail)** — the `/project/list` `page` param is 1-based (page 0 clamps to page 1), so the first two offsets both re-served page 1 as a silent duplicate and shifted every later page, dropping the tail while `count` still claimed completeness. (#247)
+- **`usaspending` recompete cursor livelock** — when the bounded End-Date scan truncated, the tool emitted an ever-advancing `nextOffset` into empty pages; an agent paging by it looped forever. The cursor now advances only within the scanned window; the un-scanned tail is signaled by `hasMore:true` + `nextOffset:null`. (#248)
+- **`clinicaltrials_search_studies` — cursor pagination crashed on page 2+** — the tool advertised a `nextCursor`, but following it threw `schema_drift`: ClinicalTrials.gov returns `totalCount` only on the first page and omits it on every `pageToken` continuation. Any result set larger than one page was unreachable past page 1; the total-count guard now applies to the first page only (a continuation ⇒ `totalAvailable:null` + note). (#259)
+- **`fema_search_public_assistance` (+ siblings) — empty-tail livelock** — OpenFEMA's `metadata.count` can exceed the rows it will serve via `$skip`, so a near-end offset returned 0 rows while `hasMore:true` and `nextOffset === offset` (a non-advancing cursor). Added the `returned > 0` guard + a disclosure that the count can exceed the pageable window. (#258)
+- **`openfda_*` (enforcement / device clearances / drug approvals) — over-skip total + skip-ceiling poison cursor** — an over-skip 404 (byte-identical to a genuine no-match) fabricated `totalAvailable:0` for a non-empty set; and a dataset larger than openFDA's 25,000 `skip` ceiling advertised a `nextOffset > 25000` that 400s when followed. A skip>0 404 now ⇒ `totalAvailable:null` + over-skip note, and the cursor never exceeds the ceiling (disclosed). (#264)
+- **`nppes_lookup_provider` — over-skip reported the skip offset as the total** — skipping past the result set made `totalAvailable = skip` (e.g. "56 available" for a 6-match query); a skip>0 empty page now reports `totalAvailable:null`. (#250)
+- **`nsf_search_awards` — undisclosed unstable order** — NSF exposes no stable server-side sort, so offset paging can duplicate/skip rows; a multi-page result now discloses that `totalAvailable` (not row-walking) is the reliable count. (#260)
+- **`grants_search` — the default `oppStatuses` filter is now disclosed** — the tool always sent `oppStatuses=forecasted|posted` (excluding closed/archived) but only recorded it in `filtersApplied` when the caller supplied it, so `totalAvailable` (a filtered subset — 235 vs 2,008 across all statuses) read as unfiltered. Now always disclosed + a defaulted note. (#257)
+- **`socrata` — DISTINCT / any function-call `$select` treated as cardinality-changing** — a `distinct`/aggregate `$select` no longer reports the base-table `count(*)` as the total; `totalAvailable:null` with page-fullness completeness instead. (#244)
+- **`ckan_discover_datasets` — truncation driven by dataset count, not per-resource rows** — a unit mismatch made a partial result read as complete; `hasMore` now compares packages-returned against the dataset count. (#245)
+- **`gsa` contract-opportunities CSV — column-header contract asserted before indexing** — a shifted upstream header column now throws `schema_drift` instead of silently mis-indexing fields. (#243)
+- **`census` business-patterns — default CBP year advanced to the latest published vintage (2022 → 2023)**. (#246)
+- **`bonfire_search_opportunities` — a drifted seed slug's redirect is `schema_drift`, not a retryable outage** — a moved portal (HTTP 307) was misclassified as retryable `upstream_unavailable`; it is now a non-retryable drift with a "re-discover the slug" message. (#256)
+- **`usaspending` recompete amount — `null` for an absent award amount (P3)** — an absent amount no longer reads as a fabricated `$0`. (#249)
+- **`fdic_*` — empty-page pagination guard (defense-in-depth)** — all 7 FDIC tools now terminate on an empty page (`returned > 0`). (#263)
+- **`bls_timeseries` — `totalAvailable` is `null` for a batch-series request** — it was the requested-series count, which counted a nonexistent/stubbed seriesId; a batch request has no upstream total. (#265)
+
 ## [1.11.0] — 2026-07-20 (adversarial-dogfood honesty hardening: 14 fixes across lda/gao/nhtsa/gsa-perdiem/nist/cbp/grants/exclusions/ofac/ZodEffects/sam-offset/bonfire + Socrata county sweep 34→53)
 
 This release is a large **adversarial-dogfooding honesty pass**: parallel Claude sub-agents audited the tool surface against LIVE upstreams, and every confirmed defect was fixed under the SDLC (live-reproduced → non-vacuous fault fixture → PR → CI 6-gate → snapshot MATCH). Fourteen honesty fixes plus the tail of the SLED Socrata county sweep (34 → 53 curated hosts). No new tools (150). Fault assertions 3247 → 3393.
