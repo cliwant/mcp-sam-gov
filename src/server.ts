@@ -52,6 +52,7 @@ import * as arcgisHub from "./arcgis-hub.js";
 import * as opengov from "./opengov.js";
 import * as bonfire from "./bonfire.js";
 import * as arcgisFeature from "./arcgis-feature.js";
+import * as tableau from "./tableau.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
@@ -3059,6 +3060,17 @@ const BonfireSearchOpportunitiesInput = z.object({
     .describe("The Bonfire org subdomain slug (from bonfire_list_organizations `org`), e.g. 'harriscountytx', 'broward', 'u-46'. REQUIRED. Lowercase alnum/hyphen; a bad slug ⇒ invalid_input pre-fetch."),
   limit: z.number().int().min(1).max(200).default(50).describe("Opportunities per page, 1..200, default 50. The RSS is the complete open set; this pages over it."),
   offset: z.number().int().min(0).default(0).describe("0-based offset; page with _meta.pagination.nextOffset. totalAvailable = the exact open-opportunity count."),
+});
+
+// ─── Tableau Server Guest view CSV (curated view allowlist — SLED transparency) ─
+// Fetch a Guest-enabled Tableau Server WORKSHEET view's COMPLETE CSV export
+// (keyless) and page over it client-side. `view` is an enum (SSRF core).
+const TableauViewCsvInput = z.object({
+  view: z
+    .enum(tableau.TABLEAU_VIEWS.map((v) => v.key) as [string, ...string[]])
+    .describe("The curated Tableau Server Guest view (SSRF allowlist enum). 'mt_contracts_awarded' = State of Montana (DOA) Contracts Awarded (~4,554 award records: $ Awarded, Award Date, Event Type IFB/RFP, Event# solicitation, Vendor Name, Agency)."),
+  limit: z.number().int().min(1).max(1000).default(50).describe("Rows per page, 1..1000, default 50. The CSV is the complete view export; this pages over it client-side."),
+  offset: z.number().int().min(0).default(0).describe("0-based offset; page with _meta.pagination.nextOffset. totalAvailable = the complete export row count (NOT a page length)."),
 });
 
 // ─── ArcGIS REST feature query (curated service allowlist — SLED bids/GIS) ─
@@ -6222,6 +6234,18 @@ export const TOOLS: ToolDef[] = [
     inputSchema: ArcgisFeatureQueryInput,
     handler: (input) => arcgisFeature.featureQuery(input),
   }),
+  // ─── Tableau Server Guest view CSV export (curated allowlist) — SLED transparency ─
+  // Many US state/local govs publish contracts/vendor-payment/checkbook data on a
+  // Guest-enabled Tableau Server; a worksheet view exports its full data as CSV at
+  // {host}/t/{site}/views/{wb}/{view}.csv?:embed=y (keyless). First payload: Montana
+  // Contracts Awarded — the ND-sibling in the dark-state closure campaign.
+  defineTool({
+    name: "tableau_view_csv",
+    description:
+      "Fetch a curated US-government **Tableau Server Guest** view's COMPLETE CSV export (keyless) and page over it — a SLED transparency source (many state/local govs publish contracts / vendor-payment / checkbook data on a Guest-enabled Tableau Server; a worksheet view exports as CSV at `{host}/t/{site}/views/{workbook}/{view}.csv?:embed=y`, no login/key/cookie). First payload: `mt_contracts_awarded` = **State of Montana (DOA) Contracts Awarded** (~4,554 award records: '$ Awarded', 'Award Date', 'Event Type' (Invitation For Bid / RFP), 'Event#' solicitation number, 'Vendor Name', 'Agency'). Inputs: `view` (the allowlist ENUM — SSRF core, never a free host), `limit`(1..1000)/`offset`. Returns { view, columns:[…], rows:[{col:value…}] } + honest _meta. HONESTY: the CSV is the COMPLETE view export (Tableau returns ALL summary rows — NO server pagination), so totalAvailable = the true row count (NEVER a page length); limit/offset page it client-side; a round-number total is flagged as a possible Tableau export cap. Values are TRIMMED strings (an empty field ⇒ null, never 0/\"\"); the content is preserved — amounts like \"$5,879,590.00\" are FORMATTED STRINGS, parse client-side. A 429/5xx/404/timeout THROWS; a gated/renamed view (200 sign-in HTML or an empty dashboard-container export) ⇒ schema_drift (a loud failure, NEVER a fake empty); a worksheet with a header but 0 data rows ⇒ honest empty. SSRF: fixed allowlist base + hostname assertion + redirect:error.",
+    inputSchema: TableauViewCsvInput,
+    handler: (input) => tableau.viewCsv(input),
+  }),
   // ━━━ GovInfo (api.govinfo.gov) — the api.data.gov keyed trio's 3rd API (3) ━━━ ADR-0010
   // GPO-authoritative bulk publications (BILLS/PLAW/USCODE/CREC/CFR-FR editions/
   // BUDGET/GAOREPORTS) with PDF/XML/MODS downloads + provenance. 2nd consumer of the
@@ -6823,7 +6847,7 @@ const TOOL_SOURCE_LABELS: Record<string, string> = {
   clinicaltrials: "ClinicalTrials.gov", bls: "BLS", socrata: "Socrata", opengov: "OpenGov",
   nsf: "NSF", nonprofit: "Nonprofit", nhtsa: "NHTSA", gsa: "GSA", grants: "Grants.gov",
   fred: "FRED", fac: "FAC", echo: "EPA ECHO", dol: "DOL", congress: "Congress.gov",
-  ckan: "data.gov", bonfire: "Bonfire", arcgis: "ArcGIS", sba: "SBA", ofac: "OFAC",
+  ckan: "data.gov", bonfire: "Bonfire", arcgis: "ArcGIS", tableau: "Tableau", sba: "SBA", ofac: "OFAC",
   nws: "NWS", nppes: "NPPES", nist: "NIST", nih: "NIH", lda: "Senate LDA", hts: "USITC HTS",
   bea: "BEA", cbp: "CBP", cpsc: "CPSC", nvd: "NVD", courtlistener: "CourtListener",
   fpds: "FPDS", gao: "GAO", epa: "EPA", nsn: "NSN",
