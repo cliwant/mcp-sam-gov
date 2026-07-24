@@ -43,6 +43,7 @@ import * as opengov from "./opengov.js";
 import * as bonfire from "./bonfire.js";
 import * as arcgisFeature from "./arcgis-feature.js";
 import * as tableau from "./tableau.js";
+import * as openCheckbook from "./open-checkbook.js";
 import * as govinfo from "./govinfo.js";
 import * as fpds from "./fpds.js";
 import * as nih from "./nih.js";
@@ -2589,6 +2590,22 @@ const BonfireSearchOpportunitiesInput = z.object({
         .describe("The Bonfire org subdomain slug (from bonfire_list_organizations `org`), e.g. 'harriscountytx', 'broward', 'u-46'. REQUIRED. Lowercase alnum/hyphen; a bad slug ⇒ invalid_input pre-fetch."),
     limit: z.number().int().min(1).max(200).default(50).describe("Opportunities per page, 1..200, default 50. The RSS is the complete open set; this pages over it."),
     offset: z.number().int().min(0).default(0).describe("0-based offset; page with _meta.pagination.nextOffset. totalAvailable = the exact open-opportunity count."),
+});
+// ─── Socrata Open Expenditures checkbook (curated portal allowlist — SLED) ─
+// Row-level vendor-payment search over the keyless /api/checkbook_data.json
+// app-proxy (the underlying SODA dataset is login-gated — never touched).
+const OpenCheckbookSearchInput = z.object({
+    portal: z
+        .enum(openCheckbook.OPEN_CHECKBOOK_PORTALS.map((p) => p.key))
+        .describe("The curated Open-Checkbook portal (SSRF allowlist enum). 'sd' = State of South Dakota Open Checkbook (~740,980 vendor payments, ~$8.41B, ~3 most-recent fiscal years)."),
+    year: z.string().min(1).max(40).optional().describe("Fiscal-year filter (EXACT match), e.g. '2025'. Default 'All Years' = the exposed ~3-year window (NOT full history)."),
+    vendor: z.string().min(1).max(200).optional().describe("Vendor name filter (EXACT match, e.g. 'US BANK NA' → 917). A partial/misspelled value returns an honest count:0."),
+    org: z.string().min(1).max(200).optional().describe("Department filter (org1, EXACT match, e.g. 'TRANSPORTATION' → 109,887)."),
+    expenseCategory: z.string().min(1).max(200).optional().describe("Expense-category filter (EXACT match, e.g. 'CONTRACTUAL SERVICES')."),
+    sortBy: z.enum(["amount", "payment_date", "vendor", "org1", "expense_category"]).optional().describe("Sort field. Pair with sortOrder."),
+    sortOrder: z.enum(["asc", "desc"]).optional().describe("Sort direction (default desc when sortBy is set)."),
+    limit: z.number().int().min(1).max(1000).default(25).describe("Rows per page, 1..1000, default 25."),
+    offset: z.number().int().min(0).default(0).describe("0-based offset (snapped to a page×limit boundary; the served offset is disclosed). totalAvailable = the real match count, NOT a page length."),
 });
 // ─── Tableau Server Guest view CSV (curated view allowlist — SLED transparency) ─
 // Fetch a Guest-enabled Tableau Server WORKSHEET view's COMPLETE CSV export
@@ -5278,6 +5295,15 @@ export const TOOLS = [
         inputSchema: TableauViewCsvInput,
         handler: (input) => tableau.viewCsv(input),
     }),
+    // ─── Socrata Open Expenditures checkbook (curated portal allowlist) — SLED ─
+    // Row-level vendor payments via the keyless /api/checkbook_data.json app-proxy.
+    // First portal: South Dakota — the LAST dark-state closure (presence → 100%).
+    defineTool({
+        name: "open_checkbook_search",
+        description: "Row-level vendor-payment search over a curated US-government **Socrata Open Expenditures** checkbook portal (keyless) — a SLED spending source. Some govs run Socrata's 'Open Expenditures/Open Checkbook' product, whose public dashboard fronts a keyless app-proxy at `{host}/api/checkbook_data.json`. First portal: `sd` = **State of South Dakota Open Checkbook** (~740,980 vendor-payment rows, ~$8.41B, the ~3 most-recent fiscal years). Inputs: `portal` (allowlist ENUM — SSRF core), `year`/`vendor`/`org`/`expenseCategory` (EXACT-match filters), `sortBy`/`sortOrder`, `limit`(1..1000)/`offset`. Returns { portal, rows:[{vendor, amount, payment_date, org1, expense_category, description, fund, invoice, payment_id}] } + honest _meta. HONESTY: totalAvailable = the API's own `count` (the REAL filtered total — matches the product's totals.json, e.g. 740,980 unfiltered / 109,887 for org=TRANSPORTATION — NEVER a page length); `amount` = number|null (a real $0 is 0, an absent value is null, never a fabricated 0); an EXACT-match filter miss ⇒ honest count:0; a deep offset past the end ⇒ returned:0 with the real count preserved; a 429/5xx/timeout THROWS; a non-`{data:[],count}` body ⇒ schema_drift. ★Only the ~3 most-recent fiscal years are exposed (NOT full history — disclosed). ★The underlying Socrata SODA dataset is login-gated and is NEVER touched — only the public app-proxy the dashboard itself uses. SSRF: fixed allowlist host + assertion + redirect:error.",
+        inputSchema: OpenCheckbookSearchInput,
+        handler: (input) => openCheckbook.openCheckbookSearch(input),
+    }),
     // ━━━ GovInfo (api.govinfo.gov) — the api.data.gov keyed trio's 3rd API (3) ━━━ ADR-0010
     // GPO-authoritative bulk publications (BILLS/PLAW/USCODE/CREC/CFR-FR editions/
     // BUDGET/GAOREPORTS) with PDF/XML/MODS downloads + provenance. 2nd consumer of the
@@ -5838,7 +5864,7 @@ const TOOL_SOURCE_LABELS = {
     clinicaltrials: "ClinicalTrials.gov", bls: "BLS", socrata: "Socrata", opengov: "OpenGov",
     nsf: "NSF", nonprofit: "Nonprofit", nhtsa: "NHTSA", gsa: "GSA", grants: "Grants.gov",
     fred: "FRED", fac: "FAC", echo: "EPA ECHO", dol: "DOL", congress: "Congress.gov",
-    ckan: "data.gov", bonfire: "Bonfire", arcgis: "ArcGIS", tableau: "Tableau", sba: "SBA", ofac: "OFAC",
+    ckan: "data.gov", bonfire: "Bonfire", arcgis: "ArcGIS", tableau: "Tableau", open: "Open Checkbook", sba: "SBA", ofac: "OFAC",
     nws: "NWS", nppes: "NPPES", nist: "NIST", nih: "NIH", lda: "Senate LDA", hts: "USITC HTS",
     bea: "BEA", cbp: "CBP", cpsc: "CPSC", nvd: "NVD", courtlistener: "CourtListener",
     fpds: "FPDS", gao: "GAO", epa: "EPA", nsn: "NSN",
