@@ -6,6 +6,8 @@
 
 The most comprehensive **keyless-first** MCP server for US federal **and state/local (SLED)** contracting + spending + regulation + partner vetting. **150 tools across 52 data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 48 need none. Works today, in any AI agent.
 
+**Independent project** — not affiliated with, endorsed by, or sponsored by SAM.gov, the U.S. General Services Administration (GSA), or any government agency.
+
 [![npm](https://img.shields.io/npm/v/@cliwant/mcp-sam-gov?color=cb3837&label=%40cliwant%2Fmcp-sam-gov&logo=npm)](https://www.npmjs.com/package/@cliwant/mcp-sam-gov)
 [![mcp-registry](https://img.shields.io/badge/MCP%20Registry-active-2ea44f?logo=anthropic)](https://registry.modelcontextprotocol.io/v0/servers?search=cliwant)
 [![Glama score](https://glama.ai/mcp/servers/cliwant/mcp-sam-gov/badges/score.svg)](https://glama.ai/mcp/servers/cliwant/mcp-sam-gov)
@@ -747,4 +749,4 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Disclaimer
 
-This server uses **publicly available** federal API endpoints. It is not affiliated with the General Services Administration, SAM.gov, USAspending.gov, the Office of the Federal Register, the National Archives, Grants.gov, or any federal agency. Federal procurement, spending, and regulation data is in the public domain.
+This is an **independent open-source project**. It is not affiliated with, endorsed by, or sponsored by the General Services Administration, SAM.gov, USAspending.gov, the Office of the Federal Register, the National Archives, Grants.gov, or any federal, state, or local government agency. It uses only **publicly available** government open-data endpoints; federal procurement, spending, and regulation data is in the public domain.

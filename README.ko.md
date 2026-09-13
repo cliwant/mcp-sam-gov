@@ -3,6 +3,8 @@
 > **가장 포괄적인 keyless 연방 데이터 MCP 서버.**
 > SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) 외 **52개 데이터 소스, 150개 도구.** keyless 우선 — Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 48개 소스는 키가 필요 없습니다.
 > API 키 / 등록 / 가입 불필요. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
+>
+> **독립 프로젝트** — SAM.gov, 미국 연방조달청(GSA) 등 어떤 정부 기관과도 제휴 관계가 없으며, 승인이나 후원을 받지 않았습니다.
 
 [English README](./README.md) · [日本語 README](./README.ja.md)
 
@@ -245,4 +247,4 @@ MIT — [LICENSE](./LICENSE).
 
 ## 면책 조항
 
-이 서버는 **공개된** federal API endpoint 만 사용합니다. 미국 GSA, SAM.gov, USAspending.gov, Office of the Federal Register, National Archives, Grants.gov 또는 연방 기관과 무관합니다. 연방 조달 / spending / 규정 데이터는 public domain.
+이 서버는 **독립 오픈소스 프로젝트**입니다. 미국 연방조달청(GSA), SAM.gov, USAspending.gov, Office of the Federal Register, National Archives, Grants.gov 등 어떤 연방·주·지방 정부 기관과도 제휴 관계가 없으며, 승인이나 후원을 받지 않았습니다. **공개된** 정부 오픈데이터 endpoint만 사용하며, 연방 조달 / spending / 규정 데이터는 public domain입니다.
