@@ -28,8 +28,12 @@
  *       any fetch (the path-injection guard).
  *   (3) Every interpolated id is grammar-validated BEFORE use — `state` ∈ a frozen
  *       US state/territory enum (also the silent-zero guard, below); `naics`
- *       ^[0-9]{2,6}$ / `sic` ^[0-9]{2,4}$; `registryId` ^[0-9]{9,12}$ (FRS IDs are
- *       12 digits; all-digit is the security property); the UPSTREAM-supplied
+ *       ^[0-9]{2,6}$ / `sic` ^[0-9]{2,4}$; `registryId` ^[A-Za-z0-9]{1,20}$ (FRS
+ *       ids are 12 digits, but ECHO's own search rows also carry state/program ids
+ *       like 'DCR000509282' and short ids like '9434', and get_dfr serves them —
+ *       live-verified 2026-09-13; the ALPHANUMERIC charclass is the security
+ *       property: no separator, space, '%' or newline can reach p_id, and an id
+ *       ECHO does not know comes back "ID … is invalid" ⇒ not_found); the UPSTREAM-supplied
  *       `qid` is validated ^[0-9]+$ BECAUSE it is external (echodata.epa.gov mints
  *       it), before it is used in step 2; the internally-computed `pageno` is a
  *       plain integer. `facilityName` (p_fn) is a free-text filter VALUE — encoded
@@ -117,10 +121,12 @@ const ECHO_SERVICES = new Set([
 // ECHO does NOT validate filter VALUES: an unknown value silently returns
 // QueryRows:"0" (indistinguishable from a genuine-empty). So we validate
 // client-side: `state` against the enum below (surfaced by the Zod enum in
-// server.ts), naics/sic against a digit-length grammar, registryId all-digit.
+// server.ts), naics/sic against a digit-length grammar, registryId alphanumeric.
 const NAICS_RE = /^[0-9]{2,6}$/;
 const SIC_RE = /^[0-9]{2,4}$/;
-const REGISTRY_ID_RE = /^[0-9]{9,12}$/;
+// Alphanumeric, not all-digit: ECHO search rows return non-FRS ids (e.g. 'DCR000509282',
+// '9434') that get_dfr accepts, so an all-digit 9–12 grammar broke search → report.
+const REGISTRY_ID_RE = /^[A-Za-z0-9]{1,20}$/;
 // The UPSTREAM-supplied QueryID — validated BECAUSE it is external (echodata mints
 // it), before it is used to build the step-2 URL.
 const QID_RE = /^[0-9]+$/;
@@ -390,11 +396,11 @@ export async function searchFacilities(args) {
  * body guard classifies "ID … is invalid" ⇒ not_found (never a fabricated report).
  */
 export async function facilityReport(args) {
-    // Belt-and-suspenders (behind the server's Zod ^[0-9]{9,12}$).
+    // Belt-and-suspenders (behind the server's Zod ^[A-Za-z0-9]{1,20}$).
     if (!REGISTRY_ID_RE.test(args.registryId)) {
         throw new ToolErrorCarrier({
             kind: "invalid_input",
-            message: `Invalid registryId ${JSON.stringify(args.registryId)} — expected an all-digit FRS RegistryID (9–12 digits).`,
+            message: `Invalid registryId ${JSON.stringify(args.registryId)} — expected the RegistryID exactly as returned by echo_search_facilities (1–20 letters/digits, e.g. '110059768461' or 'DCR000509282').`,
             retryable: false,
         });
     }

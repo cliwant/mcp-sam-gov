@@ -208,7 +208,7 @@ const tests = [
   },
   {
     name: "usas_search_subawards",
-    args: { primeRecipientName: "Booz Allen Hamilton", limit: 3 },
+    args: { subRecipientName: "Booz Allen Hamilton", limit: 3 },
     verify: (r) => Array.isArray(r.subawards),
   },
   {
@@ -1000,7 +1000,7 @@ const tests = [
       r.facilities.length >= 1 &&
       r.facilities.length <= 3 &&
       r.facilities.every(
-        (f) => f !== null && typeof f === "object" && /^[0-9]{9,12}$/.test(String(f.RegistryID)),
+        (f) => f !== null && typeof f === "object" && /^[A-Za-z0-9]{1,20}$/.test(String(f.RegistryID)),
       ),
   },
   {
