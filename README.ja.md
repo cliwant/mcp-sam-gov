@@ -3,6 +3,8 @@
 > **最も包括的なキーレス連邦データ MCP サーバー。**
 > SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) ほか **52 のデータソース、150 ツール。** キーレス優先 — Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 48 ソースはキー不要。
 > API キー不要、登録不要、サインアップ不要。Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI、すべての MCP ホスト対応。
+>
+> **独立プロジェクト** — SAM.gov、米国一般調達局(GSA)を含むいかなる政府機関とも提携しておらず、承認や後援も受けていません。
 
 [English README](./README.md) · [한국어 README](./README.ko.md)
 
@@ -245,4 +247,4 @@ MIT — [LICENSE](./LICENSE).
 
 ## 免責事項
 
-このサーバーは **公開されている** federal API エンドポイントのみを使用します。米国 GSA、SAM.gov、USAspending.gov、Office of the Federal Register、National Archives、Grants.gov、または連邦機関とは無関係です。連邦調達 / spending / 規制データはパブリックドメインです。
+このサーバーは **独立したオープンソースプロジェクト** です。米国一般調達局(GSA)、SAM.gov、USAspending.gov、Office of the Federal Register、National Archives、Grants.gov を含むいかなる連邦・州・地方政府機関とも提携しておらず、承認や後援も受けていません。**公開されている** 政府オープンデータのエンドポイントのみを使用し、連邦調達 / spending / 規制データはパブリックドメインです。
