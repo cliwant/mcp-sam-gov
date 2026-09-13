@@ -13839,6 +13839,8 @@ async function testTableauHonesty() {
     ok("45TB-P1 totalAvailable = 5 (the COMPLETE view export row count) with returned:2 ⇒ hasMore:true/nextOffset:2 — mutate to rows.length ⇒ 2≠5 ⇒ RED (the forbidden total===page-size class)",
       m.totalAvailable === 5 && m.returned === 2 && m.pagination.hasMore === true && m.pagination.nextOffset === 2, JSON.stringify({ ta: m.totalAvailable, r: m.returned, hm: m.pagination.hasMore, no: m.pagination.nextOffset }));
     ok("45TB-cols header parsed (6 columns) + rows are {col:value} objects", r.data.columns.length === 6 && r.data.columns[0] === "$ Awarded" && r.data.rows.length === 2, JSON.stringify({ cols: r.data.columns, n: r.data.rows.length }));
+    ok("45TB-P5 freshness disclosed: a note says the export has no refresh timestamp and can lag, and says how to check recency (the MT view sat unrefreshed for weeks in 2026 — never imply the data is current)",
+      m.notes.some((n) => /FRESHNESS/.test(n) && /no refresh timestamp/i.test(n) && /date columns/i.test(n)), JSON.stringify(m.notes));
     const row0 = r.data.rows[0];
     ok("45TB-P3 values TRIMMED (surrounding spaces removed, content preserved): '$ Awarded'='$5,879,590.00' + quoted-comma 'Vendor Name'='CK May Excavating, Inc.' (CSV parse honored the quotes)",
       row0["$ Awarded"] === "$5,879,590.00" && row0["Vendor Name"] === "CK May Excavating, Inc.", JSON.stringify(row0));
@@ -13928,6 +13930,8 @@ async function testOpenCheckbookHonesty() {
       u.hostname === "southdakota.spending.socrata.com" && u.pathname === "/api/checkbook_data.json" && u.protocol === "https:" && calls[0].init.redirect === "error", JSON.stringify({ host: u.hostname, path: u.pathname, redir: calls[0].init.redirect }));
     ok("45OC-P5 disclosure: a note states the underlying SODA dataset is GATED / this is the public app-proxy + the ~3-year coverage limit (honest provenance)",
       m.notes.some((n) => /app-proxy|gated|login-gated/i.test(n)) && m.notes.some((n) => /most-recent fiscal years|NOT.*full history/i.test(n)), JSON.stringify(m.notes));
+    ok("45OC-P5 freshness disclosed: a note says publisher refreshes can lag and tells the caller to sort by payment_date desc to see the newest date (SD's newest payment sat at 2026-07-03 into September despite the 'each payment cycle' claim)",
+      m.notes.some((n) => /FRESHNESS/.test(n) && /lag/i.test(n) && /payment_date/.test(n) && /desc/.test(n)), JSON.stringify(m.notes));
   });
   // ── P3 absent amount ⇒ null (never a fabricated 0). ──
   await withFetch(ocMock({ data: [{ vendor: "NO AMOUNT CO", payment_id: "row-c" }], count: 1 }), async () => {

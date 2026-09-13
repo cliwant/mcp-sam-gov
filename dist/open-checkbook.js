@@ -147,6 +147,7 @@ export async function openCheckbookSearch(args) {
         "totalAvailable = the API's exact match count (matches the product's totals.json), NOT the page length.",
         "Filters (year/vendor/org/expenseCategory) are EXACT-match — a partial/misspelled value returns an honest count:0, not an error. amount is number|null (a real $0 is 0, an absent value is null, never a fabricated 0).",
         "COVERAGE: only the ~3 most-recent fiscal years are exposed by this product — this is NOT the state's full payment history.",
+        "FRESHNESS is set by the publisher: the portal says it refreshes each payment cycle, but refreshes can lag by weeks. To check recency, sort by payment_date (sortBy='payment_date', sortOrder='desc') and read the newest date.",
     ];
     if (servedOffset !== offset)
         notes.push(`offset ${offset} was snapped to ${servedOffset} (the product paginates by fixed page×limit); pass an offset that is a multiple of limit to avoid snapping.`);

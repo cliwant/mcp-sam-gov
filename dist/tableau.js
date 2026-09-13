@@ -113,6 +113,7 @@ export async function viewCsv(args) {
         "totalAvailable is the COMPLETE view export row count (Tableau returns all summary rows; there is no server-side pagination) — limit/offset page over the full set client-side.",
         "Pagination order follows the Tableau view's OWN sort. Each call re-fetches the complete CSV and slices it; if the view lacks a stable sort, offsets across SEPARATE calls could shift — for a consistent snapshot of a large view, fetch it with a single large limit.",
         VALUE_NOTE,
+        "FRESHNESS is set by the publisher: a Tableau export carries no refresh timestamp, and the view reflects whenever the publisher last refreshed it, which can lag by weeks. Check the newest value in the view's date columns before relying on recency.",
     ];
     if (roundCap)
         notes.push(`NOTE: the row count (${totalAvailable}) is an exact multiple of 1000 — Tableau Server MAY have capped this summary export, so totalAvailable could be a lower bound. Treat with caution.`);
