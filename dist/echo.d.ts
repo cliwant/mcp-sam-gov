@@ -28,8 +28,12 @@
  *       any fetch (the path-injection guard).
  *   (3) Every interpolated id is grammar-validated BEFORE use — `state` ∈ a frozen
  *       US state/territory enum (also the silent-zero guard, below); `naics`
- *       ^[0-9]{2,6}$ / `sic` ^[0-9]{2,4}$; `registryId` ^[0-9]{9,12}$ (FRS IDs are
- *       12 digits; all-digit is the security property); the UPSTREAM-supplied
+ *       ^[0-9]{2,6}$ / `sic` ^[0-9]{2,4}$; `registryId` ^[A-Za-z0-9]{1,20}$ (FRS
+ *       ids are 12 digits, but ECHO's own search rows also carry state/program ids
+ *       like 'DCR000509282' and short ids like '9434', and get_dfr serves them —
+ *       live-verified 2026-09-13; the ALPHANUMERIC charclass is the security
+ *       property: no separator, space, '%' or newline can reach p_id, and an id
+ *       ECHO does not know comes back "ID … is invalid" ⇒ not_found); the UPSTREAM-supplied
  *       `qid` is validated ^[0-9]+$ BECAUSE it is external (echodata.epa.gov mints
  *       it), before it is used in step 2; the internally-computed `pageno` is a
  *       plain integer. `facilityName` (p_fn) is a free-text filter VALUE — encoded

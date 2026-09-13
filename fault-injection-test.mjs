@@ -14428,16 +14428,32 @@ async function testEchoHonesty() {
       threw && toToolError(error).kind === "invalid_input" && calls.length === 0, JSON.stringify({ kind: toToolError(error).kind, added: calls.length }));
   });
 
-  // (m) registryId grammar: bad id ⇒ invalid_input, no fetch (Zod ^[0-9]{9,12}$).
+  // (m) registryId grammar: an injection-shaped id ⇒ invalid_input, no fetch (Zod ^[A-Za-z0-9]{1,20}$).
+  // The charclass (not digit-count) is the security property; ECHO itself answers an
+  // unknown-but-well-formed id with "ID … is invalid" ⇒ not_found (46i).
   await withFetch(failClosed(), async (calls) => {
-    for (const registryId of ["abc", "12345678", "1234567890123", "110059768461\n", "../etc/passwd"]) {
+    for (const registryId of ["110059768461\n", "../etc/passwd", "1234;DROP", "a b", "", "DCR-000509282", "110059768461&p_x=1", "x".repeat(21)]) {
       const before = calls.length;
       const { threw, error } = await expectThrow(() => runTool("echo_facility_report", { registryId }, sam));
-      ok(`46m bad registryId ${JSON.stringify(registryId)} ⇒ invalid_input, no fetch (all-digit 9–12; ` + "`$`" + ` rejects trailing \\n)`,
+      ok(`46m bad registryId ${JSON.stringify(registryId)} ⇒ invalid_input, no fetch (alphanumeric 1–20; ` + "`$`" + ` rejects trailing \\n)`,
         threw && toToolError(error).kind === "invalid_input" && calls.length === before,
         JSON.stringify({ kind: toToolError(error).kind, added: calls.length - before }));
     }
   });
+  // (m2) upstream-drift regression (2026-09-13): ECHO search rows carry NON-FRS ids — state/program
+  // ids ('DCR000509282') and short ids ('9434') — and get_dfr serves them. The old all-digit 9–12
+  // grammar rejected both, so a row's RegistryID could not be fed to echo_facility_report. Revert the
+  // grammar ⇒ these throw invalid_input ⇒ RED. p_id must be passed through verbatim.
+  for (const rid of ["DCR000509282", "9434"]) {
+    await withFetch((u) => (isEchoDfr(u) ? mockResponse({ status: 200, json: { Results: { Message: "Success", RegistryID: rid, Permits: [{ Statute: "CWA" }] } } }) : failClosed()()), async (calls) => {
+      let r = null, err = null;
+      try { r = await runTool("echo_facility_report", { registryId: rid }, sam); } catch (e) { err = e; }
+      const d = calls.find((c) => isEchoDfr(c.url));
+      ok(`46m2 non-FRS RegistryID ${JSON.stringify(rid)} (as returned by ECHO search) ⇒ report fetched with p_id verbatim, registryId echoed — the search→report chain holds`,
+        !err && r.data.registryId === rid && !!r.data.report && !!d && new URL(d.url).searchParams.get("p_id") === rid,
+        JSON.stringify({ threw: err ? toToolError(err).kind : null, rid: r?.data?.registryId ?? null, p_id: d ? new URL(d.url).searchParams.get("p_id") : null }));
+    });
+  }
 
   // (n) num coercion — null-never-0; echo.num is the SHARED coerce.num choke point.
   eq("46n num('4714') ⇒ 4714", echoNum("4714"), 4714);

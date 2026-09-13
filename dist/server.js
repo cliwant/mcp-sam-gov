@@ -2303,8 +2303,8 @@ const EchoSearchFacilitiesInput = z.object({
 const EchoFacilityReportInput = z.object({
     registryId: z
         .string()
-        .regex(/^[0-9]{9,12}$/)
-        .describe("The facility's FRS RegistryID (from echo_search_facilities rows' RegistryID) — an all-digit id, 9–12 digits (e.g. '110059768461'). A bad/unknown id ⇒ not_found (never a fabricated report)."),
+        .regex(/^[A-Za-z0-9]{1,20}$/)
+        .describe("The facility's RegistryID exactly as returned in echo_search_facilities rows — usually a 12-digit FRS id (e.g. '110059768461'), but ECHO also returns state/program ids (e.g. 'DCR000509282') and short ids (e.g. '9434'), which the report accepts. 1–20 letters/digits. A bad/unknown id ⇒ not_found (never a fabricated report)."),
 });
 // ─── api.data.gov keyed trio (Regulations.gov + Congress.gov) — input schemas ──
 // ADR-0007. The project's FIRST KEYED source. The key is read from env
@@ -5164,7 +5164,7 @@ export const TOOLS = [
     }),
     defineTool({
         name: "echo_facility_report",
-        description: "Fetch the EPA ECHO Detailed Facility Report (DFR) for ONE facility by its FRS RegistryID (keyless) — the per-facility compliance / enforcement / inspection / permit deep-dive for competitor or acquisition-target due diligence. Input `registryId` (all-digit FRS id, 9–12 digits, from echo_search_facilities rows). Returns { registryId, report:{…verbatim compliance/enforcement/permit detail…} } + single-record _meta (complete:true, no pagination). A bad/unknown RegistryID ⇒ not_found (never a fabricated report).",
+        description: "Fetch the EPA ECHO Detailed Facility Report (DFR) for ONE facility by its FRS RegistryID (keyless) — the per-facility compliance / enforcement / inspection / permit deep-dive for competitor or acquisition-target due diligence. Input `registryId` (the RegistryID exactly as returned by echo_search_facilities rows — usually a 12-digit FRS id, but ECHO also returns state/program ids like 'DCR000509282' and short ids like '9434', all accepted; 1–20 letters/digits). Returns { registryId, report:{…verbatim compliance/enforcement/permit detail…} } + single-record _meta (complete:true, no pagination). A bad/unknown RegistryID ⇒ not_found (never a fabricated report).",
         inputSchema: EchoFacilityReportInput,
         handler: (input) => echo.facilityReport(input),
     }),
