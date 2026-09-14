@@ -4,8 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="google-site-verification" content="AgDz4S2fT8OVqh6gLi2BiMrQfx0wywIY_1iy7ToZtTU" />
-<title>mcp-sam-gov — Keyless MCP server for US government contracting data (150 tools)</title>
-<meta name="description" content="Keyless-first MCP server: 150 tools for US federal + state/local (SLED) government contracting, spending, regulation, and partner vetting. SAM.gov, USAspending, Grants.gov, OFAC, FDIC, EPA, CourtListener and 45+ more. No API key. Works in Claude Desktop, Claude Code, Codex CLI, Cursor, and any MCP client." />
+<title>mcp-sam-gov — Keyless-first MCP server for US government contracting data (152 tools)</title>
+<meta name="description" content="Keyless-first MCP server: 152 tools for US federal + state/local (SLED) government contracting, spending, regulation, and partner vetting. SAM.gov, USAspending, Grants.gov, OFAC, FDIC, EPA, CourtListener and 45+ more. No API key for 147 of 152 tools. Works in Claude Desktop, Claude Code, Codex CLI, Cursor, and any MCP client." />
 <link rel="canonical" href="https://cliwant.github.io/mcp-sam-gov/" />
 <meta name="robots" content="index, follow" />
 <meta name="keywords" content="MCP, Model Context Protocol, SAM.gov, USAspending, government contracting, govcon, procurement, RFP, SLED, keyless, Claude, Cursor, Codex, MCP server, federal contracting, public data" />
@@ -13,12 +13,12 @@
 <!-- Open Graph -->
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="@cliwant/mcp-sam-gov" />
-<meta property="og:title" content="mcp-sam-gov — Keyless MCP server for US government contracting data" />
-<meta property="og:description" content="150 keyless tools for US federal + state/local government contracting, spending, regulation & partner vetting. No API key. Plug into Claude, Cursor, Codex, or any MCP client." />
+<meta property="og:title" content="mcp-sam-gov — Keyless-first MCP server for US government contracting data" />
+<meta property="og:description" content="152 keyless-first tools for US federal + state/local government contracting, spending, regulation & partner vetting. No API key for 147 of 152 tools. Plug into Claude, Cursor, Codex, or any MCP client." />
 <meta property="og:url" content="https://cliwant.github.io/mcp-sam-gov/" />
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="mcp-sam-gov — 150 keyless tools for US government contracting data" />
-<meta name="twitter:description" content="Federal + state/local (SLED) contracting, spending, regulation & vetting via MCP. No API key. Honesty-hardened." />
+<meta name="twitter:title" content="mcp-sam-gov — 152 keyless-first tools for US government contracting data" />
+<meta name="twitter:description" content="Federal + state/local (SLED) contracting, spending, regulation & vetting via MCP. No API key for 147 of 152 tools. Honesty-hardened." />
 
 <!-- Structured data: SoftwareApplication + FAQ (SEO rich results) -->
 <script type="application/ld+json">
@@ -30,7 +30,7 @@
   "operatingSystem": "Cross-platform (Node.js)",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
   "license": "https://opensource.org/licenses/MIT",
-  "description": "Keyless-first MCP server with 150 tools for US federal and state/local (SLED) government contracting, spending, regulation, and partner vetting.",
+  "description": "Keyless-first MCP server with 152 tools for US federal and state/local (SLED) government contracting, spending, regulation, and partner vetting.",
   "url": "https://cliwant.github.io/mcp-sam-gov/",
   "downloadUrl": "https://www.npmjs.com/package/@cliwant/mcp-sam-gov",
   "softwareHelp": "https://github.com/cliwant/mcp-sam-gov#readme",
@@ -42,7 +42,7 @@
   "@context": "https://schema.org",
   "@type": "FAQPage",
   "mainEntity": [
-    { "@type": "Question", "name": "Do I need an API key?", "acceptedAnswer": { "@type": "Answer", "text": "No. All 150 tools work keyless. A handful of sources (Census, FRED, BEA, DOL) accept an optional free key for higher limits, but nothing is required." } },
+    { "@type": "Question", "name": "Do I need an API key?", "acceptedAnswer": { "@type": "Answer", "text": "Mostly no. 147 of the 152 tools work with no API key. Five tools require a free key from their source: Census business patterns (census_business_patterns), FRED (fred_search_series, fred_series_observations), BEA (bea_regional_data), and DOL’s data endpoint (dol_get_dataset). Without that key they return a clear configuration error. A few other sources accept an optional free key only for higher rate limits." } },
     { "@type": "Question", "name": "Which AI clients does it work with?", "acceptedAnswer": { "@type": "Answer", "text": "Any MCP client — Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, and more — via a single npx command." } },
     { "@type": "Question", "name": "What data does it cover?", "acceptedAnswer": { "@type": "Answer", "text": "US federal and state/local (SLED) contracting opportunities, spending and awards, regulation, and partner vetting: SAM.gov, USAspending, Grants.gov, OFAC, FDIC, EPA, CourtListener, and 45+ more public sources." } }
   ]
@@ -103,8 +103,8 @@
 <header class="hero">
   <div class="wrap">
     <div class="badge">Open source · MIT · Keyless-first</div>
-    <h1><span class="k">150 keyless tools</span> for US government<br/>contracting, spending &amp; vetting — in your AI agent</h1>
-    <p class="sub">A Model Context Protocol (MCP) server that puts SAM.gov, USAspending, Grants.gov, OFAC, FDIC, EPA, CourtListener and 45+ more public sources one <code class="inline">npx</code> away — federal <em>and</em> state/local (SLED). No API key, no signup.</p>
+    <h1><span class="k">152 keyless-first tools</span> for US government<br/>contracting, spending &amp; vetting — in your AI agent</h1>
+    <p class="sub">A Model Context Protocol (MCP) server that puts SAM.gov, USAspending, Grants.gov, OFAC, FDIC, EPA, CourtListener and 45+ more public sources one <code class="inline">npx</code> away — federal <em>and</em> state/local (SLED). No API key for 147 of 152 tools, no signup.</p>
     <div class="cta">
       <a class="btn primary" href="#quickstart">Get started</a>
       <a class="btn" href="https://github.com/cliwant/mcp-sam-gov" rel="noopener">GitHub</a>
@@ -156,8 +156,8 @@
     <table>
       <tr><th>Status quo</th><th>With this MCP</th></tr>
       <tr><td>$30K–$100K/yr per seat for a bid platform</td><td>Free, MIT-licensed</td></tr>
-      <tr><td>API-key registration → wait → quota-tier shopping</td><td><code class="inline">npx</code> → working in 60 seconds, keyless</td></tr>
-      <tr><td>5+ separate vendor APIs and scrapers</td><td>1 unified surface, 150 tools across 50+ sources</td></tr>
+      <tr><td>API-key registration → wait → quota-tier shopping</td><td><code class="inline">npx</code> → working in 60 seconds, no key for 147 of 152 tools</td></tr>
+      <tr><td>5+ separate vendor APIs and scrapers</td><td>1 unified surface, 152 tools across 54 sources</td></tr>
       <tr><td>LLMs hallucinate NAICS codes and agency names</td><td>Anti-hallucination autocomplete guards built in</td></tr>
     </table>
   </div>
@@ -179,12 +179,12 @@
 
 <section id="privacy">
   <div class="wrap">
-    <h2>Keyless &amp; private by design</h2>
+    <h2>Keyless-first &amp; private by design</h2>
     <p class="lead">The server runs locally and collects nothing.</p>
     <ul class="checks">
       <li>No telemetry, no analytics, no accounts — your queries never reach us.</li>
       <li>Each tool calls the relevant official government API directly over HTTPS.</li>
-      <li>Optional API keys (Census, FRED, BEA, DOL, and a few others for higher limits) stay in your local environment and are sent only to that source.</li>
+      <li>API keys stay in your local environment and are sent only to their own source. A free key is required for Census business patterns, FRED, BEA, and DOL’s data endpoint; a few other sources accept an optional key for higher limits.</li>
     </ul>
     <p class="kv">See the <a href="https://github.com/cliwant/mcp-sam-gov/blob/main/PRIVACY.md" rel="noopener">full privacy policy</a>.</p>
   </div>
