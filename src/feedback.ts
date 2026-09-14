@@ -189,6 +189,6 @@ export function feedbackTool(
     instructions:
       "Open reportUrl in a browser and submit the issue yourself — the server does NOT post anything automatically. Edit the prefilled title/body first if you like.",
     privacy:
-      "The link prefills only your summary + tool name — no API keys, query values, or personal data. Keep it that way; the issue is public.",
+      "The link prefills only your summary, tool name, server version and report kind — no API keys, query values, or personal data. Keep it that way; the issue is public.",
   };
 }

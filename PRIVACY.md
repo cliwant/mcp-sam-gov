@@ -1,6 +1,6 @@
 # Privacy Policy — @cliwant/mcp-sam-gov
 
-_Last updated: 2026-07-20_
+_Last updated: 2026-09-14_
 
 `@cliwant/mcp-sam-gov` is an open-source MCP (Model Context Protocol) server that runs **locally** on your own machine (or your own infrastructure) and exposes read-only tools for querying **public US-government open data**. It is designed to collect nothing.
 
@@ -13,7 +13,7 @@ _Last updated: 2026-07-20_
 - Your prompts, tool inputs, and tool results are processed **in memory, locally**, and are **not stored** by this software and **not transmitted to Cliwant**.
 - When you invoke a tool, the server makes a direct HTTPS request to the **relevant official US-government (or equivalent public) API** — e.g. SAM.gov, USAspending.gov, api.data.gov, EPA, FDIC, CourtListener — and returns the response to your MCP client. Those requests are governed by the respective provider's own privacy terms.
 - **Optional API keys** (for sources such as Census, FRED, BEA, DOL, and a few others that offer higher limits with a free key) are read from your local environment variables and are sent **only** to that source's official API over HTTPS. They are never logged, never included in error reports, and never transmitted to Cliwant.
-- The optional **feedback tool** produces a **pre-filled GitHub issue URL locally** for you to review and submit yourself; it does **not** post anything automatically and includes no personal data.
+- The optional **feedback tool** produces a **pre-filled GitHub issue URL locally** for you to review and submit yourself; it does **not** post anything automatically and includes no personal data. The link prefills only the summary you give, the tool name, the server version and the report kind; the version and kind also sit in an HTML comment at the top of the issue body (visible while you edit, hidden once the issue is posted), which the maintainers use to count reports.
 - **Update check:** on startup the package fetches its own public version metadata from `registry.npmjs.org` (the same public registry `npm install` uses) to tell you if a newer version exists. This is **not telemetry** — it sends no user data. Disable it with `MCP_SAM_GOV_NO_UPDATE_CHECK=1` (or `NO_UPDATE_NOTIFIER=1`).
 
 ## Third-party sharing

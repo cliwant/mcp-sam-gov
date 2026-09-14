@@ -22040,6 +22040,12 @@ async function testFeedbackLoop() {
     ok("FB-M8 feedback with no arguments ⇒ marker kind=bug (the default kind)", first === expectMarker("bug"), JSON.stringify(first));
   }
   {
+    // The user-facing privacy note must name everything the link now prefills.
+    const privacy = (await runTool("feedback", {}, sam)).privacy;
+    ok("FB-M10 feedback privacy note names every prefilled field (summary, tool name, server version, report kind)",
+      typeof privacy === "string" && /summary/i.test(privacy) && /tool name/i.test(privacy) && /server version/i.test(privacy) && /report kind/i.test(privacy), privacy);
+  }
+  {
     // A value outside the closed sets can never reach the marker (or close the comment early).
     const first = bodyOf(reportUrlForError("t", "schema_drift --> <img src=x>", "1.0.0; rm -rf /")).split("\n")[0];
     ok("FB-M9 a malformed kind/version ⇒ marker writes v=unknown kind=unknown (never the raw value)",
@@ -22056,12 +22062,15 @@ async function testFeedbackLoop() {
   // marker; the marker does not change that, so FB-L3 pins the ASCII case only.
   const REPORT_URL_MAX = 8000;
   ok("FB-L0 every report path produced a URL to measure (5 paths)", reports.length === 5, JSON.stringify(reports.map((x) => x.path)));
-  for (const { path, url } of reports) {
+  for (const { path, kind, url } of reports) {
     const body = bodyOf(url);
+    const first = body.split("\n")[0];
     const q = new URL(url).searchParams;
     q.set("body", body.split("\n").slice(1).join("\n"));
     const cost = url.length - `${NEW_ISSUE}${q.toString()}`.length;
-    ok(`FB-L1 ${path} ⇒ the marker line adds ≤ ${MARKER_URL_COST_MAX} URL characters (got ${cost})`, cost > 0 && cost <= MARKER_URL_COST_MAX, String(cost));
+    // Measure only when the removed first line really is the marker.
+    ok(`FB-L1 ${path} ⇒ the removed first line is the marker and it adds ≤ ${MARKER_URL_COST_MAX} URL characters (got ${cost})`,
+      first === expectMarker(kind) && cost > 0 && cost <= MARKER_URL_COST_MAX, JSON.stringify({ first, cost }));
   }
   {
     const longestTool = TOOLS.reduce((a, t) => (t.name.length > a.length ? t.name : a), "");
@@ -22144,9 +22153,14 @@ async function testFeedbackLoop() {
       !w.threw && w.writes.length === 0 && w.failed.length === 1, JSON.stringify({ writes: w.writes, failed: w.failed }));
   }
   {
-    const w = await runWorkflow("see <!-- mcp-sam-gov:tool-report v=1.0.0 kind=Bad-Kind; rm -rf --> here", ALL_LABELS);
-    ok("FB-W10 token present but a malformed kind ⇒ from-tool only (the raw text never becomes a label)",
-      !w.threw && w.writes.length === 1 && JSON.stringify(w.writes[0].params.labels) === JSON.stringify(["from-tool"]), JSON.stringify(w.writes));
+    // The forged kind labels EXIST in the fake repo, so only the workflow's kind
+    // regex can keep them off (loosen it to kind=(\S+) ⇒ RED).
+    const FORGED = [...ALL_LABELS, "kind:Bad-Kind;", "kind:Bad-Kind"];
+    const w = await runWorkflow("see <!-- mcp-sam-gov:tool-report v=1.0.0 kind=Bad-Kind; rm -rf --> here", FORGED);
+    const w2 = await runWorkflow("<!-- mcp-sam-gov:tool-report v=1.0.0 kind=Bad-Kind -->\nbody", FORGED);
+    const onlyFromTool = (x) => !x.threw && x.writes.length === 1 && JSON.stringify(x.writes[0].params.labels) === JSON.stringify(["from-tool"]);
+    ok("FB-W10 token present but a malformed kind (even one whose kind:* label exists) ⇒ from-tool only (the raw text never becomes a label)",
+      onlyFromTool(w) && onlyFromTool(w2), JSON.stringify({ a: w.writes, b: w2.writes }));
   }
 }
 

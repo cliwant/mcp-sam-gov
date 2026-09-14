@@ -1,16 +1,34 @@
 # Label issues filed from the server's prefilled report links.
 #
-# The `feedback` tool and the `report` field on schema_drift / upstream_unavailable
-# errors hand the user a prefilled GitHub new-issue URL (src/feedback.ts). That URL
-# asks for the `from-tool` label, but GitHub ignores a prefilled label when the
-# filer has no triage rights, which is almost every external user. So those
-# reports could not be counted.
+# The server hands the user prefilled GitHub new-issue URLs (src/feedback.ts):
+#   - the `report` field on schema_drift / upstream_unavailable errors asks for
+#     the `from-tool` label;
+#   - the `feedback` tool asks for its kind's labels: bug -> `bug`,
+#     feature -> `enhancement`, wrong_output -> `bug,wrong-output`.
+# GitHub ignores prefilled labels when the filer has no triage rights, which is
+# almost every external user. So those reports could not be counted.
 #
 # Every prefilled body starts with one fixed HTML comment:
 #   <!-- mcp-sam-gov:tool-report v=<server version> kind=<report kind> -->
 # When a new issue's body contains `mcp-sam-gov:tool-report`, this workflow adds
 # the existing `from-tool` label, plus `kind:<kind>` if that label already exists.
-# It never creates labels, comments, edits, or closes anything.
+# It does this for both kinds of link, so feedback-tool issues now get
+# `from-tool` too. They never got it before this workflow, even from filers with
+# triage rights, so from-tool counts from before and after it are not
+# comparable. The feedback tool's own labels (bug / enhancement / wrong-output)
+# are not re-applied. It never creates labels, comments, edits, or closes
+# anything.
+#
+# Counts are approximate: the marker is not authenticated. Anyone can type it
+# into a hand-written issue (and so pick any kind:* label that already exists),
+# and a filer can delete it from the prefilled body. from-tool counts issues
+# that claim to come from the tool, not verified ones.
+#
+# Maintainers: kind labels use the kind exactly as the marker writes it, with
+# underscores: kind:schema_drift, kind:upstream_unavailable, kind:bug,
+# kind:feature, kind:wrong_output (not the hyphenated wrong-output label). If
+# the from-tool label is deleted, marked issues fail this job; it is never
+# recreated automatically.
 #
 # Security: the issue body is attacker-controlled. It is read only inside the
 # github-script JavaScript, from context.payload. This file has no GitHub
