@@ -36,7 +36,7 @@ The most comprehensive **keyless-first** MCP server for US federal **and state/l
                                                                                           
 🤖  Claude     → sam_get_opportunity { noticeId: "5ef3db5d…" }                          
 ✓  Department of Veterans Affairs · Combined Synopsis/Solicitation                       
-   POC:           Rebecca Gobble  <rebecca.gobble@va.gov>  +1-410-642-2411                 
+   POC:           Contracting Officer  <co.name@agency.gov>  +1-XXX-XXX-XXXX                
    Set-aside:     Total Small Business                                                    
    Attachments:   1   ↓ 36C24526Q0460_1.docx (172 KB)                                     
    SOW preview:   "RFQ# 36C24526Q0460 — Bulk Oxygen Tank Rental, Fill, Telemetry…"        
@@ -136,6 +136,8 @@ After install, the binary `mcp-sam-gov` is on your PATH. Add this to your host c
 
 Specific config locations per host: see [Host configurations](#host-configurations) below.
 
+**No global install?** Every host config below also has an `npx` variant (`npx -y @cliwant/mcp-sam-gov`) that skips the clone and `npm install -g`. It only needs Node.js.
+
 ### ⚪ Path 4 — Direct path (zero install, just point at the file)
 
 Skip installation entirely:
@@ -163,14 +165,43 @@ Then point your host config at the absolute path:
 
 ## Host configurations
 
+Each host below shows two variants. Use one of them:
+
+- **Global install**: `"command": "mcp-sam-gov"`. This works only after `npm install -g` (Path 3) has put the `mcp-sam-gov` binary on your PATH.
+- **No global install (npx)**: `"command": "npx", "args": ["-y", "@cliwant/mcp-sam-gov"]`. This needs only Node.js. npx downloads the package from npm on first run and caches it.
+
+> **Package name:** the npm package is scoped: **`@cliwant/mcp-sam-gov`**. `mcp-sam-gov` is only the name of the binary that a global install puts on your PATH. No unscoped `mcp-sam-gov` package exists on npm, so `npx -y mcp-sam-gov` fails with a 404. Use `npx -y @cliwant/mcp-sam-gov`.
+
 ### Claude Desktop
 
 `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+
+Global install:
 
 ```json
 {
   "mcpServers": {
     "sam-gov": { "command": "mcp-sam-gov" }
+  }
+}
+```
+
+No global install (npx):
+
+```json
+{
+  "mcpServers": {
+    "sam-gov": { "command": "npx", "args": ["-y", "@cliwant/mcp-sam-gov"] }
+  }
+}
+```
+
+On Windows, if the server fails to start with `spawn npx ENOENT` in `%APPDATA%\Claude\logs\mcp*.log`, wrap npx in `cmd /c`:
+
+```json
+{
+  "mcpServers": {
+    "sam-gov": { "command": "cmd", "args": ["/c", "npx", "-y", "@cliwant/mcp-sam-gov"] }
   }
 }
 ```
@@ -181,21 +212,33 @@ Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS),
 
 ### Claude Code
 
-Per-project `.mcp.json`:
+Per-project `.mcp.json`, global install:
 
 ```json
 { "mcpServers": { "sam-gov": { "command": "mcp-sam-gov" } } }
 ```
 
-Or globally:
+No global install (npx):
+
+```json
+{ "mcpServers": { "sam-gov": { "command": "npx", "args": ["-y", "@cliwant/mcp-sam-gov"] } } }
+```
+
+Or with the CLI:
 
 ```bash
+# global install
 claude mcp add sam-gov mcp-sam-gov
+
+# no global install (npx)
+claude mcp add sam-gov -- npx -y @cliwant/mcp-sam-gov
 ```
 
 ### Codex CLI
 
 `~/.codex/config.toml`:
+
+Global install:
 
 ```toml
 [mcp_servers.sam-gov]
@@ -203,17 +246,31 @@ command = "mcp-sam-gov"
 args = []
 ```
 
+No global install (npx):
+
+```toml
+[mcp_servers.sam-gov]
+command = "npx"
+args = ["-y", "@cliwant/mcp-sam-gov"]
+```
+
 ### Cursor
 
-Settings → MCP → Add new MCP server:
+Settings → MCP → Add new MCP server. Global install:
 
 ```json
 { "mcpServers": { "sam-gov": { "command": "mcp-sam-gov" } } }
 ```
 
+No global install (npx):
+
+```json
+{ "mcpServers": { "sam-gov": { "command": "npx", "args": ["-y", "@cliwant/mcp-sam-gov"] } } }
+```
+
 ### Continue
 
-`~/.continue/config.json`:
+`~/.continue/config.json`, global install:
 
 ```json
 {
@@ -225,17 +282,35 @@ Settings → MCP → Add new MCP server:
 }
 ```
 
+No global install (npx):
+
+```json
+{
+  "experimental": {
+    "modelContextProtocolServer": {
+      "transport": { "type": "stdio", "command": "npx", "args": ["-y", "@cliwant/mcp-sam-gov"] }
+    }
+  }
+}
+```
+
 ### Gemini CLI
 
-`~/.gemini/settings.json`:
+`~/.gemini/settings.json`, global install:
 
 ```json
 { "mcpServers": { "sam-gov": { "command": "mcp-sam-gov" } } }
 ```
 
+No global install (npx):
+
+```json
+{ "mcpServers": { "sam-gov": { "command": "npx", "args": ["-y", "@cliwant/mcp-sam-gov"] } } }
+```
+
 ### Anything else
 
-If your host speaks MCP over stdio, point it at `mcp-sam-gov`. No host-specific code.
+If your host speaks MCP over stdio, point it at `mcp-sam-gov` (global install) or at `npx -y @cliwant/mcp-sam-gov` (no global install). No host-specific code.
 
 ---
 
@@ -688,6 +763,7 @@ This server is built around one rule: **honest failure over confident fabricatio
 |---|---|
 | Claude Desktop 🔨 menu doesn't show `sam-gov` | Fully quit Claude Desktop (system tray on Windows / Quit menu on macOS) and reopen. Check `%APPDATA%\Claude\logs\mcp*.log` |
 | `command not found: mcp-sam-gov` | Confirm `npm install -g .` succeeded; check that npm's global bin is on PATH (`npm config get prefix`) |
+| `spawn npx ENOENT` (Windows, npx config) | The host started `npx` without a shell, so Windows can't find `npx.cmd`. Use `"command": "cmd", "args": ["/c", "npx", "-y", "@cliwant/mcp-sam-gov"]`. |
 | `MODULE_NOT_FOUND ...dist/server.js` after `npm install -g github:...` | npm bug with git-dep symlinks on Windows. Use the clone + `npm install -g .` recipe (Path 3) instead. |
 | `EPERM: operation not permitted, rmdir` during install | Previous failed install left dangling files. Run `rmdir /s /q "%APPDATA%\npm\node_modules\@cliwant"` (or `@govicon` if you installed an early version) then retry. |
 | `npm install` fails with "private repo" / 404 | The repo is now public — should not happen. If it does, try `git clone https://github.com/cliwant/mcp-sam-gov.git` directly. |
