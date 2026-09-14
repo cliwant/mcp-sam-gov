@@ -36,7 +36,7 @@ The most comprehensive **keyless-first** MCP server for US federal **and state/l
                                                                                           
 🤖  Claude     → sam_get_opportunity { noticeId: "5ef3db5d…" }                          
 ✓  Department of Veterans Affairs · Combined Synopsis/Solicitation                       
-   POC:           Contracting Officer  <co.name@agency.gov>  +1-XXX-XXX-XXXX                
+   POC:           Contracting Officer  <co.name@example.gov>  +1-XXX-XXX-XXXX             
    Set-aside:     Total Small Business                                                    
    Attachments:   1   ↓ 36C24526Q0460_1.docx (172 KB)                                     
    SOW preview:   "RFQ# 36C24526Q0460 — Bulk Oxygen Tank Rental, Fill, Telemetry…"        
