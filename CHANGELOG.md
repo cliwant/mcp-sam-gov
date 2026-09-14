@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.1] — 2026-09-14 (new Claude Desktop / MCP Directory icon)
+
+### Changed
+- **New bundle icon.** `icon.png` (512×512, referenced by the manifest's `icon` field) is replaced with a new design: three overlapping frosted-glass cards, standing for the federal, state and local layers of public data, with a single blue point marking the exact record. The artwork was generated with an image model and then only resized and masked to a rounded square. It contains no text, government seal, flag or agency mark. No tool, schema or behaviour changes.
+
 ## [1.13.0] — 2026-09-14 (every state + DC now has a keyless state/local source — North Dakota via a DOT funding-award proxy; 2 new SLED tools; Anthropic Directory listing requirements, one-click bundle restored)
 
 Closes the last three states that had no keyless state/local government-contracting source — North Dakota, Montana and South Dakota — so all 50 states and DC now have at least one (North Dakota only through a proxy: NDDOT federal flex-funding awards to local public agencies, not vendor contracts, because ND's statewide checkbook and procurement portal are not keyless-reachable). That is breadth, not depth: inside most states, coverage of the state portal and mid-sized counties and cities is still thin. Two new reusable tools (150 → 152). The release also meets the Anthropic MCP Directory listing requirements, fixes an EPA ECHO drift bug found by a pre-release live run, discloses upstream freshness for the new sources, and puts the one-click Claude Desktop bundle back on GitHub releases. Fault assertions 3441 → 3477.
