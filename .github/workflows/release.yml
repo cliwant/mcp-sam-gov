@@ -6,7 +6,8 @@
 #     and GitHub does NOT expose secrets to workflows triggered by fork PRs. So the
 #     NPM_TOKEN is only ever available when the maintainer deliberately pushes a tag.
 #   * No `pull_request` trigger ⇒ untrusted PR code never runs with the token.
-#   * Least privilege: `contents: read`. `id-token: write` is only for npm PROVENANCE
+#   * Least privilege: `contents: write` only to create the GitHub Release and attach
+#     the bundle (the `bundle` job gets nothing else). `id-token: write` is only for npm PROVENANCE
 #     (a signed attestation proving this package was built from this repo+commit on
 #     GitHub Actions — a supply-chain integrity guarantee, not a secret exposure).
 #   * The secret is injected as an env var ONLY in the publish step and is auto-masked
@@ -189,8 +190,9 @@ jobs:
         run: gh release upload "$GITHUB_REF_NAME" mcp-sam-gov.mcpb --clobber --repo "$GITHUB_REPOSITORY"
 
       # v1.6.0 through v1.12.0 shipped with no bundle on the release and nothing
-      # failed, which silently broke README install path 1
-      # (releases/latest/download/mcp-sam-gov.mcpb). Check both what the API reports
+      # failed, which silently broke README install path 1 ("download
+      # mcp-sam-gov.mcpb from the latest release"): the latest release page had no
+      # bundle file to download. Check both what the API reports
       # (an uploaded asset with this exact name, over 1 MB) and what a user actually
       # downloads (the public URL resolves). Retries cover brief propagation delay.
       # Values come from env; the jq filter reads the name with env.ASSET_NAME, so
