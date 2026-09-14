@@ -1,0 +1,88 @@
+# Label issues filed from the server's prefilled report links.
+#
+# The server hands the user prefilled GitHub new-issue URLs (src/feedback.ts):
+#   - the `report` field on schema_drift / upstream_unavailable errors asks for
+#     the `from-tool` label;
+#   - the `feedback` tool asks for its kind's labels: bug -> `bug`,
+#     feature -> `enhancement`, wrong_output -> `bug,wrong-output`.
+# GitHub ignores prefilled labels when the filer has no triage rights, which is
+# almost every external user. So those reports could not be counted.
+#
+# Every prefilled body starts with one fixed HTML comment:
+#   <!-- mcp-sam-gov:tool-report v=<server version> kind=<report kind> -->
+# When a new issue's body contains `mcp-sam-gov:tool-report`, this workflow adds
+# the existing `from-tool` label, plus `kind:<kind>` if that label already exists.
+# It does this for both kinds of link, so feedback-tool issues now get
+# `from-tool` too. They never got it before this workflow, even from filers with
+# triage rights, so from-tool counts from before and after it are not
+# comparable. The feedback tool's own labels (bug / enhancement / wrong-output)
+# are not re-applied. It never creates labels, comments, edits, or closes
+# anything.
+#
+# Counts are approximate: the marker is not authenticated. Anyone can type it
+# into a hand-written issue (and so pick any kind:* label that already exists),
+# and a filer can delete it from the prefilled body. from-tool counts issues
+# that claim to come from the tool, not verified ones.
+#
+# Maintainers: kind labels use the kind exactly as the marker writes it, with
+# underscores: kind:schema_drift, kind:upstream_unavailable, kind:bug,
+# kind:feature, kind:wrong_output (not the hyphenated wrong-output label). If
+# the from-tool label is deleted, marked issues fail this job; it is never
+# recreated automatically.
+#
+# Security: the issue body is attacker-controlled. It is read only inside the
+# github-script JavaScript, from context.payload. This file has no GitHub
+# expression (dollar-double-brace) at all and no shell step, so neither the
+# title nor the body can reach a shell. fault-injection-test.mjs checks this
+# file for both and runs the script below against a fake API client.
+name: Label tool reports
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add from-tool / kind labels when the report marker is present
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const MARKER = "mcp-sam-gov:tool-report";
+            const issue = context.payload.issue;
+            const body = issue && typeof issue.body === "string" ? issue.body : "";
+            if (!body.includes(MARKER)) {
+              core.info("No tool-report marker in the issue body; nothing to do.");
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const labelExists = async (name) => {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+                return true;
+              } catch (err) {
+                if (err && err.status === 404) return false;
+                throw err;
+              }
+            };
+            // addLabels would silently CREATE a missing label, so check first.
+            if (!(await labelExists("from-tool"))) {
+              core.setFailed('The "from-tool" label does not exist in this repository; not creating it.');
+              return;
+            }
+            const labels = ["from-tool"];
+            const match = body.match(/<!-- mcp-sam-gov:tool-report v=[0-9A-Za-z.-]{1,40} kind=([a-z][a-z_]{0,39}) -->/);
+            if (match) {
+              const kindLabel = "kind:" + match[1];
+              if (await labelExists(kindLabel)) {
+                labels.push(kindLabel);
+              } else {
+                core.info("Label " + kindLabel + " does not exist; adding only from-tool.");
+              }
+            }
+            await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels });
+            core.info("Added labels: " + labels.join(", "));

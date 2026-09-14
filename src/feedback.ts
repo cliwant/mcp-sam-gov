@@ -20,6 +20,13 @@
  *   • Non-nagging. Error links are attached only to the two "something may be
  *     broken" kinds (schema_drift, upstream_unavailable) — never to expected
  *     outcomes (not_found, invalid_input, rate_limited).
+ *   • Countable. Every prefilled body starts with one fixed HTML comment,
+ *     `<!-- mcp-sam-gov:tool-report v=<server version> kind=<report kind> -->`
+ *     (invisible once the issue renders). GitHub drops a prefilled `labels=`
+ *     for filers without triage rights, so the repo's label-tool-reports
+ *     workflow reads this marker instead and applies `from-tool`. The marker
+ *     holds only the server version and the report kind — never a tool
+ *     argument, query, key, path, or the caller's summary.
  */
 
 export const REPO_URL = "https://github.com/cliwant/mcp-sam-gov";
@@ -29,6 +36,27 @@ export type FeedbackKind = "bug" | "feature" | "wrong_output";
 
 const REDACT_NOTE =
   "⚠️ This is a PUBLIC issue. Do NOT paste API keys, credentials, personal data, or sensitive query values — redact anything private before you submit.";
+
+/** The fixed token the label-tool-reports workflow looks for in an issue body. */
+export const TOOL_REPORT_MARKER_TOKEN = "mcp-sam-gov:tool-report";
+
+// Both marker values come from closed sets (SERVER_VERSION, an error kind or a
+// FeedbackKind), but they are still checked here so the marker can never carry
+// anything else, and can never close the HTML comment early.
+const MARKER_KIND_RE = /^[a-z][a-z_]{0,39}$/;
+const MARKER_VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:-[0-9A-Za-z.]{1,20})?$/;
+
+/**
+ * The one-line, PII-free HTML comment put at the top of every prefilled body:
+ * `<!-- mcp-sam-gov:tool-report v=<version> kind=<kind> -->`. A value that does
+ * not match its pattern is written as `unknown`. It goes FIRST in the body so a
+ * URL cut short at the end still keeps it, and it adds under 100 URL characters.
+ */
+export function toolReportMarker(kind: string, version: string): string {
+  const v = MARKER_VERSION_RE.test(version) ? version : "unknown";
+  const k = MARKER_KIND_RE.test(kind) ? kind : "unknown";
+  return `<!-- ${TOOL_REPORT_MARKER_TOKEN} v=${v} kind=${k} -->`;
+}
 
 /**
  * Build a GitHub "new issue" URL with a prefilled title/body/labels. Everything
@@ -54,6 +82,7 @@ export function reportUrlForError(tool: string, kind: string, version: string): 
       ? "schema_drift means the government API very likely changed its response shape, so the wrapper needs updating — this is the single most useful thing to report."
       : "upstream_unavailable is often a transient government-side outage; please report only if it PERSISTS or the endpoint appears to have permanently moved.";
   const body = [
+    toolReportMarker(kind, version),
     "**Reporting a tool problem** (this link was suggested by the server).",
     "",
     `- **Tool:** \`${tool}\``,
@@ -120,12 +149,16 @@ export type FeedbackResult = {
  * report into a PREFILLED GitHub new-issue URL for the HUMAN to open and submit.
  * Pure + keyless: no network, no posting. `summary` is caller-supplied free text
  * and is trusted to be non-sensitive (the description + privacy note say so).
+ * `version` is the server version, used only in the tool-report marker.
  */
-export function feedbackTool(input: {
-  kind?: FeedbackKind;
-  tool?: string;
-  summary?: string;
-}): FeedbackResult {
+export function feedbackTool(
+  input: {
+    kind?: FeedbackKind;
+    tool?: string;
+    summary?: string;
+  },
+  version: string,
+): FeedbackResult {
   const kind: FeedbackKind = input.kind ?? "bug";
   const toolPart = input.tool ? `[${input.tool}] ` : "";
   const summary = (input.summary ?? "").trim();
@@ -135,19 +168,20 @@ export function feedbackTool(input: {
       ? "**What I want to be able to do:**"
       : "**What I did, expected, and got:**";
   const body = [
-    `**Type:** ${KIND_TITLE[kind]}`,
-    input.tool ? `**Tool:** \`${input.tool}\`` : "",
-    "",
-    `${lead} ${summary || "_(describe)_"}`,
-    "",
-    kind === "feature"
-      ? "**Why it matters / use case:** _(describe)_"
-      : "**Steps to reproduce:** _(describe — no sensitive values)_",
-    "",
-    REDACT_NOTE,
-  ]
-    .filter((line, i) => !(line === "" && i === 2 && !input.tool))
-    .join("\n");
+    toolReportMarker(kind, version),
+    ...[
+      `**Type:** ${KIND_TITLE[kind]}`,
+      input.tool ? `**Tool:** \`${input.tool}\`` : "",
+      "",
+      `${lead} ${summary || "_(describe)_"}`,
+      "",
+      kind === "feature"
+        ? "**Why it matters / use case:** _(describe)_"
+        : "**Steps to reproduce:** _(describe — no sensitive values)_",
+      "",
+      REDACT_NOTE,
+    ].filter((line, i) => !(line === "" && i === 2 && !input.tool)),
+  ].join("\n");
   return {
     reportUrl: buildIssueUrl({ title, body, labels: KIND_LABELS[kind] }),
     repo: REPO_URL,
@@ -155,6 +189,6 @@ export function feedbackTool(input: {
     instructions:
       "Open reportUrl in a browser and submit the issue yourself — the server does NOT post anything automatically. Edit the prefilled title/body first if you like.",
     privacy:
-      "The link prefills only your summary + tool name — no API keys, query values, or personal data. Keep it that way; the issue is public.",
+      "The link prefills only your summary, tool name, server version and report kind — no API keys, query values, or personal data. Keep it that way; the issue is public.",
   };
 }

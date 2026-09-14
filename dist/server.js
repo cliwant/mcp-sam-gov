@@ -5639,7 +5639,7 @@ export const TOOLS = [
         name: "feedback",
         description: "Report a problem, request a feature, or flag a wrong-looking result for THIS server — returns a PREFILLED GitHub issue link (public repo cliwant/mcp-sam-gov) for the USER to open and submit. KEYLESS. The server does NOT post anything: it only builds the link; the human submits it (nothing is sent automatically, no network call). Use when the user reports a bug, says a tool's output looks wrong, or wants a capability this server doesn't have. Input (all optional): `kind` (bug|feature|wrong_output, default bug), `tool` (the tool it's about), `summary` (a short, NON-SENSITIVE title line). Returns { reportUrl, repo, willPost:false, instructions, privacy }. PRIVACY: never put secrets, personal data, or sensitive query values in `summary` — the issue is PUBLIC and the link prefills only your summary + tool + server version.",
         inputSchema: FeedbackInput,
-        handler: async (input) => feedback.feedbackTool(input),
+        handler: async (input) => feedback.feedbackTool(input, SERVER_VERSION),
     }),
 ];
 // ─── Server bootstrap ────────────────────────────────────────────

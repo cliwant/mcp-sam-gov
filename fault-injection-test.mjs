@@ -21976,6 +21976,192 @@ async function testFeedbackLoop() {
     const body = decodeURIComponent(new URL(u).searchParams.get("body") || "");
     ok("reportUrlForError body carries the server version (debuggable) + no secret", body.includes("1.6.0") && body.includes("schema_drift") && !/api[_-]?key/i.test(body), body.slice(0, 60));
   }
+
+  // (d) COUNTABLE REPORTS. GitHub drops a prefilled `labels=` for filers without
+  //     triage rights, so every prefilled body now STARTS with one fixed, PII-free
+  //     HTML comment that .github/workflows/label-tool-reports.yml keys on:
+  //       <!-- mcp-sam-gov:tool-report v=<SERVER_VERSION> kind=<kind> -->
+  //     Expected strings are LITERALS here (never rebuilt with the module's own
+  //     builder), so dropping or changing the marker in dist ⇒ RED.
+  const PKG_VERSION = JSON.parse(censusReadFile(new URL("./package.json", import.meta.url), "utf8")).version;
+  const expectMarker = (kind) => `<!-- mcp-sam-gov:tool-report v=${PKG_VERSION} kind=${kind} -->`;
+  const bodyOf = (url) => new URL(url).searchParams.get("body") || "";
+  const markerCount = (s) => s.split("mcp-sam-gov:tool-report").length - 1;
+  // Distinctive argument values: none may appear in a marker, and none may appear
+  // anywhere in an error-path report.
+  const SECRET_ARGS = { keyword: "zq7x-secret-keyword", cfda: "98.765", oppNum: "OPP-ZQ7X-4242", rows: 7 };
+  const SECRET_VALUES = ["zq7x-secret-keyword", "98.765", "OPP-ZQ7X-4242"];
+  const reports = []; // { path, kind, url } — reused by the length + workflow checks below
+
+  // (d1) error path, exactly as the CallTool dispatcher does it: a real runTool call
+  //      WITH arguments throws, toToolError classifies, maybeAttachReport attaches.
+  const isGrSearch2 = (u) => /api\.grants\.gov\/.*search2/.test(u);
+  const errorCases = [
+    { kind: "schema_drift", respond: () => mockResponse({ status: 200, json: { unexpected: "interstitial" } }) },
+    { kind: "upstream_unavailable", respond: () => mockResponse({ status: 503 }) },
+  ];
+  for (const { kind, respond } of errorCases) {
+    await withFetch((u) => (isGrSearch2(u) ? respond() : failClosed()()), async () => {
+      const { threw, error: thrown } = await expectThrow(() => runTool("grants_search", SECRET_ARGS, sam));
+      const error = toToolError(thrown, "grants_search");
+      maybeAttachReport(error, "grants_search", PKG_VERSION);
+      ok(`FB-M1 ${kind} (runTool grants_search with args) ⇒ threw ${kind} and got a report URL`,
+        threw && error.kind === kind && typeof error.report === "string", JSON.stringify({ threw, kind: error.kind }));
+      const body = bodyOf(error.report || NEW_ISSUE);
+      ok(`FB-M2 ${kind} report body's FIRST line is exactly the marker with the server version + kind (drop/alter it ⇒ RED)`,
+        body.split("\n")[0] === expectMarker(kind), JSON.stringify(body.split("\n")[0]));
+      ok(`FB-M3 ${kind} report body carries the marker token exactly once`, markerCount(body) === 1, String(markerCount(body)));
+      const decoded = decodeURIComponent(error.report || "");
+      const leaked = SECRET_VALUES.filter((v) => decoded.includes(v) || (error.report || "").includes(v));
+      ok(`FB-M4 ${kind} report (title, body, marker) contains NO argument value even though the call had arguments`,
+        leaked.length === 0 && !body.split("\n")[0].includes("zq7x"), JSON.stringify(leaked));
+      if (typeof error.report === "string") reports.push({ path: `error:${kind}`, kind, url: error.report });
+    });
+  }
+
+  // (d2) feedback tool path, for every kind, WITH tool + summary arguments. The
+  //      summary is meant to be in the title/body (the caller's own words), but the
+  //      marker line must hold only version + kind.
+  for (const kind of ["bug", "feature", "wrong_output"]) {
+    const r = await runTool("feedback", { kind, tool: "zq7x_tool_name", summary: "zq7x-secret-keyword OPP-ZQ7X-4242" }, sam);
+    const body = bodyOf(r.reportUrl);
+    const first = body.split("\n")[0];
+    ok(`FB-M5 feedback ${kind} ⇒ body's FIRST line is exactly the marker with the server version + kind (drop/alter it ⇒ RED)`,
+      first === expectMarker(kind), JSON.stringify(first));
+    ok(`FB-M6 feedback ${kind} ⇒ marker token exactly once, and the marker line holds no argument value (tool/summary stay out of it)`,
+      markerCount(body) === 1 && !/zq7x|OPP-ZQ7X/i.test(first), JSON.stringify({ n: markerCount(body), first }));
+    ok(`FB-M7 feedback ${kind} ⇒ existing prefill unchanged apart from the marker (summary still in the body, redact note still last)`,
+      body.includes("zq7x-secret-keyword OPP-ZQ7X-4242") && /PUBLIC issue/.test(body.split("\n").at(-1)), JSON.stringify(body.split("\n").at(-1)));
+    reports.push({ path: `feedback:${kind}`, kind, url: r.reportUrl });
+  }
+  {
+    // Omitted kind defaults to bug — the marker must say so too.
+    const first = bodyOf((await runTool("feedback", {}, sam)).reportUrl).split("\n")[0];
+    ok("FB-M8 feedback with no arguments ⇒ marker kind=bug (the default kind)", first === expectMarker("bug"), JSON.stringify(first));
+  }
+  {
+    // The user-facing privacy note must name everything the link now prefills.
+    const privacy = (await runTool("feedback", {}, sam)).privacy;
+    ok("FB-M10 feedback privacy note names every prefilled field (summary, tool name, server version, report kind)",
+      typeof privacy === "string" && /summary/i.test(privacy) && /tool name/i.test(privacy) && /server version/i.test(privacy) && /report kind/i.test(privacy), privacy);
+  }
+  {
+    // A value outside the closed sets can never reach the marker (or close the comment early).
+    const first = bodyOf(reportUrlForError("t", "schema_drift --> <img src=x>", "1.0.0; rm -rf /")).split("\n")[0];
+    ok("FB-M9 a malformed kind/version ⇒ marker writes v=unknown kind=unknown (never the raw value)",
+      first === "<!-- mcp-sam-gov:tool-report v=unknown kind=unknown -->", JSON.stringify(first));
+  }
+
+  // (d3) URL LENGTH. feedback.ts has no URL-length constant: the length is bounded by
+  //      the fixed templates plus the Zod input caps (feedback `tool` ≤ 80, `summary`
+  //      ≤ 500) and, on the error path, a registered tool name. The marker must add a
+  //      small fixed cost and keep every path inside that budget.
+  const MARKER_URL_COST_MAX = 100;
+  // A conservative ceiling for a URL a browser opens. NOTE: a 500-character summary of
+  // multi-byte text (e.g. Korean) already encodes past this today, before and after the
+  // marker; the marker does not change that, so FB-L3 pins the ASCII case only.
+  const REPORT_URL_MAX = 8000;
+  ok("FB-L0 every report path produced a URL to measure (5 paths)", reports.length === 5, JSON.stringify(reports.map((x) => x.path)));
+  for (const { path, kind, url } of reports) {
+    const body = bodyOf(url);
+    const first = body.split("\n")[0];
+    const q = new URL(url).searchParams;
+    q.set("body", body.split("\n").slice(1).join("\n"));
+    const cost = url.length - `${NEW_ISSUE}${q.toString()}`.length;
+    // Measure only when the removed first line really is the marker.
+    ok(`FB-L1 ${path} ⇒ the removed first line is the marker and it adds ≤ ${MARKER_URL_COST_MAX} URL characters (got ${cost})`,
+      first === expectMarker(kind) && cost > 0 && cost <= MARKER_URL_COST_MAX, JSON.stringify({ first, cost }));
+  }
+  {
+    const longestTool = TOOLS.reduce((a, t) => (t.name.length > a.length ? t.name : a), "");
+    for (const kind of ["schema_drift", "upstream_unavailable"]) {
+      const len = reportUrlForError(longestTool, kind, PKG_VERSION).length;
+      ok(`FB-L2 error ${kind} report for the longest registered tool name (${longestTool.length} chars) ⇒ URL ≤ 2000 (got ${len})`, len <= 2000, String(len));
+    }
+    for (const kind of ["bug", "feature", "wrong_output"]) {
+      // At the Zod caps with a character URLSearchParams expands 3× ('%' ⇒ %25).
+      const len = (await runTool("feedback", { kind, tool: "%".repeat(80), summary: "%".repeat(500) }, sam)).reportUrl.length;
+      ok(`FB-L3 feedback ${kind} at the input caps (tool 80, summary 500, 3×-encoded ASCII) ⇒ URL ≤ ${REPORT_URL_MAX} (got ${len})`, len <= REPORT_URL_MAX, String(len));
+    }
+  }
+
+  // (d4) the labeling workflow, checked statically AND executed against a fake client.
+  const wfText = censusReadFile(new URL("./.github/workflows/label-tool-reports.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  ok("FB-W1 label-tool-reports.yml triggers only on issues: [opened]", /\non:\n  issues:\n    types: \[opened\]\n\n/.test(wfText) && !/pull_request|workflow_dispatch|schedule:|issue_comment/.test(wfText), "trigger block");
+  ok("FB-W2 label-tool-reports.yml grants ONLY issues: write", /\npermissions:\n  issues: write\n\n/.test(wfText) && (wfText.match(/permissions:/g) || []).length === 1, "permissions block");
+  ok("FB-W3 label-tool-reports.yml has NO GitHub expression and NO shell run: step (issue title/body can never reach a shell)",
+    !wfText.includes("${{") && !/^\s*(-\s*)?run:/m.test(wfText), "expression / run: scan");
+  ok("FB-W4 label-tool-reports.yml uses actions/github-script at a major tag, like the repo's other actions", /uses: actions\/github-script@v\d+\n/.test(wfText), "uses line");
+  const scriptLines = [];
+  {
+    const lines = wfText.split("\n");
+    const at = lines.findIndex((l) => /^\s*script: \|\s*$/.test(l));
+    const indent = at >= 0 ? lines[at].search(/\S/) : 0;
+    for (const l of at >= 0 ? lines.slice(at + 1) : []) {
+      if (l.trim() !== "" && l.search(/\S/) <= indent) break;
+      scriptLines.push(l);
+    }
+  }
+  const minIndent = Math.min(...scriptLines.filter((l) => l.trim()).map((l) => l.search(/\S/)));
+  const script = scriptLines.map((l) => l.slice(minIndent)).join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  async function runWorkflow(body, existingLabels) {
+    const calls = [];
+    const issues = new Proxy({}, {
+      get: (_t, method) => async (params) => {
+        calls.push({ method: String(method), params });
+        if (method === "getLabel") {
+          if (existingLabels.includes(params.name)) return { data: { name: params.name } };
+          throw Object.assign(new Error("Not Found"), { status: 404 });
+        }
+        if (method === "addLabels") return { data: [] };
+        throw new Error(`unexpected API call issues.${String(method)}`);
+      },
+    });
+    const github = { rest: { issues } }; // any other namespace ⇒ TypeError ⇒ `threw` ⇒ RED
+    const failed = [];
+    const core = { info: () => {}, warning: () => {}, setFailed: (m) => failed.push(m) };
+    const context = { repo: { owner: "cliwant", repo: "mcp-sam-gov" }, payload: { issue: { number: 42, title: "$(curl evil) `id`", body } } };
+    let threw = null;
+    try { await new AsyncFunction("github", "context", "core", script)(github, context, core); } catch (e) { threw = e; }
+    const writes = calls.filter((c) => c.method !== "getLabel");
+    return { calls, writes, failed, threw };
+  }
+  ok("FB-W5 the github-script block was extracted from the workflow", script.includes("addLabels") && script.includes("context.payload"), script.slice(0, 80));
+  const ALL_LABELS = ["from-tool", "kind:schema_drift", "kind:upstream_unavailable", "kind:bug", "kind:feature", "kind:wrong_output"];
+  for (const { path, kind, url } of reports) {
+    // The real prefilled body the user would submit ⇒ from-tool + kind:<kind>.
+    const w = await runWorkflow(bodyOf(url), ALL_LABELS);
+    ok(`FB-W6 workflow on the ${path} prefilled body ⇒ exactly one addLabels([from-tool, kind:${kind}]), nothing else (drop the marker in dist ⇒ RED)`,
+      !w.threw && w.failed.length === 0 && w.writes.length === 1 && w.writes[0].method === "addLabels" && w.writes[0].params.issue_number === 42 &&
+      JSON.stringify(w.writes[0].params.labels) === JSON.stringify(["from-tool", `kind:${kind}`]),
+      JSON.stringify({ threw: String(w.threw), failed: w.failed, writes: w.writes }));
+  }
+  {
+    const w = await runWorkflow(`${expectMarker("wrong_output")}\nbody`, ["from-tool"]);
+    ok("FB-W7 kind label missing from the repo ⇒ adds ONLY from-tool (never creates kind:<kind>)",
+      !w.threw && w.writes.length === 1 && JSON.stringify(w.writes[0].params.labels) === JSON.stringify(["from-tool"]), JSON.stringify(w.writes));
+  }
+  {
+    const w = await runWorkflow("I found a bug in sam_search_opportunities.", ALL_LABELS);
+    const wNull = await runWorkflow(null, ALL_LABELS);
+    ok("FB-W8 no marker (or a null body) ⇒ ZERO API calls", !w.threw && w.calls.length === 0 && !wNull.threw && wNull.calls.length === 0, JSON.stringify({ a: w.calls, b: wNull.calls }));
+  }
+  {
+    const w = await runWorkflow(`${expectMarker("bug")}\nbody`, []);
+    ok("FB-W9 from-tool label missing ⇒ fails the job loudly, adds nothing (never creates a label)",
+      !w.threw && w.writes.length === 0 && w.failed.length === 1, JSON.stringify({ writes: w.writes, failed: w.failed }));
+  }
+  {
+    // The forged kind labels EXIST in the fake repo, so only the workflow's kind
+    // regex can keep them off (loosen it to kind=(\S+) ⇒ RED).
+    const FORGED = [...ALL_LABELS, "kind:Bad-Kind;", "kind:Bad-Kind"];
+    const w = await runWorkflow("see <!-- mcp-sam-gov:tool-report v=1.0.0 kind=Bad-Kind; rm -rf --> here", FORGED);
+    const w2 = await runWorkflow("<!-- mcp-sam-gov:tool-report v=1.0.0 kind=Bad-Kind -->\nbody", FORGED);
+    const onlyFromTool = (x) => !x.threw && x.writes.length === 1 && JSON.stringify(x.writes[0].params.labels) === JSON.stringify(["from-tool"]);
+    ok("FB-W10 token present but a malformed kind (even one whose kind:* label exists) ⇒ from-tool only (the raw text never becomes a label)",
+      onlyFromTool(w) && onlyFromTool(w2), JSON.stringify({ a: w.writes, b: w2.writes }));
+  }
 }
 
 // ── startup update notice (update-check.ts): opt-out, fail-silent, stderr-only ──
