@@ -1,20 +1,20 @@
 ---
 name: sam-gov
-description: Query and analyze the full surface of US federal contracting + spending + regulation + partner-vetting + market data. 150 tools across 52 data sources (keyless-first — only 4 sources need a free key). Covers SAM.gov opportunities (active + pre-solicitation, RFP/SOW attachment TEXT, contacting officers), USAspending + FPDS awards/recipients/competition/recompetes, GAO protests, entity vetting (OFAC sanctions, SAM exclusions, FAC single-audit, FDIC bank health, EPA ECHO), SEC EDGAR financials, Federal Register / Regulations.gov / eCFR + FAR/DFARS / Congress / GovInfo, pricing & labor & fiscal (GSA CALC, SCA/DBA wage determinations, BLS CPI/OEWS/QCEW, Treasury, BEA regional GDP, Census CBP market sizing, FRED macro, GSA per-diem), health & research funding (NIH/NSF/ClinicalTrials/CMS/NPPES), cyber compliance (NVD CVE + CISA KEV), trade tariffs (HTS), geo/disaster/state-local open data (Census geocode, FEMA, Socrata, CKAN), lobbying influence (Senate LDA), DOL labor-enforcement, data.gov + SBA size standards. Use for any US federal procurement / spending / regulation / vetting / market-sizing / macro question.
-when_to_use: federal contracting, SAM.gov search, GovCon opportunities, pre-solicitation shaping, RFP attachments / read the SOW text, USAspending awards, FPDS award actions, contracting officer lookup, NAICS / PSC analysis, agency spending, recompete radar, incumbent pressure, capture brief, bid no-bid, set-aside contracts (SDVOSB / 8(a) / WOSB / HUBZone), FAR/DFARS clause lookup, FAR compliance matrix, Section 889 / CMMC, vet a firm, OFAC sanctions, debarment / exclusions, single-audit findings, bank health (FDIC), EPA compliance, SEC EDGAR financials, teaming partners, GAO bid protests, wage determination / SCA / DBA / CALC labor rates, BLS CPI escalation / OEWS wages / QCEW market size, Treasury fiscal data, BEA regional GDP, Census business patterns / market sizing, FRED macro (GDP/CPI/rates), GSA per-diem travel cost, Federal Register / Regulations.gov rules, eCFR, Congress bills, GovInfo, grants.gov / federal grants, CFDA, NIH / NSF / clinical trials / CMS Open Payments / NPPES, CVE / CISA KEV cyber, HTS tariff, FEMA disasters, Socrata / CKAN open data, Senate LDA lobbying, DOL wage-hour / OSHA enforcement, data.gov datasets, SBA size standard, which API keys are set
+description: Query and analyze US federal contracting, spending, regulation, vetting, and market data. 152 tools across 54 data sources, keyless-first (147 tools need no key; only 5 tools across Census CBP, FRED, BEA, and DOL data need a free key). Covers SAM.gov opportunities, pre-solicitations, RFP/SOW attachment text; USAspending + FPDS awards, recompetes, disaster spending; GAO protests; vetting (OFAC, SAM exclusions, FAC audits, FDIC, EPA ECHO/TRI, CMS revocations); SEC EDGAR; Federal Register, Regulations.gov, eCFR, FAR/DFARS, Congress, GovInfo; pricing, labor, fiscal data (GSA CALC, wage determinations, BLS, Treasury, BEA, Census, FRED, per-diem); NIH/NSF/ClinicalTrials/CMS/NPPES health data; NVD/CISA KEV/NIST 800-53 cyber; tariffs; FEMA/NWS/Census geo; state/local bids and checkbooks (Socrata, CKAN, OpenGov, Bonfire, ArcGIS); lobbying, DOL enforcement, SBA size standards. Use for any US federal or state/local procurement, spending, regulation, vetting, market-sizing, or macro question.
+when_to_use: federal contracting, SAM.gov search, GovCon opportunities, pre-solicitation shaping, RFP attachments / read the SOW text, USAspending awards, FPDS award actions, contracting officer lookup, NAICS / PSC analysis, agency spending, recompete radar, incumbent pressure, capture brief, bid no-bid, set-aside contracts (SDVOSB / 8(a) / WOSB / HUBZone), FAR/DFARS clause lookup, FAR compliance matrix, Section 889 / CMMC, vet a firm, OFAC sanctions, debarment / exclusions, single-audit findings, bank health (FDIC), EPA compliance, SEC EDGAR financials, teaming partners, GAO bid protests, wage determination / SCA / DBA / CALC labor rates, BLS CPI escalation / OEWS wages / QCEW market size, Treasury fiscal data, BEA regional GDP, Census business patterns / market sizing, FRED macro (GDP/CPI/rates), GSA per-diem travel cost, Federal Register / Regulations.gov rules, eCFR, Congress bills, GovInfo, grants.gov / federal grants, CFDA, NIH / NSF / clinical trials / CMS Open Payments / NPPES, Medicare providers / hospitals / care facilities / revoked providers, CVE / CISA KEV / NIST 800-53 cyber, HTS tariff, FEMA disasters / hazard mitigation, COVID / IIJA disaster spending by state, Socrata / CKAN open data, state contracts awarded / state checkbook vendor payments, Senate LDA lobbying, DOL wage-hour / OSHA enforcement, data.gov datasets, SBA size standard, which API keys are set
 disable-model-invocation: false
 user-invocable: true
 ---
 
-# SAM.gov federal-data skill — 150 tools across 52 sources
+# SAM.gov federal-data skill — 152 tools across 54 sources
 
-This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wrapped from `@cliwant/mcp-sam-gov`) to answer the full surface of US federal contracting / spending / regulation / vetting / market questions end-to-end — from discovering (and shaping) an opportunity, to **reading the actual RFP/SOW documents**, running a **FAR/DFARS compliance matrix**, **vetting a firm** (sanctions, exclusions, audits, bank health, EPA), **sizing a market** (establishments + wages + regional GDP), pricing the bid against statutory wage floors, and pulling **macro context** for escalation.
+This skill teaches Claude how to use the **`sam-gov` MCP server** (152 tools wrapped from `@cliwant/mcp-sam-gov`) to answer the full surface of US federal contracting / spending / regulation / vetting / market questions end-to-end — from discovering (and shaping) an opportunity, to **reading the actual RFP/SOW documents**, running a **FAR/DFARS compliance matrix**, **vetting a firm** (sanctions, exclusions, audits, bank health, EPA), **sizing a market** (establishments + wages + regional GDP), pricing the bid against statutory wage floors, and pulling **macro context** for escalation.
 
 > **Setup:** the `sam-gov` MCP server must be reachable. `/plugin install cliwant/mcp-sam-gov` registers it automatically; otherwise see the [repo README](https://github.com/cliwant/mcp-sam-gov). Host prefixing: Claude Code exposes tools as `mcp__sam-gov__<tool>`; bare MCP hosts use just `<tool>`. Use whichever your host gives you.
 
-## Tool inventory — 150 tools, keyless-first
+## Tool inventory — 152 tools, keyless-first
 
-**Keyless-first: 48 of 52 sources need no key. Only 4 sources require a free key** (marked 🔑 below): Census CBP (`census_business_patterns`), FRED (`fred_search_series`, `fred_series_observations`), BEA (`bea_regional_data`), and DOL's *data* endpoint (`dol_get_dataset`; DOL's catalog is keyless). Those 4 tools **throw** an honest config error without a key. A handful of others take an *optional* free key for higher limits (see the Keys section). The server is **the only source of truth** — never invent notice IDs, officer names, award amounts, NAICS codes, or regulation citations.
+**Keyless-first: 147 of the 152 tools work with no API key, and 50 of 54 sources need no key. Only 5 tools, across 4 sources, require a free key** (marked 🔑 below): Census CBP (`census_business_patterns`), FRED (`fred_search_series`, `fred_series_observations`), BEA (`bea_regional_data`), and DOL's *data* endpoint (`dol_get_dataset`; DOL's catalog is keyless). Those 5 tools **throw** an honest config error without a key. A handful of others take an *optional* free key for higher limits (see the Keys section). The server is **the only source of truth** — never invent notice IDs, officer names, award amounts, NAICS codes, or regulation citations.
 
 ### Opportunities & solicitations — SAM.gov + Grants.gov (10)
 - `sam_search_opportunities` — search active SAM.gov contracting opportunities (filters: query, ncode/NAICS, organizationName, state, setAside, limit).
@@ -28,7 +28,7 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wra
 - `grants_search` — Grants.gov federal grant opportunities (financial assistance, distinct from contracts).
 - `grants_get_opportunity` — full grant detail (description, dates, award ceiling, applicant types, CFDA).
 
-### Spending, awards & competition — USAspending + FPDS + GAO (29)
+### Spending, awards & competition — USAspending + FPDS + GAO (31)
 - `usas_search_awards` — aggregate share-of-wallet at agency × NAICS.
 - `usas_search_individual_awards` — line-item contracts (returns `generatedInternalId`).
 - `usas_get_award_detail` — per-award detail (period_of_performance, options, set-aside, competition, offers) by generatedInternalId.
@@ -45,6 +45,8 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wra
 - `usas_search_cfda_spending` — spending by CFDA grant-program code (grants, not contracts).
 - `usas_search_state_spending` — spending by state / territory.
 - `usas_search_federal_account_spending` — spending mapped to Treasury Account Symbols (TAS).
+- `usas_list_disaster_codes` — the complete list of Disaster Emergency Fund Codes (DEFC: COVID-19, IIJA/infrastructure, other emergency laws) with group/title/public law. Call FIRST to get the codes for `usas_disaster_spending`.
+- `usas_disaster_spending` — disaster/emergency-fund obligations or outlays BY GEOGRAPHY (state / county / congressional district) for given `defCodes` — "which states captured COVID/IIJA relief money". Complete set, no paging; a real $0 stays 0 (IIJA can report $0 obligations with a nonzero awardCount), absent → null.
 - `usas_search_recipients` — recipient list with parent/child hierarchy (returns `id`).
 - `usas_get_recipient_profile` — full recipient detail (UEI, alternate names, business types, totals).
 - `usas_get_agency_profile` — agency mission/abbreviation/website/subtier count by toptierCode.
@@ -59,7 +61,7 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wra
 - `fpds_search_awards` — FPDS-NG federal contract *award actions* (the authoritative action feed).
 - `gao_protest_lookup` — recent GAO bid-protest decisions (public RSS; `complete:false` — recent ~25-item window only, NOT full history).
 
-### Entity & partner vetting — OFAC · SAM · FAC · FDIC · EPA (14)
+### Entity & partner vetting — OFAC · SAM · FAC · FDIC · EPA (15)
 - `ofac_screen_entity` — OFAC denied-party / sanctions screening.
 - `sam_check_exclusions` — SAM debarment/exclusion screen by name and/or UEI/CAGE. Empty ≠ "responsible" — only "no ACTIVE match"; a name match isn't identity-proof (verify UEI/CAGE).
 - `sam_integrity_lookup` — one-call integrity screen; `integrityFlag` = `excluded` or `review_fapiis` — NEVER "clear" keylessly (FAPIIS has no keyless API); check `fapiisUrl`.
@@ -74,6 +76,7 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wra
 - `fdic_industry_summary` — industry & state banking-sector annual aggregates.
 - `echo_search_facilities` — search EPA-regulated facilities by state with compliance/enforcement screening.
 - `echo_facility_report` — EPA ECHO Detailed Facility Report for one facility (by FRS RegistryID).
+- `epa_tri_facilities` — EPA Toxics Release Inventory (TRI) reporting facilities by state / facility name / county (needs `state` or `facilityName`) — an environmental-footprint / place-of-performance screen. Nominal TRI reporters, NOT a compliance/enforcement finding (use ECHO for that); `closed` unknown → null.
 
 ### Financial disclosure — SEC EDGAR (8)
 - `edgar_lookup_cik` — company ticker/name → 10-digit SEC CIK.
@@ -85,7 +88,7 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wra
 - `edgar_filing_index` — bulk cross-filer filing index for a quarter.
 - `edgar_daily_filing_index` — per-day cross-filer filing index.
 
-### Regulatory & legislative — Fed Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (18)
+### Regulatory & legislative — Fed Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (19)
 - `fed_register_search_documents` — search Federal Register docs by query / agency / type / date.
 - `fed_register_get_document` — full detail by document_number (citation, body URL, CFR refs).
 - `fed_register_public_inspection` — the public-inspection desk (pre-publication).
@@ -134,33 +137,50 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wra
 - `cms_query_dataset` — query a CMS Open Payments distribution (industry → physician payments).
 - `nppes_lookup_provider` — CMS/HHS NPPES NPI Registry provider lookup.
 
-### Cyber compliance — NVD + CISA KEV (2)
+### Healthcare providers & facilities — CMS provider data (5)
+All keyless (data.cms.gov); `totalAvailable` is the exact upstream count, never the page length (the three tools that use a separate count query return null + a note if that count fails). Public organization/provider-level data with no patient identifiers — a market or due-diligence signal, NOT a quality, fraud, or fitness determination.
+- `cms_medicare_provider_services` — Medicare Part-B utilization for a provider (`npi`) or `state` (one is REQUIRED): HCPCS services, beneficiaries, and submitted / allowed / paid amounts. Healthcare market sizing and competitor intel; pairs with `nppes_lookup_provider` (who a provider is → what they bill). One annual vintage, disclosed in `_meta`.
+- `cms_hospital_compare` — Medicare-certified hospitals by `state` and/or `facilityName` fragment (one is REQUIRED): type, ownership, emergency-services flag, CMS 1–5 star rating ('Not Available' → null, never 0).
+- `cms_facility_directory` — nursing homes / home health agencies / hospices / dialysis facilities (`facilityType` REQUIRED; optional `state`, `facilityName`): name, address, ownership. A field the chosen dataset lacks → null, never an empty string.
+- `cms_dmepos_suppliers` — Medicare durable medical equipment (DMEPOS) suppliers for an `npi` or `state` (one is REQUIRED): HCPCS codes, beneficiaries, claims, and submitted / allowed / paid amounts. The supply-side complement to `cms_medicare_provider_services`.
+- `cms_revoked_providers` — CMS's public list of revoked Medicare providers & suppliers (optional `npi` / `state` / exact `lastName`): revocation reason, effective date, re-enrollment bar. Vetting before teaming or subcontracting, in the same class as OFAC / SAM exclusions — not a current-eligibility or guilt finding.
+
+### Cyber compliance — NVD + CISA KEV + NIST 800-53 (3)
 - `cve_lookup` — NIST NVD CVE records by cveId or keyword/CPE/severity/date, each row JOINED with CISA KEV status (severity + mandated remediation date in one row). not-in-KEV ≠ safe. Optional NVD_API_KEY raises the rate.
 - `cisa_kev_lookup` — filter the CISA KEV catalog standalone (binding BOD 22-01 / BOD 26-04 due-dates). Works when NVD is rate-limited. not-in-KEV ≠ safe caveat on every response.
+- `nist_800_53_controls` — NIST SP 800-53 Rev 5 security & privacy controls by `controlId` / `family` / `keyword` — the requirement text behind FedRAMP / CMMC / RMF mapping.
 
-### Trade & tariffs — USITC (1)
+### Trade, tariffs & logistics — USITC · CBP (2)
 - `hts_lookup` — US import-tariff classification + duty rates from the USITC Harmonized Tariff Schedule.
+- `cbp_border_wait_times` — live CBP land-border commercial-vehicle (freight-truck) wait times at US–Canada and US–Mexico ports (standard + FAST lanes); passenger/pedestrian lanes are not included.
 
-### Geo, disaster & state/local open data — Census · FEMA · Socrata · CKAN (8)
+### Geo, disaster & state/local open data — Census · FEMA · NWS · Socrata · CKAN (10)
 - `census_geocode_address` — one-line US address → matched address + Census geographies (tract, CD, place).
 - `census_geographies_by_coordinates` — longitude/latitude point → Census geographies.
 - `fema_disaster_declarations` — FEMA disaster / emergency declarations by state, type, incident, year.
-- `fema_search_public_assistance` — FEMA Public Assistance funded projects.
+- `fema_search_public_assistance` — FEMA Public Assistance funded projects (disaster RECOVERY spend).
+- `fema_search_hazard_mitigation` — FEMA Hazard Mitigation Assistance projects (HMGP / FMA / PDM / BRIC resilience grants to state/local/tribal subrecipients) — the disaster-RESILIENCE axis. `state` accepts a 2-letter code ('AL') or the full name ('Alabama') — the dataset stores full names and the tool maps codes for you; totalAvailable is the exact filtered total; amounts absent → null.
+- `nws_active_alerts` — currently-active National Weather Service watches / warnings / advisories (filter `state`, `event`) — live disaster readiness that pairs with the FEMA tools.
 - `socrata_discover_datasets` — find Socrata dataset 4x4 ids by keyword.
 - `socrata_query` — query rows from an allowlisted Socrata/SODA open-data portal.
 - `ckan_discover_datasets` — find CKAN datastore resource ids by keyword.
 - `ckan_query` — query rows from an allowlisted CKAN datastore resource (state/city spend/checkbook).
 
-### SLED bid platforms — OpenGov · Bonfire · ArcGIS (6)
+### SLED bid platforms & state checkbooks — OpenGov · Bonfire · ArcGIS · Tableau · Open Checkbook (8)
 - `opengov_list_governments` — directory of 525+ US state/local governments on **OpenGov Procurement** (filter by `state`/`query`); feed a result's `code` to the next tool.
 - `opengov_search_solicitations` — a government's **LIVE public solicitations** (title, `status` [open = accepting], deadline, portal link). Consumes only the anonymous endpoints the public portal itself calls (keyless).
 - `bonfire_list_organizations` — curated live-verified 186-org US seed directory of governments on **Bonfire (Euna)** (filter `state`/`query`); feed a result's `org` to the next tool.
 - `bonfire_search_opportunities` — an org's currently-open opportunities via keyless RSS (referenceNumber, name, `closeDate`, link). The RSS is the **complete** open set (totalAvailable = the exact open count).
 - `arcgis_hub_discover_datasets` — discover ArcGIS Hub datasets by keyword (GIS / infrastructure / permits / zoning / procurement — the SLED layer Socrata & CKAN don't cover). **Global open platform → a DISCOVERY aid** (publisher surfaced for vetting), not a curated official-source allowlist.
-- `arcgis_feature_query` — query rows from a curated allowlist of **23 US-gov ArcGIS REST feature layers**: DC OCP PASS live solicitations (~25k); local-gov checkbooks/contracts (Las Vegas, Baltimore, Naperville, Worcester, Topeka, Miami-Dade…); **state DOT bid/award registers (TX / AK / IA / OK)**. Honest match-count total; epoch-ms date disclosure.
+- `arcgis_feature_query` — query rows from a curated allowlist of **27 US-gov ArcGIS REST feature layers**: DC OCP PASS live solicitations (~25k); local-gov checkbooks/contracts (Las Vegas, Baltimore, Naperville, Worcester, Topeka, Miami-Dade…); **state DOT bid/award registers (TX / AK / IA / OK)**; **North Dakota DOT federal flex-funding award layers** (`nddot_flex_setaside_road` / `nddot_flex_partner_road` / `nddot_flex_setaside_bridge` / `nddot_flex_partner_bridge`). These are NDDOT federal flex-funding AWARDS whose recipients are **local public agencies** — counties, townships, and cities, named in `LPA_NAME` / `LPA_TYPE` — **NOT vendors, vendor contracts, or winning bids**. Their `$` amounts (`Total_Project_Cost`, `Flex_Funds_Awarded`) are FORMATTED STRINGS; parse them client-side. They are a *proxy*, since ND's statewide checkbook and procurement portal aren't keyless-reachable. Honest match-count total; epoch-ms date disclosure.
+- `tableau_view_csv` — a curated US-gov **Tableau Server Guest** view's COMPLETE CSV export (keyless), paged client-side (`view`, `limit`/`offset`). One view today: `mt_contracts_awarded` = **State of Montana (DOA) Contracts Awarded** (~4,554 awards: $ Awarded, Award Date, IFB/RFP Event Type, Event#, Vendor Name, Agency). Use for "who won Montana state contracts". totalAvailable = the full export row count; amounts are FORMATTED STRINGS (parse client-side); empty → null; freshness is the publisher's and can lag.
+- `open_checkbook_search` — row-level **vendor-payment** search over a curated Socrata **Open Expenditures** checkbook portal (keyless; `portal`, EXACT-match `year`/`vendor`/`org`/`expenseCategory`, `sortBy`/`sortOrder`, `limit`/`offset`). One portal today: `sd` = **State of South Dakota Open Checkbook** (~740,980 payments). Use for "what did South Dakota pay vendor X / department Y". Only the **~3 most-recent fiscal years** (NOT full history); a partial/misspelled filter value → honest count:0, not a fuzzy match; totalAvailable is the real filtered count; freshness is the publisher's and can lag (use `sortBy: payment_date`, `sortOrder: desc` to see the newest payment date).
 
-### Dataset discovery — data.gov (1)
+**SLED local procurement — how the keyless surfaces fit together:** (1) `socrata_query` / `socrata_discover_datasets` reach **53 curated hosts** — state + major-city (NYC City Record, Chicago/SF/LA) + a deep **county/city sweep** (KC MO, Pittsburgh, Atlanta, Dallas, Baton Rouge, Fulton/Howard/Ramsey/Macoupin/Prince George's counties, MA-Comptroller CTHRU, USAC E-Rate live bids…) — contracts / vendors / checkbook / **live solicitations**; (2) **`opengov_*`** (525+ govs' live solicitations) and **`bonfire_*`** (per-org open-opportunity RSS) for the bid-notice feeds Socrata doesn't carry; (3) **`arcgis_feature_query`** for gov ArcGIS-REST layers (DC live solicitations, state DOT bid/award registers, ND DOT flex-funding awards to local public agencies); (4) **`tableau_view_csv`** (Montana contracts awarded) and **`open_checkbook_search`** (South Dakota vendor payments, ~3 recent FYs) for state award/payment exports — one view / one portal each today. For a "who's bidding / what's open in <locality>" question, try opengov/bonfire first, then the local Socrata host.
+
+### Dataset & registry discovery — data.gov · get.gov (2)
 - `datagov_search_datasets` — search the data.gov v4 catalog for federal open datasets across all publishing agencies.
+- `search_gov_domains` — the authoritative CISA get.gov .gov domain registry (resolve which org owns a `.gov`; enumerate federal agencies; map SLED entities by state / domain type).
 
 ### Small business — SBA (1)
 - `sba_size_standard` — SBA size standard for a 6-digit NAICS (set-aside eligibility gate). Returns standardType (receipts/employees/assets), normalized threshold, unit, footnote; value is `asOf` retrieval — re-verify for high-stakes eligibility.
@@ -172,8 +192,9 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wra
 ### Lobbying & influence — US Senate LDA (1)
 - `lda_search_filings` — Senate lobbying filings: who is paid HOW MUCH to lobby WHICH agency on WHICH issue (keyless; optional LDA_API_KEY raises the rate). totalAvailable is the API's real ~1.95M-filing match count, not page rows; income/expenses null-never-0.
 
-### Server utilities — key discovery (1)
+### Server utilities — key discovery · feedback (2)
 - `api_key_status` — list every key the server can use, required vs optional, signup URL, what it unlocks, and whether each is currently set (a boolean — the value is NEVER shown). The live source of truth for key config.
+- `feedback` — build a PREFILLED GitHub issue link (bug / feature / wrong_output) for the USER to open & submit (the server never posts). Use when the user reports a problem or wants a missing capability. `schema_drift` / `upstream_unavailable` errors also carry a `report` URL.
 
 ### Product safety & recalls — openFDA · NHTSA · CPSC (6)
 - `openfda_enforcement` — drug/device/food recalls & FDA enforcement (recalling firm, Class I/II/III, reason, state).
@@ -189,14 +210,6 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wra
 ### Nonprofit vendors — IRS 990 via ProPublica (2)
 - `nonprofit_search` — tax-exempt orgs by name/state/NTEE (IRS Form 990). Provenance: ProPublica (non-`.gov`).
 - `nonprofit_financials` — a nonprofit's 990 financials by EIN.
-
-### Other recent additions
-- `nist_800_53_controls` — NIST SP 800-53 Rev5 security controls (baseline for FedRAMP / CMMC / 889 mapping).
-- `nws_active_alerts` — live National Weather Service alerts (disaster-readiness, pairs with FEMA).
-- `cbp_border_wait_times` — live CBP border-crossing wait times.
-- `search_gov_domains` — the authoritative CISA get.gov registry (resolve which org owns a `.gov`; map SLED entities).
-- **SLED local procurement (the state/local/education bid layer)** — three complementary keyless surfaces: (1) `socrata_query` / `socrata_discover_datasets` now reach **53 curated hosts** — state + major-city (NYC City Record, Chicago/SF/LA) + a deep **county/city sweep** (KC MO, Pittsburgh, Atlanta, Dallas, Baton Rouge, Fulton/Howard/Ramsey/Macoupin/Prince George's counties, MA-Comptroller CTHRU, USAC E-Rate live bids…) — contracts / vendors / checkbook / **live solicitations**; (2) **`opengov_*`** (525+ govs' live solicitations) and **`bonfire_*`** (per-org open-opportunity RSS) for the bid-notice feeds Socrata doesn't carry; (3) **`arcgis_feature_query`** for gov ArcGIS-REST layers (DC live solicitations, state DOT bid/award registers). For a "who's bidding / what's open in <locality>" question, try opengov/bonfire first, then the local Socrata host.
-- `feedback` — build a PREFILLED GitHub issue link (bug / feature / wrong_output) for the USER to open & submit (the server never posts). Use when the user reports a problem or wants a missing capability. `schema_drift` / `upstream_unavailable` errors also carry a `report` URL.
 
 ## Standard workflows
 
@@ -262,7 +275,7 @@ This skill teaches Claude how to use the **`sam-gov` MCP server** (150 tools wra
 3. `sam_integrity_lookup(uei|cage|name)` — one-call integrity (`integrityFlag` = excluded or review_fapiis; never "clear" keylessly — check `fapiisUrl`).
 4. `fac_search_audits` → `fac_get_findings` — adverse Single Audit findings.
 5. (Financial firm) `fdic_search_institutions` → `fdic_risk_ratios` / `fdic_institution_financials` — bank health.
-6. (Facility) `echo_search_facilities` → `echo_facility_report` — EPA compliance/enforcement.
+6. (Facility) `echo_search_facilities` → `echo_facility_report` — EPA compliance/enforcement; `epa_tri_facilities` for the toxics-release footprint. (Healthcare firm) `cms_revoked_providers` — Medicare revocation list.
 7. (Public co.) `edgar_lookup_cik` → `edgar_company_facts` / `edgar_company_filings` — revenue trend + 10-K.
 8. `sba_size_standard(naics)` — small for the set-aside NAICS?
 
@@ -302,6 +315,7 @@ For FedRAMP / CMMC / SBOM component review:
 1. `nih_reporter_search_projects` / `nsf_search_awards` — awarded research grants on a topic (funder/competitive intel).
 2. `clinicaltrials_search_studies` → `clinicaltrials_get_study`; `clinicaltrials_facet_counts` for the distribution.
 3. `cms_search_datasets` → `cms_query_dataset` — CMS Open Payments industry→physician payments; `nppes_lookup_provider` to confirm a provider NPI.
+4. (Healthcare market) `cms_medicare_provider_services` / `cms_dmepos_suppliers` (what providers and equipment suppliers bill Medicare, by NPI or state); `cms_hospital_compare` / `cms_facility_directory` (where facilities are, ownership, CMS star rating). Screen a healthcare partner with `cms_revoked_providers`.
 
 ### Workflow 18 — Config / which keys are set (NEW)
 1. `api_key_status` — the live source of truth: every key, required vs optional, signup URL, what it unlocks, and whether it's currently set (boolean; value never shown).
@@ -315,7 +329,7 @@ For FedRAMP / CMMC / SBOM component review:
 - **Quote sparingly** from RFP body / regulation text — at most 1 snippet, < 15 words; point to the source URL.
 - **`totalAvailable` is the real upstream total**, not the rows on this page — report it as the match count; page forward when `hasMore`.
 - **Suppression / missing → null, never 0** — Census/BEA/QCEW/FRED/per-diem/LDA all map a withheld or missing value to null; a genuine 0 is preserved. Never read a null as "$0".
-- **Key-required tools throw without a key** — the 4 🔑 tools (Census, FRED×2, BEA, DOL data) return an honest config error, not a fake empty. Check `api_key_status`.
+- **Key-required tools throw without a key** — the 5 🔑 tools (Census, FRED×2, BEA, DOL data) return an honest config error, not a fake empty. Check `api_key_status`.
 - Notice IDs starting with `demo-` are fictional demo fixtures; they don't exist on sam.gov.
 
 ## Common pitfalls
@@ -352,12 +366,12 @@ For FedRAMP / CMMC / SBOM component review:
 | `BEA_API_KEY` | `bea_regional_data` | apps.bea.gov/API/signup/ |
 | `DOL_API_KEY` | `dol_get_dataset` (the DOL *data* endpoint; `dol_list_datasets` catalog is keyless) | dataportal.dol.gov/registration |
 
-**Optional — only raise a rate limit or unlock one filter (all tools work keyless without them):**
+**Optional — only raise a rate limit or unlock one filter (the tools these keys affect all work without them):**
 
 | Env var | Effect |
 |---|---|
 | `SAM_GOV_API_KEY` | authenticated SAM.gov v2 search + the organizationName filter + full archive (>~12mo) |
-| `DATA_GOV_API_KEY` | higher limits across api.data.gov sources (Regulations.gov, FAC, NPPES, CMS, data.gov catalog, GSA per-diem) — lifts the shared `DEMO_KEY` cap |
+| `DATA_GOV_API_KEY` | higher limits across api.data.gov sources (Regulations.gov, Congress.gov, GovInfo, FAC, data.gov catalog, GSA per-diem) — lifts the shared `DEMO_KEY` cap |
 | `LDA_API_KEY` | higher rate on `lda_search_filings` |
 | `BLS_API_KEY` | BLS v2 tier (~500/day vs keyless ~25/day) for `bls_timeseries` (QCEW/CSV path is un-rate-limited regardless) |
 | `NVD_API_KEY` | higher NVD rate for `cve_lookup` |

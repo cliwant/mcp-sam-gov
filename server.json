@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cliwant/mcp-sam-gov",
-  "description": "Keyless MCP: 150 tools for US federal + state/local (SLED) contracting, spending & regulation",
+  "description": "Keyless-first MCP: 152 tools for US federal + state/local (SLED) contracting, spending & regulation",
   "repository": {
     "url": "https://github.com/cliwant/mcp-sam-gov",
     "source": "github"
   },
-  "version": "1.12.0",
+  "version": "1.13.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@cliwant/mcp-sam-gov",
-      "version": "1.12.0",
+      "version": "1.13.0",
       "transport": {
         "type": "stdio"
       },
@@ -24,19 +24,19 @@
         },
         {
           "name": "CENSUS_API_KEY",
-          "description": "Optional free key for Census business-patterns tools.",
+          "description": "Required only for census_business_patterns (the Census Data API has no keyless tier); every other tool works without it.",
           "isSecret": true,
           "isRequired": false
         },
         {
           "name": "FRED_API_KEY",
-          "description": "Optional free key for FRED economic-series tools.",
+          "description": "Required only for fred_search_series and fred_series_observations (FRED has no keyless tier); every other tool works without it.",
           "isSecret": true,
           "isRequired": false
         },
         {
           "name": "BEA_API_KEY",
-          "description": "Optional free key for BEA regional/industry economic tools.",
+          "description": "Required only for bea_regional_data (the BEA Data API has no keyless tier); every other tool works without it.",
           "isSecret": true,
           "isRequired": false
         },
@@ -48,13 +48,13 @@
         },
         {
           "name": "DOL_API_KEY",
-          "description": "Optional free key for DOL data-endpoint tools.",
+          "description": "Required only for dol_get_dataset (DOL's data endpoint has no keyless tier; dol_list_datasets works without it).",
           "isSecret": true,
           "isRequired": false
         },
         {
           "name": "DATA_GOV_API_KEY",
-          "description": "Optional free api.data.gov key (raises DEMO_KEY limits for DOL/govinfo tools).",
+          "description": "Optional free api.data.gov key; raises DEMO_KEY limits for Regulations.gov, Congress.gov, GovInfo, FAC, the data.gov catalog and GSA per-diem.",
           "isSecret": true,
           "isRequired": false
         },

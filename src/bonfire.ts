@@ -11,7 +11,7 @@
  * ★ NO keyless directory API: Bonfire's authoritative org list
  * (`GET common-production-api-global.bonfirehub.com/v1.0/organizations/external`)
  * is AUTH-GATED (a free vendor-account token) — OUT OF BOUNDS (we never sign in).
- * So this ships a CURATED, live-verified SEED directory (187 US orgs; §BONFIRE_
+ * So this ships a CURATED, live-verified SEED directory (186 US orgs; §BONFIRE_
  * ORGS) as `bonfire_list_organizations`, and documents the keyless RSS-probe
  * refresh method (no catch-all: `{slug}.bonfirehub.com/opportunities/rss` returns
  * 200 <rss> for a real org, a connection failure for a non-provisioned slug). The
@@ -53,7 +53,7 @@ const BONFIRE_SOURCE = (org: string) =>
 const BONFIRE_SEED_NOTE =
   "This directory is a CURATED, live-verified SEED (Bonfire has NO keyless org-list API; the authoritative list is auth-gated and out of bounds). Euna markets up to ~900 US orgs, so the seed is partial — probe `{slug}.bonfirehub.com/opportunities/rss` (200 <rss> = real org) to extend. Feed a result's `org` to bonfire_search_opportunities.";
 
-// ─── The curated 187-org US seed directory (live-verified 2026-07-19) ──
+// ─── The curated 186-org US seed directory (live-verified 2026-07-19) ──
 // "slug|Entity|ST" — the slug is the RSS subdomain. Non-US (.ca / cayman / etc.)
 // deliberately excluded.
 const BONFIRE_SEED_RAW: readonly string[] = [

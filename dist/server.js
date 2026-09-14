@@ -92,7 +92,7 @@ import { realpathSync } from "node:fs";
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
 // Keep in sync with package.json "version" (asserted at release; see CHANGELOG).
-const SERVER_VERSION = "1.12.0";
+const SERVER_VERSION = "1.13.0";
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 const SamSearchInput = z.object({
     query: z.string().optional().describe("Free-text title query"),
@@ -2574,7 +2574,7 @@ const OpengovSearchSolicitationsInput = z.object({
 // ─── Bonfire (Euna) — keyless per-org open-opportunity RSS (SLED bids) ─
 // SLED bid campaign. Thousands of US state/local govs on Bonfire expose a keyless
 // RSS of open opportunities at {org}.bonfirehub.com/opportunities/rss. Ships a
-// curated 187-org seed directory. Fixed-suffix SSRF. org = charclass slug.
+// curated 186-org seed directory. Fixed-suffix SSRF. org = charclass slug.
 const BonfireListOrganizationsInput = z.object({
     state: z.string().length(2).optional().describe("2-letter US state filter (client-side), e.g. 'TX', 'CA'. Optional."),
     query: z.string().min(1).max(120).optional().describe("Case-insensitive name substring filter (client-side), e.g. 'county', 'ISD'. Optional."),
@@ -2624,7 +2624,7 @@ const TableauViewCsvInput = z.object({
 const ArcgisFeatureQueryInput = z.object({
     service: z
         .enum(arcgisFeature.ARCGIS_SERVICES.map((s) => s.key))
-        .describe("The curated ArcGIS layer (SSRF allowlist enum). DC OCP PASS: 'dc_pass_solicitations' (live solicitations ~25k), 'dc_pass_contracts', 'dc_pass_purchase_orders', 'dc_pass_payments'. Other US local govs: 'asheville_purchase_orders'/'asheville_po_summary' (Asheville NC), 'bellevue_vendor_payments'/'bellevue_awarded_contracts' (Bellevue WA), 'miamidade_purchase_orders_2025'/'miamidade_purchase_orders_2017' (Miami-Dade FL, current/2017), 'suffolk_county_ny_contracts_2018' (Suffolk County NY), 'matsu_borough_ak_checkbook' (Matanuska-Susitna Borough AK), 'lasvegas_checkbook' (Las Vegas NV ~373k), 'baltimore_checkbook' (Baltimore City MD ~367k), 'naperville_vendor_payments' (Naperville IL ~127k), 'worcester_ma_checkbook_fy25' (Worcester MA FY25), 'lasvegas_purchasing_contracts' (Las Vegas NV contract register), 'txdot_construction_projects' (Texas DOT, awarded construction company ~85k), 'akdot_construction_awards'/'akdot_aashtoware_proposals' (Alaska DOT&PF bid awards/proposals), 'iowadot_public_bid_awards' (Iowa DOT public bid), 'okdot_cirb_contract_status' (Oklahoma DOT CIRB contract status), 'topeka_checkbook_aggregate' (Topeka KS checkbook FY2015–2023 ~332k). 23 curated services (state DOT bid/award registers: TX/AK/IA/OK + municipal checkbooks/contracts)."),
+        .describe("The curated ArcGIS layer (SSRF allowlist enum). DC OCP PASS: 'dc_pass_solicitations' (live solicitations ~25k), 'dc_pass_contracts', 'dc_pass_purchase_orders', 'dc_pass_payments'. Other US local govs: 'asheville_purchase_orders'/'asheville_po_summary' (Asheville NC), 'bellevue_vendor_payments'/'bellevue_awarded_contracts' (Bellevue WA), 'miamidade_purchase_orders_2025'/'miamidade_purchase_orders_2017' (Miami-Dade FL, current/2017), 'suffolk_county_ny_contracts_2018' (Suffolk County NY), 'matsu_borough_ak_checkbook' (Matanuska-Susitna Borough AK), 'lasvegas_checkbook' (Las Vegas NV ~373k), 'baltimore_checkbook' (Baltimore City MD ~367k), 'naperville_vendor_payments' (Naperville IL ~127k), 'worcester_ma_checkbook_fy25' (Worcester MA FY25), 'lasvegas_purchasing_contracts' (Las Vegas NV contract register), 'txdot_construction_projects' (Texas DOT, awarded construction company ~85k), 'akdot_construction_awards'/'akdot_aashtoware_proposals' (Alaska DOT&PF bid awards/proposals), 'iowadot_public_bid_awards' (Iowa DOT public bid), 'okdot_cirb_contract_status' (Oklahoma DOT CIRB contract status), 'topeka_checkbook_aggregate' (Topeka KS checkbook FY2015–2023 ~332k), 'nddot_flex_setaside_road'/'nddot_flex_partner_road'/'nddot_flex_setaside_bridge'/'nddot_flex_partner_bridge' (North Dakota DOT federal flex-funding awards to local public agencies — counties/townships/cities, NOT vendor contracts; a proxy because ND's checkbook/procurement portal is not keyless-reachable). 27 curated services (state DOT bid/award registers: TX/AK/IA/OK + ND DOT flex-funding awards + municipal checkbooks/contracts)."),
     where: z
         .string()
         .min(1)
@@ -5259,12 +5259,12 @@ export const TOOLS = [
     }),
     // ━━━ Bonfire (Euna) — keyless per-org open-opportunity RSS (SLED bids) ━━━
     // SLED bid campaign. Thousands of US state/local govs on Bonfire expose a keyless
-    // RSS of open opportunities. Ships a curated 187-org live-verified seed directory
+    // RSS of open opportunities. Ships a curated 186-org live-verified seed directory
     // (Bonfire's authoritative org API is auth-gated → out of bounds). Fixed-suffix
     // SSRF (.bonfirehub.com). RSS = the complete open set (totalAvailable honest).
     defineTool({
         name: "bonfire_list_organizations",
-        description: "List US governments on the Bonfire (Euna) eProcurement platform — the directory for bonfire_search_opportunities (keyless). Bonfire hosts thousands of US state/local governments' open-bid portals, each with a keyless RSS feed. Filter the curated seed by `state` (2-letter) / `query` (case-insensitive name substring); `limit`(1..200)/`offset`. Output: { organizations:[{ org, name, state }] }. Feed a result's `org` to bonfire_search_opportunities. ★HONESTY: this is a CURATED, live-verified SEED of 187 US orgs — Bonfire has NO keyless org-list API (its authoritative directory is auth-gated, out of bounds), and Euna markets up to ~900 US orgs, so the seed is PARTIAL (disclosed in _meta); probe `{slug}.bonfirehub.com/opportunities/rss` to extend. totalAvailable = the exact filtered seed count.",
+        description: "List US governments on the Bonfire (Euna) eProcurement platform — the directory for bonfire_search_opportunities (keyless). Bonfire hosts thousands of US state/local governments' open-bid portals, each with a keyless RSS feed. Filter the curated seed by `state` (2-letter) / `query` (case-insensitive name substring); `limit`(1..200)/`offset`. Output: { organizations:[{ org, name, state }] }. Feed a result's `org` to bonfire_search_opportunities. ★HONESTY: this is a CURATED, live-verified SEED of 186 US orgs — Bonfire has NO keyless org-list API (its authoritative directory is auth-gated, out of bounds), and Euna markets up to ~900 US orgs, so the seed is PARTIAL (disclosed in _meta); probe `{slug}.bonfirehub.com/opportunities/rss` to extend. totalAvailable = the exact filtered seed count.",
         inputSchema: BonfireListOrganizationsInput,
         handler: (input) => bonfire.listOrganizations(input),
     }),

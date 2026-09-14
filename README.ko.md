@@ -1,8 +1,8 @@
 # @cliwant/mcp-sam-gov
 
-> **가장 포괄적인 keyless 연방 데이터 MCP 서버.**
-> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) 외 **52개 데이터 소스, 150개 도구.** keyless 우선 — Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 48개 소스는 키가 필요 없습니다.
-> API 키 / 등록 / 가입 불필요. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
+> **가장 포괄적인 keyless 우선 연방 데이터 MCP 서버.**
+> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) 외 **54개 데이터 소스, 152개 도구.** keyless 우선 — Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 50개 소스는 키가 필요 없습니다.
+> 152개 도구 중 147개는 API 키·등록·가입이 필요 없습니다. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
 >
 > **독립 프로젝트** — SAM.gov, 미국 연방조달청(GSA) 등 어떤 정부 기관과도 제휴 관계가 없으며, 승인이나 후원을 받지 않았습니다.
 
@@ -30,9 +30,10 @@
 | 🏥 **보건·연구 자금** | "이 주제 NIH/NSF grant, 모집 중 임상시험, 이 의사에 대한 산업계 지급" | NIH RePORTER, NSF, ClinicalTrials, CMS, NPPES |
 | 🛡 **사이버 준수** | "이 CVE 가 CISA KEV 필수 패치 목록에 있나?" | NVD, CISA KEV |
 | 🌐 **무역·지리·재난** | "이 품목 HTS 관세, 이 주소 Census tract, 이 주의 FEMA 선포" | USITC HTS, Census, FEMA, Socrata, CKAN |
+| 🏙 **주·지방정부 조달 입찰 (SLED)** | "이 시·카운티 조달 포털에 지금 열려 있는 입찰은? 체크북·낙찰 계약·벤더 지급 내역, 주 교통국(DOT) 입찰·낙찰 대장까지" | OpenGov Procurement (525곳+ 정부), Bonfire, ArcGIS (feature + Hub), Socrata (53개 호스트), Tableau Server 게스트 뷰 1개 (몬태나주), Socrata Open Expenditures 체크북 1개 (사우스다코타주) |
 | 🎓 **grant·데이터셋** | "최근 30일 사이버보안 grant, 연방 오픈 데이터셋 발굴" | Grants.gov, data.gov |
 
-**52개 데이터 소스, 총 150개 도구 — keyless 우선: Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 48개 소스는 키가 필요 없습니다.** (초기 52-도구 빌드 기준 대략 p50 ~0.25s / p95 ~0.8s 측정 — 소스·업스트림 부하에 따라 변동하는 근사치이며 보장값이 아님.)
+**54개 데이터 소스, 총 152개 도구 — keyless 우선: Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 50개 소스는 키가 필요 없습니다.** (초기 52-도구 빌드 기준 대략 p50 ~0.25s / p95 ~0.8s 측정 — 소스·업스트림 부하에 따라 변동하는 근사치이며 보장값이 아님.)
 
 ---
 
@@ -59,7 +60,7 @@ PowerShell, npm 등 필요 없음.
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP 서버 + Claude 가 150개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
+MCP 서버 + Claude 가 152개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
 
 ### 🔵 경로 3 — Codex / Cursor / Continue / Gemini 등 수동 설치
 
@@ -80,7 +81,7 @@ npm install -g .
 }
 ```
 
-각 호스트별 config 위치는 [호스트별 설정](#host-configurations) 참조 (영문 README).
+각 호스트별 config 위치는 [호스트별 설정](./README.md#host-configurations) 참조 (영문 README).
 
 ### ⚪ 경로 4 — 직접 경로 (글로벌 설치 없음)
 
@@ -167,7 +168,7 @@ npm install --omit=dev
 
 ### `DATA_GOV_API_KEY` — api.data.gov / api.gsa.gov 계열
 
-일부 소스(Congress.gov, GovInfo, Regulations.gov, FAC, NPPES, data.gov v4 카탈로그)는 공유 **api.data.gov** 게이트웨이를 사용합니다. 기본은 공개 `DEMO_KEY` 로 **keyless** 동작(낮은 공유 시간당 쿼터). `DATA_GOV_API_KEY` 를 설정하면 한도가 크게 상향됩니다. [api.data.gov/signup](https://api.data.gov/signup) 에서 즉시 무료 발급(대기 없음). 하나의 키가 모든 api.data.gov / api.gsa.gov 소스에 통용됩니다. BLS 소스도 선택적 무료 `BLS_API_KEY` 로 일일 쿼터를 올릴 수 있습니다.
+일부 소스(Congress.gov, GovInfo, Regulations.gov, FAC, GSA 출장비(per-diem), data.gov v4 카탈로그)는 공유 **api.data.gov** 게이트웨이를 사용합니다. 기본은 공개 `DEMO_KEY` 로 **keyless** 동작(낮은 공유 시간당 쿼터). `DATA_GOV_API_KEY` 를 설정하면 한도가 크게 상향됩니다. [api.data.gov/signup](https://api.data.gov/signup) 에서 즉시 무료 발급(대기 없음). 하나의 키가 모든 api.data.gov / api.gsa.gov 소스에 통용됩니다. BLS 소스도 선택적 무료 `BLS_API_KEY` 로 일일 쿼터를 올릴 수 있습니다.
 
 키가 *필수*인 소스는 4개뿐입니다 — **Census**(`census_business_patterns`), **FRED**(2개 FRED 도구), **BEA**(`bea_regional_data`), **DOL 데이터 엔드포인트**(`dol_get_dataset`; 카탈로그 `dol_list_datasets` 는 keyless). 모두 무료이며, 전체 키 인벤토리(필수/선택·발급 URL)는 [영문 README 의 키 섹션](./README.md#keys--higher-limits--the-full-inventory)을 기준으로 하세요.
 
@@ -190,9 +191,9 @@ npm은 설치한 사용자에게 새 버전을 알려주지 않으므로, 서버
 
 **자동 제출은 절대 없습니다.** 서버엔 토큰·계정이 없고 링크만 만들며, 열어서 제출하는 건 **사용자**입니다. 프리필 링크에는 툴명·에러종류·서버버전만 담기고 쿼리값은 담기지 않습니다. 공개 레포이니 민감한 내용은 지우고 제출하세요. 직접 열기: [**New issue**](https://github.com/cliwant/mcp-sam-gov/issues/new/choose).
 
-## 도구 카탈로그 (150개)
+## 도구 카탈로그 (152개)
 
-워크플로별 그룹. keyless 우선 — 대부분 키가 필요 없고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트는 무료 키가 필요합니다. 전체 per-tool 목록과 입력 schema·정직성 caveat 원문은 [영문 README 의 카탈로그 섹션](./README.md#tool-catalog-150-tools)을 기준으로 하세요.
+워크플로별 그룹. keyless 우선 — 대부분 키가 필요 없고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트는 무료 키가 필요합니다. 몇몇 다른 소스는 선택적 무료 키를 넣으면 한도가 올라갑니다(위 키 섹션 참고). 전체 per-tool 목록과 입력 schema·정직성 caveat 원문은 [영문 README 의 카탈로그 섹션](./README.md#tool-catalog-152-tools)을 기준으로 하세요.
 
 - **입찰 + 솔리시테이션 — SAM.gov + Grants.gov (10)**: `sam_search_opportunities` `sam_search_shaping` `sam_get_opportunity` `sam_fetch_description` `sam_fetch_attachment_text` `sam_attachment_url` `sam_lookup_organization` `sam_lookup_notice_fields` `grants_search` `grants_get_opportunity`
 - **spending·수주·경쟁 — USAspending + FPDS + GAO (31)**: `usas_search_awards` `usas_search_individual_awards` `usas_get_award_detail` `usas_search_awards_by_recipient` `usas_search_subawards` `usas_search_recompetes` `usas_search_expiring_contracts`(deprecated) `usas_analyze_incumbent` `usas_search_teaming_partners` `usas_spending_over_time` `usas_search_agency_spending` `usas_search_subagency_spending` `usas_search_psc_spending` `usas_search_cfda_spending` `usas_search_state_spending` `usas_search_federal_account_spending` `usas_search_recipients` `usas_get_recipient_profile` `usas_get_agency_profile` `usas_get_agency_awards_summary` `usas_get_agency_budget_function` `usas_list_toptier_agencies` `usas_lookup_agency` `usas_autocomplete_naics` `usas_autocomplete_recipient` `usas_naics_hierarchy` `usas_glossary` `usas_list_disaster_codes`(재난긴급자금코드(DEFC) 목록 — COVID-19·IIJA/인프라 등 긴급세출 태그) `usas_disaster_spending`(지정 DEFC의 재난/긴급자금 지출 지역별 분해 — 어느 주/카운티/선거구가 COVID/IIJA 구호금 수령) `fpds_search_awards` `gao_protest_lookup`
@@ -201,18 +202,19 @@ npm은 설치한 사용자에게 새 버전을 알려주지 않으므로, 서버
 - **소송·법원 — CourtListener (1)**: `courtlistener_search_opinions`(미 연방 법원 판례 — 연방청구법원 계약 청구/입찰 이의, 연방순회항소법원; CourtListener/Free Law Project 경유, 명시)
 - **비영리 벤더 — IRS 990 via ProPublica (2)**: `nonprofit_search`(IRS-990 비영리 검색 by 이름/주/NTEE) `nonprofit_financials`(IRS-990 비영리 재무 by EIN) — ProPublica Nonprofit Explorer 경유(명시)
 - **재무 공시 — SEC EDGAR (8)**: `edgar_lookup_cik` `edgar_company_filings` `edgar_company_facts` `edgar_company_concept` `edgar_xbrl_frames` `edgar_full_text_search` `edgar_filing_index` `edgar_daily_filing_index`
-- **규정·입법 — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (18)**: `fed_register_search_documents` `fed_register_get_document` `fed_register_public_inspection` `fed_register_list_agencies` `regulations_search_dockets` `regulations_search_documents` `regulations_search_comments` `regulations_get_docket` `ecfr_search` `ecfr_list_titles` `far_clause_lookup` `far_search` `far_compliance_matrix` `congress_search_bills` `congress_get_bill` `govinfo_search_packages` `govinfo_get_package` `govinfo_list_collections`
+- **규정·입법 — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (19)**: `fed_register_search_documents` `fed_register_get_document` `fed_register_public_inspection` `fed_register_list_agencies` `regulations_search_dockets` `regulations_search_documents` `regulations_search_comments` `regulations_get_docket` `ecfr_search` `ecfr_get_section`(CFR 조항 하나의 전문을 인용번호로 조회 — 모든 title 대상, FAR/DFARS는 `far_clause_lookup` 권장) `ecfr_list_titles` `far_clause_lookup` `far_search` `far_compliance_matrix` `congress_search_bills` `congress_get_bill` `govinfo_search_packages` `govinfo_get_package` `govinfo_list_collections`
 - **가격·노무·재정 — GSA CALC · SAM WD · BLS · Census CBP · FRED · BEA · Treasury · GSA per-diem (15)**: `gsa_benchmark_labor_rates` `sam_search_wage_determinations` `sam_get_wage_rates` `bls_timeseries` `bls_oews_wages` `bls_qcew` `treasury_debt_to_penny` `treasury_avg_interest_rates` `treasury_monthly_statement` `treasury_query_dataset` `bea_regional_data`(무료 BEA_API_KEY 필요) `census_business_patterns`(무료 CENSUS_API_KEY 필요) `fred_search_series`(무료 FRED_API_KEY 필요) `fred_series_observations`(무료 FRED_API_KEY 필요) `gsa_perdiem_rates`(DEMO_KEY keyless)
 - **보건·연구 자금 — NIH · NSF · ClinicalTrials · CMS · NPPES (9)**: `nih_reporter_search_projects` `nsf_search_awards` `nsf_get_award` `clinicaltrials_search_studies` `clinicaltrials_get_study` `clinicaltrials_facet_counts` `cms_search_datasets` `cms_query_dataset` `nppes_lookup_provider`
 - **의료 제공자·시설 — CMS (5)**: `cms_medicare_provider_services`(Medicare provider 이용·지급 — 의료 시장규모) `cms_hospital_compare`(CMS 병원 품질 등급) `cms_facility_directory`(요양원/재택의료/호스피스/투석 시설 디렉터리) `cms_dmepos_suppliers`(DMEPOS 의료기기 공급자 디렉터리 + Medicare 지출) `cms_revoked_providers`(Medicare 취소/배제 목록 — 준수 검증)
 - **사이버 준수 — NVD + CISA KEV + NIST 800-53 (3)**: `cve_lookup` `cisa_kev_lookup` `nist_800_53_controls`(NIST SP 800-53 Rev 5 보안·프라이버시 관리항목 조회 — FedRAMP/CMMC/RMF 요구사항 by controlId/family/키워드)
 - **무역·관세·물류 — USITC · CBP (2)**: `hts_lookup` `cbp_border_wait_times`(CBP 육상국경 상용차 실시간 대기시간 — 캐나다·멕시코 항구; 화물/물류)
 - **지리·재난·주/시 오픈데이터 — Census · FEMA · NWS · Socrata · CKAN (10)**: `census_geocode_address` `census_geographies_by_coordinates` `fema_disaster_declarations` `fema_search_public_assistance` `fema_search_hazard_mitigation`(FEMA 재해경감지원 프로젝트 — HMGP/FMA/PDM/BRIC 경감보조금; Public Assistance 복구와 구별) `nws_active_alerts`(현재 활성 NWS 기상 경보 — 주의보/경보/특보; 재난/기후 대비, FEMA 도구와 페어) `socrata_discover_datasets` `socrata_query` `ckan_discover_datasets` `ckan_query`
+- **주·지방정부 조달 입찰 (SLED) — OpenGov · Bonfire · ArcGIS · Tableau · Socrata Open Checkbook (8)**: `opengov_list_governments`(OpenGov Procurement를 쓰는 미국 주·지방정부 525곳+ 디렉터리 — 주·이름으로 필터) `opengov_search_solicitations`(정부별 공개 솔리시테이션 — 제목·상태[open = 현재 접수 중]·마감일·포털 링크; 포털이 쓰는 keyless 익명 엔드포인트) `bonfire_list_organizations`(Bonfire(Euna)를 쓰는 미국 정부 디렉터리 — 실제 동작을 확인한 큐레이션 시드라 전체 목록은 아님) `bonfire_search_opportunities`(기관별 현재 공고 중인 입찰 — keyless RSS가 공고 전체라 총계가 정확) `arcgis_hub_discover_datasets`(ArcGIS Hub 데이터셋 키워드 발굴 — Socrata·CKAN이 못 덮는 SLED GIS·인프라·인허가·조달 레이어; 게시자를 직접 검증하도록 돕는 발굴용 도구) `arcgis_feature_query`(큐레이션 허용목록 **27개 미국 정부 ArcGIS REST feature 레이어** 행 조회 — DC OCP PASS 실시간 솔리시테이션, 지자체 체크북·계약, **주 DOT 입찰·낙찰 대장(TX / AK / IA / OK)**, **노스다코타주 DOT 연방 flex 자금 교부 레이어 4개** — 카운티·타운십·시 같은 지방 공공기관에 배분한 교부 내역이지 벤더와 맺은 계약이나 입찰 결과가 아님. ND 주 체크북·조달 포털에 키 없이 닿을 수 없어 대신 쓰는 대리 데이터) `tableau_view_csv`(미국 정부 Tableau Server 게스트 뷰의 CSV 전체 내보내기를 키 없이 받아 페이지로 나눠 조회 — 지금은 뷰 1개: 몬태나주 행정부(DOA) Contracts Awarded 약 4,554건. 갱신 시점은 게시 기관이 정하므로 늦을 수 있음) `open_checkbook_search`(Socrata Open Expenditures 체크북 포털의 벤더 지급 건별 검색 — keyless, 연도·벤더·부서·지출 분류 정확 일치 필터. 지금은 포털 1개: 사우스다코타주 Open Checkbook 약 740,980건, 최근 약 3개 회계연도만. 갱신 시점은 게시 기관이 정하므로 늦을 수 있으니 최신 날짜는 payment_date 내림차순 정렬로 확인)
 - **데이터셋·레지스트리 발굴 — data.gov · get.gov (2)**: `datagov_search_datasets` `search_gov_domains`(CISA get.gov 공식 .gov 도메인 레지스트리 — 도메인 소유 기관 확인; 연방기관 열거 + SLED 매핑)
 - **소상공인 — SBA (1)**: `sba_size_standard`
 - **노무 준수 — US DOL (2)**: `dol_list_datasets`(DOL 집행·준수 데이터셋 카탈로그 탐색 — WHD, OFCCP 등, keyless) `dol_get_dataset`(DOL 집행 기록 조회 — WHD 임금·근로 / OFCCP; 무료 DOL_API_KEY 필요)
 - **로비·영향력 — US Senate LDA (1)**: `lda_search_filings`(상원 로비 신고: 누가 어느 기관에, 어떤 이슈로, 얼마를 쓰는지; keyless)
-- **서버 유틸리티 — 키 발견 (1)**: `api_key_status`(각 소스에 필요한 키·required/optional·발급 URL·현재 설정 여부 나열; 값은 노출 안 함)
+- **서버 유틸리티 — 키 발견 · 피드백 (2)**: `api_key_status`(각 소스에 필요한 키·required/optional·발급 URL·현재 설정 여부 나열; 값은 노출 안 함) `feedback`(버그 신고·기능 요청·이상해 보이는 결과를 알릴 때 미리 채운 GitHub 이슈 링크를 돌려줌 — 서버는 아무것도 직접 올리지 않고, 링크를 열어 제출하는 건 사용자)
 
 ---
 
@@ -220,7 +222,7 @@ npm은 설치한 사용자에게 새 버전을 알려주지 않으므로, 서버
 
 이 서버의 원칙은 하나입니다: **그럴듯한 조작보다 정직한 실패.** 아래는 모두 공개 데이터의 *가용성*에 관한 것이며, 어떤 접근 통제도 우회하지 않습니다.
 
-- **Keyless 우선, 다운된 소스는 예외를 *던진다*.** 모든 소스가 API 키 없이 동작합니다. 소스가 rate-limit·차단·다운되면 도구는 **타입이 지정된 에러**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)를 반환하며, 행을 지어내거나 다운된 서비스를 "결과 0" / "없음"으로 보고하지 않습니다. 진짜 빈 결과와 장애는 항상 구별됩니다.
+- **Keyless 우선, 다운된 소스는 예외를 *던진다*.** 54개 소스 중 50개(152개 도구 중 147개)는 API 키 없이 동작하고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트만 무료 키가 필요합니다. 소스가 rate-limit·차단·다운되면 도구는 **타입이 지정된 에러**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)를 반환하며, 행을 지어내거나 다운된 서비스를 "결과 0" / "없음"으로 보고하지 않습니다. 진짜 빈 결과와 장애는 항상 구별됩니다.
 - **오프라인 스냅샷 (기본 on).** 느리게 바뀌는 참조 데이터(toptier 기관 목록, 상위 NAICS 트리, USAspending 용어집, SBA 규모 기준, 최신 Treasury "Debt to the Penny")는, 라이브 연방 소스가 egress 에서 잠시 도달 불가일 때 서버가 기본적으로 `raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots` 에 호스팅된 **공개·주간 갱신 스냅샷**으로 폴백합니다. 라이브 **하드 실패**(장애 / IP 평판 차단) 시에만 가져오며 평상시엔 절대 아닙니다 — 공개 데이터, 텔레메트리 없음. 스냅샷이 서빙되면 **절대 라이브처럼 표시하지 않습니다** — 응답에 `_meta.dataPath: "snapshot"` + `asOf` 타임스탬프가 붙고 `complete` 는 강제로 꺼집니다. rate limit(429)은 항상 **준수**하며 미러로 우회하지 않습니다.
 - **끄기(순수 라이브 전용):** `SAMGOV_SNAPSHOT_BASE_URL=off` 설정 시 스냅샷 경로가 추가되지 않고 라이브 전용 클라이언트와 byte-identical.
 - **자체 미러 지정:** `SAMGOV_SNAPSHOT_BASE_URL` 을 자신의 base URL 로 설정하면 공개 기본값 대신 직접 호스팅.

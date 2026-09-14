@@ -4,7 +4,7 @@
 
 ### **$4 trillion of public federal data, one `npm install` away.**
 
-The most comprehensive **keyless-first** MCP server for US federal **and state/local (SLED)** contracting + spending + regulation + partner vetting. **150 tools across 52 data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 48 need none. Works today, in any AI agent.
+The most comprehensive **keyless-first** MCP server for US federal **and state/local (SLED)** contracting + spending + regulation + partner vetting. **152 tools across 54 data sources** — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 50 need none. Works today, in any AI agent.
 
 **Independent project** — not affiliated with, endorsed by, or sponsored by SAM.gov, the U.S. General Services Administration (GSA), or any government agency.
 
@@ -42,7 +42,7 @@ The most comprehensive **keyless-first** MCP server for US federal **and state/l
    SOW preview:   "RFQ# 36C24526Q0460 — Bulk Oxygen Tank Rental, Fill, Telemetry…"        
 ```
 
-**Zero API key. Zero registration. Zero signup.** Just plug it in and ask.
+**No API key, registration or signup for 147 of the 152 tools.** Just plug it in and ask.
 
 ---
 
@@ -52,7 +52,7 @@ The most comprehensive **keyless-first** MCP server for US federal **and state/l
 |---|---|
 | GovWin: $30K-$100K/yr per seat | Free, MIT license |
 | API key registration → wait 24h → quota tier shopping | `npm install` → working in 60s |
-| 5+ separate vendor APIs / scrapers | 1 unified surface, 150 tools across 52 sources |
+| 5+ separate vendor APIs / scrapers | 1 unified surface, 152 tools across 54 sources |
 | LLMs hallucinate NAICS codes / agency names | Anti-hallucination autocomplete guards built-in |
 | Brittle scraping breaks weekly | Daily live smoke test ([badge above](#)) |
 | Procurement officer → IT ticket → 3-week wait | Claude Desktop double-click install |
@@ -79,10 +79,10 @@ The federal data this wraps is **public domain**. There is no good reason it sho
 | 🏥 **Health & research funding** | "NIH/NSF grants on this topic; recruiting clinical trials; industry payments to this physician" | NIH RePORTER, NSF, ClinicalTrials.gov, CMS Open Payments, NPPES |
 | 🛡 **Cyber compliance** | "Is this CVE on the CISA KEV must-patch list?" | NVD, CISA KEV |
 | 🌐 **Trade, geo & disaster** | "HTS tariff for this product; Census tract for this address; FEMA declarations in this state" | USITC HTS, US Census, FEMA, Socrata, CKAN |
-| 🏙 **State/local procurement bids (SLED)** | "What's open on this city's/county's procurement portal right now? Their checkbook, awarded contracts, vendor payments; state DOT bid/award registers" | OpenGov Procurement (525+ govs), Bonfire, ArcGIS (feature + Hub), Socrata (53 hosts) |
+| 🏙 **State/local procurement bids (SLED)** | "What's open on this city's/county's procurement portal right now? Their checkbook, awarded contracts, vendor payments; state DOT bid/award registers" | OpenGov Procurement (525+ govs), Bonfire, ArcGIS (feature + Hub), Socrata (53 hosts), one Tableau Server Guest view (Montana), one Socrata Open Expenditures checkbook (South Dakota) |
 | 🎓 **Grants & datasets** | "Cybersecurity grants posted in the last 30 days; discover federal open datasets" | Grants.gov, data.gov |
 
-**150 tools across 52 data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 48 need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
+**152 tools across 54 data sources — keyless-first: only 4 sources (Census business-patterns, FRED, BEA, and DOL's data endpoint) need a free key; the other 50 need none.** (An earlier 52-tool build measured roughly p50 ~0.25s / p95 ~0.8s against production federal APIs; latency varies by source and upstream load — treat it as fast, not a benchmarked guarantee.)
 
 ---
 
@@ -109,7 +109,7 @@ If you already use Claude Code (the CLI):
 /plugin install cliwant/mcp-sam-gov
 ```
 
-This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 150 tools.
+This installs the MCP server **plus** a [SKILL.md](./skills/sam-gov/SKILL.md) workflow guide that teaches Claude when + how to use each of the 152 tools.
 
 ### 🔵 Path 3 — Manual install for any MCP host (Codex, Cursor, Continue, Gemini)
 
@@ -177,7 +177,7 @@ Then point your host config at the absolute path:
 
 (Or skip this entirely — use Path 1's `.mcpb` and it auto-configures.)
 
-Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (150 tools)".
+Restart Claude Desktop fully (system tray quit on Windows / Quit menu on macOS), then look for the 🔨 icon. You should see "sam-gov (152 tools)".
 
 ### Claude Code
 
@@ -333,7 +333,7 @@ Get a free key at [sam.gov/SAM/pages/public/searchKeyData.jsf](https://sam.gov/S
 
 ### `DATA_GOV_API_KEY` — the api.data.gov / api.gsa.gov family
 
-A handful of sources ride the shared **api.data.gov** gateway — Congress.gov, GovInfo, Regulations.gov, FAC, NPPES, and the data.gov v4 dataset catalog. They work **keyless** out of the box via the public `DEMO_KEY` (a low shared hourly quota). Set `DATA_GOV_API_KEY` to raise those limits substantially:
+A handful of sources ride the shared **api.data.gov** gateway — Congress.gov, GovInfo, Regulations.gov, FAC, GSA per-diem, and the data.gov v4 dataset catalog. They work **keyless** out of the box via the public `DEMO_KEY` (a low shared hourly quota). Set `DATA_GOV_API_KEY` to raise those limits substantially:
 
 ```json
 {
@@ -358,7 +358,7 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 | `FRED_API_KEY` | **Required** | the 2 FRED tools (no keyless tier — throw without it) | [fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html) |
 | `BEA_API_KEY` | **Required** | `bea_regional_data` (BEA Regional; no keyless tier — throws without it) | [apps.bea.gov/API/signup](https://apps.bea.gov/API/signup/) |
 | `DOL_API_KEY` | **Required for data** | `dol_get_dataset` (DOL enforcement records via `X-API-KEY`; the `dol_list_datasets` catalog is keyless) | [dol.gov/developer](https://dol.gov/developer) |
-| `DATA_GOV_API_KEY` | Optional | higher limits on all api.data.gov sources (Regulations.gov, FAC, NPPES, CMS, data.gov catalog, GSA per-diem) — lifts the shared `DEMO_KEY` cap | [api.data.gov/signup](https://api.data.gov/signup/) |
+| `DATA_GOV_API_KEY` | Optional | higher limits on all api.data.gov sources (Regulations.gov, Congress.gov, GovInfo, FAC, data.gov catalog, GSA per-diem) — lifts the shared `DEMO_KEY` cap | [api.data.gov/signup](https://api.data.gov/signup/) |
 | `SAM_GOV_API_KEY` | Optional | authenticated SAM.gov v2 search + the organization-name filter | [open.gsa.gov/api/get-opportunities-public-api](https://open.gsa.gov/api/get-opportunities-public-api/) |
 | `LDA_API_KEY` | Optional | higher rate limit on `lda_search_filings` (Senate LDA lobbying; keyless by default) | [lda.senate.gov/api/register](https://lda.senate.gov/api/register/) |
 | `BLS_API_KEY` | Optional | the BLS v2 tier (~500 queries/day vs keyless ~25/day) | [data.bls.gov/registrationEngine](https://data.bls.gov/registrationEngine/) |
@@ -402,7 +402,7 @@ This server is built to **improve from real usage**. Because an AI agent (not a 
 
 You can also open one directly: [**New issue**](https://github.com/cliwant/mcp-sam-gov/issues/new/choose) — bug / feature / wrong-output templates.
 
-## Tool catalog (150 tools)
+## Tool catalog (152 tools)
 
 Grouped by workflow. Keyless-first — most tools need no key; Census business-patterns, FRED, BEA, and DOL's data endpoint require a free key, and a handful of others gain higher limits from an optional free key (noted above). Descriptions are condensed — each tool's own `inputSchema` carries the full contract and honesty caveats.
 
@@ -515,7 +515,7 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 </details>
 
 <details>
-<summary><b>Regulatory & legislative — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (18 tools)</b></summary>
+<summary><b>Regulatory & legislative — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (19 tools)</b></summary>
 
 - `fed_register_search_documents` — search Federal Register documents by query / agency / type / date
 - `fed_register_get_document` — full detail for a document by number (citation, body URL, CFR refs)
@@ -613,14 +613,16 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 </details>
 
 <details>
-<summary><b>State/local procurement bids (SLED) — OpenGov · Bonfire · ArcGIS (6 tools)</b></summary>
+<summary><b>State/local procurement bids (SLED) — OpenGov · Bonfire · ArcGIS · Tableau · Open Checkbook (8 tools)</b></summary>
 
 - `opengov_list_governments` — directory of 525+ US state/local governments on **OpenGov Procurement** (filter by state/query)
 - `opengov_search_solicitations` — a government's **live public solicitations** (title, status [open = accepting], deadline, portal link) — keyless anonymous endpoints
 - `bonfire_list_organizations` — curated live-verified 186-org US seed directory of governments on **Bonfire (Euna)**
 - `bonfire_search_opportunities` — an org's currently-open opportunities via keyless RSS (referenceNumber, name, closeDate, link); the RSS is the complete open set (exact total)
 - `arcgis_hub_discover_datasets` — discover ArcGIS Hub datasets by keyword (the SLED GIS/infrastructure/permits/procurement layer Socrata & CKAN don't cover; a discovery aid with publisher surfaced for vetting)
-- `arcgis_feature_query` — query rows from a curated allowlist of **23 US-gov ArcGIS REST feature layers**: DC OCP PASS live solicitations; local-gov checkbooks/contracts; **state DOT bid/award registers (TX / AK / IA / OK)**
+- `arcgis_feature_query` — query rows from a curated allowlist of **27 US-gov ArcGIS REST feature layers**: DC OCP PASS live solicitations; local-gov checkbooks/contracts; **state DOT bid/award registers (TX / AK / IA / OK)**; **4 North Dakota DOT federal flex-funding award layers** (NDDOT funding awards to local public agencies such as counties, townships and cities, not vendor contracts or winning bids; a proxy because ND's statewide checkbook and procurement portal aren't keyless-reachable)
+- `tableau_view_csv` — fetch a curated US-gov **Tableau Server Guest** view's complete CSV export (keyless) and page over it; one view today: **Montana DOA Contracts Awarded** (~4,554 award records; freshness is set by the publisher and can lag)
+- `open_checkbook_search` — row-level vendor-payment search over a curated **Socrata Open Expenditures** checkbook portal (keyless; exact-match year/vendor/department/expense-category filters); one portal today: **South Dakota Open Checkbook** (~740,980 payments, only the ~3 most recent fiscal years; freshness is set by the publisher and can lag, so sort by payment_date desc to see the newest date)
 </details>
 
 <details>
@@ -650,9 +652,10 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 </details>
 
 <details>
-<summary><b>Server utilities — key discovery (1 tool)</b></summary>
+<summary><b>Server utilities — key discovery · feedback (2 tools)</b></summary>
 
 - `api_key_status` — list which API keys the server can use, required vs optional, signup URLs, and whether each is currently set (value never shown)
+- `feedback` — returns a prefilled GitHub issue link for a bug report or feature request; you open and submit it yourself (the tool never posts anything)
 </details>
 
 ---
@@ -661,7 +664,7 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 
 This server is built around one rule: **honest failure over confident fabrication.** Everything below is about *availability* of public data — none of it bypasses access controls.
 
-**Keyless-first, and a down source *throws*.** Every source works with no API key. When a source is rate-limited, blocked, or down, the tool returns a **typed error** (`rate_limited` / `upstream_unavailable` / `schema_drift` / …) — it never invents rows and never reports a DOWN service as "0 results" or "not found". A genuine empty result and an outage are always distinguishable.
+**Keyless-first, and a down source *throws*.** 50 of the 54 sources (147 of the 152 tools) work with no API key; Census business-patterns, FRED, BEA and DOL's data endpoint need a free one. When a source is rate-limited, blocked, or down, the tool returns a **typed error** (`rate_limited` / `upstream_unavailable` / `schema_drift` / …) — it never invents rows and never reports a DOWN service as "0 results" or "not found". A genuine empty result and an outage are always distinguishable.
 
 **Offline snapshots (on by default).** Some reference data changes slowly — the toptier-agency list, the top-level NAICS tree, the USAspending glossary, SBA size standards, the latest Treasury "Debt to the Penny." By default, when a live federal source is briefly unreachable from your egress, the server falls back to a **public, weekly-refreshed snapshot** of that slow-changing reference data, hosted at `raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots`. It only fetches on a **live hard-failure** (an outage / IP-reputation block), never during normal operation — public data, no telemetry. A served snapshot is **never presented as live** — the response carries `_meta.dataPath: "snapshot"` plus an `asOf` timestamp, and `complete` is forced off, so an AI agent (and you) always see the staleness. A rate limit (429) is always **honored**, never routed around onto the mirror.
 
