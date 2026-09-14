@@ -1,0 +1,29 @@
+# Claude Desktop bundle = manifest.json + icon.png + package.json + dist/ + production node_modules.
+# Root-anchored (leading /) so nothing inside node_modules is ever matched.
+/src/
+/scripts/
+/docs/
+/skills/
+/snapshots/
+/coverage/
+/.nyc_output/
+/.github/
+/.claude/
+/.tools/
+/scratchpad/
+/research/
+/*.mjs
+/tools-list-snapshot.json
+/server.json
+/CHANGELOG.md
+/README.ko.md
+/README.ja.md
+/CONTRIBUTING.md
+/SECURITY.md
+/test-fixtures/
+/.claude-plugin/
+/.c8rc.json
+/.gitattributes
+/.mcp.json
+/CODE_OF_CONDUCT.md
+/DCO

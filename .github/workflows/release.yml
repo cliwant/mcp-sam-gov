@@ -55,13 +55,33 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Verify the tag matches package.json version
+      # Every place a version ships from must agree with the tag: npm (package.json),
+      # the Claude Desktop bundle (manifest.json), the MCP Registry (server.json and
+      # its npm package entry) and the server's own reported version (SERVER_VERSION).
+      - name: Verify the tag matches every shipped version field
         run: |
-          PKG="$(node -p "require('./package.json').version")"
           TAG="${GITHUB_REF_NAME#v}"
-          echo "package.json=$PKG  tag=$TAG"
-          if [ "$PKG" != "$TAG" ]; then
-            echo "::error::tag v$TAG does not match package.json version $PKG — refusing to publish"
+          node -e '
+            const tag = process.argv[1];
+            const server = require("./server.json");
+            const fields = {
+              "package.json": require("./package.json").version,
+              "manifest.json": require("./manifest.json").version,
+              "server.json": server.version,
+              "server.json packages[0]": ((server.packages || [])[0] || {}).version,
+            };
+            let bad = 0;
+            for (const name of Object.keys(fields)) {
+              console.log(name + "=" + fields[name] + "  tag=" + tag);
+              if (fields[name] !== tag) {
+                console.log("::error::tag v" + tag + " does not match " + name + " version " + fields[name] + " — refusing to publish");
+                bad = 1;
+              }
+            }
+            process.exit(bad);
+          ' "$TAG"
+          if ! grep -qF "const SERVER_VERSION = \"$TAG\";" src/server.ts; then
+            echo "::error::src/server.ts SERVER_VERSION does not match tag v$TAG — refusing to publish"
             exit 1
           fi
 
@@ -101,3 +121,41 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "$notes"
           fi
+
+  # The Claude Desktop one-click bundle: README install path 1 ("download
+  # mcp-sam-gov.mcpb from the latest release") and the artifact submitted to the
+  # Anthropic MCP Directory. A separate job on purpose: npm publish is not
+  # re-runnable for the same version, so if only this step fails, "Re-run failed
+  # jobs" rebuilds and re-attaches the bundle without touching npm.
+  bundle:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload the release asset; no npm secret, no id-token
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      # Build exactly as the publish job did, then drop dev dependencies so the
+      # bundle ships the same dist/ as npm plus production node_modules only.
+      # .mcpbignore keeps source, tests, docs and repo tooling out of the bundle.
+      - name: Install (locked), build, prune to production dependencies
+        run: |
+          npm ci
+          npm run build
+          npm prune --omit=dev
+
+      - name: Validate and pack the MCPB bundle
+        run: |
+          npx --yes @anthropic-ai/mcpb@2.1.2 validate manifest.json
+          npx --yes @anthropic-ai/mcpb@2.1.2 pack . mcp-sam-gov.mcpb
+
+      - name: Attach the bundle to the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" mcp-sam-gov.mcpb --clobber --repo "$GITHUB_REPOSITORY"
