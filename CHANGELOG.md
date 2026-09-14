@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The release workflow now fails if the Claude Desktop bundle is missing.** v1.6.0 through v1.12.0 were published with no `mcp-sam-gov.mcpb` asset and nothing failed, so for about two months README install path 1 ("download `mcp-sam-gov.mcpb` from the latest release") led to a release page with no bundle file to download. After the upload, the `bundle` job in `release.yml` now checks that the release lists an uploaded asset named exactly `mcp-sam-gov.mcpb` larger than 1 MB and that its public download URL resolves, retrying briefly, and fails the job otherwise. CI only; no tool, schema or runtime change.
+
 ## [1.13.1] — 2026-09-14 (new Claude Desktop / MCP Directory icon)
 
 ### Changed

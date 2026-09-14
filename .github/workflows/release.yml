@@ -6,7 +6,8 @@
 #     and GitHub does NOT expose secrets to workflows triggered by fork PRs. So the
 #     NPM_TOKEN is only ever available when the maintainer deliberately pushes a tag.
 #   * No `pull_request` trigger ⇒ untrusted PR code never runs with the token.
-#   * Least privilege: `contents: read`. `id-token: write` is only for npm PROVENANCE
+#   * Least privilege: `contents: write` only to create the GitHub Release and attach
+#     the bundle (the `bundle` job gets nothing else). `id-token: write` is only for npm PROVENANCE
 #     (a signed attestation proving this package was built from this repo+commit on
 #     GitHub Actions — a supply-chain integrity guarantee, not a secret exposure).
 #   * The secret is injected as an env var ONLY in the publish step and is auto-masked
@@ -187,3 +188,42 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$GITHUB_REF_NAME" mcp-sam-gov.mcpb --clobber --repo "$GITHUB_REPOSITORY"
+
+      # v1.6.0 through v1.12.0 shipped with no bundle on the release and nothing
+      # failed, which silently broke README install path 1 ("download
+      # mcp-sam-gov.mcpb from the latest release"): the latest release page had no
+      # bundle file to download. Check both what the API reports
+      # (an uploaded asset with this exact name, over 1 MB) and what a user actually
+      # downloads (the public URL resolves). Retries cover brief propagation delay.
+      # Values come from env; the jq filter reads the name with env.ASSET_NAME, so
+      # nothing is spliced into the filter or the command line.
+      - name: Verify the bundle is on the release and downloadable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET_NAME: mcp-sam-gov.mcpb
+          MIN_BYTES: "1048576"
+        run: |
+          set -euo pipefail
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$ASSET_NAME"
+          size=0
+          resolves=no
+          for attempt in 1 2 3 4 5; do
+            size="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets \
+              --jq '[.assets[] | select(.name == env.ASSET_NAME and .state == "uploaded") | .size] | max // 0')" || size=0
+            case "$size" in ''|*[!0-9]*) size=0 ;; esac
+            resolves=no
+            if curl -sfIL --max-time 60 -o /dev/null "$url"; then resolves=yes; fi
+            echo "attempt $attempt: $ASSET_NAME size=$size bytes (min $MIN_BYTES), download URL resolves=$resolves"
+            if [ "$size" -gt "$MIN_BYTES" ] && [ "$resolves" = yes ]; then
+              echo "OK: $ASSET_NAME is attached to $GITHUB_REF_NAME and downloadable."
+              exit 0
+            fi
+            if [ "$attempt" -lt 5 ]; then sleep 10; fi
+          done
+          if [ "$size" -le "$MIN_BYTES" ]; then
+            echo "::error::release $GITHUB_REF_NAME has no uploaded asset named exactly $ASSET_NAME larger than $MIN_BYTES bytes (size=$size) — Claude Desktop install path is broken"
+          fi
+          if [ "$resolves" != yes ]; then
+            echo "::error::$url does not resolve — Claude Desktop install path is broken"
+          fi
+          exit 1
