@@ -71,7 +71,7 @@ npm install --omit=dev
 npm install -g .
 ```
 
-설치 후 `mcp-sam-gov` 가 PATH 등록됨. 호스트 config 에 추가:
+설치 후 `mcp-sam-gov` 가 PATH 등록됨. 호스트 config 에 추가 (글로벌 설치):
 
 ```json
 {
@@ -81,7 +81,23 @@ npm install -g .
 }
 ```
 
-각 호스트별 config 위치는 [호스트별 설정](./README.md#host-configurations) 참조 (영문 README).
+**글로벌 설치 없이 (npx)** — clone 과 `npm install -g` 를 건너뛰고 Node.js 만 있으면 됩니다. 첫 실행 때 npx 가 npm 에서 패키지를 받아 캐시합니다.
+
+```json
+{ "mcpServers": { "sam-gov": { "command": "npx", "args": ["-y", "@cliwant/mcp-sam-gov"] } } }
+```
+
+Claude Code CLI 로 등록할 때:
+
+```bash
+claude mcp add sam-gov -- npx -y @cliwant/mcp-sam-gov
+```
+
+Windows 에서 호스트가 `spawn npx ENOENT` 로 서버를 못 띄우면 npx 를 `cmd /c` 로 감싸세요: `"command": "cmd", "args": ["/c", "npx", "-y", "@cliwant/mcp-sam-gov"]`.
+
+> **패키지 이름 주의:** npm 패키지 이름은 scope 가 붙은 **`@cliwant/mcp-sam-gov`** 입니다. `mcp-sam-gov` 는 글로벌 설치 시 PATH 에 생기는 실행 파일 이름일 뿐이고, npm 에 scope 없는 `mcp-sam-gov` 패키지는 없습니다. 그래서 `npx -y mcp-sam-gov` 는 404 로 실패합니다. `npx -y @cliwant/mcp-sam-gov` 를 쓰세요.
+
+각 호스트별 config 위치와 호스트별 npx 설정 예시는 [호스트별 설정](./README.md#host-configurations) 참조 (영문 README).
 
 ### ⚪ 경로 4 — 직접 경로 (글로벌 설치 없음)
 
@@ -237,6 +253,7 @@ npm은 설치한 사용자에게 새 버전을 알려주지 않으므로, 서버
 |---|---|
 | Claude Desktop 🔨 메뉴에 `sam-gov` 안 보임 | Claude Desktop 완전 종료 (Windows: 시스템 트레이 / macOS: Quit) 후 재실행. 로그: `%APPDATA%\Claude\logs\mcp*.log` |
 | `command not found: mcp-sam-gov` | `npm install -g .` 성공했나 확인. `npm config get prefix` 결과가 PATH 에 있나 확인 |
+| `spawn npx ENOENT` (Windows, npx 설정) | 호스트가 셸 없이 `npx` 를 실행해 Windows 가 `npx.cmd` 를 못 찾은 경우. `"command": "cmd", "args": ["/c", "npx", "-y", "@cliwant/mcp-sam-gov"]` 사용 |
 | `MODULE_NOT_FOUND ...dist/server.js` (Windows) | npm 의 git-dep + symlink 버그. 경로 3 (clone + `npm install -g .`) 사용 |
 | `EPERM: operation not permitted` | `rmdir /s /q "%APPDATA%\npm\node_modules\@cliwant"` (또는 초기 버전 설치 경험이 있다면 `@govicon"`) 후 재시도 |
 | 도구 결과 비어있음 | SAM.gov rate limit. 1분 대기 후 재시도 또는 `SAM_GOV_API_KEY` 설정 |

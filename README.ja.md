@@ -71,7 +71,7 @@ npm install --omit=dev
 npm install -g .
 ```
 
-インストール後 `mcp-sam-gov` が PATH に登録される。ホスト config に追加：
+インストール後 `mcp-sam-gov` が PATH に登録される。ホスト config に追加 (グローバルインストール)：
 
 ```json
 {
@@ -81,7 +81,23 @@ npm install -g .
 }
 ```
 
-各ホスト別 config の場所は [Host configurations](./README.md#host-configurations) (英語 README) を参照。
+**グローバルインストールなし (npx)** — clone と `npm install -g` を省略でき、Node.js さえあれば動きます。初回起動時に npx が npm からパッケージを取得してキャッシュします。
+
+```json
+{ "mcpServers": { "sam-gov": { "command": "npx", "args": ["-y", "@cliwant/mcp-sam-gov"] } } }
+```
+
+Claude Code の CLI で登録する場合：
+
+```bash
+claude mcp add sam-gov -- npx -y @cliwant/mcp-sam-gov
+```
+
+Windows でホストが `spawn npx ENOENT` でサーバーを起動できない場合は、npx を `cmd /c` で包んでください：`"command": "cmd", "args": ["/c", "npx", "-y", "@cliwant/mcp-sam-gov"]`。
+
+> **パッケージ名に注意:** npm パッケージ名はスコープ付きの **`@cliwant/mcp-sam-gov`** です。`mcp-sam-gov` はグローバルインストール時に PATH に置かれる実行ファイル名にすぎず、スコープなしの `mcp-sam-gov` パッケージは npm に存在しません。そのため `npx -y mcp-sam-gov` は 404 で失敗します。`npx -y @cliwant/mcp-sam-gov` を使ってください。
+
+各ホスト別 config の場所とホスト別の npx 設定例は [Host configurations](./README.md#host-configurations) (英語 README) を参照。
 
 ### ⚪ パス 4 — 直接パス (グローバルインストールなし)
 
@@ -237,6 +253,7 @@ npm はインストール済みユーザーに新バージョンを通知しな�
 |---|---|
 | Claude Desktop 🔨 メニューに `sam-gov` が表示されない | Claude Desktop を完全終了 (Windows: システムトレイ / macOS: Quit) して再起動。ログ: `%APPDATA%\Claude\logs\mcp*.log` |
 | `command not found: mcp-sam-gov` | `npm install -g .` が成功したか確認。`npm config get prefix` の結果が PATH にあるか確認 |
+| `spawn npx ENOENT` (Windows, npx 設定) | ホストがシェルを介さずに `npx` を起動したため、Windows が `npx.cmd` を見つけられない。`"command": "cmd", "args": ["/c", "npx", "-y", "@cliwant/mcp-sam-gov"]` を使用 |
 | `MODULE_NOT_FOUND ...dist/server.js` (Windows) | npm の git-dep + symlink バグ。パス 3 (clone + `npm install -g .`) を使用 |
 | `EPERM: operation not permitted` | `rmdir /s /q "%APPDATA%\npm\node_modules\@cliwant"` (初期バージョンをインストールしたことがある場合は `@govicon"`) 後に再試行 |
 | ツールが空の結果を返す | SAM.gov のレート制限。1 分待機後に再試行 または `SAM_GOV_API_KEY` 設定 |
