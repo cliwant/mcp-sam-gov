@@ -42,6 +42,8 @@ jobs:
     steps:
       - name: Checkout the tagged commit
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false # nothing here pushes to git; don't leave the token in .git/config
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -57,7 +59,8 @@ jobs:
 
       # Every place a version ships from must agree with the tag: npm (package.json),
       # the Claude Desktop bundle (manifest.json), the MCP Registry (server.json and
-      # its npm package entry) and the server's own reported version (SERVER_VERSION).
+      # its npm package entry), the Claude Code plugin (.claude-plugin/plugin.json)
+      # and the server's own reported version (SERVER_VERSION).
       - name: Verify the tag matches every shipped version field
         run: |
           TAG="${GITHUB_REF_NAME#v}"
@@ -69,6 +72,7 @@ jobs:
               "manifest.json": require("./manifest.json").version,
               "server.json": server.version,
               "server.json packages[0]": ((server.packages || [])[0] || {}).version,
+              ".claude-plugin/plugin.json": require("./.claude-plugin/plugin.json").version,
             };
             let bad = 0;
             for (const name of Object.keys(fields)) {
@@ -85,14 +89,29 @@ jobs:
             exit 1
           fi
 
+      # The bundle job runs only after npm publish, so an invalid manifest must stop
+      # the release here, before anything irreversible. Uses the lockfile-installed mcpb.
+      - name: Validate the Claude Desktop bundle manifest
+        run: npx --no-install mcpb validate manifest.json
+
       - name: Smoke gate (registry snapshot + fault suite)
         run: |
           node registry-snapshot-test.mjs
           node fault-injection-test.mjs > /tmp/fault.log 2>&1 || { tail -5 /tmp/fault.log; exit 1; }
           tail -1 /tmp/fault.log
 
+      # npm refuses to publish the same version twice. Skipping an already-published
+      # version makes this job re-runnable: if a later step (the GitHub Release) fails,
+      # "Re-run failed jobs" finishes the release and unblocks the bundle job.
+      # `npm view pkg@ver version` exits 0 only when that exact version exists.
       - name: Publish to npm (with provenance)
-        run: npm publish --provenance --access public
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          if npm view "@cliwant/mcp-sam-gov@$VER" version >/dev/null 2>&1; then
+            echo "@cliwant/mcp-sam-gov@$VER is already on npm; skipping publish (re-run)."
+          else
+            npm publish --provenance --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -124,9 +143,8 @@ jobs:
 
   # The Claude Desktop one-click bundle: README install path 1 ("download
   # mcp-sam-gov.mcpb from the latest release") and the artifact submitted to the
-  # Anthropic MCP Directory. A separate job on purpose: npm publish is not
-  # re-runnable for the same version, so if only this step fails, "Re-run failed
-  # jobs" rebuilds and re-attaches the bundle without touching npm.
+  # Anthropic MCP Directory. A separate job so a bundle-only failure can be fixed
+  # with "Re-run failed jobs" without repeating the publish job.
   bundle:
     needs: publish
     runs-on: ubuntu-latest
@@ -135,25 +153,35 @@ jobs:
     steps:
       - name: Checkout the tagged commit
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false # the upload uses GH_TOKEN; no git push
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20.x"
 
-      # Build exactly as the publish job did, then drop dev dependencies so the
-      # bundle ships the same dist/ as npm plus production node_modules only.
-      # .mcpbignore keeps source, tests, docs and repo tooling out of the bundle.
-      - name: Install (locked), build, prune to production dependencies
+      # Locked install (dev dependencies included, so mcpb comes from the lockfile,
+      # never an unpinned npx download) and the same build the publish job ran.
+      # --ignore-scripts: nothing here needs install scripts, so none run.
+      - name: Install (locked) and build
         run: |
-          npm ci
+          npm ci --ignore-scripts
           npm run build
-          npm prune --omit=dev
 
+      # Pack from a staging copy: the tagged tree (git archive, so only tracked
+      # files), this build's dist/, and production-only dependencies installed from
+      # the same lockfile. .mcpbignore (tracked) keeps source, tests and docs out;
+      # mcpb's defaults drop .d.ts, source maps, lockfiles and .env files.
       - name: Validate and pack the MCPB bundle
         run: |
-          npx --yes @anthropic-ai/mcpb@2.1.2 validate manifest.json
-          npx --yes @anthropic-ai/mcpb@2.1.2 pack . mcp-sam-gov.mcpb
+          npx --no-install mcpb validate manifest.json
+          STAGE="$RUNNER_TEMP/mcpb-stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          git archive HEAD | tar -x -C "$STAGE"
+          rm -rf "$STAGE/dist" && cp -R dist "$STAGE/dist"
+          (cd "$STAGE" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
+          npx --no-install mcpb pack "$STAGE" mcp-sam-gov.mcpb
 
       - name: Attach the bundle to the GitHub Release
         env:
