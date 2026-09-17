@@ -6,12 +6,12 @@
     "url": "https://github.com/cliwant/mcp-sam-gov",
     "source": "github"
   },
-  "version": "1.13.1",
+  "version": "1.13.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@cliwant/mcp-sam-gov",
-      "version": "1.13.1",
+      "version": "1.13.2",
       "transport": {
         "type": "stdio"
       },

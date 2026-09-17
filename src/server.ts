@@ -108,7 +108,7 @@ import { realpathSync } from "node:fs";
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
 // Keep in sync with package.json "version" (asserted at release; see CHANGELOG).
-const SERVER_VERSION = "1.13.1";
+const SERVER_VERSION = "1.13.2";
 
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 

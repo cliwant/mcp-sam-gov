@@ -3,7 +3,7 @@
   "name": "mcp-sam-gov",
   "display_name": "SAM.gov & US Government Contracting",
   "icon": "icon.png",
-  "version": "1.13.1",
+  "version": "1.13.2",
   "description": "Keyless-first: 152 tools for US federal + state/local (SLED) government contracting, spending, regulation & partner vetting. Independent project — not affiliated with or endorsed by SAM.gov or the U.S. GSA.",
   "long_description": "One-click Claude Desktop extension for US-government business intelligence — 152 tools, 147 of them with no API key. Search federal AND state/local (SLED) solicitations (SAM.gov, Grants.gov, OpenGov, Bonfire); analyze spending and awards (USAspending, FPDS); vet a partner across sanctions, exclusions, single-audit findings, bank health, and environmental compliance (OFAC, SAM, FAC, FDIC, EPA); check product recalls (openFDA, NHTSA, CPSC); pull litigation (CourtListener); and read regulation (Federal Register, eCFR, FAR/DFARS, NIST 800-53). Anti-hallucination autocomplete keeps NAICS/agency/recipient answers grounded. Honesty-hardened: totals are never a page length, outages throw instead of returning empty, and a missing value is null (never a fabricated $0). Keyless-first: 5 tools need a free key (Census business-patterns, FRED, BEA and DOL's data endpoint); other optional free keys (SAM.gov, api.data.gov, BLS and more) only raise rate limits. Independent open-source project — not affiliated with, endorsed by, or sponsored by SAM.gov, the U.S. General Services Administration (GSA), or any other government agency; it reads publicly available government open-data APIs.",
   "author": {
