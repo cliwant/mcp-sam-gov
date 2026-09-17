@@ -15757,7 +15757,7 @@ async function testNihHonesty() {
 //   shape/outage honesty; parity nsf.num===coerce.num.
 const NSF_URL_RE = /api\.nsf\.gov\/services\/v1\/awards\.json/;
 const isNsf = (u) => NSF_URL_RE.test(u);
-// A real-structured NSF award row (verbatim shape from a live id=2545697 probe).
+// A fictional NSF award row (NSF API response shape; personal data fictionalized — see PR test/fictional-fixture-pii).
 const NSF_ROW = {
   id: "2545697",
   title: "REU Site: AI in Sensing, Robotics, and Healthcare",
@@ -15780,13 +15780,13 @@ const NSF_ROW = {
   perfStateCode: "MD",
   perfCountryCode: "US",
   perfZipCode: "212182608",
-  pdPIName: "Muyinatu A Bell",
-  piFirstName: "Muyinatu",
-  piLastName: "Bell",
+  pdPIName: "Alex A Rivera",
+  piFirstName: "Alex",
+  piLastName: "Rivera",
   piMiddeInitial: "A", // VERBATIM misspelled source key (missing the second 'l')
-  piEmail: "mledijubell@jhu.edu",
+  piEmail: "alex.rivera@example.edu",
   piId: "269999537",
-  coPDPI: ["Jeremy D Brown jbrow262@jhu.edu"],
+  coPDPI: ["Morgan D Chen mchen001@example.edu"],
   poName: "Jane Officer",
   poEmail: "officer@nsf.gov",
   fundsObligatedAmt: "505423",
@@ -15829,7 +15829,7 @@ async function testNsfHonesty() {
     // The mapped enrichment payload is non-vacuous (recipient/UEI/PI/amounts).
     const a = r.data.awards[0];
     ok("52a record map (recipient enrichment): id/title, awardee JHU/MD, ueiNumber+parentUeiNumber (the SAM/USAspending join), PI, amounts as number — abstract OMITTED in search rows",
-      a.id === "2545697" && a.awardee.name === "Johns Hopkins University" && a.awardee.stateCode === "MD" && a.awardee.ueiNumber === "FTMTDMBR29C7" && a.awardee.parentUeiNumber === "GS4PNKTRNKL3" && a.principalInvestigator.fullName === "Muyinatu A Bell" && a.amounts.fundsObligatedAmt === 505423 && a.abstractText === undefined,
+      a.id === "2545697" && a.awardee.name === "Johns Hopkins University" && a.awardee.stateCode === "MD" && a.awardee.ueiNumber === "FTMTDMBR29C7" && a.awardee.parentUeiNumber === "GS4PNKTRNKL3" && a.principalInvestigator.fullName === "Alex A Rivera" && a.amounts.fundsObligatedAmt === 505423 && a.abstractText === undefined,
       JSON.stringify({ id: a.id, uei: a.awardee.ueiNumber, puei: a.awardee.parentUeiNumber, amt: a.amounts.fundsObligatedAmt, hasAbstract: a.abstractText !== undefined }));
     ok("52h piMiddeInitial read VERBATIM (misspelled source key) ⇒ middleInitial 'A' — mutate the mapper to read piMiddleInitial ⇒ reads undefined→null ⇒ RED (silently drops real PI data)",
       a.principalInvestigator.middleInitial === "A", JSON.stringify(a.principalInvestigator.middleInitial));
@@ -15991,7 +15991,7 @@ async function testNsfHonesty() {
   // ── filtersApplied honesty + SSRF query building + uppercase-normalize UEIs. ──
   await withFetch(nsfMock(nsfBody(3396, nsfRows(25))), async (calls) => {
     // Only SHIPPED filters + a lowercase UEI (to prove uppercase-normalization).
-    const r = await runTool("nsf_search_awards", { keyword: "robotics", awardeeStateCode: "MD", ueiNumber: "ftmtdmbr29c7", parentUeiNumber: "gs4pnktrnkl3", pdPIName: "Bell" }, sam);
+    const r = await runTool("nsf_search_awards", { keyword: "robotics", awardeeStateCode: "MD", ueiNumber: "ftmtdmbr29c7", parentUeiNumber: "gs4pnktrnkl3", pdPIName: "Rivera" }, sam);
     const m = buildMeta(r.meta);
     ok("52-filters filtersApplied lists EXACTLY the shipped, live-confirmed-narrowing filters actually sent (keyword, awardeeStateCode, awardeeName?, ueiNumber, parentUeiNumber, pdPIName)",
       JSON.stringify([...m.filtersApplied].sort()) === JSON.stringify(["awardeeStateCode", "keyword", "parentUeiNumber", "pdPIName", "ueiNumber"]), JSON.stringify(m.filtersApplied));
