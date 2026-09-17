@@ -13,6 +13,8 @@ The most comprehensive **keyless-first** MCP server for US federal **and state/l
 [![Glama score](https://glama.ai/mcp/servers/cliwant/mcp-sam-gov/badges/score.svg)](https://glama.ai/mcp/servers/cliwant/mcp-sam-gov)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Daily smoke](https://github.com/cliwant/mcp-sam-gov/actions/workflows/daily-smoke.yml/badge.svg)](https://github.com/cliwant/mcp-sam-gov/actions/workflows/daily-smoke.yml)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_MCP-0098FF?logo=visualstudiocode)](https://insiders.vscode.dev/redirect/mcp/install?name=sam-gov&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40cliwant%2Fmcp-sam-gov%22%5D%7D)
+[![Add to Kiro](https://img.shields.io/badge/Kiro-Add_MCP-7B3FE4)](https://kiro.dev/launch/mcp/add?name=sam-gov&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40cliwant%2Fmcp-sam-gov%22%5D%7D)
 
 [English](./README.md) · [한국어](./README.ko.md) · [日本語](./README.ja.md)
 
@@ -307,6 +309,27 @@ No global install (npx):
 ```json
 { "mcpServers": { "sam-gov": { "command": "npx", "args": ["-y", "@cliwant/mcp-sam-gov"] } } }
 ```
+
+### VS Code
+
+Add a `.vscode/mcp.json` at your project root (VS Code uses `"servers"`, not `"mcpServers"`):
+
+```json
+{
+  "servers": {
+    "sam-gov": {
+      "command": "npx",
+      "args": ["-y", "@cliwant/mcp-sam-gov"]
+    }
+  }
+}
+```
+
+Or use the one-click badge at the top of this page to install directly from your browser.
+
+### Kiro
+
+Use the one-click badge at the top of this page to add the server. Kiro opens an install dialog pre-filled with the `npx` command.
 
 ### Anything else
 
