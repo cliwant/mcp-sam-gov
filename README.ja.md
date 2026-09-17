@@ -97,6 +97,8 @@ Windows でホストが `spawn npx ENOENT` でサーバーを起動できない�
 
 > **パッケージ名に注意:** npm パッケージ名はスコープ付きの **`@cliwant/mcp-sam-gov`** です。`mcp-sam-gov` はグローバルインストール時に PATH に置かれる実行ファイル名にすぎず、スコープなしの `mcp-sam-gov` パッケージは npm に存在しません。そのため `npx -y mcp-sam-gov` は 404 で失敗します。`npx -y @cliwant/mcp-sam-gov` を使ってください。
 
+VS Code は `.vscode/mcp.json` に `"servers"` キーを使います。英語 README 上部の **Install in VS Code** / **Add to Kiro** バッジからワンクリックでインストールすることもできます。
+
 各ホスト別 config の場所とホスト別の npx 設定例は [Host configurations](./README.md#host-configurations) (英語 README) を参照。
 
 ### ⚪ パス 4 — 直接パス (グローバルインストールなし)
