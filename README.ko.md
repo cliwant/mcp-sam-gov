@@ -192,6 +192,12 @@ npm install --omit=dev
 
 ---
 
+## 도구셋 선택 (컨텍스트 절약)
+
+기본값은 전체 152개 도구를 로드하며 세션당 약 80k 토큰이 소요됩니다. `MCP_SAM_GOV_TOOLSETS` 환경 변수에 필요한 도구셋 이름을 쉼표로 구분해 지정하면 컨텍스트를 줄일 수 있습니다. 빈 값이나 `all`로 설정하면 전체 도구가 로드됩니다. 사용 가능한 도구셋: `core`(58개, SAM/Grants/USAspending/FAR/eCFR/Federal Register/SBA 등), `sled`(13개, 주·지자체 조달), `vetting`(17개, OFAC/FDIC/FAC/EPA ECHO 등), `disclosure`(8개, SEC EDGAR), `regulatory`(9개, Regulations.gov/Congress/GovInfo), `pricing`(15개, GSA/BLS/Treasury/FRED/DOL 등), `health`(17개, CMS/NIH/NSF/openFDA 등), `safety`(3개, NHTSA/CPSC), `geo`(9개, Census geocode/FEMA/NWS 등), `cyber`(3개, NVD/CISA KEV/NIST 800-53). 로드되지 않은 도구를 호출하면 어느 도구셋에서 활성화할 수 있는지를 알려주는 `tool_not_loaded` 오류가 반환됩니다.
+
+---
+
 ## 최신 버전 유지
 
 npm은 설치한 사용자에게 새 버전을 알려주지 않으므로, 서버가 **최소한으로** 알려줍니다. 시작 시 **공개 npm 레지스트리에 익명 요청 1회**로 자기 최신 버전을 확인하고, **더 새 버전이 있을 때만** stderr에 한 줄 출력합니다(예: `a newer version is available: 1.7.0 → 1.8.0`). **사용 데이터는 전혀 보내지 않고**(텔레메트리 아닌 버전 확인), 프로토콜 stdout은 건드리지 않으며, 논블로킹이고, 최신이면 조용합니다.

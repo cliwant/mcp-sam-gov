@@ -1,8 +1,10 @@
 /**
  * cbp-border.ts — CBP Border Wait Times (bwt.cbp.gov, KEYLESS) — the FREIGHT /
- * LOGISTICS lane. Live commercial-vehicle (and passenger) wait times at every US
+ * LOGISTICS lane. Live COMMERCIAL-VEHICLE (freight-truck) wait times at every US
  * land border port (Canadian + Mexican): per-port lane delays, operational status,
- * and open-lane counts. Answers "what's the current commercial-truck delay at port
+ * and open-lane counts. (The raw feed also carries passenger/pedestrian lanes, but
+ * this tool surfaces ONLY the commercial-vehicle lanes — the freight lane.)
+ * Answers "what's the current commercial-truck delay at port
  * X" — real-time freight-crossing situational awareness for logistics/trade vendors.
  *
  * SOURCE: CBP's official Border Wait Times API (bwt.cbp.gov/api/bwtnew) — a .gov host,
@@ -38,9 +40,11 @@ export type CbpPort = {
     };
 };
 /**
- * List CBP land-border-port commercial-vehicle (+ passenger) wait times, optionally
- * filtered by border (Canadian/Mexican) and/or port name (substring). Client-side
- * filter over the live feed; honest `_meta` (exact match total + real-time freshness).
+ * List CBP land-border-port COMMERCIAL-VEHICLE (freight-truck) wait times, optionally
+ * filtered by border (Canadian/Mexican) and/or port name (substring, applied
+ * CLIENT-SIDE over the full fetched set and disclosed as such). Passenger/pedestrian
+ * lanes are NOT surfaced (freight lane only). Honest `_meta` (exact match total +
+ * real-time freshness).
  */
 export declare function borderWaitTimes(args: {
     border?: string;

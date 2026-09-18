@@ -19,16 +19,20 @@
  *   entirely — never surfaced, logged, or stored. The B2G value is the
  *   manufacturer / component / safety signal, NOT the VIN.
  *
- * ★ THE HONESTY PILLARS (P1-P4, live-verified 2026-07-15):
+ * ★ THE HONESTY PILLARS (P1/P3/P4 live-verified 2026-07-15; P2 corrected +
+ *   re-verified 2026-07-20):
  *   P1: totalAvailable = `Count` (recalls) / `count` (complaints) — the REAL total.
  *       NHTSA returns the COMPLETE filtered set (no pagination), so in the normal
  *       case Count === results.length ⇒ complete:true. totalAvailable is NEVER
  *       fabricated: a PRESENT numeric Count is trusted verbatim; a MISSING Count
  *       falls back to results.length WITH an honest note (never invented).
- *   P2: results:[] (Count 0) ⇒ an HONEST EMPTY (returned:0, complete:true) — a bad
- *       make/model that returns 200+Count 0 is an honest no-match, NOT an error. A
- *       4xx ⇒ invalid_input; a 5xx/timeout ⇒ THROW (never a fake empty); a 200
- *       non-JSON body ⇒ schema_drift.
+ *   P2: ★NHTSA returns HTTP 400 (NOT 200) + {Count/count:0, results:[]} (Message
+ *       "Results returned successfully") for a VALID make/model/year that simply
+ *       has ZERO records (live-verified 2026-07-20). getNhtsa reads the body and
+ *       reclassifies THAT idiom as an HONEST EMPTY (returned:0, totalAvailable:0,
+ *       complete:true) with a note; any OTHER 400 ⇒ invalid_input, a 404 ⇒
+ *       not_found, a 5xx/timeout ⇒ THROW (never a fake empty), a 200 non-JSON
+ *       body ⇒ schema_drift.
  *   P3: booleans (crash/fire/parkIt/parkOutSide/overTheAirUpdate) preserved AS
  *       booleans (a non-boolean ⇒ null, never a fabricated false); counts
  *       (numberOfInjuries/numberOfDeaths) via `num` (a genuine 0 stays 0, NEVER

@@ -45,6 +45,13 @@
 import { readFileSync, readdirSync, statSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
+// Toolset completeness check — imported lazily inside runCli so a bare import of
+// the lint detectors (by the fault suite) never triggers a dynamic import.
+let _toolsets = null;
+async function loadToolsets() {
+  if (!_toolsets) _toolsets = await import("./dist/toolsets.js");
+  return _toolsets;
+}
 
 // ─── Check (1): truthfulness (silent-empty on the !ok path) ─────────
 const EMPTY = /return\s*(\[\s*\]|\{\s*\}|""|''|\{[^{}]*:\s*\[\s*\]\s*\})\s*(;|\}|$)/;
@@ -198,7 +205,7 @@ function tsFiles(dir) {
   return out;
 }
 
-function runCli() {
+async function runCli() {
   const files = tsFiles("src");
   let failed = false;
 
@@ -234,6 +241,65 @@ function runCli() {
     console.log(`✓ disclosure-tokenizer lint: 0 whitespace-only multi-token disclosure splits across ${files.length} src files (the only sanctioned tokenizer is tokenizeForDisclosure; ${optOuts.length} allowlisted opt-out(s))`);
   }
 
+  // Check (3) — toolset completeness: every registered tool must map to exactly one
+  // toolset; no mapping entry for a tool that doesn't exist. This guard fires if a
+  // new tool is added to TOOLS without a matching entry in TOOL_TOOLSET_MAP, or if
+  // a stale entry references a tool name that no longer exists.
+  //
+  // Implementation: extract tool names from src/server.ts via regex (no npm install
+  // needed — works in the lint CI job that doesn't run `npm ci`), and load
+  // TOOL_TOOLSET_MAP from dist/toolsets.js (no external deps — safe to import).
+  // Missing tools → fail; extra map entries with no matching tool → warn only.
+  try {
+    // Extract tool names from src/server.ts: `defineTool({ name: "tool_name"` or
+    // `name: 'tool_name'`. Tool names are all-lowercase with underscores (no dashes).
+    // The server name "sam-gov" has a dash so it will never match [a-z][a-z0-9_]*.
+    // Accepting single quotes too so a future style change does not silently break the check.
+    const serverSrc = readFileSync("src/server.ts", "utf-8");
+    const toolNames = new Set();
+    const nameRe = /\bname:\s*["']([a-z][a-z0-9_]*)["']/g;
+    let nm;
+    while ((nm = nameRe.exec(serverSrc)) !== null) toolNames.add(nm[1]);
+
+    // Read the mapping from BOTH src/toolsets.ts (via regex — catches changes before
+    // a rebuild) and dist/toolsets.js (via import — the authoritative runtime mapping).
+    // A key missing in src but present in dist means a stale dist; a key missing in dist
+    // but present in src means the dist needs rebuilding. We flag both.
+    const srcToolsets = readFileSync("src/toolsets.ts", "utf-8");
+    const srcMapKeys = new Set();
+    const srcMapRe = /^\s{2}([a-z][a-z0-9_]*)\s*:\s*"[a-z]+"/gm;
+    let sm;
+    while ((sm = srcMapRe.exec(srcToolsets)) !== null) srcMapKeys.add(sm[1]);
+
+    const { TOOL_TOOLSET_MAP } = await loadToolsets();
+    const mapKeys = new Set(Object.keys(TOOL_TOOLSET_MAP));
+
+    // Warn if src and dist are out of sync (stale build).
+    const srcNotDist = [...srcMapKeys].filter((k) => !mapKeys.has(k));
+    const distNotSrc = [...mapKeys].filter((k) => !srcMapKeys.has(k));
+    if (srcNotDist.length || distNotSrc.length) {
+      console.log(`  ℹ toolset-completeness lint: src/toolsets.ts ↔ dist/toolsets.js drift detected — run npm run build. src-only: [${srcNotDist.join(", ")}]; dist-only: [${distNotSrc.join(", ")}]`);
+    }
+
+    const missing = [...toolNames].filter((n) => !mapKeys.has(n));
+    const extra   = [...mapKeys].filter((n) => !toolNames.has(n));
+
+    if (missing.length) {
+      console.error(`✗ toolset-completeness lint: ${missing.length} tool(s) have NO toolset mapping — add them to TOOL_TOOLSET_MAP in src/toolsets.ts:`);
+      for (const n of missing) console.error(`    ${n}`);
+      failed = true;
+    } else {
+      console.log(`✓ toolset-completeness lint: all ${toolNames.size} registered tools have a toolset mapping`);
+    }
+    if (extra.length) {
+      // Stale entries — warn only, not a hard failure (they are benign).
+      console.log(`  ℹ toolset-completeness lint: ${extra.length} stale TOOL_TOOLSET_MAP entr${extra.length === 1 ? "y" : "ies"} (no matching TOOLS entry): ${extra.join(", ")}`);
+    }
+  } catch (e) {
+    console.error(`✗ toolset-completeness lint: check failed — ${e.message}`);
+    failed = true;
+  }
+
   if (failed) process.exit(1);
 }
 
@@ -258,4 +324,4 @@ function isMain() {
   }
 }
 
-if (isMain()) runCli();
+if (isMain()) runCli().catch((e) => { console.error("FATAL:", e); process.exit(1); });

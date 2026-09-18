@@ -8,7 +8,7 @@
  * ★ THIS IS THE SERVER'S THIRD KEY-REQUIRED SOURCE (Census CBP #1, FRED #2). The
  *   BEA Data API has NO keyless tier: every request needs `UserID=`. So, honestly:
  *   with NO `BEA_API_KEY` this tool THROWS an `invalid_input` config error BEFORE
- *   any fetch (never a fake-empty, never a keyless-pretend). The other 116 tools
+ *   any fetch (never a fake-empty, never a keyless-pretend). The other tools
  *   stay keyless — this key is scoped to this one source. (Contrast the OPTIONAL
  *   keys of datagov/bls/nvd, which lift a tier but are not required.)
  *

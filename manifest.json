@@ -51,7 +51,8 @@
         "FRED_API_KEY": "${user_config.fred_api_key}",
         "BEA_API_KEY": "${user_config.bea_api_key}",
         "DOL_API_KEY": "${user_config.dol_api_key}",
-        "DATA_GOV_API_KEY": "${user_config.data_gov_api_key}"
+        "DATA_GOV_API_KEY": "${user_config.data_gov_api_key}",
+        "MCP_SAM_GOV_TOOLSETS": "${user_config.toolsets}"
       }
     }
   },
@@ -216,6 +217,13 @@
       "description": "Optional free key; raises the shared DEMO_KEY limits for Regulations.gov, Congress.gov, GovInfo, FAC, the data.gov catalog and GSA per-diem.",
       "required": false,
       "sensitive": true,
+      "default": ""
+    },
+    "toolsets": {
+      "type": "string",
+      "title": "Toolsets (optional)",
+      "description": "Comma-separated subset of toolsets to load, e.g. 'core,sled'. Blank = all 152 tools. Available sets: core (SAM/Grants/USAspending/FAR/eCFR/Federal Register/SBA), sled (OpenGov/Bonfire/ArcGIS/Socrata/CKAN/Tableau/Open Checkbook), vetting (OFAC/FAC/FDIC/EPA ECHO/CourtListener/nonprofit/LDA), disclosure (SEC EDGAR), regulatory (Regulations.gov/Congress/GovInfo), pricing (GSA/BLS/Treasury/BEA/Census business-patterns/FRED/DOL), health (CMS/NPPES/NIH/NSF/ClinicalTrials/openFDA), safety (NHTSA/CPSC), geo (Census geocode/FEMA/NWS/HTS/CBP/data.gov catalog), cyber (NVD CVE/CISA KEV/NIST 800-53).",
+      "required": false,
       "default": ""
     }
   }

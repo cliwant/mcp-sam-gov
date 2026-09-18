@@ -192,6 +192,12 @@ npm install --omit=dev
 
 ---
 
+## ツールセットの選択 (コンテキスト削減)
+
+デフォルトでは全 152 ツールがロードされ、セッションあたり約 80k トークンを消費します。`MCP_SAM_GOV_TOOLSETS` 環境変数に必要なツールセット名をカンマ区切りで指定することでコンテキストを削減できます。空値または `all` で全ツールがロードされます。利用可能なツールセット: `core`(58 ツール, SAM/Grants/USAspending/FAR/eCFR/Federal Register/SBA 等), `sled`(13 ツール, 州・地方調達), `vetting`(17 ツール, OFAC/FDIC/FAC/EPA ECHO 等), `disclosure`(8 ツール, SEC EDGAR), `regulatory`(9 ツール, Regulations.gov/Congress/GovInfo), `pricing`(15 ツール, GSA/BLS/Treasury/FRED/DOL 等), `health`(17 ツール, CMS/NIH/NSF/openFDA 等), `safety`(3 ツール, NHTSA/CPSC), `geo`(9 ツール, Census geocode/FEMA/NWS 等), `cyber`(3 ツール, NVD/CISA KEV/NIST 800-53)。ロードされていないツールを呼び出すと、どのツールセットで有効化できるかを示す `tool_not_loaded` エラーが返されます。
+
+---
+
 ## 最新バージョンの維持
 
 npm はインストール済みユーザーに新バージョンを通知しないため、サーバーが**最小限に**通知します。起動時に**公開 npm レジストリへ匿名リクエストを 1 回**送って自身の最新版を確認し、**より新しい版がある場合のみ** stderr に 1 行出力します(例: `a newer version is available: 1.7.0 → 1.8.0`)。**利用データは一切送信せず**(テレメトリではなくバージョン確認)、プロトコルの stdout には触れず、ノンブロッキングで、最新なら沈黙します。

@@ -8,7 +8,7 @@
  *   its keyless tier — a request WITHOUT a key is 302-redirected to a "Missing
  *   Key" HTML page. So, honestly: with NO `CENSUS_API_KEY` this tool THROWS an
  *   `invalid_input` config error BEFORE any fetch (never a fake-empty, never a
- *   keyless-pretend). The other 111 tools stay keyless — this key is scoped to
+ *   keyless-pretend). The other tools stay keyless — this key is scoped to
  *   this one source. (Contrast the OPTIONAL keys of datagov/bls/nvd, which lift a
  *   tier but are not required.)
  *
@@ -18,12 +18,15 @@
  * post-construction `new URL().hostname` assertion + `redirect:"error"`) and does
  * NOT touch census_geocode.
  *
- * Zero fetch/coercion/error/meta code of its own: it REUSES `getJson`
- * (+ redirect:"error"), `driftError`, `num` (coerce.ts, null-never-0),
- * `withMeta`/`buildMeta`. The optional-key leak discipline is MIRRORED from
- * datagatekey.ts/bls.ts — but here the key is REQUIRED and rides ONLY in the
- * `&key=` query param, NOWHERE else (never the label, `_meta.source`, notes, or a
- * log — the K-test).
+ * Coercion/meta code is REUSED (`driftError`, `errorFromResponse`, `num`
+ * coerce.ts null-never-0, `withMeta`/`buildMeta`). The ONE bespoke bit is the
+ * fetch: a single `fetch(redirect:"manual")` (NOT the shared getJson) so a
+ * missing/invalid-key 302 surfaces as an INSPECTABLE opaque-redirect → honest
+ * invalid_input, instead of undici's redirect:"error" TypeError that
+ * fetchWithRetry would mask as a retryable outage (see the fetch block). The
+ * optional-key leak discipline is MIRRORED from datagovKey.ts/bls.ts — but here
+ * the key is REQUIRED and rides ONLY in the `&key=` query param, NOWHERE else
+ * (never the label, `_meta.source`, notes, or a log — the K-test).
  *
  *   GET https://api.census.gov/data/{year}/cbp
  *       ?get=NAME,NAICS2017_LABEL,ESTAB,EMP,PAYANN,GEO_ID
@@ -37,9 +40,10 @@
  *
  * ★ HONESTY (ADR-0047 P1–P5):
  *   [KEY]  no key ⇒ invalid_input THROW pre-fetch (0 fetch); the message names
- *          CENSUS_API_KEY + the free-signup URL. A 302 at the wire (missing/invalid
- *          key redirected to the Missing-Key page) ⇒ reclassified to invalid_input
- *          "check CENSUS_API_KEY" (never a fake-empty).
+ *          CENSUS_API_KEY + the free-signup URL. A wire 302 (a key that IS set but is
+ *          invalid → the Missing-Key page) is caught via redirect:"manual" as an
+ *          opaque-redirect ⇒ invalid_input "check CENSUS_API_KEY" (never a
+ *          fake-empty, never a masked outage).
  *   [P1]   CBP returns the COMPLETE geography set for the filter (no server
  *          pagination) ⇒ totalAvailable = the row count, complete:true. NEVER
  *          fabricated (RED if totalAvailable = header-length or invented).
