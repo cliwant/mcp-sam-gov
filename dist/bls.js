@@ -132,10 +132,11 @@ export const BLS_CATALOG = {
 // helpful behavior.
 const BLS_ID_TO_KEY = new Map(BLS_SERIES_KEYS.map((k) => [BLS_CATALOG[k].seriesId, k]));
 // ─── Raw-seriesId charclass (SSRF + "verify the ID" honesty) ──────
-// `^[A-Z0-9]{1,20}$` — uppercase alnum, explicit length bound. In JS (no `m`
+// `^[A-Z0-9]{1,25}$` — uppercase alnum, explicit length bound. In JS (no `m`
 // flag) `$` matches only end-of-input, and `[A-Z0-9]` cannot include `\n`, so a
 // trailing newline is rejected. Rejects `../`, encoded traversal, `@host`, `;`.
-const SERIES_ID_RE = /^[A-Z0-9]{1,20}$/;
+// 25 chars covers OEWS series IDs (e.g. OEUN000000000000015125201, 25 chars).
+const SERIES_ID_RE = /^[A-Z0-9]{1,25}$/;
 // ─── Year bounds ──────────────────────────────────────────────────
 const YEAR_MIN = 1900;
 const CURRENT_YEAR = new Date().getUTCFullYear();
@@ -323,7 +324,7 @@ export async function timeseries(args) {
         if (typeof raw !== "string" || !SERIES_ID_RE.test(raw)) {
             throw new ToolErrorCarrier({
                 kind: "invalid_input",
-                message: `Invalid seriesId ${JSON.stringify(raw)} — expected 1..20 uppercase alphanumeric characters (^[A-Z0-9]{1,20}$). A BLS series ID like 'CUUR0000SA0'; punctuation/whitespace/lowercase are rejected (SSRF + "verify the ID" honesty).`,
+                message: `Invalid seriesId ${JSON.stringify(raw)} — expected 1..25 uppercase alphanumeric characters (^[A-Z0-9]{1,25}$). A BLS series ID like 'CUUR0000SA0' or OEWS 'OEUN000000000000015125201' (25 chars); punctuation/whitespace/lowercase are rejected (SSRF + "verify the ID" honesty).`,
                 retryable: false,
                 upstreamEndpoint: label,
             });

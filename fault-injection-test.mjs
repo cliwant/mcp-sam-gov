@@ -16240,7 +16240,7 @@ async function testBlsHonesty() {
     await withFetch(failClosed(), async (calls) => {
       const before = calls.length;
       const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { seriesId: [bad] }, sam));
-      ok(`62bls-7 seriesId ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (charclass ^[A-Z0-9]{1,20}$ rejects ../, encoded traversal, ; and a trailing newline) — kills (f) SSRF half`,
+      ok(`62bls-7 seriesId ${JSON.stringify(bad)} ⇒ invalid_input, 0 fetch (charclass ^[A-Z0-9]{1,25}$ rejects ../, encoded traversal, ; and a trailing newline) — kills (f) SSRF half`,
         threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
     });
   }
@@ -16251,6 +16251,34 @@ async function testBlsHonesty() {
     ok("62bls-7 module pre-fetch guard: blsTimeseries({seriesId:['…;drop']}) directly ⇒ invalid_input, 0 fetch (belt-and-suspenders behind Zod)",
       threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
   });
+
+  // ── Fixture 7b: 25-char OEWS seriesId accepted; 26+ rejected; injection rejected. ──
+  // Red proof: prior regex /^[A-Z0-9]{1,20}$/ would reject OEUN000000000000015125201 (25 chars).
+  const OEWS_25 = "OEUN000000000000015125201"; // canonical 25-char OEWS ID
+  await withFetch(blsMock(blsBody([blsSeries(OEWS_25, [CPI_REAL])])), async (calls) => {
+    const before = calls.length;
+    const r = await runTool("bls_timeseries", { seriesId: [OEWS_25], startYear: 2024, endYear: 2024 }, sam);
+    ok("62bls-7b 25-char OEWS seriesId OEUN000000000000015125201 is ACCEPTED (not invalid_input) — red under old /^[A-Z0-9]{1,20}$/",
+      calls.length > before, JSON.stringify({ added: calls.length - before }));
+    ok("62bls-7b result carries the OEWS seriesId back (not fabricated)",
+      Array.isArray(r?.data?.series) && r.data.series.some((s) => s.seriesId === OEWS_25), JSON.stringify(r?.data?.series?.map((s) => s.seriesId)));
+  });
+  // 26-char id must still be rejected
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { seriesId: ["OEUN0000000000000151252010"] }, sam));
+    ok("62bls-7b 26-char seriesId OEUN0000000000000151252010 ⇒ invalid_input, 0 fetch (length cap 25 enforced)",
+      threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+  });
+  // Injection-shaped ids must be rejected
+  for (const inj of ["OEWS 25CHAR%20ID", "OEWS\n25CHAR", "OEWS%0025CHAR"]) {
+    await withFetch(failClosed(), async (calls) => {
+      const before = calls.length;
+      const { threw, error } = await expectThrow(() => runTool("bls_timeseries", { seriesId: [inj] }, sam));
+      ok(`62bls-7b injection-shaped seriesId ${JSON.stringify(inj)} ⇒ invalid_input, 0 fetch`,
+        threw && toToolError(error).kind === "invalid_input" && calls.length === before, JSON.stringify({ k: threw ? toToolError(error).kind : "no-throw", added: calls.length - before }));
+    });
+  }
 
   // ── Fixture 8: year-span clamp (kills f, span half; P1). ──
   await withFetch(blsMock(blsBody([blsSeries("CUUR0000SA0", [CPI_REAL])])), async (calls) => {
