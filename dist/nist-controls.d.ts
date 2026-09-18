@@ -25,8 +25,10 @@ export type NistControl = {
     id: string;
     family: string;
     title: string;
-    statement: string;
+    status: string | null;
+    statement: string | null;
     guidance: string | null;
+    incorporatedInto: string[];
     enhancements: {
         id: string;
         title: string;

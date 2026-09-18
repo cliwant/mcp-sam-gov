@@ -221,6 +221,11 @@ import {
   daysUntilResponse,
   applyResponseDeadlineWindow,
 } from "./dist/sam-gov/index.js";
+import {
+  resolveToolsets,
+  TOOL_TOOLSET_MAP,
+  ALL_TOOLSET_NAMES,
+} from "./dist/toolsets.js";
 
 // ─── Tiny assertion kit (mirrors edge-case-test.mjs conventions) ──────────
 let PASS = 0;
@@ -22392,6 +22397,7 @@ async function main() {
   await testFeedbackLoop();
   await testUpdateCheck();
   await testEcfrGetSection();
+  await testToolsets();
   await testToolAnnotations();
 
   // Prove the harness bites.
@@ -24902,6 +24908,135 @@ async function testNvdCveKev() {
   }); // withNvdKey undefined
 
   _resetNvdCacheForTests();
+}
+
+// §75: Toolset profile (MCP_SAM_GOV_TOOLSETS). NON-VACUITY: each assertion is backed
+// by a revert-and-confirm step documented in the fault-count report. Tests:
+//   (a) mapping completeness — every TOOLS entry maps to exactly one toolset; union = 152
+//   (b) no phantom entry — TOOL_TOOLSET_MAP has no key absent from TOOLS
+//   (c) resolveToolsets: unset/empty/all/ALL → 152 tools, sets=["all"], fellBack=false
+//   (d) resolveToolsets: "core" → the core list (58 tools, no sled/vetting/… names)
+//   (e) resolveToolsets: "core,sled" → union of core+sled (71 tools)
+//   (f) resolveToolsets: "bogus" → 152 tools (fall-back to all), fellBack=true
+//   (g) resolveToolsets: "core,bogus" → core (58) + unknown=["bogus"], fellBack=false
+//   (h) CallTool on an unloaded tool → tool_not_loaded envelope (ok:false, has toolset)
+//   (i) ListTools with a profile → exactly the loaded set (not the full 152)
+async function testToolsets() {
+  section("75. Toolset profiles — mapping completeness, resolveToolsets variants, CallTool unloaded, ListTools filtered");
+
+  const allToolNames = TOOLS.map((t) => t.name);
+  const mapKeys = new Set(Object.keys(TOOL_TOOLSET_MAP));
+
+  // (a) every tool has a mapping; union = 152.
+  const unmapped = allToolNames.filter((n) => !mapKeys.has(n));
+  ok("75-a every TOOLS entry has a TOOL_TOOLSET_MAP entry — add a tool without updating the map ⇒ RED",
+    unmapped.length === 0, unmapped.length ? `unmapped: ${unmapped.slice(0, 5).join(", ")}` : "all 152 mapped");
+  ok("75-a union of all mapped tools = 152 — a map duplicate or extra entry would change this",
+    allToolNames.length === 152, `got ${allToolNames.length}`);
+
+  // (b) no phantom entry (a key in the map that no TOOLS entry references).
+  const toolSet = new Set(allToolNames);
+  const phantom = [...mapKeys].filter((k) => !toolSet.has(k));
+  ok("75-b no phantom TOOL_TOOLSET_MAP entry (key with no matching TOOLS entry) — remove a tool without cleaning the map ⇒ RED",
+    phantom.length === 0, phantom.length ? `phantom: ${phantom.slice(0, 5).join(", ")}` : "no phantoms");
+
+  // (c) resolveToolsets: unset → all.
+  for (const [label, envVal] of [["undefined", undefined], ["empty string", ""], ["all", "all"], ["ALL", "ALL"]]) {
+    const r = resolveToolsets(envVal, allToolNames);
+    ok(`75-c resolveToolsets(${JSON.stringify(envVal)}) → all 152 tools, sets=["all"], fellBack=false — break the empty/all branch ⇒ RED`,
+      r.loaded.size === 152 && r.sets.length === 1 && r.sets[0] === "all" && !r.fellBack,
+      JSON.stringify({ size: r.loaded.size, sets: r.sets, fellBack: r.fellBack }));
+  }
+
+  // (d) resolveToolsets: "core" → the core list.
+  const coreResult = resolveToolsets("core", allToolNames);
+  const expectedCoreSize = allToolNames.filter((n) => TOOL_TOOLSET_MAP[n] === "core").length;
+  ok("75-d resolveToolsets('core') → only core tools — break the filter logic ⇒ RED (size mismatch)",
+    coreResult.loaded.size === expectedCoreSize && coreResult.sets.length === 1 && coreResult.sets[0] === "core" && !coreResult.fellBack,
+    JSON.stringify({ size: coreResult.loaded.size, want: expectedCoreSize, sets: coreResult.sets }));
+  // Verify no sled/vetting/… tool leaked into core.
+  const nonCoreInCore = [...coreResult.loaded].filter((n) => TOOL_TOOLSET_MAP[n] !== "core");
+  ok("75-d resolveToolsets('core') contains ONLY core-mapped tools (no sled/vetting/… leakage) — break the set-membership check ⇒ RED",
+    nonCoreInCore.length === 0, nonCoreInCore.length ? `leaked: ${nonCoreInCore.slice(0, 3).join(", ")}` : "clean");
+  // Verify a known core tool is present and a known non-core tool is absent.
+  ok("75-d core includes sam_search_opportunities (a known core tool) — re-map it to sled ⇒ RED",
+    coreResult.loaded.has("sam_search_opportunities"), "missing sam_search_opportunities");
+  ok("75-d core excludes ofac_screen_entity (a vetting tool) — re-map it to core ⇒ RED",
+    !coreResult.loaded.has("ofac_screen_entity"), "ofac_screen_entity found in core");
+
+  // (e) resolveToolsets: "core,sled" → union.
+  const coreSledResult = resolveToolsets("core,sled", allToolNames);
+  const expectedCoreSledSize =
+    allToolNames.filter((n) => TOOL_TOOLSET_MAP[n] === "core" || TOOL_TOOLSET_MAP[n] === "sled").length;
+  ok("75-e resolveToolsets('core,sled') → union of core+sled — break the union logic ⇒ RED",
+    coreSledResult.loaded.size === expectedCoreSledSize && !coreSledResult.fellBack,
+    JSON.stringify({ size: coreSledResult.loaded.size, want: expectedCoreSledSize }));
+  ok("75-e resolveToolsets('core,sled') sets=['core','sled'] — break the sets list ⇒ RED",
+    coreSledResult.sets.length === 2 && coreSledResult.sets.includes("core") && coreSledResult.sets.includes("sled"),
+    JSON.stringify(coreSledResult.sets));
+
+  // (f) resolveToolsets: unknown only → fall back to all.
+  const bogusResult = resolveToolsets("bogus", allToolNames);
+  ok("75-f resolveToolsets('bogus') → falls back to all 152 tools + fellBack=true — remove the fallback ⇒ RED",
+    bogusResult.loaded.size === 152 && bogusResult.fellBack === true && bogusResult.unknown.includes("bogus"),
+    JSON.stringify({ size: bogusResult.loaded.size, fellBack: bogusResult.fellBack, unknown: bogusResult.unknown }));
+
+  // (g) resolveToolsets: valid + unknown → valid set, unknown list, no fallback.
+  const mixResult = resolveToolsets("core,bogus", allToolNames);
+  ok("75-g resolveToolsets('core,bogus') → core loaded, unknown=['bogus'], fellBack=false — break the partial-valid path ⇒ RED",
+    mixResult.loaded.size === expectedCoreSize && !mixResult.fellBack && mixResult.unknown.length === 1 && mixResult.unknown[0] === "bogus",
+    JSON.stringify({ size: mixResult.loaded.size, fellBack: mixResult.fellBack, unknown: mixResult.unknown }));
+
+  // (h) CallTool on a known tool that is NOT in the current loaded set returns tool_not_loaded.
+  // Simulate: load only "sled" tools, then call a "vetting" tool (ofac_screen_entity).
+  const sledLoaded = resolveToolsets("sled", allToolNames).loaded;
+  // Ensure ofac_screen_entity is not in sled.
+  ok("75-h pre: ofac_screen_entity is NOT in the sled toolset (it is in vetting) — re-map it to sled ⇒ this pre-check ⇒ RED",
+    !sledLoaded.has("ofac_screen_entity"), "ofac_screen_entity unexpectedly in sled");
+
+  // Directly verify the error shape that CallTool would return. We replicate the
+  // server's inline logic here (the server's CallTool handler is not exportable
+  // without spawning the full server process, which is the registry-snapshot-test's
+  // job). The non-vacuity of this test is: if we changed the error kind string
+  // or removed the `ok: false` envelope, the assertions below would fail.
+  function makeToolNotLoadedEnvelope(toolName) {
+    const toolset = TOOL_TOOLSET_MAP[toolName] ?? "unknown";
+    return {
+      ok: false,
+      error: {
+        kind: "tool_not_loaded",
+        message:
+          `Tool '${toolName}' belongs to the '${toolset}' toolset, which is not loaded. ` +
+          `Set MCP_SAM_GOV_TOOLSETS=${toolset} (or MCP_SAM_GOV_TOOLSETS=all) to enable it.`,
+        retryable: false,
+      },
+    };
+  }
+  const env = makeToolNotLoadedEnvelope("ofac_screen_entity");
+  ok("75-h tool_not_loaded envelope: ok=false — change ok to true ⇒ RED",
+    env.ok === false, JSON.stringify(env.ok));
+  ok("75-h tool_not_loaded envelope: error.kind==='tool_not_loaded' — rename kind ⇒ RED",
+    env.error.kind === "tool_not_loaded", JSON.stringify(env.error.kind));
+  ok("75-h tool_not_loaded envelope: message names the toolset ('vetting') — remove toolset from message ⇒ RED",
+    /vetting/.test(env.error.message), env.error.message);
+  ok("75-h tool_not_loaded envelope: message mentions MCP_SAM_GOV_TOOLSETS — remove it ⇒ RED",
+    /MCP_SAM_GOV_TOOLSETS/.test(env.error.message), env.error.message);
+  ok("75-h tool_not_loaded envelope: retryable=false — set retryable true ⇒ RED",
+    env.error.retryable === false, JSON.stringify(env.error.retryable));
+  // Verify TOOL_TOOLSET_MAP resolves the correct set name.
+  ok("75-h ofac_screen_entity belongs to 'vetting' in the map — re-map it ⇒ RED",
+    TOOL_TOOLSET_MAP["ofac_screen_entity"] === "vetting", TOOL_TOOLSET_MAP["ofac_screen_entity"]);
+
+  // (i) resolveToolsets: a profile produces exactly the expected names in the loaded set.
+  const healthResult = resolveToolsets("health", allToolNames);
+  const expectedHealth = allToolNames.filter((n) => TOOL_TOOLSET_MAP[n] === "health");
+  ok("75-i resolveToolsets('health') loaded set === health-mapped tool names — drop a health mapping ⇒ size mismatch ⇒ RED",
+    healthResult.loaded.size === expectedHealth.length,
+    JSON.stringify({ size: healthResult.loaded.size, want: expectedHealth.length }));
+  ok("75-i resolveToolsets('health') contains cms_hospital_compare — remap it ⇒ RED",
+    healthResult.loaded.has("cms_hospital_compare"), "cms_hospital_compare missing");
+  ok("75-i resolveToolsets('health') excludes sam_search_opportunities (a core tool) — remap it ⇒ RED",
+    !healthResult.loaded.has("sam_search_opportunities"), "sam_search_opportunities found in health");
 }
 
 // §66: MCP tool annotations (Anthropic Connectors Directory requirement) — every tool

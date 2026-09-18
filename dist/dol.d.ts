@@ -12,7 +12,7 @@
  *   • `dol_get_dataset` (KEY-REQUIRED, DOL_API_KEY) — GET
  *     /v4/get/{agency}/{endpoint}/json?… . The DATA endpoint has NO keyless tier, so
  *     with NO `DOL_API_KEY` this tool THROWS an invalid_input config error BEFORE any
- *     fetch (0 network call; the message names DOL_API_KEY + dol.gov/developer).
+ *     fetch (0 network call; the message names DOL_API_KEY + dataportal.dol.gov/registration).
  *   So DOL is the 4th REQUIRED key — but ONLY for the data tool; the catalog tool
  *   (and every other tool on the server) stays keyless.
  *
@@ -44,7 +44,7 @@
  *
  * ★HONESTY (ADR-0053 P1–P4 + KEY + SSRF):
  *   [KEY]  dol_get_dataset with NO DOL_API_KEY ⇒ invalid_input THROW pre-fetch (0
- *          fetch); the message names DOL_API_KEY + dol.gov/developer. The key rides the
+ *          fetch); the message names DOL_API_KEY + dataportal.dol.gov/registration. The key rides the
  *          `X-API-KEY` HEADER ONLY — NEVER the URL / label / _meta / notes / a log (the
  *          K-test). dol_list_datasets is keyless (no key read, no header).
  *   [P1]   catalog: totalAvailable = meta.total_count (the API's real catalog total)

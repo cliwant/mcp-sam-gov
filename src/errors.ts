@@ -32,7 +32,12 @@ export type ErrorKind =
   /** API returned 200 but we couldn't parse / shape doesn't match. */
   | "schema_drift"
   /** Anything else. Don't retry. */
-  | "unknown";
+  | "unknown"
+  /**
+   * The tool exists in the registry but is not loaded in the current toolset
+   * profile. Set MCP_SAM_GOV_TOOLSETS to enable the required toolset.
+   */
+  | "tool_not_loaded";
 
 export type ToolError = {
   kind: ErrorKind;

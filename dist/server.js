@@ -89,6 +89,7 @@ import { checkForUpdate } from "./update-check.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
+import { resolveToolsets, TOOL_TOOLSET_MAP, ALL_TOOLSET_NAMES, } from "./toolsets.js";
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
 // Keep in sync with package.json "version" (asserted at release; see CHANGELOG).
@@ -5661,15 +5662,34 @@ async function main() {
             },
         },
     });
+    // ── Toolset resolution (MCP_SAM_GOV_TOOLSETS) ────────────────────
+    const toolsetEnv = process.env.MCP_SAM_GOV_TOOLSETS;
+    const allToolNames = TOOLS.map((t) => t.name);
+    const tsResult = resolveToolsets(toolsetEnv, allToolNames);
+    // Warn on unknown names.
+    for (const u of tsResult.unknown) {
+        console.error(`[mcp-sam-gov] WARNING: unknown toolset name '${u}' in MCP_SAM_GOV_TOOLSETS — valid names: ${ALL_TOOLSET_NAMES.join(", ")}. Ignoring.`);
+    }
+    if (tsResult.fellBack) {
+        console.error(`[mcp-sam-gov] WARNING: no valid toolset names found in MCP_SAM_GOV_TOOLSETS='${toolsetEnv}' — falling back to all tools.`);
+    }
+    const loadedToolNames = tsResult.loaded;
+    const isAllTools = tsResult.sets.length === 1 && tsResult.sets[0] === "all";
+    // Build instructions: add a one-liner about loaded/available toolsets when
+    // not using the default (all). The default instructions stay byte-identical.
+    const BASE_INSTRUCTIONS = "This server wraps US government open data (keyless-first). If a tool result looks wrong, a tool stays broken, or the user wants a capability this server lacks, help improve it: call the `feedback` tool — or use the `report` URL present on schema_drift / upstream_unavailable errors — to get a PREFILLED GitHub issue link, and offer it to the user to open and submit. Nothing is posted automatically; the user submits. Never include secrets or personal data in a report (the repo is public).";
+    const serverInstructions = isAllTools
+        ? BASE_INSTRUCTIONS
+        : `${BASE_INSTRUCTIONS} Loaded toolsets: ${tsResult.sets.join(", ")}. Other available toolsets (set MCP_SAM_GOV_TOOLSETS to enable): ${ALL_TOOLSET_NAMES.filter((s) => !tsResult.sets.includes(s)).join(", ")}.`;
     const server = new Server({ name: SERVER_NAME, version: SERVER_VERSION }, {
         capabilities: { tools: {} },
         // Surfaced to the agent at initialize. Tells it how to route real-usage
         // friction back to the project WITHOUT the server ever posting anything.
-        instructions: "This server wraps US government open data (keyless-first). If a tool result looks wrong, a tool stays broken, or the user wants a capability this server lacks, help improve it: call the `feedback` tool — or use the `report` URL present on schema_drift / upstream_unavailable errors — to get a PREFILLED GitHub issue link, and offer it to the user to open and submit. Nothing is posted automatically; the user submits. Never include secrets or personal data in a report (the repo is public).",
+        instructions: serverInstructions,
     });
     server.setRequestHandler(ListToolsRequestSchema, async () => {
         return {
-            tools: TOOLS.map((t) => ({
+            tools: TOOLS.filter((t) => loadedToolNames.has(t.name)).map((t) => ({
                 name: t.name,
                 description: t.description,
                 inputSchema: zodToJsonSchema(t.inputSchema),
@@ -5679,6 +5699,26 @@ async function main() {
     });
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const { name, arguments: args } = req.params;
+        // Check if the tool exists but is not loaded in the current toolset profile.
+        const knownEntry = TOOLS.find((t) => t.name === name);
+        if (knownEntry && !loadedToolNames.has(name)) {
+            const toolset = TOOL_TOOLSET_MAP[name] ?? "unknown";
+            const error = {
+                kind: "tool_not_loaded",
+                message: `Tool '${name}' belongs to the '${toolset}' toolset, which is not loaded. ` +
+                    `Set MCP_SAM_GOV_TOOLSETS=${toolset} (or MCP_SAM_GOV_TOOLSETS=all) to enable it.`,
+                retryable: false,
+            };
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({ ok: false, error }, null, 2),
+                    },
+                ],
+                isError: true,
+            };
+        }
         try {
             const raw = await runTool(name, args ?? {}, sam);
             // A handler may return either its raw domain object OR a MetaBundle
@@ -5723,7 +5763,11 @@ async function main() {
     });
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error(`[mcp-sam-gov] v${SERVER_VERSION} listening on stdio (${TOOLS.length} tools).`);
+    const loadedCount = loadedToolNames.size;
+    const profileNote = isAllTools
+        ? `${loadedCount} tools`
+        : `${loadedCount}/${TOOLS.length} tools, toolsets: ${tsResult.sets.join(",")}`;
+    console.error(`[mcp-sam-gov] v${SERVER_VERSION} listening on stdio (${profileNote}).`);
     // Fire-and-forget, opt-out, fail-silent update notice (STDERR only, never stdout).
     // Deliberately NOT awaited: it must never delay or affect the server (update-check.ts).
     void checkForUpdate(SERVER_VERSION);

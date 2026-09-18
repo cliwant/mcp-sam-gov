@@ -39,7 +39,21 @@
  */
 import { type MetaBundle } from "./meta.js";
 export declare const GSA_PERDIEM_HOST = "api.gsa.gov";
-export declare const DEFAULT_PERDIEM_YEAR = "2025";
+/**
+ * The US federal fiscal year for a date (ADR-0050). The FY begins Oct 1, so
+ * Oct–Dec belong to the NEXT calendar year's FY (e.g. 2025-11 → FY2026) while
+ * Jan–Sep stay in the current (e.g. 2026-07 → FY2026). Pure + UTC-based so it is
+ * deterministic and timezone-independent (the intra-day rollover instant is
+ * immaterial — per-diem rates do not change within a day).
+ */
+export declare function federalFiscalYear(d: Date): number;
+/**
+ * The default per-diem year when the caller omits `year`: the CURRENT federal
+ * fiscal year. GSA publishes rates per FY; a hard-coded default silently serves
+ * an EXPIRED vintage once the FY rolls over (the drift this replaces — a no-year
+ * lookup must track the live FY, not a frozen year).
+ */
+export declare function defaultPerdiemYear(): string;
 export type PerdiemMonth = {
     month: number | null;
     monthName: string | null;
@@ -64,7 +78,7 @@ export type GsaPerdiemRatesArgs = {
 };
 /**
  * Look up GSA Federal Travel per-diem rates by EITHER (city + state) OR zip, for a
- * given `year` (default 2025). Returns flattened rate rows (each outer state/year
+ * given `year` (default: the current U.S. federal fiscal year). Returns flattened rate rows (each outer state/year
  * group × inner city/rate) + honest `_meta`: totalAvailable = the row count (no
  * pagination — P1), lodging/meals as null-never-0 dollars (P3), standardRate/isOconus
  * as real booleans, the months array preserved as-is. The DEMO_KEY rate disclosure

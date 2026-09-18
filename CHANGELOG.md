@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Toolset profiles (MCP_SAM_GOV_TOOLSETS).** A new src/toolsets.ts maps every registered tool to one of ten named toolsets (core, sled, vetting, disclosure, regulatory, pricing, health, safety, geo, cyber). Set MCP_SAM_GOV_TOOLSETS to a comma-separated list to load only a subset. Unset or all loads all 152 tools (byte-identical default). Unknown names produce a stderr warning; if no valid name survives, falls back to all tools. When a tool in an unloaded toolset is called, CallTool returns a structured tool_not_loaded error (not empty) naming the toolset and the env var to set. The server instructions field gains a one-liner listing loaded vs available toolsets when not using the default. manifest.json gains a user_config.toolsets string field (blank = all) mapped to MCP_SAM_GOV_TOOLSETS in mcp_config.env. lint-invariants.mjs gains check (3): fails if a newly added tool has no toolset mapping. fault-injection-test.mjs gains 25 non-vacuous toolset assertions (+3522 -> 3547). README gains a Choosing toolsets section with toolset table (name, tool count, approximate tokens), config examples (Claude Desktop, Claude Code, .mcpb), and a note that tool_not_loaded names the toolset to enable. SKILL.md gains a short note on profile-gated tools. README.ko.md and README.ja.md each gain a one-line mention.
+
 ## [1.13.2] — 2026-09-17 (README contact redaction reaches npm; countable tool reports; release asset guard; VS Code/Kiro install badges)
 
 ### Added

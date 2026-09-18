@@ -45,6 +45,13 @@
 import { readFileSync, readdirSync, statSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
+// Toolset completeness check — imported lazily inside runCli so a bare import of
+// the lint detectors (by the fault suite) never triggers a dynamic import.
+let _toolsets = null;
+async function loadToolsets() {
+  if (!_toolsets) _toolsets = await import("./dist/toolsets.js");
+  return _toolsets;
+}
 
 // ─── Check (1): truthfulness (silent-empty on the !ok path) ─────────
 const EMPTY = /return\s*(\[\s*\]|\{\s*\}|""|''|\{[^{}]*:\s*\[\s*\]\s*\})\s*(;|\}|$)/;
@@ -198,7 +205,7 @@ function tsFiles(dir) {
   return out;
 }
 
-function runCli() {
+async function runCli() {
   const files = tsFiles("src");
   let failed = false;
 
@@ -234,6 +241,39 @@ function runCli() {
     console.log(`✓ disclosure-tokenizer lint: 0 whitespace-only multi-token disclosure splits across ${files.length} src files (the only sanctioned tokenizer is tokenizeForDisclosure; ${optOuts.length} allowlisted opt-out(s))`);
   }
 
+  // Check (3) — toolset completeness: every registered tool must map to exactly one
+  // toolset; no mapping entry for a tool that doesn't exist. This guard fires if a
+  // new tool is added to TOOLS without a matching entry in TOOL_TOOLSET_MAP, or if
+  // a stale entry references a tool name that no longer exists.
+  //
+  // Implementation: read both TOOLS and TOOL_TOOLSET_MAP from the compiled dist/,
+  // then cross-check. Missing tools → fail (the map is incomplete); extra map entries
+  // with no matching tool → warn (stale, not a correctness hazard).
+  try {
+    const { TOOLS } = await import("./dist/server.js");
+    const { TOOL_TOOLSET_MAP } = await loadToolsets();
+    const toolNames = new Set(TOOLS.map((t) => t.name));
+    const mapKeys = new Set(Object.keys(TOOL_TOOLSET_MAP));
+
+    const missing = [...toolNames].filter((n) => !mapKeys.has(n));
+    const extra   = [...mapKeys].filter((n) => !toolNames.has(n));
+
+    if (missing.length) {
+      console.error(`✗ toolset-completeness lint: ${missing.length} tool(s) have NO toolset mapping — add them to TOOL_TOOLSET_MAP in src/toolsets.ts:`);
+      for (const n of missing) console.error(`    ${n}`);
+      failed = true;
+    } else {
+      console.log(`✓ toolset-completeness lint: all ${toolNames.size} registered tools have a toolset mapping`);
+    }
+    if (extra.length) {
+      // Stale entries — warn only, not a hard failure (they are benign).
+      console.log(`  ℹ toolset-completeness lint: ${extra.length} stale TOOL_TOOLSET_MAP entr${extra.length === 1 ? "y" : "ies"} (no matching TOOLS entry): ${extra.join(", ")}`);
+    }
+  } catch (e) {
+    console.error(`✗ toolset-completeness lint: could not load dist/server.js or dist/toolsets.js — run \`npm run build\` first (${e.message})`);
+    failed = true;
+  }
+
   if (failed) process.exit(1);
 }
 
@@ -258,4 +298,4 @@ function isMain() {
   }
 }
 
-if (isMain()) runCli();
+if (isMain()) runCli().catch((e) => { console.error("FATAL:", e); process.exit(1); });

@@ -481,6 +481,52 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 
 ---
 
+## Choosing toolsets (smaller context)
+
+By default all 152 tools load — about 80k tokens per session. Clients that pay the full context cost (Claude Desktop, Cursor, raw API) can cut that significantly by loading only the toolsets relevant to the task.
+
+Set the **`MCP_SAM_GOV_TOOLSETS`** environment variable to a comma-separated list of toolset names (case-insensitive). Leave it blank (or set it to `all`) to restore all tools.
+
+| Toolset | Tools | Approx tokens | What it covers |
+|---|---|---|---|
+| `core` | 58 | ~16k | SAM.gov discovery, attachments, wage determinations, exclusions, integrity; Grants.gov; all USAspending; FPDS; GAO; FAR/eCFR/Federal Register; SBA; `api_key_status`; `feedback` |
+| `sled` | 13 | ~8k | State/local (SLED) procurement: OpenGov, Bonfire, ArcGIS, Socrata, data.gov/CKAN, Tableau, Open Checkbook, search.gov domains |
+| `vetting` | 17 | ~12k | Partner due-diligence: OFAC, FAC, FDIC, EPA ECHO/TRI, CourtListener, nonprofit (IRS 990), Senate LDA lobbying |
+| `disclosure` | 8 | ~6k | SEC EDGAR financial filings and XBRL frames |
+| `regulatory` | 9 | ~4k | Regulations.gov, Congress.gov, GovInfo |
+| `pricing` | 15 | ~10k | GSA labor rates/per-diem, BLS, Treasury, BEA, Census business-patterns, FRED, DOL |
+| `health` | 17 | ~14k | CMS, NPPES, NIH, NSF, ClinicalTrials.gov, openFDA |
+| `safety` | 3 | ~2k | NHTSA vehicle recalls, CPSC consumer-product recalls |
+| `geo` | 9 | ~6k | Census geocode, FEMA disasters, NWS alerts, USITC HTS, CBP border wait times, data.gov catalog |
+| `cyber` | 3 | ~2k | NVD CVE, CISA KEV, NIST SP 800-53 |
+| **all** | **152** | **~80k** | Everything (default) |
+
+**Config examples:**
+
+**Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "sam-gov": {
+      "command": "npx",
+      "args": ["-y", "@cliwant/mcp-sam-gov"],
+      "env": { "MCP_SAM_GOV_TOOLSETS": "core,sled" }
+    }
+  }
+}
+```
+
+**Claude Code** (command line):
+```bash
+claude mcp add sam-gov -e MCP_SAM_GOV_TOOLSETS=core,sled -- npx -y @cliwant/mcp-sam-gov
+```
+
+**Claude Desktop bundle** (`.mcpb` / manifest `user_config`): set the **Toolsets** field in the extension settings dialog (blank = all).
+
+If you call a tool that belongs to an unloaded toolset, the server returns a structured `tool_not_loaded` error naming the toolset and the exact env var to set — it never silently returns an empty result.
+
+---
+
 ## Staying up to date
 
 npm doesn't notify installed users of new versions, so the server does — minimally. On startup it makes **one anonymous request to the public npm registry** for its own latest version and, **only if a newer one exists**, prints a single line to stderr (e.g. `a newer version is available: 1.7.0 → 1.8.0`). It sends **no usage data** (a version check, not telemetry), never touches the protocol's stdout, is non-blocking, and stays silent when you're current.

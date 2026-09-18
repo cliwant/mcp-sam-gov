@@ -113,6 +113,15 @@ export type NoticeFields = {
     popCountry: string;
     active: string;
 };
+/**
+ * Stream a CSV file on disk line-by-line and build the compact index. NEVER
+ * loads the whole file into memory — readline yields one physical line at a
+ * time and the assembler holds at most one in-progress (quote-spanning) record.
+ */
+export declare function buildIndexFromFile(csvPath: string): Promise<{
+    notices: Record<string, NoticeFields>;
+    rowCount: number;
+}>;
 /** TEST-ONLY: drop the process-lifetime memo so a test can re-point the env. */
 export declare function _resetIndexForTests(): void;
 /** A read-only view of a loaded index for enrichment consumers. */

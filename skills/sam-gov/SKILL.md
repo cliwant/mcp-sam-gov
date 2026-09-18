@@ -387,3 +387,7 @@ This server has a built-in, **PULL-only** feedback path — use it to help the u
 - **When the user reports a bug, says a result looks wrong, or wants a capability this server lacks**, call the **`feedback`** tool with `kind` (`bug` | `feature` | `wrong_output`), optional `tool`, and a short **non-sensitive** `summary`. It returns a `reportUrl` for the user to open and submit.
 
 **Never post anything yourself** — the server only builds the link; the human opens and submits it. The repo is public, so never put secrets, personal data, or sensitive query values in `summary` (and tell the user to redact them).
+
+## Toolset profiles (MCP_SAM_GOV_TOOLSETS)
+
+If the server is configured with a toolset profile (e.g. `MCP_SAM_GOV_TOOLSETS=core,sled`), some tools may not be loaded. When a tool is unavailable because of a profile, you receive a `tool_not_loaded` error naming the toolset and the env var to set (`MCP_SAM_GOV_TOOLSETS=<set>` or `MCP_SAM_GOV_TOOLSETS=all`). Tell the user which toolset to enable and ask them to update their server configuration.
