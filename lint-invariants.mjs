@@ -251,17 +251,35 @@ async function runCli() {
   // TOOL_TOOLSET_MAP from dist/toolsets.js (no external deps — safe to import).
   // Missing tools → fail; extra map entries with no matching tool → warn only.
   try {
-    // Extract tool names from src/server.ts: `name: "tool_name"` inside TOOLS.
-    // Tool names are all-lowercase with underscores (no dashes). The server name
-    // "sam-gov" has a dash so it will never match [a-z0-9_]+.
+    // Extract tool names from src/server.ts: `defineTool({ name: "tool_name"` or
+    // `name: 'tool_name'`. Tool names are all-lowercase with underscores (no dashes).
+    // The server name "sam-gov" has a dash so it will never match [a-z][a-z0-9_]*.
+    // Accepting single quotes too so a future style change does not silently break the check.
     const serverSrc = readFileSync("src/server.ts", "utf-8");
     const toolNames = new Set();
-    const nameRe = /\bname:\s*"([a-z][a-z0-9_]*)"/g;
+    const nameRe = /\bname:\s*["']([a-z][a-z0-9_]*)["']/g;
     let nm;
     while ((nm = nameRe.exec(serverSrc)) !== null) toolNames.add(nm[1]);
 
+    // Read the mapping from BOTH src/toolsets.ts (via regex — catches changes before
+    // a rebuild) and dist/toolsets.js (via import — the authoritative runtime mapping).
+    // A key missing in src but present in dist means a stale dist; a key missing in dist
+    // but present in src means the dist needs rebuilding. We flag both.
+    const srcToolsets = readFileSync("src/toolsets.ts", "utf-8");
+    const srcMapKeys = new Set();
+    const srcMapRe = /^\s{2}([a-z][a-z0-9_]*)\s*:\s*"[a-z]+"/gm;
+    let sm;
+    while ((sm = srcMapRe.exec(srcToolsets)) !== null) srcMapKeys.add(sm[1]);
+
     const { TOOL_TOOLSET_MAP } = await loadToolsets();
     const mapKeys = new Set(Object.keys(TOOL_TOOLSET_MAP));
+
+    // Warn if src and dist are out of sync (stale build).
+    const srcNotDist = [...srcMapKeys].filter((k) => !mapKeys.has(k));
+    const distNotSrc = [...mapKeys].filter((k) => !srcMapKeys.has(k));
+    if (srcNotDist.length || distNotSrc.length) {
+      console.log(`  ℹ toolset-completeness lint: src/toolsets.ts ↔ dist/toolsets.js drift detected — run npm run build. src-only: [${srcNotDist.join(", ")}]; dist-only: [${distNotSrc.join(", ")}]`);
+    }
 
     const missing = [...toolNames].filter((n) => !mapKeys.has(n));
     const extra   = [...mapKeys].filter((n) => !toolNames.has(n));

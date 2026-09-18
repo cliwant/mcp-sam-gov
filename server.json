@@ -93,6 +93,12 @@
           "description": "Optional SEC EDGAR User-Agent string (courtesy identification; a sensible default is used otherwise).",
           "isSecret": false,
           "isRequired": false
+        },
+        {
+          "name": "MCP_SAM_GOV_TOOLSETS",
+          "description": "Optional. Comma-separated toolset names to load (e.g. core,sled). Blank or 'all' loads all 152 tools.",
+          "isSecret": false,
+          "isRequired": false
         }
       ]
     }

@@ -487,17 +487,20 @@ By default all 152 tools load — about 80k tokens per session. Clients that pay
 
 Set the **`MCP_SAM_GOV_TOOLSETS`** environment variable to a comma-separated list of toolset names (case-insensitive). Leave it blank (or set it to `all`) to restore all tools.
 
+Token counts are approximate, measured as the compact JSON character count of each `tools/list` entry divided by 4.
+`feedback` and `api_key_status` are always loaded in every profile (they help agents report problems and check key health regardless of which toolset is active).
+
 | Toolset | Tools | Approx tokens | What it covers |
 |---|---|---|---|
-| `core` | 58 | ~16k | SAM.gov discovery, attachments, wage determinations, exclusions, integrity; Grants.gov; all USAspending; FPDS; GAO; FAR/eCFR/Federal Register; SBA; `api_key_status`; `feedback` |
+| `core` | 60 | ~17k | SAM.gov discovery/attachments/wage-determinations/exclusions/integrity; Grants.gov; all USAspending; FPDS; GAO; FAR/eCFR/Federal Register; SBA; OFAC screening; GSA labor-rate benchmarks; `api_key_status`; `feedback` (always loaded) |
 | `sled` | 13 | ~8k | State/local (SLED) procurement: OpenGov, Bonfire, ArcGIS, Socrata, data.gov/CKAN, Tableau, Open Checkbook, search.gov domains |
-| `vetting` | 17 | ~12k | Partner due-diligence: OFAC, FAC, FDIC, EPA ECHO/TRI, CourtListener, nonprofit (IRS 990), Senate LDA lobbying |
+| `vetting` | 16 | ~11k | Partner due-diligence: FAC, FDIC, EPA ECHO/TRI, CourtListener, nonprofit (IRS 990), Senate LDA lobbying |
 | `disclosure` | 8 | ~6k | SEC EDGAR financial filings and XBRL frames |
 | `regulatory` | 9 | ~4k | Regulations.gov, Congress.gov, GovInfo |
-| `pricing` | 15 | ~10k | GSA labor rates/per-diem, BLS, Treasury, BEA, Census business-patterns, FRED, DOL |
+| `pricing` | 15 | ~10k | GSA per-diem, BLS, Treasury, BEA, Census business-patterns, FRED, DOL, USITC HTS |
 | `health` | 17 | ~14k | CMS, NPPES, NIH, NSF, ClinicalTrials.gov, openFDA |
 | `safety` | 3 | ~2k | NHTSA vehicle recalls, CPSC consumer-product recalls |
-| `geo` | 9 | ~6k | Census geocode, FEMA disasters, NWS alerts, USITC HTS, CBP border wait times, data.gov catalog |
+| `geo` | 8 | ~5k | Census geocode, FEMA disasters, NWS alerts, CBP border wait times, data.gov catalog |
 | `cyber` | 3 | ~2k | NVD CVE, CISA KEV, NIST SP 800-53 |
 | **all** | **152** | **~80k** | Everything (default) |
 
@@ -523,7 +526,7 @@ claude mcp add sam-gov -e MCP_SAM_GOV_TOOLSETS=core,sled -- npx -y @cliwant/mcp-
 
 **Claude Desktop bundle** (`.mcpb` / manifest `user_config`): set the **Toolsets** field in the extension settings dialog (blank = all).
 
-If you call a tool that belongs to an unloaded toolset, the server returns a structured `tool_not_loaded` error naming the toolset and the exact env var to set — it never silently returns an empty result.
+If you call a tool that belongs to an unloaded toolset, the server returns a structured `tool_not_loaded` error naming the toolset and the exact env var to set. The suggested value is the **union** of your current loaded sets plus the needed set (e.g. `MCP_SAM_GOV_TOOLSETS=core,vetting` when you have `core` loaded and call a vetting tool) so your existing profile is not silently dropped. It never silently returns an empty result.
 
 ---
 

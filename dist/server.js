@@ -89,7 +89,7 @@ import { checkForUpdate } from "./update-check.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
-import { resolveToolsets, TOOL_TOOLSET_MAP, ALL_TOOLSET_NAMES, } from "./toolsets.js";
+import { resolveToolsets, ALL_TOOLSET_NAMES, TOOLSET_HINTS, filterToolsFor, toolNotLoadedEnvelope, } from "./toolsets.js";
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
 // Keep in sync with package.json "version" (asserted at release; see CHANGELOG).
@@ -5677,10 +5677,36 @@ async function main() {
     const isAllTools = tsResult.sets.length === 1 && tsResult.sets[0] === "all";
     // Build instructions: add a one-liner about loaded/available toolsets when
     // not using the default (all). The default instructions stay byte-identical.
+    // B2: unknown toolset names are reported here (not only stderr) because
+    // stderr is invisible in Claude Desktop.
     const BASE_INSTRUCTIONS = "This server wraps US government open data (keyless-first). If a tool result looks wrong, a tool stays broken, or the user wants a capability this server lacks, help improve it: call the `feedback` tool — or use the `report` URL present on schema_drift / upstream_unavailable errors — to get a PREFILLED GitHub issue link, and offer it to the user to open and submit. Nothing is posted automatically; the user submits. Never include secrets or personal data in a report (the repo is public).";
-    const serverInstructions = isAllTools
-        ? BASE_INSTRUCTIONS
-        : `${BASE_INSTRUCTIONS} Loaded toolsets: ${tsResult.sets.join(", ")}. Other available toolsets (set MCP_SAM_GOV_TOOLSETS to enable): ${ALL_TOOLSET_NAMES.filter((s) => !tsResult.sets.includes(s)).join(", ")}.`;
+    let serverInstructions;
+    if (isAllTools && tsResult.unknown.length === 0) {
+        // Default: byte-identical to main.
+        serverInstructions = BASE_INSTRUCTIONS;
+    }
+    else {
+        const parts = [];
+        if (!isAllTools) {
+            // List loaded sets.
+            parts.push(`Loaded toolsets: ${tsResult.sets.join(", ")}.`);
+            // List other available sets with a 2–4 word hint each (NB5).
+            const otherSets = ALL_TOOLSET_NAMES
+                .filter((s) => !tsResult.sets.includes(s))
+                .map((s) => `${s} (${TOOLSET_HINTS[s]})`);
+            if (otherSets.length > 0) {
+                parts.push(`Other available sets (set MCP_SAM_GOV_TOOLSETS to enable): ${otherSets.join("; ")}.`);
+            }
+        }
+        // B2: report unknown names in instructions so they are visible in Claude Desktop.
+        if (tsResult.unknown.length > 0) {
+            parts.push(`Unknown toolset name(s) ignored: ${tsResult.unknown.join(", ")} — valid names: ${ALL_TOOLSET_NAMES.join(", ")}.`);
+        }
+        if (tsResult.fellBack) {
+            parts.push("No valid toolset names found; fell back to all tools.");
+        }
+        serverInstructions = `${BASE_INSTRUCTIONS} ${parts.join(" ")}`;
+    }
     const server = new Server({ name: SERVER_NAME, version: SERVER_VERSION }, {
         capabilities: { tools: {} },
         // Surfaced to the agent at initialize. Tells it how to route real-usage
@@ -5689,7 +5715,7 @@ async function main() {
     });
     server.setRequestHandler(ListToolsRequestSchema, async () => {
         return {
-            tools: TOOLS.filter((t) => loadedToolNames.has(t.name)).map((t) => ({
+            tools: filterToolsFor(TOOLS, loadedToolNames).map((t) => ({
                 name: t.name,
                 description: t.description,
                 inputSchema: zodToJsonSchema(t.inputSchema),
@@ -5702,18 +5728,14 @@ async function main() {
         // Check if the tool exists but is not loaded in the current toolset profile.
         const knownEntry = TOOLS.find((t) => t.name === name);
         if (knownEntry && !loadedToolNames.has(name)) {
-            const toolset = TOOL_TOOLSET_MAP[name] ?? "unknown";
-            const error = {
-                kind: "tool_not_loaded",
-                message: `Tool '${name}' belongs to the '${toolset}' toolset, which is not loaded. ` +
-                    `Set MCP_SAM_GOV_TOOLSETS=${toolset} (or MCP_SAM_GOV_TOOLSETS=all) to enable it.`,
-                retryable: false,
-            };
+            // B3: suggest the union of current sets + the needed set, so the user's
+            // existing profile is not silently dropped.
+            const envelope = toolNotLoadedEnvelope(name, tsResult.sets);
             return {
                 content: [
                     {
                         type: "text",
-                        text: JSON.stringify({ ok: false, error }, null, 2),
+                        text: JSON.stringify(envelope, null, 2),
                     },
                 ],
                 isError: true,
