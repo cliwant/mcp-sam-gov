@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Trim tool descriptions to cut tools/list token cost.** Rewrote 39 tool descriptions and 2 parameter descriptions to enforce <=1600-char tool description and <=650-char param description limits. Grand total compact-JSON chars reduced from 323,017 (~80,754 tokens) to 297,839 (~74,460 tokens). A reworked lint-invariants.mjs check (4) now reads actual exported strings from tools-list-snapshot.json (the MCP tools/list ground-truth) instead of regex over source, correctly catching multi-line .describe() calls that the previous regex missed; it enforces the limits in CI so regressions turn CI red.
 
+### Fixed
+- **bls_timeseries: widen seriesId regex from 20 to 25 chars.** OEWS series IDs are 25 chars (e.g. `OEUN000000000000015125201`) and were silently rejected by the prior `^[A-Z0-9]{1,20}$` validation guard. The regex is now `^[A-Z0-9]{1,25}$`; the character-class guard (uppercase alnum only, no separators/spaces/percent/newlines) is unchanged. Fault assertions added: 25-char OEWS id accepted, 26-char id rejected, injection-shaped ids rejected.
+
 ## [1.13.2] — 2026-09-17 (README contact redaction reaches npm; countable tool reports; release asset guard; VS Code/Kiro install badges)
 
 ### Added

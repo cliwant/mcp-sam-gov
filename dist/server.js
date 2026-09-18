@@ -2963,7 +2963,7 @@ const HtsLookupInput = z.object({
 // SECOND POST-batch getJson-port consumer (after NIH). SSRF surface = a compile-
 // time-CONSTANT host+path; seriesids ride in the module-built POST body. `series`
 // is a FROZEN 9-key curated enum (the SSRF value guard + the units-label source);
-// `seriesId` is the raw passthrough, charclass-validated ^[A-Z0-9]{1,20}$. Years
+// `seriesId` is the raw passthrough, charclass-validated ^[A-Z0-9]{1,25}$. Years
 // are bounded ints (1900..currentYear+1); the span is clamped to the tier cap
 // (v1 ~10y) BEFORE the fetch + disclosed. An OPTIONAL free BLS_API_KEY rides ONLY
 // in the POST body (v2, ~500/day) — never a URL/header/label/_meta/log.
@@ -2974,10 +2974,10 @@ const BlsTimeseriesInput = z.object({
         .optional()
         .describe("One or more CURATED series enum keys (typo-proof; each carries a meaning + units label): cpi_u_all (CPI-U all items NSA, index), cpi_u_core (CPI-U core NSA, index), ppi_final_demand (PPI final demand NSA, index), eci_total_comp (ECI total comp — ★12-MO % CHANGE, not an index), eci_wages (ECI wages — ★12-MO % CHANGE), unemployment_rate (SA, percent), labor_force_participation (SA, percent), employment_total_nonfarm (SA, thousands of persons), avg_hourly_earnings (SA, dollars/hour). NSA CPI-U is the escalation/EPA-clause reference. At least one of series/seriesId is required; both may be combined."),
     seriesId: z
-        .array(z.string().regex(/^[A-Z0-9]{1,20}$/))
+        .array(z.string().regex(/^[A-Z0-9]{1,25}$/))
         .max(bls.BLS_SERIES_KEYS.length + 50)
         .optional()
-        .describe("One or more RAW BLS series IDs (power-user passthrough for the un-curatable space — OEWS area×occupation, local-area unemployment LAUCN…, SA/regional CPI variants). Charclass ^[A-Z0-9]{1,20}$ (uppercase alnum; punctuation/whitespace/lowercase rejected — SSRF + 'verify the ID' honesty). A raw ID has units:null (consult BLS). A nonexistent/typo'd ID returns BLS success + empty data (the ambiguity is disclosed, not asserted as 'no data'). At least one of series/seriesId is required."),
+        .describe("One or more RAW BLS series IDs (power-user passthrough for the un-curatable space — OEWS area×occupation, local-area unemployment LAUCN…, SA/regional CPI variants). Charclass ^[A-Z0-9]{1,25}$ (uppercase alnum; punctuation/whitespace/lowercase rejected — SSRF + 'verify the ID' honesty). OEWS IDs are 25 chars (e.g. OEUN000000000000015125201). A raw ID has units:null (consult BLS). A nonexistent/typo'd ID returns BLS success + empty data (the ambiguity is disclosed, not asserted as 'no data'). At least one of series/seriesId is required."),
     startYear: z
         .number()
         .int()
@@ -4998,7 +4998,7 @@ export const TOOLS = [
     // rides ONLY in the POST body (v2) — never a URL/header/label/_meta/log.
     defineTool({
         name: "bls_timeseries",
-        description: "Fetch one or more BLS time-series over a year range (keyless v1 default; optional free BLS_API_KEY lifts to v2; api.bls.gov POST). At least one of `series` (curated enum key) or `seriesId` (raw ^[A-Z0-9]{1,20}$) is required; both may be combined. Optional `startYear`/`endYear` (defaults to active tier's span cap). Returns { series:[{ seriesId, key, meaning, units, observations:[{year, period, periodName, value:number|null, valueUnavailable:bool, footnotes:[{code,text}], latest:bool}], observationCount, coveredRange:{from,to} }] } + honest _meta. HONESTY: BLS '-' unavailable marker → value:null (NEVER 0); valueUnavailable:true on the observation + footnote reason lifted into _meta.notes so the gap is DISCLOSED, never silent. Each series carries its own units label — an ECI '…A' series is a 12-month PERCENT CHANGE, NOT an index level; CPI/PPI are index levels; CES nonfarm employment is thousands of persons. Do NOT compare values across series without reading each units label. status !== 'REQUEST_SUCCEEDED' THROWS: REQUEST_NOT_PROCESSED (v1 daily limit) → rate_limited retryable; REQUEST_FAILED → upstream_unavailable. Series count refused over active tier cap (v1: 25 series/~10yr; v2: 50 series/~20yr) — overflow is NEVER silently dropped. Span is CLAMPED to tier cap before the fetch and disclosed. totalAvailable is null (batch fetch has no upstream total). A typo'd seriesId returns an empty series with 'Invalid Series' upstream message — NOT a real available series. BLS_API_KEY rides ONLY in the POST body, never URL/label/_meta/log.",
+        description: "Fetch one or more BLS time-series over a year range (keyless v1 default; optional free BLS_API_KEY lifts to v2; api.bls.gov POST). At least one of `series` (curated enum key) or `seriesId` (raw ^[A-Z0-9]{1,25}$; covers 25-char OEWS IDs) is required; both may be combined. Optional `startYear`/`endYear` (defaults to active tier's span cap). Returns { series:[{ seriesId, key, meaning, units, observations:[{year, period, periodName, value:number|null, valueUnavailable:bool, footnotes:[{code,text}], latest:bool}], observationCount, coveredRange:{from,to} }] } + honest _meta. HONESTY: BLS '-' unavailable marker → value:null (NEVER 0); valueUnavailable:true on the observation + footnote reason lifted into _meta.notes so the gap is DISCLOSED, never silent. Each series carries its own units label — an ECI '…A' series is a 12-month PERCENT CHANGE, NOT an index level; CPI/PPI are index levels; CES nonfarm employment is thousands of persons. Do NOT compare values across series without reading each units label. status !== 'REQUEST_SUCCEEDED' THROWS: REQUEST_NOT_PROCESSED (v1 daily limit) → rate_limited retryable; REQUEST_FAILED → upstream_unavailable. Series count refused over active tier cap (v1: 25 series/~10yr; v2: 50 series/~20yr) — overflow is NEVER silently dropped. Span is CLAMPED to tier cap before the fetch and disclosed. totalAvailable is null (batch fetch has no upstream total). A typo'd seriesId returns an empty series with 'Invalid Series' upstream message — NOT a real available series. BLS_API_KEY rides ONLY in the POST body, never URL/label/_meta/log.",
         inputSchema: BlsTimeseriesInput,
         handler: (input) => bls.timeseries(input),
     }),
@@ -5006,8 +5006,8 @@ export const TOOLS = [
     // The LEVEL layer next to bls_timeseries's ESCALATION layer: mean/median annual &
     // hourly wages + employment by SOC occupation × geography — the highest-value B2G
     // BLS slice (labor-rate benchmarking) that bls_timeseries structurally cannot reach
-    // (OEWS IDs are 25 chars > the raw-seriesId 20-char cap). BUILDS the 25-char series
-    // ID INTERNALLY from validated structured inputs; REUSES the same POST/JSON transport
+    // (OEWS IDs are 25 chars; bls_timeseries raw-seriesId cap is now widened to 25). BUILDS
+    // the 25-char series ID INTERNALLY from validated structured inputs; REUSES the same POST/JSON transport
     // + parseBlsBody status-throw + mapObservation ("-"→null-never-0) + tier/key seam.
     defineTool({
         name: "bls_oews_wages",
