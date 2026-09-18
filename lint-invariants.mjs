@@ -246,13 +246,21 @@ async function runCli() {
   // new tool is added to TOOLS without a matching entry in TOOL_TOOLSET_MAP, or if
   // a stale entry references a tool name that no longer exists.
   //
-  // Implementation: read both TOOLS and TOOL_TOOLSET_MAP from the compiled dist/,
-  // then cross-check. Missing tools → fail (the map is incomplete); extra map entries
-  // with no matching tool → warn (stale, not a correctness hazard).
+  // Implementation: extract tool names from src/server.ts via regex (no npm install
+  // needed — works in the lint CI job that doesn't run `npm ci`), and load
+  // TOOL_TOOLSET_MAP from dist/toolsets.js (no external deps — safe to import).
+  // Missing tools → fail; extra map entries with no matching tool → warn only.
   try {
-    const { TOOLS } = await import("./dist/server.js");
+    // Extract tool names from src/server.ts: `name: "tool_name"` inside TOOLS.
+    // Tool names are all-lowercase with underscores (no dashes). The server name
+    // "sam-gov" has a dash so it will never match [a-z0-9_]+.
+    const serverSrc = readFileSync("src/server.ts", "utf-8");
+    const toolNames = new Set();
+    const nameRe = /\bname:\s*"([a-z][a-z0-9_]*)"/g;
+    let nm;
+    while ((nm = nameRe.exec(serverSrc)) !== null) toolNames.add(nm[1]);
+
     const { TOOL_TOOLSET_MAP } = await loadToolsets();
-    const toolNames = new Set(TOOLS.map((t) => t.name));
     const mapKeys = new Set(Object.keys(TOOL_TOOLSET_MAP));
 
     const missing = [...toolNames].filter((n) => !mapKeys.has(n));
@@ -270,7 +278,7 @@ async function runCli() {
       console.log(`  ℹ toolset-completeness lint: ${extra.length} stale TOOL_TOOLSET_MAP entr${extra.length === 1 ? "y" : "ies"} (no matching TOOLS entry): ${extra.join(", ")}`);
     }
   } catch (e) {
-    console.error(`✗ toolset-completeness lint: could not load dist/server.js or dist/toolsets.js — run \`npm run build\` first (${e.message})`);
+    console.error(`✗ toolset-completeness lint: check failed — ${e.message}`);
     failed = true;
   }
 
