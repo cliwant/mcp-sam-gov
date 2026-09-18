@@ -300,6 +300,80 @@ async function runCli() {
     failed = true;
   }
 
+  // Check (4) — description-length: no tool description >1600 chars, no single
+  // parameter description >650 chars. Guards the token budget at tools/list.
+  //
+  // Reads ACTUAL exported strings from tools-list-snapshot.json (the MCP tools/list
+  // ground-truth) so multi-line .describe() calls — which the prior src regex missed
+  // (261+ multi-line calls → false green) — are correctly measured.
+  //
+  // STALENESS: tools-list-snapshot.json staleness relative to dist is already guarded
+  // by registry-snapshot-test.mjs (deep byte-for-byte compare of the full tools/list
+  // response). This check additionally verifies the snapshot file exists and is
+  // parseable, and compares tool names from snapshot vs dist for a fast early warning.
+  //
+  // Limits: tool description ≤ 1,600 chars; parameter description ≤ 650 chars.
+  try {
+    const SNAPSHOT_PATH = "tools-list-snapshot.json";
+    const snapshotRaw = readFileSync(SNAPSHOT_PATH, "utf-8");
+    const snapshot = JSON.parse(snapshotRaw);
+    if (!Array.isArray(snapshot)) throw new Error("snapshot is not an array");
+
+    // Compare tool names vs dist to detect a stale snapshot (fast early warning —
+    // registry-snapshot-test.mjs provides the authoritative deep check).
+    let staleWarning = null;
+    try {
+      const { TOOL_TOOLSET_MAP } = await loadToolsets();
+      const distNames = new Set(Object.keys(TOOL_TOOLSET_MAP));
+      const snapshotNames = new Set(snapshot.map((t) => t.name));
+      const onlyInDist = [...distNames].filter((n) => !snapshotNames.has(n));
+      const onlyInSnapshot = [...snapshotNames].filter((n) => !distNames.has(n));
+      if (onlyInDist.length || onlyInSnapshot.length) {
+        staleWarning = `snapshot tool names differ from dist — run node registry-snapshot-test.mjs to regenerate. dist-only: [${onlyInDist.join(", ")}]; snapshot-only: [${onlyInSnapshot.join(", ")}]`;
+      }
+    } catch {
+      // toolsets not available (e.g. no dist) — skip staleness check
+    }
+    if (staleWarning) {
+      console.log(`  ℹ description-length lint: ${staleWarning}`);
+    }
+
+    /** Recursively collect param description violations from an inputSchema. */
+    function checkParamDescs(properties, toolName, path) {
+      const viols = [];
+      for (const [pname, pval] of Object.entries(properties ?? {})) {
+        if (!pval || typeof pval !== "object") continue;
+        const desc = pval.description;
+        if (typeof desc === "string" && desc.length > 650) {
+          viols.push({ tool: toolName, path: `${path}.${pname}`, len: desc.length, kind: "param description" });
+        }
+        if (pval.properties) viols.push(...checkParamDescs(pval.properties, toolName, `${path}.${pname}`));
+      }
+      return viols;
+    }
+
+    const descViolations = [];
+    for (const tool of snapshot) {
+      const desc = tool.description ?? "";
+      if (desc.length > 1600) {
+        descViolations.push({ tool: tool.name, path: tool.name, len: desc.length, kind: "tool description" });
+      }
+      const paramProps = tool.inputSchema?.properties ?? {};
+      descViolations.push(...checkParamDescs(paramProps, tool.name, tool.name));
+    }
+
+    if (descViolations.length) {
+      console.error(`✗ description-length lint: ${descViolations.length} violation(s) — tool descriptions must be ≤1600 chars, param descriptions ≤650 chars (checked via ${SNAPSHOT_PATH}):`);
+      for (const v of descViolations) console.error(`    ${v.path}  ${v.kind} ${v.len} chars (limit: ${v.kind === "tool description" ? 1600 : 650})`);
+      failed = true;
+    } else {
+      console.log(`✓ description-length lint: all ${snapshot.length} tool descriptions ≤1600 chars, all param descriptions ≤650 chars (via ${SNAPSHOT_PATH})`);
+    }
+  } catch (e) {
+    console.error(`✗ description-length lint: check failed — ${e.message}`);
+    failed = true;
+  }
+
   if (failed) process.exit(1);
 }
 
