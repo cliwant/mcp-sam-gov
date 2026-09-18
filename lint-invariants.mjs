@@ -300,6 +300,43 @@ async function runCli() {
     failed = true;
   }
 
+  // Check (4) — description-length: no tool description >1600 chars, no single
+  // parameter description >400 chars. Guards the token budget at tools/list.
+  try {
+    const serverSrc = readFileSync("src/server.ts", "utf-8");
+    const descViolations = [];
+    // Tool-level description field: description: "..."
+    const toolDescRe = /description:\s*"((?:[^"\\]|\\.)*)"/g;
+    let dm;
+    while ((dm = toolDescRe.exec(serverSrc)) !== null) {
+      const len = dm[1].replace(/\\(.)/g, "$1").length; // unescape for true char count
+      if (len > 1600) {
+        const lineNum = serverSrc.slice(0, dm.index).split("\n").length;
+        descViolations.push({ line: lineNum, len, kind: "tool description" });
+      }
+    }
+    // Parameter descriptions in inputSchema: look for description in Zod .describe("...")
+    const paramDescRe = /\.describe\("((?:[^"\\]|\\.)*)"\)/g;
+    let pm;
+    while ((pm = paramDescRe.exec(serverSrc)) !== null) {
+      const len = pm[1].replace(/\\(.)/g, "$1").length;
+      if (len > 400) {
+        const lineNum = serverSrc.slice(0, pm.index).split("\n").length;
+        descViolations.push({ line: lineNum, len, kind: "param description" });
+      }
+    }
+    if (descViolations.length) {
+      console.error(`✗ description-length lint: ${descViolations.length} violation(s) — tool descriptions must be ≤1600 chars, param descriptions ≤400 chars:`);
+      for (const v of descViolations) console.error(`    src/server.ts:${v.line}  ${v.kind} ${v.len} chars (limit: ${v.kind === "tool description" ? 1600 : 400})`);
+      failed = true;
+    } else {
+      console.log(`✓ description-length lint: all tool descriptions ≤1600 chars, all param descriptions ≤400 chars`);
+    }
+  } catch (e) {
+    console.error(`✗ description-length lint: check failed — ${e.message}`);
+    failed = true;
+  }
+
   if (failed) process.exit(1);
 }
 

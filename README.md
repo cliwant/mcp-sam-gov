@@ -483,7 +483,7 @@ Get one free (instant, no wait) at [api.data.gov/signup](https://api.data.gov/si
 
 ## Choosing toolsets (smaller context)
 
-By default all 152 tools load — about 80k tokens per session. Clients that pay the full context cost (Claude Desktop, Cursor, raw API) can cut that significantly by loading only the toolsets relevant to the task.
+By default all 152 tools load — about 68k tokens per session. Clients that pay the full context cost (Claude Desktop, Cursor, raw API) can cut that significantly by loading only the toolsets relevant to the task.
 
 Set the **`MCP_SAM_GOV_TOOLSETS`** environment variable to a comma-separated list of toolset names (case-insensitive). Leave it blank (or set it to `all`) to restore all tools.
 
@@ -492,17 +492,17 @@ Token counts are approximate, measured as the compact JSON character count of ea
 
 | Toolset | Tools | Approx tokens | What it covers |
 |---|---|---|---|
-| `core` | 60 | ~17k | SAM.gov discovery/attachments/wage-determinations/exclusions/integrity; Grants.gov; all USAspending; FPDS; GAO; FAR/eCFR/Federal Register; SBA; OFAC screening; GSA labor-rate benchmarks; `api_key_status`; `feedback` (always loaded) |
-| `sled` | 13 | ~8k | State/local (SLED) procurement: OpenGov, Bonfire, ArcGIS, Socrata, data.gov/CKAN, Tableau, Open Checkbook, search.gov domains |
-| `vetting` | 16 | ~11k | Partner due-diligence: FAC, FDIC, EPA ECHO/TRI, CourtListener, nonprofit (IRS 990), Senate LDA lobbying |
-| `disclosure` | 8 | ~6k | SEC EDGAR financial filings and XBRL frames |
+| `core` | 60 | ~15k | SAM.gov discovery/attachments/wage-determinations/exclusions/integrity; Grants.gov; all USAspending; FPDS; GAO; FAR/eCFR/Federal Register; SBA; OFAC screening; GSA labor-rate benchmarks; `api_key_status`; `feedback` (always loaded) |
+| `sled` | 13 | ~7k | State/local (SLED) procurement: OpenGov, Bonfire, ArcGIS, Socrata, data.gov/CKAN, Tableau, Open Checkbook, search.gov domains |
+| `vetting` | 16 | ~10k | Partner due-diligence: FAC, FDIC, EPA ECHO/TRI, CourtListener, nonprofit (IRS 990), Senate LDA lobbying |
+| `disclosure` | 8 | ~5k | SEC EDGAR financial filings and XBRL frames |
 | `regulatory` | 9 | ~4k | Regulations.gov, Congress.gov, GovInfo |
-| `pricing` | 15 | ~10k | GSA per-diem, BLS, Treasury, BEA, Census business-patterns, FRED, DOL, USITC HTS |
-| `health` | 17 | ~14k | CMS, NPPES, NIH, NSF, ClinicalTrials.gov, openFDA |
-| `safety` | 3 | ~2k | NHTSA vehicle recalls, CPSC consumer-product recalls |
+| `pricing` | 15 | ~9k | GSA per-diem, BLS, Treasury, BEA, Census business-patterns, FRED, DOL, USITC HTS |
+| `health` | 17 | ~11k | CMS, NPPES, NIH, NSF, ClinicalTrials.gov, openFDA |
+| `safety` | 3 | ~1k | NHTSA vehicle recalls, CPSC consumer-product recalls |
 | `geo` | 8 | ~5k | Census geocode, FEMA disasters, NWS alerts, CBP border wait times, data.gov catalog |
 | `cyber` | 3 | ~2k | NVD CVE, CISA KEV, NIST SP 800-53 |
-| **all** | **152** | **~80k** | Everything (default) |
+| **all** | **152** | **~68k** | Everything (default) |
 
 **Config examples:**
 
