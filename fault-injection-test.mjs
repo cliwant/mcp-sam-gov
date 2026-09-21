@@ -25496,6 +25496,42 @@ async function testDataMapResource() {
   ok("76-c MA cthru entry datasetId=pegc-naaa — change the id ⇒ RED",
     maEntry?.keyArgs?.includes("pegc-naaa") ?? false, maEntry?.keyArgs ?? "(no entry)");
 
+  // (c-2) Doc counts are DERIVED from the code, not hand-maintained. On 2026-09-21
+  // ten current claims had drifted at once: the Bonfire seed was 187 while KO/JA
+  // READMEs and SKILL.md said 195, Socrata reached 54 hosts while READMEs said 53,
+  // and all three READMEs said open_checkbook_search had ONE portal after Alaska
+  // made it two. Nothing checked them, so nothing failed.
+  {
+    const { readFileSync: rfDoc } = await import("node:fs");
+    const { BONFIRE_ORGS: seed } = await import("./dist/bonfire.js");
+    const { SOCRATA_DOMAINS: soc, MIGRATED_SOCRATA_HOSTS: mig } = await import("./dist/socrata.js");
+    const { OPEN_CHECKBOOK_PORTALS: cb } = await import("./dist/open-checkbook.js");
+    // A migrated host is kept only so its handler can name the replacement — it is
+    // not a host anyone can query, so it does not count toward "reach".
+    const reach = soc.length - mig.size;
+    // Plain substrings, not RegExp: no escaping to get wrong.
+    const docs = {
+      "README.md": [`${seed.length}-org`, `Socrata (${reach} hosts)`, `**${reach} curated`],
+      "README.ko.md": [`시드 ${seed.length}개`, `Socrata (${reach}개 호스트)`],
+      "README.ja.md": [`シード ${seed.length} 団体`, `${reach} ホスト`],
+      "skills/sam-gov/SKILL.md": [`${seed.length}-org`, `**${reach} curated`],
+    };
+    for (const [file, needles] of Object.entries(docs)) {
+      const text = rfDoc(file, "utf8");
+      for (const needle of needles) {
+        ok(`76-d ${file} states the CURRENT count "${needle}" — let the doc drift ⇒ RED`,
+          text.includes(needle), `"${needle}" not found in ${file}`);
+      }
+    }
+    // Checkbook: no current doc may claim a single portal once there are more.
+    if (cb.length > 1) {
+      for (const [file, stale] of [["README.md", "one portal today"], ["README.ko.md", "포털 1개"], ["README.ja.md", "1 ポータルのみ"]]) {
+        ok(`76-d ${file} no longer says open_checkbook_search has ONE portal (there are ${cb.length}) — reintroduce it ⇒ RED`,
+          !rfDoc(file, "utf8").includes(stale), `${file} still says "${stale}"`);
+      }
+    }
+  }
+
   // (c-1) FALSE-ZERO guard on socrata_discover_datasets. The catalog behaves as if
   // every q term must match, and datasets rarely repeat their jurisdiction's name —
   // so q="Illinois state solicitations" returned 0 on data.illinois.gov while
