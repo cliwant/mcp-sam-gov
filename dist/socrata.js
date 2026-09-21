@@ -627,6 +627,20 @@ export async function discoverDatasets(args) {
     if (totalAvailable !== null && returned < totalAvailable) {
         notes.push(`Showing ${returned} of ${totalAvailable} matches; raise limit (≤100) or narrow q for the rest.`);
     }
+    // HONESTY (false-zero guard). An empty catalog result is easy to read as "this
+    // portal has no such data", and the per-host note above even calls the index
+    // COMPLETE — but the catalog behaves as if EVERY q term must match, and datasets
+    // rarely repeat their own jurisdiction's name. Measured 2026-09-21 on
+    // data.illinois.gov: q="Illinois state solicitations" -> 0 and
+    // q="Illinois procurement" -> 0, while q="solicitations" -> 1 (6rb8-ntpm). An eval
+    // agent took that zero at face value and told the user no Illinois procurement
+    // datasets exist. So a zero is reported as possibly false, with the fix.
+    if (returned === 0) {
+        const terms = args.q.trim().split(/\s+/).filter(Boolean);
+        notes.push(terms.length > 1
+            ? `0 matches for a ${terms.length}-word q — likely a FALSE zero, not proof the data is absent: the catalog behaves as if every term must match, and datasets rarely repeat their jurisdiction's name in their title. Put the place in \`domain\` (not in q) and retry with ONE topical term, e.g. 'solicitations', 'bids', 'contract', 'vendor', 'payments', 'purchase'.`
+            : `0 matches for q=${JSON.stringify(args.q)} — this is not proof the data is absent: publishers title the same thing differently. Retry with a synonym ('solicitations', 'bids', 'contract', 'vendor', 'payments', 'purchase') before concluding the portal has none.`);
+    }
     return withMeta({ query: args.q, domain: args.domain ?? null, results }, {
         source: `${args.domain ?? CATALOG_HOST} catalog ${SOURCE_SUFFIX}`,
         keylessMode: true,
