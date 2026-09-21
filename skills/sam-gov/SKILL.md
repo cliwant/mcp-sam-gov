@@ -178,6 +178,43 @@ All keyless (data.cms.gov); `totalAvailable` is the exact upstream count, never 
 
 **SLED local procurement — how the keyless surfaces fit together:** (1) `socrata_query` / `socrata_discover_datasets` reach **53 curated hosts** — state + major-city (NYC City Record, Chicago/SF/LA) + a deep **county/city sweep** (KC MO, Pittsburgh, Atlanta, Dallas, Baton Rouge, Fulton/Howard/Ramsey/Macoupin/Prince George's counties, MA-Comptroller CTHRU, USAC E-Rate live bids…) — contracts / vendors / checkbook / **live solicitations**; (2) **`opengov_*`** (525+ govs' live solicitations) and **`bonfire_*`** (per-org open-opportunity RSS) for the bid-notice feeds Socrata doesn't carry; (3) **`arcgis_feature_query`** for gov ArcGIS-REST layers (DC live solicitations, state DOT bid/award registers, ND DOT flex-funding awards to local public agencies); (4) **`tableau_view_csv`** (Montana contracts awarded) and **`open_checkbook_search`** (South Dakota vendor payments, ~3 recent FYs) for state award/payment exports — one view / one portal each today. For a "who's bidding / what's open in <locality>" question, try opengov/bonfire first, then the local Socrata host.
 
+## State & local data map
+
+Agent-readable lookup: jurisdiction → data type → exact tool call → verified row count → what it is NOT (the most common source of agent error).
+
+**State-level open-data sources (verified 2026-09-21, all keyless):**
+
+| Jurisdiction | Data | Tool · key args | Rows | NOT |
+|---|---|---|---|---|
+| **Virginia** | eVA PO line items 2023 | `ckan_query` host=data.virginia.gov, resourceId=`3c7f1bde-35b0-4fbf-b89c-978a19124d53` | 1,693,227 | the live eVA portal (login-gated); years 2016–2026 have separate resource IDs — `ckan_discover_datasets` host=data.virginia.gov q=`eVA procurement` lists them (2024=`25a59527`, 2025=`b8dc22a8`, 2026=`76f6831d`) |
+| **Massachusetts** | Comptroller vendor payments (CTHRU) | `socrata_query` domain=cthru.data.socrata.com, datasetId=`pegc-naaa` | ~49M | an award or bid register; these are payment transactions |
+| **New Jersey** | YourMoney agency purchasing by vendor | `socrata_query` domain=data.nj.gov, datasetId=`ubnu-tqu7` | 660,425 | a solicitation or bid register; agency expenditure rows |
+| **New York** | State authority procurement contracts | `socrata_query` domain=data.ny.gov, datasetId=`ehig-g5x3` | 275,763 | all NYS agencies (authorities only) and NOT active solicitations |
+| **New York** | MTA procurement contracts | `socrata_query` domain=data.ny.gov, datasetId=`twsw-2mqa` | 107,503 | a live MTA bid portal; MTA historical contract records |
+| **Washington** | Agency contract register | `socrata_query` domain=data.wa.gov, datasetId=`s8d5-pj78` | 79,329 | a solicitation or bid feed; awarded contract records |
+| **Washington** | Master-contract sales by vendor/customer | `socrata_query` domain=data.wa.gov, datasetId=`n8q6-4twj` | 245,831 | open bids; sales reported off statewide master contracts |
+| **Montana** | DOA contracts awarded | `tableau_view_csv` view=`mt_contracts_awarded` | ~4,554 | a bid portal; awarded records only, freshness set by publisher |
+| **South Dakota** | Open Checkbook vendor payments | `open_checkbook_search` portal=`sd` | ~741k | an award register; only ~3 most-recent FYs, exact-match filters |
+| **Illinois** | CDB capital project future bids | `socrata_query` domain=data.illinois.gov, datasetId=`6rb8-ntpm` | 48 | a comprehensive solicitation feed; only ~48 upcoming CDB capital bids |
+| **Illinois** | IDHR certified eligible bidders | `socrata_query` domain=data.illinois.gov, datasetId=`w8h2-q8hu` | 7,848 | a bid or award register; vendor-eligibility directory only |
+
+**County & city — Socrata hosts (use `socrata_discover_datasets` to find dataset IDs):**
+
+| Jurisdiction | Tool · domain | Data available | Notes |
+|---|---|---|---|
+| **NYC** | `socrata_query` domain=data.cityofnewyork.us | City Record solicitations + contracts | Live bids and awarded contracts; discover IDs first |
+| **Chicago** | `socrata_query` domain=data.cityofchicago.org | Contracts, vendor payments | Checkbook and awarded contracts |
+| **Austin TX** | `socrata_query` domain=data.austintexas.gov or datahub.austintexas.gov | Solicitations + spending | Multiple datasets; discover IDs first |
+| **Dallas TX** | `socrata_query` domain=www.dallasopendata.com | Vendor/contract data | Contracts and spending |
+| **LA City** | `socrata_query` domain=controllerdata.lacity.org or data.lacity.org | Controller spending | Payment records; not a solicitation feed |
+| **King County WA** | `socrata_query` domain=data.kingcounty.gov | Contracts + spending | Discover dataset IDs |
+| **Cook County IL** | `socrata_query` domain=datacatalog.cookcountyil.gov | Contracts + checkbook | Checkbook and contract data |
+| **Montgomery County MD** | `socrata_query` domain=data.montgomerycountymd.gov | Vendor payments | Discover dataset IDs |
+| **Hennepin County MN** | `arcgis_feature_query` view=`hennepin_transportation_cip` | Transportation CIP pipeline | ~257 rows; capital-project pipeline — **NOT** solicitations or awards |
+| **Charlotte-Mecklenburg NC** | `arcgis_feature_query` view=`charlotte_mecklenburg_cip` | Joint city-county CIP pipeline | ~2,276 rows; capital-project pipeline — **NOT** solicitations or awards |
+
+**State portals not reachable keyless** — official bid portals that are login-gated or WAF-blocked (2026-09-21): CA (Cal eProcure), TX (ESBD / TxSmartBuy), OH (OH|ID), NC (NC eProcurement), MI (SIGMA), and the Periscope-based portals for IL, MA, and NJ. These states have Socrata/CKAN open-data mirrors for past spend (rows above); what they lack is a keyless live-bid feed.
+
 ### Dataset & registry discovery — data.gov · get.gov (2)
 - `datagov_search_datasets` — search the data.gov v4 catalog for federal open datasets across all publishing agencies.
 - `search_gov_domains` — the authoritative CISA get.gov .gov domain registry (resolve which org owns a `.gov`; enumerate federal agencies; map SLED entities by state / domain type).
