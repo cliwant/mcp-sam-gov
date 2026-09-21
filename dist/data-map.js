@@ -153,7 +153,7 @@ export const DATA_MAP_ENTRIES = [
         keyArgs: "domain=data.illinois.gov, datasetId=6rb8-ntpm",
         rows: 48,
         approximate: false,
-        notNote: "a comprehensive solicitation feed; only ~48 upcoming CDB capital bids",
+        notNote: "a comprehensive solicitation feed, and NOT currently open bids — these are ~48 CDB capital solicitations the publisher describes as \"anticipated for a future date, but have not been posted yet\" (estimated_bid_date field)",
     },
     {
         state: "IL",

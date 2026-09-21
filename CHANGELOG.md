@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`socrata_discover_datasets` no longer presents a likely-false zero as proof of absence.** The catalog behaves as if every `q` term must match, and datasets rarely repeat their jurisdiction's name — so on `data.illinois.gov`, `q="Illinois state solicitations"` and `q="Illinois procurement"` returned 0 while `q="solicitations"` returned the dataset. An eval agent took that zero at face value and told the user no Illinois procurement datasets exist. An empty result now carries a note saying it is likely a false zero and how to retry (place in `domain`, one topical term, synonyms), and the `q` parameter says to put the jurisdiction in `domain`, never in `q`.
+- **Illinois CDB `6rb8-ntpm` is no longer described as just "upcoming".** The publisher describes these as solicitations "anticipated for a future date, but have not been posted yet"; the data-map caveat now says they are NOT currently open bids. Two eval answers had called them "currently out to bid".
+
+### Changed
+
+- **The four solicitation directory/search tools (`opengov_*`, `bonfire_*`) now point to the state-level bid feeds that live on open-data portals** — TX TxDOT lettings (advertised, taking bids) and IL CDB capital bids (anticipated, not yet posted). Asked for "Illinois state solicitations", agents searched OpenGov then Bonfire, found no state-level Illinois portal in either, and never reached the Illinois dataset.
+
 ### Added
 
 - **Drift canary (`drift-canary.mjs`)**: weekly live-endpoint health check covering all ~285 allowlisted hosts (Socrata 55, CKAN 4, Open Checkbook 2, ArcGIS 29, Bonfire 195) plus row-count drift verification for all 26 `DATA_MAP_ENTRIES`. Classifies each probe as `ok | redirect | not-found | blocked | server-error | timeout | dns` and row-count drift as `ok | collapse (< 50%) | growth (> 200%) | unmeasurable`. Exits non-zero on regressions (`redirect`, `not-found`, `dns`, `collapse`); transient issues (`blocked`, `timeout`, `server-error`) warn without failing. Baseline run (2026-09-21) confirmed `data.sfgov.org` 301-redirect and 9 drifted Bonfire org slugs.

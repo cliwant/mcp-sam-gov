@@ -66,7 +66,7 @@ import { _clearCache } from "./dist/cache.js";
 import { sizeStandard } from "./dist/sba.js";
 import { num as treasuryNum } from "./dist/treasury.js";
 import { padCik as edgarPadCik, xbrlFrames, filingIndex, parseFullIndex, MAX_INDEX_ROWS, _resetFullIndexCache, dailyFilingIndex, parseDailyIndex, _resetDailyIndexCache, companyConcept, CONCEPT_TAXONOMIES } from "./dist/edgar.js";
-import { num as socrataNum, SOCRATA_DOMAINS } from "./dist/socrata.js";
+import { num as socrataNum, SOCRATA_DOMAINS, discoverDatasets as socrataDiscover } from "./dist/socrata.js";
 import { num as ckanNum } from "./dist/ckan.js";
 import {
   num as fdicNum,
@@ -25481,6 +25481,64 @@ async function testDataMapResource() {
   // (c) The MA entry carries pegc-naaa as the datasetId.
   ok("76-c MA cthru entry datasetId=pegc-naaa — change the id ⇒ RED",
     maEntry?.keyArgs?.includes("pegc-naaa") ?? false, maEntry?.keyArgs ?? "(no entry)");
+
+  // (c-1) FALSE-ZERO guard on socrata_discover_datasets. The catalog behaves as if
+  // every q term must match, and datasets rarely repeat their jurisdiction's name —
+  // so q="Illinois state solicitations" returned 0 on data.illinois.gov while
+  // q="solicitations" returned the dataset, and an eval agent told the user no
+  // Illinois procurement datasets exist. An empty result must say it may be false.
+  {
+    const catalog = (n) => mockResponse({ status: 200, json: {
+      resultSetSize: n,
+      results: Array.from({ length: n }, (_, k) => ({
+        resource: { id: `abcd-00${k}0`, name: `Future Solicitations ${k}`, description: "x", updatedAt: "2026-09-20T00:00:00Z" },
+        metadata: { domain: "data.illinois.gov" },
+        permalink: `https://data.illinois.gov/d/abcd-00${k}0`,
+      })),
+    } });
+    const zeroNote = (r) => (r?._meta?.notes ?? r?.meta?.notes ?? []).find((n) => /0 matches/.test(n)) ?? null;
+
+    await withFetch(() => catalog(0), async () => {
+      const r = await socrataDiscover({ q: "Illinois state solicitations", domain: "data.illinois.gov", limit: 20 });
+      const n = zeroNote(r);
+      ok("76-z1 multi-word q with 0 results carries a FALSE-zero note — drop the note ⇒ RED",
+        !!n && /FALSE zero/.test(n), JSON.stringify(n));
+      ok("76-z1 the note tells the caller to put the place in `domain`, not q — drop that advice ⇒ RED",
+        !!n && /domain/.test(n) && /not in q/.test(n), JSON.stringify(n));
+    });
+    await withFetch(() => catalog(0), async () => {
+      const r = await socrataDiscover({ q: "procurement", domain: "data.illinois.gov", limit: 20 });
+      const n = zeroNote(r);
+      ok("76-z2 single-word q with 0 results still warns it is not proof of absence — drop it ⇒ RED",
+        !!n && /not proof the data is absent/.test(n) && /synonym/.test(n), JSON.stringify(n));
+    });
+    await withFetch(() => catalog(1), async () => {
+      const r = await socrataDiscover({ q: "solicitations", domain: "data.illinois.gov", limit: 20 });
+      ok("76-z3 a NON-empty result carries no false-zero note — emit it unconditionally ⇒ RED",
+        zeroNote(r) === null, JSON.stringify(zeroNote(r)));
+    });
+
+    // The guidance must also sit where the agent reads BEFORE calling: the q param.
+    const { readFileSync: rfZ } = await import("node:fs");
+    const snapZ = JSON.parse(rfZ("tools-list-snapshot.json", "utf8"));
+    const disc = snapZ.find((t) => t.name === "socrata_discover_datasets");
+    const qDesc = disc?.inputSchema?.properties?.q?.description ?? "";
+    ok("76-z4 socrata_discover_datasets.q says put the JURISDICTION in `domain` — drop it ⇒ RED",
+      /JURISDICTION in `domain`/.test(qDesc), qDesc.slice(0, 120));
+
+    // The state-level bid-feed pointer must be on every tool an agent opens when it
+    // thinks "solicitations", and must say IL's feed is NOT yet posted.
+    for (const nm of ["opengov_list_governments", "opengov_search_solicitations",
+                      "bonfire_list_organizations", "bonfire_search_opportunities"]) {
+      const d = snapZ.find((t) => t.name === nm)?.description ?? "";
+      ok(`76-z5 ${nm} points to IL 6rb8-ntpm and says NOT YET POSTED — drop it ⇒ RED`,
+        d.includes("6rb8-ntpm") && /NOT YET POSTED/.test(d) && d.includes("qh8x-rm8r"),
+        `6rb8=${d.includes("6rb8-ntpm")} notYet=${/NOT YET POSTED/.test(d)} tx=${d.includes("qh8x-rm8r")}`);
+    }
+    const ilEntry = DATA_MAP_ENTRIES.find((e) => e.keyArgs.includes("6rb8-ntpm"));
+    ok("76-z6 data-map IL CDB caveat says NOT currently open bids — soften it ⇒ RED",
+      /NOT currently open bids/.test(ilEntry?.notNote ?? ""), ilEntry?.notNote ?? "(no entry)");
+  }
 
   // (c0) Every Open-Checkbook portal must carry its OWN measured coverage note.
   // A single hardcoded "~3 most-recent fiscal years" line was emitted for all
