@@ -13857,12 +13857,26 @@ async function testBonfireHonesty() {
   // ── seed integrity + num parity. ──
   ok("45BF seed directory is non-empty, all slugs charclass-valid, all .gov-adjacent US states", BONFIRE_ORGS.length > 150 && BONFIRE_ORGS.every((o) => /^[a-z0-9-]{1,64}$/.test(o.org) && o.name && o.state), JSON.stringify({ n: BONFIRE_ORGS.length, bad: BONFIRE_ORGS.filter((o) => !/^[a-z0-9-]+$/.test(o.org)).map((o) => o.org).slice(0, 3) }));
   // Depth seeds (loop, 2026-09-21): 9 new orgs bring total from 186 to 195.
+  // Drift fix (2026-09-21): 8 dead feeds removed + saha→homesa rename; total 195 → 187.
   // NON-VACUOUS assertions:
-  //   (a) count: BONFIRE_ORGS.length >= 195 — remove any new entry ⇒ RED.
+  //   (a) count: BONFIRE_ORGS.length === 187 — re-add any dead slug ⇒ RED, remove valid ⇒ RED.
   //   (b) slug identity traps: pcc=OR, dps=OH, maricopa=AZ (slug traps documented in source).
   //       Mutating the state tag or removing the entry ⇒ RED (a user asking for OR/OH/AZ orgs gets wrong results).
   //   (c) calwater must NOT be present (private investor-owned utility, out of scope — add it ⇒ RED).
-  ok("45BF DEPTH seed count ≥195 (186 + 9 new depth orgs; remove any new entry ⇒ RED)", BONFIRE_ORGS.length >= 195, JSON.stringify({ actual: BONFIRE_ORGS.length }));
+  //   (d) dead slugs must NOT be present (re-add any dead slug ⇒ RED).
+  //   (e) homesa must be present (saha rename — remove ⇒ RED = missing entity).
+  //   (f) saha must NOT be present (old slug retired — re-add ⇒ RED = dead feed).
+  ok("45BF DRIFT seed count ===187 (195 - 8 dead removed - saha removed + homesa added; deviate ⇒ RED)", BONFIRE_ORGS.length === 187, JSON.stringify({ actual: BONFIRE_ORGS.length }));
+  ok("45BF DRIFT homesa present TX (saha slug rename; remove ⇒ RED = Opportunity Home SA missing)", (() => { const o = BONFIRE_ORGS.find((o) => o.org === "homesa"); return o !== undefined && o.state === "TX"; })(), JSON.stringify(BONFIRE_ORGS.find((o) => o.org === "homesa")));
+  ok("45BF DRIFT saha NOT in seed (dead 301-redirect slug — re-add ⇒ RED = dead feed advertised)", !BONFIRE_ORGS.some((o) => o.org === "saha"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "saha") }));
+  ok("45BF DRIFT thecha NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "thecha"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "thecha") }));
+  ok("45BF DRIFT sourcewell NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "sourcewell"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "sourcewell") }));
+  ok("45BF DRIFT rutgers NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "rutgers"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "rutgers") }));
+  ok("45BF DRIFT apsu NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "apsu"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "apsu") }));
+  ok("45BF DRIFT sanantonio NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "sanantonio"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "sanantonio") }));
+  ok("45BF DRIFT allenisd NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "allenisd"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "allenisd") }));
+  ok("45BF DRIFT kingcounty NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "kingcounty"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "kingcounty") }));
+  ok("45BF DRIFT cvtc NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "cvtc"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "cvtc") }));
   ok("45BF DEPTH slug-trap pcc=Portland Community College OR (NOT Pima CC AZ — wrong state ⇒ RED = wrong entity in OR filter)", (() => {
     const pcc = BONFIRE_ORGS.find((o) => o.org === "pcc");
     return pcc !== undefined && pcc.state === "OR" && pcc.name === "Portland Community College";

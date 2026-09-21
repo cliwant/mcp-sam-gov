@@ -11,7 +11,7 @@
  * ★ NO keyless directory API: Bonfire's authoritative org list
  * (`GET common-production-api-global.bonfirehub.com/v1.0/organizations/external`)
  * is AUTH-GATED (a free vendor-account token) — OUT OF BOUNDS (we never sign in).
- * So this ships a CURATED, live-verified SEED directory (195 US orgs; §BONFIRE_
+ * So this ships a CURATED, live-verified SEED directory (187 US orgs; §BONFIRE_
  * ORGS) as `bonfire_list_organizations`, and documents the keyless RSS-probe
  * refresh method (no catch-all: `{slug}.bonfirehub.com/opportunities/rss` returns
  * 200 <rss> for a real org, a connection failure for a non-provisioned slug). The

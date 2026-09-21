@@ -6226,13 +6226,13 @@ export const TOOLS: ToolDef[] = [
   }),
   // ━━━ Bonfire (Euna) — keyless per-org open-opportunity RSS (SLED bids) ━━━
   // SLED bid campaign. Thousands of US state/local govs on Bonfire expose a keyless
-  // RSS of open opportunities. Ships a curated 195-org live-verified seed directory
+  // RSS of open opportunities. Ships a curated 187-org live-verified seed directory
   // (Bonfire's authoritative org API is auth-gated → out of bounds). Fixed-suffix
   // SSRF (.bonfirehub.com). RSS = the complete open set (totalAvailable honest).
   defineTool({
     name: "bonfire_list_organizations",
     description:
-      "List US governments on the Bonfire (Euna) eProcurement platform — the directory for bonfire_search_opportunities (keyless). Bonfire hosts thousands of US state/local governments' open-bid portals, each with a keyless RSS feed. Filter the curated seed by `state` (2-letter) / `query` (case-insensitive name substring); `limit`(1..200)/`offset`. Output: { organizations:[{ org, name, state }] }. Feed a result's `org` to bonfire_search_opportunities. ★HONESTY: this is a CURATED, live-verified SEED of 195 US orgs — Bonfire has NO keyless org-list API (its authoritative directory is auth-gated, out of bounds), and Euna markets up to ~900 US orgs, so the seed is PARTIAL (disclosed in _meta); probe `{slug}.bonfirehub.com/opportunities/rss` to extend. totalAvailable = the exact filtered seed count." + " " + STATE_BID_FEEDS_POINTER,
+      "List US governments on the Bonfire (Euna) eProcurement platform — the directory for bonfire_search_opportunities (keyless). Bonfire hosts thousands of US state/local governments' open-bid portals, each with a keyless RSS feed. Filter the curated seed by `state` (2-letter) / `query` (case-insensitive name substring); `limit`(1..200)/`offset`. Output: { organizations:[{ org, name, state }] }. Feed a result's `org` to bonfire_search_opportunities. ★HONESTY: this is a CURATED, live-verified SEED of 187 US orgs — Bonfire has NO keyless org-list API (its authoritative directory is auth-gated, out of bounds), and Euna markets up to ~900 US orgs, so the seed is PARTIAL (disclosed in _meta); probe `{slug}.bonfirehub.com/opportunities/rss` to extend. totalAvailable = the exact filtered seed count." + " " + STATE_BID_FEEDS_POINTER,
     inputSchema: BonfireListOrganizationsInput,
     handler: (input) => bonfire.listOrganizations(input),
   }),

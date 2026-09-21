@@ -764,7 +764,7 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 
 - `opengov_list_governments` — directory of 525+ US state/local governments on **OpenGov Procurement** (filter by state/query)
 - `opengov_search_solicitations` — a government's **live public solicitations** (title, status [open = accepting], deadline, portal link) — keyless anonymous endpoints
-- `bonfire_list_organizations` — curated live-verified 195-org US seed directory of governments on **Bonfire (Euna)**
+- `bonfire_list_organizations` — curated live-verified 187-org US seed directory of governments on **Bonfire (Euna)**
 - `bonfire_search_opportunities` — an org's currently-open opportunities via keyless RSS (referenceNumber, name, closeDate, link); the RSS is the complete open set (exact total)
 - `arcgis_hub_discover_datasets` — discover ArcGIS Hub datasets by keyword (the SLED GIS/infrastructure/permits/procurement layer Socrata & CKAN don't cover; a discovery aid with publisher surfaced for vetting)
 - `arcgis_feature_query` — query rows from a curated allowlist of **29 US-gov ArcGIS REST feature layers**: DC OCP PASS live solicitations; local-gov checkbooks/contracts; **county CIP pipelines (Hennepin County MN, Charlotte-Mecklenburg NC — capital-project pipelines, not solicitation registers)**; **state DOT bid/award registers (TX / AK / IA / OK)**; **4 North Dakota DOT federal flex-funding award layers** (NDDOT funding awards to local public agencies such as counties, townships and cities, not vendor contracts or winning bids; a proxy because ND's statewide checkbook and procurement portal aren't keyless-reachable)
