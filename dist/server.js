@@ -18,7 +18,7 @@
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { SamGovClient, daysUntilResponse, applyResponseDeadlineWindow, } from "./sam-gov/index.js";
 import * as usas from "./usaspending.js";
@@ -86,6 +86,7 @@ import * as keys from "./keys.js";
 import { toToolError, ToolErrorCarrier, errorFromResponse } from "./errors.js";
 import * as feedback from "./feedback.js";
 import { checkForUpdate } from "./update-check.js";
+import { renderDataMapMarkdown } from "./data-map.js";
 import { buildMeta, isMetaBundle, withMeta, } from "./meta.js";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
@@ -4913,7 +4914,7 @@ export const TOOLS = [
     // ━━━ Socrata / SODA — keyless SLED + E-rate open data (2) ━━━ ADR-0004
     defineTool({
         name: "socrata_query",
-        description: "Query rows from an allowlisted Socrata/SODA open-data portal (keyless; ~a dozen US state portals + USAC E-rate on one identical API — state spend/checkbook/contract/vendor-payment datasets). Input `domain` (curated allowlist enum — the SSRF host guard), `datasetId` (4x4, from socrata_discover_datasets), optional SoQL `select`/`where`/`order`/`q`, `limit` (≤1000, def 100), `offset`, `withTotal` (def true). HONESTY: SODA's row response has no total, so a count(*) companion supplies an exact totalAvailable; if it fails the rows still return with totalAvailable:null + a note (hasMore is then inferred from page-fill, never a false complete). Genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). Value fields are strings.",
+        description: "Query rows from an allowlisted Socrata/SODA open-data portal (keyless; ~a dozen US state portals + USAC E-rate on one identical API — state spend/checkbook/contract/vendor-payment datasets). State procurement mirrors: NY ehig-g5x3, NJ ubnu-tqu7, WA s8d5-pj78, MA cthru.data.socrata.com pegc-naaa (~49M payment rows). Full map: read resource samgov://data-map/state-local. Input `domain` (curated allowlist enum — the SSRF host guard), `datasetId` (4x4, from socrata_discover_datasets), optional SoQL `select`/`where`/`order`/`q`, `limit` (≤1000, def 100), `offset`, `withTotal` (def true). HONESTY: SODA's row response has no total, so a count(*) companion supplies an exact totalAvailable; if it fails the rows still return with totalAvailable:null + a note (hasMore is then inferred from page-fill, never a false complete). Genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). Value fields are strings.",
         inputSchema: SocrataQueryInput,
         handler: (input) => socrata.query(input),
     }),
@@ -4926,7 +4927,7 @@ export const TOOLS = [
     // ━━━ CKAN datastore_search — keyless SLED open data (2) ━━━ ADR-0006
     defineTool({
         name: "ckan_query",
-        description: "Query rows from an allowlisted CKAN datastore resource (keyless; the FIRST source on the R2 DataSource port — state/city spend/checkbook/procurement/vendor tables on the identical CKAN Action API). Input `host` (curated allowlist enum — the SSRF host guard: data.ca.gov, data.virginia.gov, data.boston.gov), `resourceId` (36-char lowercase UUID, from ckan_discover_datasets), optional `q` (full-text), `filters` (constrained object {field:value} we JSON.stringify), `sort`, `limit` (≤1000, def 100), `offset`. HONESTY: CKAN's envelope carries a real result.total — the DEFAULT is an EXACT total (exact totalAvailable + hasMore); the rare estimated total (total_was_estimated:true) is disclosed via totalIsEstimated + a note and does NOT drive pagination (it can be above OR below the truth). Genuine-empty ⇒ complete:true/total:0; an outage/404/409 or success:false THROWS (never a fake empty). Values are typed per result.fields[].type.",
+        description: "Query rows from an allowlisted CKAN datastore resource (keyless; state/city spend/checkbook/procurement/vendor tables on the CKAN Action API). VA eVA PO lines: host=data.virginia.gov resourceId=3c7f1bde-35b0-4fbf-b89c-978a19124d53. Full map: read resource samgov://data-map/state-local. Input `host` (curated allowlist enum — the SSRF host guard: data.ca.gov, data.virginia.gov, data.boston.gov), `resourceId` (36-char lowercase UUID, from ckan_discover_datasets), optional `q` (full-text), `filters` (constrained object {field:value} we JSON.stringify), `sort`, `limit` (≤1000, def 100), `offset`. HONESTY: CKAN's envelope carries a real result.total — the DEFAULT is an EXACT total (exact totalAvailable + hasMore); the rare estimated total (total_was_estimated:true) is disclosed via totalIsEstimated + a note and does NOT drive pagination (it can be above OR below the truth). Genuine-empty ⇒ complete:true/total:0; an outage/404/409 or success:false THROWS (never a fake empty). Values are typed per result.fields[].type.",
         inputSchema: CkanQueryInput,
         handler: (input) => ckan.query(input),
     }),
@@ -5679,7 +5680,7 @@ async function main() {
     // not using the default (all). The default instructions stay byte-identical.
     // B2: unknown toolset names are reported here (not only stderr) because
     // stderr is invisible in Claude Desktop.
-    const BASE_INSTRUCTIONS = "This server wraps US government open data (keyless-first). If a tool result looks wrong, a tool stays broken, or the user wants a capability this server lacks, help improve it: call the `feedback` tool — or use the `report` URL present on schema_drift / upstream_unavailable errors — to get a PREFILLED GitHub issue link, and offer it to the user to open and submit. Nothing is posted automatically; the user submits. Never include secrets or personal data in a report (the repo is public).";
+    const BASE_INSTRUCTIONS = "This server wraps US government open data (keyless-first). State/local dataset IDs (Socrata, CKAN, etc.) are listed in the MCP resource samgov://data-map/state-local. If a tool result looks wrong, a tool stays broken, or the user wants a capability this server lacks, help improve it: call the `feedback` tool — or use the `report` URL present on schema_drift / upstream_unavailable errors — to get a PREFILLED GitHub issue link, and offer it to the user to open and submit. Nothing is posted automatically; the user submits. Never include secrets or personal data in a report (the repo is public).";
     let serverInstructions;
     if (isAllTools && tsResult.unknown.length === 0) {
         // Default: byte-identical to main.
@@ -5708,7 +5709,7 @@ async function main() {
         serverInstructions = `${BASE_INSTRUCTIONS} ${parts.join(" ")}`;
     }
     const server = new Server({ name: SERVER_NAME, version: SERVER_VERSION }, {
-        capabilities: { tools: {} },
+        capabilities: { tools: {}, resources: {} },
         // Surfaced to the agent at initialize. Tells it how to route real-usage
         // friction back to the project WITHOUT the server ever posting anything.
         instructions: serverInstructions,
@@ -5723,6 +5724,38 @@ async function main() {
             })),
         };
     });
+    // ── MCP Resources: state & local data map ──────────────────────────────
+    const DATA_MAP_URI = "samgov://data-map/state-local";
+    const DATA_MAP_NAME = "State & local data map";
+    const DATA_MAP_DESCRIPTION = "Jurisdiction → verified tool call → row count for every allowlisted state/local Socrata, CKAN, Tableau and Open Checkbook dataset.";
+    server.setRequestHandler(ListResourcesRequestSchema, async () => {
+        return {
+            resources: [
+                {
+                    uri: DATA_MAP_URI,
+                    name: DATA_MAP_NAME,
+                    description: DATA_MAP_DESCRIPTION,
+                    mimeType: "text/markdown",
+                },
+            ],
+        };
+    });
+    server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+        const { uri } = req.params;
+        if (uri !== DATA_MAP_URI) {
+            throw new Error(`Unknown resource: ${uri}`);
+        }
+        return {
+            contents: [
+                {
+                    uri: DATA_MAP_URI,
+                    mimeType: "text/markdown",
+                    text: renderDataMapMarkdown(),
+                },
+            ],
+        };
+    });
+    // ── end MCP Resources ──────────────────────────────────────────────────
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const { name, arguments: args } = req.params;
         // Check if the tool exists but is not loaded in the current toolset profile.

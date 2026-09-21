@@ -197,6 +197,11 @@ Agent-readable lookup: jurisdiction → data type → exact tool call → verifi
 | **South Dakota** | Open Checkbook vendor payments | `open_checkbook_search` portal=`sd` | ~741k | an award register; only ~3 most-recent FYs, exact-match filters |
 | **Illinois** | CDB capital project future bids | `socrata_query` domain=data.illinois.gov, datasetId=`6rb8-ntpm` | 48 | a comprehensive solicitation feed; only ~48 upcoming CDB capital bids |
 | **Illinois** | IDHR certified eligible bidders | `socrata_query` domain=data.illinois.gov, datasetId=`w8h2-q8hu` | 7,848 | a bid or award register; vendor-eligibility directory only |
+| **Texas** | TxDOT current lettings (★live bid-line items) | `socrata_query` domain=data.texas.gov, datasetId=`qh8x-rm8r` | 8,861 | rows are bid LINE ITEMS not projects (8,861 rows = 412 distinct project_ids — use `$select=count(distinct project_id)` for open-bid count); TxDOT highway lettings ONLY; rolling window (past lettings dropped). ★First live state solicitation feed in this map. |
+| **Texas** | DIR Cooperative Contract Sales FY2010–FY2025 (archive) | `socrata_query` domain=data.texas.gov, datasetId=`w64c-ndf7` | 10,749,743 | bids or awards; purchase line items off DIR cooperative contracts (historical) |
+| **Texas** | DIR Cooperative & Tele Contract Sales FY2026 | `socrata_query` domain=data.texas.gov, datasetId=`a743-wj72` | 2,077,855 | historical FY2026 purchase lines (same shape as w64c-ndf7); not bids |
+| **Texas** | DIR Current Active Cooperative Contracts | `socrata_query` domain=data.texas.gov, datasetId=`vipt-h4ye` | 5,167 | a solicitation feed; active cooperative contract register (not TxDOT lettings) |
+| **Texas** | TCEQ Current Contracts & Purchase Orders | `socrata_query` domain=data.texas.gov, datasetId=`svjm-sdfz` | 2,067 | statewide; one agency (TCEQ) only |
 
 **County & city — Socrata hosts (use `socrata_discover_datasets` to find dataset IDs):**
 
@@ -213,7 +218,10 @@ Agent-readable lookup: jurisdiction → data type → exact tool call → verifi
 | **Hennepin County MN** | `arcgis_feature_query` view=`hennepin_transportation_cip` | Transportation CIP pipeline | ~257 rows; capital-project pipeline — **NOT** solicitations or awards |
 | **Charlotte-Mecklenburg NC** | `arcgis_feature_query` view=`charlotte_mecklenburg_cip` | Joint city-county CIP pipeline | ~2,276 rows; capital-project pipeline — **NOT** solicitations or awards |
 
-**State portals not reachable keyless** — official bid portals that are login-gated or WAF-blocked (2026-09-21): CA (Cal eProcure), TX (ESBD / TxSmartBuy), OH (OH|ID), NC (NC eProcurement), MI (SIGMA), and the Periscope-based portals for IL, MA, and NJ. These states have Socrata/CKAN open-data mirrors for past spend (rows above); what they lack is a keyless live-bid feed.
+**State portals with no keyless procurement content (measured absence, 2026-09-21):**
+- **Login-gated or WAF-blocked live-bid portals:** CA (Cal eProcure), TX ESBD/TxSmartBuy non-TxDOT (TxDOT lettings ARE available via `qh8x-rm8r` above), OH (OH|ID), NC (NC eProcurement), MI (SIGMA), and the Periscope-based portals for IL, MA, and NJ. These states have Socrata/CKAN mirrors for past spend (rows above); what they lack is a keyless live non-TxDOT bid feed.
+- **Portal live, no procurement data:** PA (`data.pa.gov` is live and allowlisted; scoped catalog returns 0 bid/vendor/procurement datasets).
+- **No state-level open-data portal:** FL (`data.fl.gov` NXDOMAIN — domain does not exist), GA (`data.georgia.gov` NXDOMAIN). These are measured absences, not connectivity blocks — there is no state portal to reach.
 
 ### Dataset & registry discovery — data.gov · get.gov (2)
 - `datagov_search_datasets` — search the data.gov v4 catalog for federal open datasets across all publishing agencies.
