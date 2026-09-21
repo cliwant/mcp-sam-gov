@@ -179,7 +179,8 @@ export const SOCRATA_DOMAINS = [
   //    allowlist, not the TLD; these five are the documented non-.gov entries. ──
   "data.cityofnewyork.us", // NYC OpenData (.us, official) — e.g. dg92-zbpx (City Record: procurement notices)
   "data.cityofchicago.org", // Chicago (.org, official) — e.g. rsxa-ify5 (Contracts)
-  "data.sfgov.org", // San Francisco / DataSF (.org, official) — e.g. cqi5-hm2d (Supplier Contracts)
+  "data.sfgov.org", // San Francisco / DataSF — PERMANENTLY MIGRATED to data.sf.gov (301 all paths, 2026-09); kept allowlisted so requests reach the migration handler (see MIGRATED_SOCRATA_HOSTS below) instead of returning invalid_input. Use data.sf.gov for all new calls.
+  "data.sf.gov", // San Francisco / DataSF (canonical post-migration .gov domain) — e.g. cqi5-hm2d (Supplier Contracts 49,186 rows), hmh3-ff63 (Airport/SFO Contract Opportunities)
   "controllerdata.lacity.org", // LA City Controller (.org, official) — e.g. pggv-e4fn (Checkbook L.A.)
   "opendata.usac.org", // USAC E-rate (.org, m6) — e.g. avi8-svp9
   // ── County/city procurement sweep (loop cycle 17, 2026-07-20). Discovered via
@@ -229,6 +230,24 @@ export const SOCRATA_DOMAINS = [
 export type SocrataDomain = (typeof SOCRATA_DOMAINS)[number];
 
 const SOCRATA_DOMAIN_SET: ReadonlySet<string> = new Set(SOCRATA_DOMAINS);
+
+/**
+ * Known host migrations (permanent 301 redirects). A domain here has permanently
+ * moved; redirect:"error" means any fetch to the old host will fail immediately.
+ * Rather than returning a retryable upstream_unavailable (which implies the
+ * problem may resolve on its own), we pre-flight check this map and return
+ * invalid_input — non-retryable, naming the replacement — so the caller can
+ * update the `domain` parameter instead of spinning on a doomed retry loop.
+ *
+ * Keep the old host in SOCRATA_DOMAINS so it passes the allowlist gate (invalid
+ * domains are rejected before reaching this check). Only add an entry here when
+ * the migration is confirmed by a live 301 probe with a stable redirect_url.
+ *
+ *   data.sfgov.org → data.sf.gov   (confirmed 2026-09-21; all paths 301)
+ */
+const MIGRATED_SOCRATA_HOSTS: ReadonlyMap<string, string> = new Map([
+  ["data.sfgov.org", "data.sf.gov"],
+]);
 
 const CATALOG_HOST = "api.us.socrata.com";
 const CATALOG_URL = `https://${CATALOG_HOST}/api/catalog/v1`;
@@ -294,6 +313,18 @@ async function getSocrataResource(
     throw new ToolErrorCarrier({
       kind: "invalid_input",
       message: `Socrata domain ${JSON.stringify(domain)} is not on the curated allowlist. Allowed: ${SOCRATA_DOMAINS.join(", ")}.`,
+      retryable: false,
+    });
+  }
+  // Migration pre-flight (MIGRATED_SOCRATA_HOSTS): if the domain has permanently
+  // moved, redirect:"error" means any fetch will immediately fail with a 301.
+  // Return invalid_input (non-retryable) now — before wasting a network round-trip
+  // — naming the replacement so the caller can update the domain parameter.
+  const migratedTo = MIGRATED_SOCRATA_HOSTS.get(domain);
+  if (migratedTo !== undefined) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `Socrata host ${JSON.stringify(domain)} has permanently moved to ${JSON.stringify(migratedTo)}. Update the \`domain\` parameter to ${JSON.stringify(migratedTo)} — retrying ${JSON.stringify(domain)} will not succeed.`,
       retryable: false,
     });
   }
@@ -375,6 +406,15 @@ async function getHostCatalog(
       retryable: false,
     });
   }
+  // Migration pre-flight — same policy as getSocrataResource (see comment there).
+  const migratedTo = MIGRATED_SOCRATA_HOSTS.get(domain);
+  if (migratedTo !== undefined) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      message: `Socrata host ${JSON.stringify(domain)} has permanently moved to ${JSON.stringify(migratedTo)}. Update the \`domain\` parameter to ${JSON.stringify(migratedTo)} — retrying ${JSON.stringify(domain)} will not succeed.`,
+      retryable: false,
+    });
+  }
   const url = `https://${domain}/api/catalog/v1?${params.toString()}`;
   const built = new URL(url);
   if (built.hostname !== domain || built.protocol !== "https:") {
@@ -419,6 +459,12 @@ async function fetchCount(
   const params = new URLSearchParams();
   if (where) params.set("$where", where);
   if (q) params.set("$q", q);
+  // ★ MUST stay count(*) — DO NOT change to count(1) or SELECT count(1).
+  // Cloudflare-fronted Socrata hosts (e.g. opendata.maryland.gov) deterministically
+  // 403 ("Just a moment...") on count(1) and `$query=SELECT count(1)` — their WAF
+  // treats the pattern as SQLi-like — while count(*) consistently returns 200.
+  // Verified 3/3 on opendata.maryland.gov (2026-09-21): count(1)→403, count(*)→200
+  // (342 rows). Maryland is not broken; the shape here is load-bearing.
   params.set("$select", "count(*)");
   let body: unknown;
   try {
