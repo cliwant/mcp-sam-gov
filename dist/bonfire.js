@@ -11,7 +11,7 @@
  * ★ NO keyless directory API: Bonfire's authoritative org list
  * (`GET common-production-api-global.bonfirehub.com/v1.0/organizations/external`)
  * is AUTH-GATED (a free vendor-account token) — OUT OF BOUNDS (we never sign in).
- * So this ships a CURATED, live-verified SEED directory (186 US orgs; §BONFIRE_
+ * So this ships a CURATED, live-verified SEED directory (195 US orgs; §BONFIRE_
  * ORGS) as `bonfire_list_organizations`, and documents the keyless RSS-probe
  * refresh method (no catch-all: `{slug}.bonfirehub.com/opportunities/rss` returns
  * 200 <rss> for a real org, a connection failure for a non-provisioned slug). The
@@ -45,21 +45,25 @@ const BONFIRE_SUFFIX = ".bonfirehub.com";
 export const BONFIRE_ORG_RE = /^[a-z0-9-]{1,64}$/;
 const bonfireLabel = (org) => `bonfire:${org}/opportunities/rss`;
 const BONFIRE_SOURCE = (org) => `${org}.bonfirehub.com via Bonfire (Euna) open-opportunities RSS (keyless)`;
-const BONFIRE_SEED_NOTE = "This directory is a CURATED, live-verified SEED (Bonfire has NO keyless org-list API; the authoritative list is auth-gated and out of bounds). Euna markets up to ~900 US orgs, so the seed is partial — probe `{slug}.bonfirehub.com/opportunities/rss` (200 <rss> = real org) to extend. Feed a result's `org` to bonfire_search_opportunities.";
-// ─── The curated 186-org US seed directory (live-verified 2026-07-19) ──
+const BONFIRE_SEED_NOTE = "This directory is a CURATED, live-verified SEED (Bonfire has NO keyless org-list API; the authoritative list is auth-gated and out of bounds). Euna markets up to ~900 US orgs, so the seed is partial — probe `{slug}.bonfirehub.com/opportunities/rss` (200 <rss> = real org) to extend. Feed a result's `org` to bonfire_search_opportunities. Slug identity traps: pcc = Portland Community College OR (NOT Pima CC AZ); dps = Dayton Public Schools OH (NOT Denver PS CO); maricopa = Maricopa County Community Colleges AZ (NOT Maricopa County government).";
+// ─── The curated 195-org US seed directory (live-verified 2026-09-21) ──
 // "slug|Entity|ST" — the slug is the RSS subdomain. Non-US (.ca / cayman / etc.)
 // deliberately excluded.
+// Slug identity notes (depth sweep 2026-09-21):
+//   pcc = Portland Community College OR (NOT Pima Community College AZ)
+//   dps = Dayton Public Schools OH (NOT Denver Public Schools CO)
+//   maricopa = Maricopa County Community Colleges AZ (NOT Maricopa County government)
 const BONFIRE_SEED_RAW = [
     "littlerock|City of Little Rock|AR",
-    "buckeyeaz|City of Buckeye|AZ", "goodyearaz|City of Goodyear|AZ", "peoriaaz|City of Peoria|AZ", "scottsdaleaz|City of Scottsdale|AZ", "yumaaz|City of Yuma|AZ", "pinalcountyaz|Pinal County|AZ", "susd|Scottsdale USD|AZ", "tollesonuhsd|Tolleson Union HSD|AZ",
-    "cityofirvine|City of Irvine|CA", "oaklandca|City of Oakland|CA", "alamedacounty|Alameda County|CA", "solanocounty|Solano County|CA", "ventura|County of Ventura|CA", "yolocounty|Yolo County|CA", "mtc|Metropolitan Transportation Commission|CA", "azusa|Azusa USD|CA", "stocktonusd|Stockton USD|CA", "weta|SF Bay Area Water Emergency Transportation Authority|CA", "acwd|Alameda County Water District|CA", "wrd|Water Replenishment District of Southern CA|CA", "actransit|AC Transit|CA", "marintransit|Marin Transit|CA", "mst|Monterey-Salinas Transit|CA", "omnitrans|Omnitrans|CA", "smctd|San Mateo County Transit District|CA", "sonomamarintrain|Sonoma-Marin Area Rail Transit|CA", "ggbhtd|Golden Gate Bridge Highway & Transportation District|CA",
+    "buckeyeaz|City of Buckeye|AZ", "goodyearaz|City of Goodyear|AZ", "maricopa|Maricopa County Community Colleges|AZ", "peoriaaz|City of Peoria|AZ", "scottsdaleaz|City of Scottsdale|AZ", "yumaaz|City of Yuma|AZ", "pinalcountyaz|Pinal County|AZ", "susd|Scottsdale USD|AZ", "tollesonuhsd|Tolleson Union HSD|AZ",
+    "cityofirvine|City of Irvine|CA", "oaklandca|City of Oakland|CA", "alamedacounty|Alameda County|CA", "emwd|Eastern Municipal Water District|CA", "laccd|Los Angeles Community College District|CA", "solanocounty|Solano County|CA", "ventura|County of Ventura|CA", "yolocounty|Yolo County|CA", "mtc|Metropolitan Transportation Commission|CA", "azusa|Azusa USD|CA", "stocktonusd|Stockton USD|CA", "weta|SF Bay Area Water Emergency Transportation Authority|CA", "acwd|Alameda County Water District|CA", "wrd|Water Replenishment District of Southern CA|CA", "actransit|AC Transit|CA", "marintransit|Marin Transit|CA", "mst|Monterey-Salinas Transit|CA", "omnitrans|Omnitrans|CA", "smctd|San Mateo County Transit District|CA", "sonomamarintrain|Sonoma-Marin Area Rail Transit|CA", "ggbhtd|Golden Gate Bridge Highway & Transportation District|CA",
     "bouldercounty|Boulder County|CO",
     "crcog|Capitol Region Council of Governments|CT", "easternct|Eastern Connecticut State University|CT",
     "dfm|DE OMB - Division of Facility Management|DE", "gss|DE OMB - Government Support Services|DE",
     "daviefl|Town of Davie|FL", "ocoee|City of Ocoee|FL", "broward|Broward County|FL", "hillsboroughcounty|Hillsborough County|FL", "marionfl|Marion County|FL", "monroecounty-fl|Monroe County|FL", "pascocountyfl|Pasco County|FL", "famu|Florida A&M University|FL", "fau|Florida Atlantic University|FL", "fgcu|Florida Gulf Coast University|FL", "floridapoly|Florida Polytechnic University|FL", "ucf|University of Central Florida|FL", "tampabaywater|Tampa Bay Water|FL", "gohart|Hillsborough Transit Authority|FL", "psta|Pinellas Suncoast Transit Authority|FL",
     "brookhavenga|City of Brookhaven|GA", "sandysprings|City of Sandy Springs|GA", "chathamcountyga|Chatham County|GA", "columbiacountyga|Columbia County|GA", "gwinnett|Gwinnett County Public Schools|GA",
     "cityofnampa|City of Nampa|ID", "adacounty|Ada County|ID", "bannockcounty|Bannock County|ID",
-    "cookcountyil|Cook County|IL", "thecha|Chicago Housing Authority|IL", "cps|Chicago Public Schools|IL", "u-46|School District U-46|IL", "chicagoparkdistrict|Chicago Park District|IL", "mwrd|Metro Water Reclamation District of Greater Chicago|IL", "transitchicago|Chicago Transit Authority|IL", "metra|Metra|IL",
+    "cookcountyil|Cook County|IL", "d214|Township High School District 214|IL", "thecha|Chicago Housing Authority|IL", "cps|Chicago Public Schools|IL", "u-46|School District U-46|IL", "chicagoparkdistrict|Chicago Park District|IL", "mwrd|Metro Water Reclamation District of Greater Chicago|IL", "transitchicago|Chicago Transit Authority|IL", "metra|Metra|IL",
     "indygo|Indianapolis Public Transportation Corp|IN",
     "olatheks|City of Olathe|KS", "wichita|City of Wichita|KS",
     "covingtonky|City of Covington|KY", "louisvilleky|City of Louisville|KY", "owensboro|City of Owensboro|KY", "lexingtonky|Lexington-Fayette|KY", "kyhousing|Kentucky Housing Corporation|KY", "tarc|Transit Authority of River City|KY",
@@ -68,20 +72,20 @@ const BONFIRE_SEED_RAW = [
     "maine|State of Maine|ME",
     "detroit|City of Detroit|MI",
     "ramseycountymn|Ramsey County|MN", "sourcewell|Sourcewell|MN",
-    "jeffersoncitymo|Jefferson City|MO", "stlouiscountymo|St. Louis County|MO", "stlcc|St. Louis Community College|MO",
+    "jeffersoncitymo|Jefferson City|MO", "kcmo|Kansas City, MO|MO", "stlouiscountymo|St. Louis County|MO", "stlcc|St. Louis Community College|MO",
     "apexnc|Town of Apex|NC", "charlottenc|City of Charlotte|NC", "wake|Wake County|NC", "ncat|NC A&T State University|NC", "ncsu|NC State University|NC",
     "rutgers|Rutgers University|NJ",
     "cabq|City of Albuquerque|NM", "mckinleycounty|McKinley County|NM",
     "clarkcountynv|Clark County|NV", "ccsd|Clark County School District|NV",
     "suffolkcountyny|Suffolk County|NY", "stonybrook|Stony Brook University|NY", "healthsolutions|Public Health Solutions|NY", "centro|Central NY Regional Transportation Authority|NY", "nfta|Niagara Frontier Transportation Authority|NY", "panynj|Port Authority of New York & New Jersey|NY",
-    "akronohio|City of Akron|OH", "cincinnati-oh|City of Cincinnati|OH", "columbus|City of Columbus|OH", "equalisgroup|Equalis Group|OH",
-    "pdx|Portland State University|OR",
-    "pennbid|PennBid|PA", "alleghenycounty|Allegheny County|PA",
+    "akronohio|City of Akron|OH", "cincinnati-oh|City of Cincinnati|OH", "columbus|City of Columbus|OH", "dps|Dayton Public Schools|OH", "equalisgroup|Equalis Group|OH",
+    "pcc|Portland Community College|OR", "pdx|Portland State University|OR",
+    "alleghenycounty|Allegheny County|PA", "montcopa|Montgomery County PA|PA", "pennbid|PennBid|PA",
     "charlestoncounty|Charleston County|SC", "tridenttech|Trident Technical College|SC",
     "apsu|Austin Peay State University|TN",
     "dfwairport|DFW International Airport|TX", "amarillo|City of Amarillo|TX", "arlingtontx|City of Arlington|TX", "brownsvilletx|City of Brownsville|TX", "burlesontx|City of Burleson|TX", "cityoflewisville|City of Lewisville|TX", "dallascityhall|City of Dallas|TX", "fortworthtexas|City of Fort Worth|TX", "friscotexas|City of Frisco|TX", "leandertx|City of Leander|TX", "mckinneytexas|City of McKinney|TX", "midlandtexas|City of Midland|TX", "roundrocktexas|City of Round Rock|TX", "sanantonio|City of San Antonio|TX", "schertz|City of Schertz|TX", "southlake|City of Southlake|TX", "templetx|City of Temple|TX", "waco-texas|City of Waco|TX", "mansfield|Mansfield Council of Governments|TX", "brazoriacounty|Brazoria County|TX", "dentoncounty|Denton County|TX", "galvestoncountytx|Galveston County|TX", "harriscountytx|Harris County|TX", "johnsoncountytx|Johnson County|TX", "lubbock|Lubbock County|TX", "parkercountytx|Parker County|TX", "smithcounty|Smith County|TX", "wilco|Williamson County|TX", "hccs|Houston Community College|TX", "rice-edu|Rice University|TX", "tccd|Tarrant County College District|TX", "utdallas|UT Dallas|TX", "utexas|UT Austin|TX", "utrgv|UT Rio Grande Valley|TX", "uttyler|UT Tyler|TX", "uthscsa|UT Health San Antonio|TX", "saha|Opportunity Home San Antonio|TX", "universityhealth|University Health (hospital district)|TX", "allenisd|Allen ISD|TX", "austinisd|Austin ISD|TX", "comalisd|Comal ISD|TX", "dallasisd|Dallas ISD|TX", "fortbendisd|Fort Bend ISD|TX", "kleinisd|Klein ISD|TX", "laredoisd|Laredo ISD|TX", "magnoliaisd|Magnolia ISD|TX", "mesquiteisd|Mesquite ISD|TX", "tomballisd|Tomball ISD|TX", "twc-texas-gov|Texas Workforce Commission|TX", "txdot|Texas Department of Transportation|TX", "dart|Dallas Area Rapid Transit|TX", "ridemetro|Harris County METRO|TX",
     "ccog|The Cooperative Council of Governments|US", "omniapartners|OMNIA Partners|US", "utah|U3P / Utah Public Procurement Place|UT",
-    "fairfaxcounty|Fairfax County|VA", "cnu|Christopher Newport University|VA", "gmu|George Mason University|VA", "nsu|Norfolk State University|VA", "fcps|Fairfax County Public Schools|VA",
+    "chesterfield|Chesterfield County|VA", "fairfaxcounty|Fairfax County|VA", "cnu|Christopher Newport University|VA", "gmu|George Mason University|VA", "nsu|Norfolk State University|VA", "fcps|Fairfax County Public Schools|VA",
     "cityofvancouver|City of Vancouver WA|WA", "federalwaywa|City of Federal Way|WA", "clarkcountywa|Clark County WA|WA", "kingcounty|King County|WA", "portolympia|Port of Olympia|WA", "lwsd|Lake Washington School District|WA", "tacoma|Tacoma Public Schools|WA",
     "cityofmilwaukee|City of Milwaukee|WI", "westalliswi|City of West Allis|WI", "racinecounty|Racine County|WI", "waukeshacounty|Waukesha County|WI", "cvtc|Chippewa Valley Technical College|WI", "mmsd|Milwaukee Metropolitan Sewerage District|WI",
     "marshall|Marshall University|WV",

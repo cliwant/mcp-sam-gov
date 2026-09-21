@@ -2625,7 +2625,7 @@ const TableauViewCsvInput = z.object({
 const ArcgisFeatureQueryInput = z.object({
     service: z
         .enum(arcgisFeature.ARCGIS_SERVICES.map((s) => s.key))
-        .describe("Service key (SSRF allowlist; 27 services). DC OCP PASS (solicitations/contracts/purchase_orders/payments). US local govs: Asheville NC, Bellevue WA, Miami-Dade FL×2, Suffolk County NY, Mat-Su AK, Las Vegas NV×2, Baltimore MD, Naperville IL, Worcester MA, Topeka KS (FY2015–23); TX/AK/IA/OK DOT bid/award registers. ND DOT flex-funding to local agencies (nddot_flex×4 — NOT vendor contracts)."),
+        .describe("Service key (SSRF allowlist; 29 services). DC OCP PASS (solicitations/contracts/purchase_orders/payments). US local govs: Asheville NC, Bellevue WA, Miami-Dade FL×2, Suffolk County NY, Mat-Su AK, Las Vegas NV×2, Baltimore MD, Naperville IL, Worcester MA, Topeka KS (FY2015–23), Hennepin County MN (CIP pipeline), Charlotte-Mecklenburg NC (CIP pipeline); TX/AK/IA/OK DOT bid/award registers. ND DOT flex-funding to local agencies (nddot_flex×4 — NOT vendor contracts)."),
     where: z
         .string()
         .min(1)
@@ -5260,12 +5260,12 @@ export const TOOLS = [
     }),
     // ━━━ Bonfire (Euna) — keyless per-org open-opportunity RSS (SLED bids) ━━━
     // SLED bid campaign. Thousands of US state/local govs on Bonfire expose a keyless
-    // RSS of open opportunities. Ships a curated 186-org live-verified seed directory
+    // RSS of open opportunities. Ships a curated 195-org live-verified seed directory
     // (Bonfire's authoritative org API is auth-gated → out of bounds). Fixed-suffix
     // SSRF (.bonfirehub.com). RSS = the complete open set (totalAvailable honest).
     defineTool({
         name: "bonfire_list_organizations",
-        description: "List US governments on the Bonfire (Euna) eProcurement platform — the directory for bonfire_search_opportunities (keyless). Bonfire hosts thousands of US state/local governments' open-bid portals, each with a keyless RSS feed. Filter the curated seed by `state` (2-letter) / `query` (case-insensitive name substring); `limit`(1..200)/`offset`. Output: { organizations:[{ org, name, state }] }. Feed a result's `org` to bonfire_search_opportunities. ★HONESTY: this is a CURATED, live-verified SEED of 186 US orgs — Bonfire has NO keyless org-list API (its authoritative directory is auth-gated, out of bounds), and Euna markets up to ~900 US orgs, so the seed is PARTIAL (disclosed in _meta); probe `{slug}.bonfirehub.com/opportunities/rss` to extend. totalAvailable = the exact filtered seed count.",
+        description: "List US governments on the Bonfire (Euna) eProcurement platform — the directory for bonfire_search_opportunities (keyless). Bonfire hosts thousands of US state/local governments' open-bid portals, each with a keyless RSS feed. Filter the curated seed by `state` (2-letter) / `query` (case-insensitive name substring); `limit`(1..200)/`offset`. Output: { organizations:[{ org, name, state }] }. Feed a result's `org` to bonfire_search_opportunities. ★HONESTY: this is a CURATED, live-verified SEED of 195 US orgs — Bonfire has NO keyless org-list API (its authoritative directory is auth-gated, out of bounds), and Euna markets up to ~900 US orgs, so the seed is PARTIAL (disclosed in _meta); probe `{slug}.bonfirehub.com/opportunities/rss` to extend. totalAvailable = the exact filtered seed count.",
         inputSchema: BonfireListOrganizationsInput,
         handler: (input) => bonfire.listOrganizations(input),
     }),
