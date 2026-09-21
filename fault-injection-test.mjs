@@ -44,6 +44,7 @@ import zlib from "node:zlib";
 // smoke's spawn), never on an import like this one. §9/§12/§13 call this real
 // runTool over a mocked fetch so a regression in the real wrapper turns RED.
 import { runTool, TOOLS, zodToJsonSchema, toolAnnotations, humanizeToolTitle } from "./dist/server.js";
+import { DATA_MAP_ENTRIES, renderDataMapMarkdown, renderStateTableMarkdown } from "./dist/data-map.js";
 import { maybeAttachReport, reportUrlForError } from "./dist/feedback.js";
 import { checkForUpdate, isNewerVersion } from "./dist/update-check.js";
 import { apiKeyStatus, loadDotEnv, KEY_REGISTRY } from "./dist/keys.js";
@@ -22525,6 +22526,7 @@ async function main() {
   await testEcfrGetSection();
   await testToolsets();
   await testToolAnnotations();
+  await testDataMapResource();
 
   // Prove the harness bites.
   await selfCheck();
@@ -25320,6 +25322,224 @@ async function testToolAnnotations() {
   // (d) An unknown-prefix name still yields a non-empty title-cased string (never empty).
   ok("73-d humanizeToolTitle of an unknown-prefix name is a non-empty title-cased string (never blank ⇒ Directory rejects a blank title)",
     humanizeToolTitle("zzz_unknown_thing") === "Zzz Unknown Thing", `got ${JSON.stringify(humanizeToolTitle("zzz_unknown_thing"))}`);
+}
+
+// §data-map-resource: MCP resources/list + resources/read + source-of-truth consistency
+// Non-vacuity: each assertion pins a contract that a regression (removing the resource,
+// corrupting a host/id, drifting SKILL.md from data-map.ts) would break.
+async function testDataMapResource() {
+  section("76. MCP data-map resource — resources/list + resources/read + SKILL.md consistency (source-of-truth)");
+
+  const { spawn: spawnProc } = await import("node:child_process");
+  const { setTimeout: waitMs } = await import("node:timers/promises");
+  const { StringDecoder } = await import("node:string_decoder");
+
+  // (a) DATA_MAP_ENTRIES has at least 10 entries (smoke for a non-empty source of truth).
+  ok("76-a DATA_MAP_ENTRIES non-empty (≥10 entries) — clear the array ⇒ RED",
+    DATA_MAP_ENTRIES.length >= 10, `got ${DATA_MAP_ENTRIES.length}`);
+
+  // (b) MA cthru entry is present (the eval-gap case: agent didn't know this host).
+  const maEntry = DATA_MAP_ENTRIES.find(
+    (e) => e.state === "MA" && e.keyArgs.includes("cthru.data.socrata.com")
+  );
+  ok("76-b MA cthru.data.socrata.com entry present in DATA_MAP_ENTRIES — remove the entry ⇒ RED",
+    !!maEntry, "MA/cthru entry missing");
+
+  // (c) The MA entry carries pegc-naaa as the datasetId.
+  ok("76-c MA cthru entry datasetId=pegc-naaa — change the id ⇒ RED",
+    maEntry?.keyArgs?.includes("pegc-naaa") ?? false, maEntry?.keyArgs ?? "(no entry)");
+
+  // (c2) HONESTY of the Rows column. The table header promises a "verified row
+  // count", so an entry measured exactly must render exactly — rounding
+  // 1,693,227 to "2M" reads as exact while overstating by 18%. Only an entry
+  // flagged `approximate` may be rounded, and it must then carry a leading '~'
+  // so a reader can tell a measurement from an estimate.
+  {
+    const table = renderStateTableMarkdown();
+    const cellFor = (needle) => {
+      const line = table.split(String.fromCharCode(10)).find((l) => l.includes(needle));
+      return line ? line.split("|")[4].trim() : null;
+    };
+    for (const e of DATA_MAP_ENTRIES) {
+      if (e.rows === null) continue;
+      const cell = cellFor(e.keyArgs);
+      if (e.approximate) {
+        ok(`76-c2 approximate entry ${e.jurisdiction}/${e.tool} renders with '~' — drop the tilde ⇒ RED`,
+          (cell ?? "").startsWith("~"), `got ${cell}`);
+      } else {
+        ok(`76-c2 exact entry ${e.jurisdiction}/${e.tool} renders the exact count — round it ⇒ RED`,
+          cell === e.rows.toLocaleString("en-US"),
+          `expected ${e.rows.toLocaleString("en-US")}, got ${cell}`);
+      }
+    }
+    // The specific regression this locks: VA must not appear as "2M".
+    const vaCell = cellFor("3c7f1bde");
+    ok("76-c2 VA renders 1,693,227 not a rounded 2M — reinstate rounding ⇒ RED",
+      vaCell === "1,693,227", `got ${vaCell}`);
+  }
+
+  // (d) VA ckan entry is present with 3c7f1bde resourceId.
+  const vaEntry = DATA_MAP_ENTRIES.find(
+    (e) => e.state === "VA" && e.tool === "ckan_query"
+  );
+  ok("76-d VA ckan_query entry present — remove the entry ⇒ RED",
+    !!vaEntry, "VA/ckan entry missing");
+  ok("76-d VA resourceId contains 3c7f1bde — change the resourceId ⇒ RED",
+    vaEntry?.keyArgs?.includes("3c7f1bde") ?? false, vaEntry?.keyArgs ?? "(no entry)");
+
+  // (e) renderDataMapMarkdown returns markdown with the expected header and at least one table row.
+  const md = renderDataMapMarkdown();
+  ok("76-e renderDataMapMarkdown returns non-empty string — blank out the function ⇒ RED",
+    typeof md === "string" && md.length > 200, `got length ${md.length}`);
+  ok("76-e rendered markdown contains '# State & local data map' heading — remove heading ⇒ RED",
+    md.includes("# State & local data map"), "heading missing");
+  ok("76-e rendered markdown contains cthru.data.socrata.com — remove that entry ⇒ RED",
+    md.includes("cthru.data.socrata.com"), "cthru missing from rendered markdown");
+  ok("76-e rendered markdown contains pegc-naaa — change the id ⇒ RED",
+    md.includes("pegc-naaa"), "pegc-naaa missing from rendered markdown");
+  ok("76-e rendered markdown contains data.virginia.gov — remove VA entry ⇒ RED",
+    md.includes("data.virginia.gov"), "VA missing from rendered markdown");
+
+  // (f) SKILL.md table consistency: the key dataset IDs and hosts mentioned in SKILL.md
+  //     must be present in DATA_MAP_ENTRIES (source of truth). We check a representative
+  //     sample that PR #288 introduced — the ones the eval proved agents needed.
+  let skillMd = null;
+  try {
+    const { readFileSync: _rf } = await import("node:fs");
+    skillMd = _rf("skills/sam-gov/SKILL.md", "utf8");
+  } catch { /* file may not exist in some test environments */ }
+  if (skillMd) {
+    // Each of these ids/hosts must appear in BOTH skill.md AND the data-map entries.
+    const anchors = [
+      { id: "pegc-naaa", label: "MA CTHRU datasetId" },
+      { id: "ubnu-tqu7", label: "NJ datasetId" },
+      { id: "ehig-g5x3", label: "NY datasetId" },
+      { id: "s8d5-pj78", label: "WA datasetId" },
+      { id: "3c7f1bde", label: "VA resourceId prefix" },
+      { id: "cthru.data.socrata.com", label: "MA CTHRU host" },
+      { id: "qh8x-rm8r", label: "TX TxDOT lettings datasetId" },
+      { id: "w64c-ndf7", label: "TX DIR archive datasetId" },
+    ];
+    for (const { id, label } of anchors) {
+      const inSkill = skillMd.includes(id);
+      const inMap = DATA_MAP_ENTRIES.some(
+        (e) => e.keyArgs.includes(id) || (e.extra ?? "").includes(id)
+      );
+      ok(
+        `76-f SKILL.md ↔ data-map consistency: ${label} (${id}) present in both — remove from data-map ⇒ RED`,
+        inSkill && inMap,
+        `inSkill=${inSkill} inMap=${inMap}`
+      );
+    }
+  }
+
+  // (g) E2E: spawn the built server over stdio and call resources/list + resources/read.
+  //     NON-VACUITY: removing the capability/handler in server.ts ⇒ these turn RED.
+  {
+    const child = spawnProc("node", ["dist/server.js"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env },
+    });
+
+    let e2eBuf = "";
+    const e2eResponses = new Map();
+    const stdoutDec = new StringDecoder("utf8");
+    child.stdout.on("data", (chunk) => {
+      e2eBuf += stdoutDec.write(chunk);
+      let nl;
+      while ((nl = e2eBuf.indexOf("\n")) >= 0) {
+        const line = e2eBuf.slice(0, nl);
+        e2eBuf = e2eBuf.slice(nl + 1);
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.id !== undefined) e2eResponses.set(msg.id, msg);
+        } catch { /* non-JSON stderr bleed */ }
+      }
+    });
+    child.stderr.on("data", () => {});
+
+    let rpcId = 1;
+    const TIMEOUT = 15_000;
+    async function rpc(method, params) {
+      const id = rpcId++;
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }) + "\n");
+      const start = Date.now();
+      while (Date.now() - start < TIMEOUT) {
+        if (e2eResponses.has(id)) return e2eResponses.get(id);
+        await waitMs(30);
+      }
+      throw new Error(`E2E timeout id=${id} method=${method}`);
+    }
+
+    try {
+      await rpc("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "fault-e2e-resource", version: "0.0.1" },
+      });
+
+      // resources/list
+      const listRes = await rpc("resources/list", {});
+      const resources = listRes.result?.resources ?? [];
+      ok("76-g E2E resources/list returns ≥1 resource — remove ListResourcesRequestSchema handler ⇒ RED",
+        resources.length >= 1, `got ${resources.length} resources`);
+      const dataMapR = resources.find((r) => r.uri === "samgov://data-map/state-local");
+      ok("76-g E2E resources/list: samgov://data-map/state-local present — change the URI ⇒ RED",
+        !!dataMapR, "samgov://data-map/state-local missing from list");
+      ok("76-g E2E resources/list: resource has name — remove name field ⇒ RED",
+        typeof dataMapR?.name === "string" && dataMapR.name.length > 0, `name=${JSON.stringify(dataMapR?.name)}`);
+      ok("76-g E2E resources/list: mimeType is text/markdown — change mimeType ⇒ RED",
+        dataMapR?.mimeType === "text/markdown", `mimeType=${dataMapR?.mimeType}`);
+
+      // resources/read
+      const readRes = await rpc("resources/read", { uri: "samgov://data-map/state-local" });
+      const contents = readRes.result?.contents ?? [];
+      ok("76-g E2E resources/read returns contents array — remove ReadResourceRequestSchema handler ⇒ RED",
+        Array.isArray(contents) && contents.length >= 1, `got ${contents.length} content(s)`);
+      const item = contents[0];
+      ok("76-g E2E resources/read: content.uri matches — wrong URI in response ⇒ RED",
+        item?.uri === "samgov://data-map/state-local", `uri=${item?.uri}`);
+      ok("76-g E2E resources/read: content.mimeType=text/markdown — change mimeType ⇒ RED",
+        item?.mimeType === "text/markdown", `mimeType=${item?.mimeType}`);
+      ok("76-g E2E resources/read: text is a non-empty string — return empty ⇒ RED",
+        typeof item?.text === "string" && item.text.length > 100, `len=${item?.text?.length}`);
+      ok("76-g E2E resources/read: text contains cthru.data.socrata.com — remove MA entry ⇒ RED",
+        item?.text?.includes("cthru.data.socrata.com") ?? false, "cthru missing from read content");
+      ok("76-g E2E resources/read: text contains pegc-naaa — change the id ⇒ RED",
+        item?.text?.includes("pegc-naaa") ?? false, "pegc-naaa missing from read content");
+      ok("76-g E2E resources/read: text contains data.virginia.gov — remove VA entry ⇒ RED",
+        item?.text?.includes("data.virginia.gov") ?? false, "VA missing from read content");
+
+      // resources/read unknown URI → error
+      const unknownRes = await rpc("resources/read", { uri: "samgov://data-map/nonexistent" });
+      ok("76-g E2E resources/read unknown URI returns error — remove the guard ⇒ RED",
+        !!unknownRes.error || (unknownRes.result?.isError === true), JSON.stringify(unknownRes));
+
+      // socrata_query description pointer (in-process, no spawn needed)
+      const socTool = TOOLS.find((t) => t.name === "socrata_query");
+      ok("76-h socrata_query description contains state mirror pointer — remove the pointer ⇒ RED",
+        socTool?.description?.includes("NY ehig-g5x3") ?? false, "NY ehig-g5x3 not in socrata_query description");
+      ok("76-h socrata_query description contains cthru.data.socrata.com — remove the pointer ⇒ RED",
+        socTool?.description?.includes("cthru.data.socrata.com") ?? false, "cthru not in socrata_query description");
+      ok("76-h socrata_query description mentions the resource URI — remove the reference ⇒ RED",
+        socTool?.description?.includes("samgov://data-map/state-local") ?? false, "resource URI missing from socrata_query description");
+      ok("76-h socrata_query description ≤1600 chars (lint cap) — added text pushed it over ⇒ RED",
+        (socTool?.description?.length ?? 9999) <= 1600, `len=${socTool?.description?.length}`);
+
+      // ckan_query description pointer
+      const ckanTool = TOOLS.find((t) => t.name === "ckan_query");
+      ok("76-h ckan_query description contains VA pointer — remove the pointer ⇒ RED",
+        ckanTool?.description?.includes("data.virginia.gov") ?? false, "VA not in ckan_query description");
+      ok("76-h ckan_query description mentions the resource URI — remove the reference ⇒ RED",
+        ckanTool?.description?.includes("samgov://data-map/state-local") ?? false, "resource URI missing from ckan_query description");
+      ok("76-h ckan_query description ≤1600 chars (lint cap) — added text pushed it over ⇒ RED",
+        (ckanTool?.description?.length ?? 9999) <= 1600, `len=${ckanTool?.description?.length}`);
+
+    } finally {
+      child.kill();
+    }
+  }
 }
 
 main().catch((e) => {
