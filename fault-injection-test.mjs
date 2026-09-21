@@ -9376,6 +9376,55 @@ async function testSocrataHonesty() {
     }
   });
 
+  // (a-sf) SF host migration — three sub-assertions:
+  //   (i)   data.sf.gov is allowlisted (the canonical post-migration host reaches the guard).
+  //   (ii)  data.sfgov.org (migrated) ⇒ invalid_input, NOT retryable, message names data.sf.gov, 0 fetch calls.
+  //         Non-vacuous: flip retryable→true or drop "data.sf.gov" from the message ⇒ RED.
+  //   (iii) An unrelated allowlisted host (data.ny.gov) is unaffected by the migration map.
+  ok("42a-sf data.sf.gov is in SOCRATA_DOMAINS (canonical SF post-migration host allowlisted)",
+    SOCRATA_DOMAINS.includes("data.sf.gov"),
+    JSON.stringify({ missing: "data.sf.gov" }));
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() =>
+      runTool("socrata_query", { domain: "data.sfgov.org", datasetId: "cqi5-hm2d" }, sam));
+    const te = toToolError(error);
+    ok("42a-sf data.sfgov.org (permanently moved) ⇒ invalid_input, retryable:false, 0 fetch, message names data.sf.gov",
+      threw &&
+      te.kind === "invalid_input" &&
+      te.retryable === false &&
+      typeof te.message === "string" &&
+      te.message.includes("data.sf.gov") &&
+      calls.length === before,
+      JSON.stringify({ kind: te.kind, retryable: te.retryable, hasMigrationTarget: te.message?.includes("data.sf.gov"), fetchCount: calls.length - before }));
+  });
+  await withFetch(failClosed(), async (calls) => {
+    const before = calls.length;
+    const { threw, error } = await expectThrow(() =>
+      runTool("socrata_query", { domain: "data.sfgov.org", datasetId: "cqi5-hm2d" }, sam));
+    // Also verify discover-datasets path (getHostCatalog) for the migrated host.
+    const { threw: threw2, error: error2 } = await expectThrow(() =>
+      runTool("socrata_discover_datasets", { domain: "data.sfgov.org", q: "contract" }, sam));
+    const te2 = toToolError(error2);
+    ok("42a-sf socrata_discover_datasets domain=data.sfgov.org ⇒ invalid_input, retryable:false, names data.sf.gov",
+      threw2 &&
+      te2.kind === "invalid_input" &&
+      te2.retryable === false &&
+      te2.message?.includes("data.sf.gov"),
+      JSON.stringify({ kind: te2.kind, retryable: te2.retryable, hasMigrationTarget: te2.message?.includes("data.sf.gov") }));
+    ok("42a-sf migration pre-flight fires before any fetch (0 fetch calls for both migrated-host calls)",
+      calls.length === before,
+      JSON.stringify({ fetchCount: calls.length - before }));
+  });
+  // Unrelated host (data.ny.gov) goes through unaffected — no migration intercept.
+  await withFetch(socrataRowsAndCount([{ a: "1" }], 42), async () => {
+    const { threw: threwNy } = await expectThrow(() =>
+      runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze" }, sam));
+    ok("42a-sf unrelated host data.ny.gov is unaffected by the SF migration map (still fetches normally)",
+      threwNy === false,
+      JSON.stringify({ threw: threwNy }));
+  });
+
   // (b) M2 — bad datasetId ⇒ invalid_input, no fetch. "abcd-1234\n"/"abcd-1234x"
   // are the M2-specific cases (a trailing char the regex `$` would admit).
   await withFetch(failClosed(), async (calls) => {
