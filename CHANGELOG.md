@@ -7,9 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **`socrata_query` / `socrata_discover_datasets`: the `domain` parameter now names the jurisdiction of every allowlisted host whose hostname does not reveal it** (`cthru.data.socrata.com` = Massachusetts statewide, `data.brla.gov` = Baton Rouge, `data.kcmo.org` = Kansas City, and so on), and warns that `data.colorado.gov`'s procurement datasets are City of Denver rather than Colorado state. Measured, not cosmetic: with the bare 54-value enum an agent answered "no statewide Massachusetts portal" while the ~49M-row MA dataset sat in that enum. Adding the legend flipped that eval task from FAIL to PASS and raised right-tool selection from 2/6 to 4/6.
+## [1.15.0] - 2026-09-21
 
 ### Added
 
@@ -21,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Texas added to state & local data map** — `data.texas.gov` is already in the Socrata allowlist and carries substantial state procurement data. Five verified datasets: `qh8x-rm8r` (★TxDOT current lettings — the first live state solicitation feed in this map; 8,861 rows = 412 distinct projects in a rolling window, TxDOT only); `w64c-ndf7` (DIR Cooperative Contract Sales FY2010–FY2025 archive, 10.7M rows); `a743-wj72` (DIR Cooperative Sales FY2026, 2.1M rows); `vipt-h4ye` (DIR Current Active Cooperative Contracts, 5,167 rows); `svjm-sdfz` (TCEQ agency contracts, 2,067 rows). Agent row-count trap documented: 8,861 rows ≠ 8,861 open bids — use `$select=count(distinct project_id)` for the correct 412-project count.
 
 ### Changed
+
+- **`socrata_query` / `socrata_discover_datasets`: the `domain` parameter now names the jurisdiction of every allowlisted host whose hostname does not reveal it** (`cthru.data.socrata.com` = Massachusetts statewide, `data.brla.gov` = Baton Rouge, `data.kcmo.org` = Kansas City, and so on), and warns that `data.colorado.gov`'s procurement datasets are City of Denver rather than Colorado state. Measured, not cosmetic: with the bare 54-value enum an agent answered "no statewide Massachusetts portal" while the ~49M-row MA dataset sat in that enum. Adding the legend flipped that eval task from FAIL to PASS and raised right-tool selection from 2/6 to 4/6.
 
 - **State & local data map:** now generated from `src/data-map.ts` (single source of truth) and exposed as MCP resource `samgov://data-map/state-local` (see Added). SKILL.md `## State & local data map` table extended with 5 Texas datasets. "Not reachable" section split into three honest categories: login-gated/WAF-blocked portals; portal-live-but-no-procurement-data (PA); no-portal (FL data.fl.gov NXDOMAIN, GA data.georgia.gov NXDOMAIN — these are measured absences, not connectivity blocks). TX ESBD/TxSmartBuy updated to note that TxDOT lettings ARE available via `qh8x-rm8r`.
 

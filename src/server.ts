@@ -119,7 +119,7 @@ import {
 const SERVER_NAME = "mcp-sam-gov";
 // Kept in lockstep with package.json / manifest.json / server.json.
 // Keep in sync with package.json "version" (asserted at release; see CHANGELOG).
-const SERVER_VERSION = "1.14.0";
+const SERVER_VERSION = "1.15.0";
 
 // ─── Tool input schemas (Zod) ────────────────────────────────────
 
