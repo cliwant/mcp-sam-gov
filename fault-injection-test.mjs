@@ -13857,12 +13857,26 @@ async function testBonfireHonesty() {
   // ── seed integrity + num parity. ──
   ok("45BF seed directory is non-empty, all slugs charclass-valid, all .gov-adjacent US states", BONFIRE_ORGS.length > 150 && BONFIRE_ORGS.every((o) => /^[a-z0-9-]{1,64}$/.test(o.org) && o.name && o.state), JSON.stringify({ n: BONFIRE_ORGS.length, bad: BONFIRE_ORGS.filter((o) => !/^[a-z0-9-]+$/.test(o.org)).map((o) => o.org).slice(0, 3) }));
   // Depth seeds (loop, 2026-09-21): 9 new orgs bring total from 186 to 195.
+  // Drift fix (2026-09-21): 8 dead feeds removed + saha→homesa rename; total 195 → 187.
   // NON-VACUOUS assertions:
-  //   (a) count: BONFIRE_ORGS.length >= 195 — remove any new entry ⇒ RED.
+  //   (a) count: BONFIRE_ORGS.length === 187 — re-add any dead slug ⇒ RED, remove valid ⇒ RED.
   //   (b) slug identity traps: pcc=OR, dps=OH, maricopa=AZ (slug traps documented in source).
   //       Mutating the state tag or removing the entry ⇒ RED (a user asking for OR/OH/AZ orgs gets wrong results).
   //   (c) calwater must NOT be present (private investor-owned utility, out of scope — add it ⇒ RED).
-  ok("45BF DEPTH seed count ≥195 (186 + 9 new depth orgs; remove any new entry ⇒ RED)", BONFIRE_ORGS.length >= 195, JSON.stringify({ actual: BONFIRE_ORGS.length }));
+  //   (d) dead slugs must NOT be present (re-add any dead slug ⇒ RED).
+  //   (e) homesa must be present (saha rename — remove ⇒ RED = missing entity).
+  //   (f) saha must NOT be present (old slug retired — re-add ⇒ RED = dead feed).
+  ok("45BF DRIFT seed count ===187 (195 - 8 dead removed - saha removed + homesa added; deviate ⇒ RED)", BONFIRE_ORGS.length === 187, JSON.stringify({ actual: BONFIRE_ORGS.length }));
+  ok("45BF DRIFT homesa present TX (saha slug rename; remove ⇒ RED = Opportunity Home SA missing)", (() => { const o = BONFIRE_ORGS.find((o) => o.org === "homesa"); return o !== undefined && o.state === "TX"; })(), JSON.stringify(BONFIRE_ORGS.find((o) => o.org === "homesa")));
+  ok("45BF DRIFT saha NOT in seed (dead 301-redirect slug — re-add ⇒ RED = dead feed advertised)", !BONFIRE_ORGS.some((o) => o.org === "saha"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "saha") }));
+  ok("45BF DRIFT thecha NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "thecha"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "thecha") }));
+  ok("45BF DRIFT sourcewell NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "sourcewell"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "sourcewell") }));
+  ok("45BF DRIFT rutgers NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "rutgers"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "rutgers") }));
+  ok("45BF DRIFT apsu NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "apsu"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "apsu") }));
+  ok("45BF DRIFT sanantonio NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "sanantonio"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "sanantonio") }));
+  ok("45BF DRIFT allenisd NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "allenisd"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "allenisd") }));
+  ok("45BF DRIFT kingcounty NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "kingcounty"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "kingcounty") }));
+  ok("45BF DRIFT cvtc NOT in seed (307→root, dead feed — re-add ⇒ RED)", !BONFIRE_ORGS.some((o) => o.org === "cvtc"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "cvtc") }));
   ok("45BF DEPTH slug-trap pcc=Portland Community College OR (NOT Pima CC AZ — wrong state ⇒ RED = wrong entity in OR filter)", (() => {
     const pcc = BONFIRE_ORGS.find((o) => o.org === "pcc");
     return pcc !== undefined && pcc.state === "OR" && pcc.name === "Portland Community College";
@@ -25481,6 +25495,42 @@ async function testDataMapResource() {
   // (c) The MA entry carries pegc-naaa as the datasetId.
   ok("76-c MA cthru entry datasetId=pegc-naaa — change the id ⇒ RED",
     maEntry?.keyArgs?.includes("pegc-naaa") ?? false, maEntry?.keyArgs ?? "(no entry)");
+
+  // (c-2) Doc counts are DERIVED from the code, not hand-maintained. On 2026-09-21
+  // ten current claims had drifted at once: the Bonfire seed was 187 while KO/JA
+  // READMEs and SKILL.md said 195, Socrata reached 54 hosts while READMEs said 53,
+  // and all three READMEs said open_checkbook_search had ONE portal after Alaska
+  // made it two. Nothing checked them, so nothing failed.
+  {
+    const { readFileSync: rfDoc } = await import("node:fs");
+    const { BONFIRE_ORGS: seed } = await import("./dist/bonfire.js");
+    const { SOCRATA_DOMAINS: soc, MIGRATED_SOCRATA_HOSTS: mig } = await import("./dist/socrata.js");
+    const { OPEN_CHECKBOOK_PORTALS: cb } = await import("./dist/open-checkbook.js");
+    // A migrated host is kept only so its handler can name the replacement — it is
+    // not a host anyone can query, so it does not count toward "reach".
+    const reach = soc.length - mig.size;
+    // Plain substrings, not RegExp: no escaping to get wrong.
+    const docs = {
+      "README.md": [`${seed.length}-org`, `Socrata (${reach} hosts)`, `**${reach} curated`],
+      "README.ko.md": [`시드 ${seed.length}개`, `Socrata (${reach}개 호스트)`],
+      "README.ja.md": [`シード ${seed.length} 団体`, `${reach} ホスト`],
+      "skills/sam-gov/SKILL.md": [`${seed.length}-org`, `**${reach} curated`],
+    };
+    for (const [file, needles] of Object.entries(docs)) {
+      const text = rfDoc(file, "utf8");
+      for (const needle of needles) {
+        ok(`76-d ${file} states the CURRENT count "${needle}" — let the doc drift ⇒ RED`,
+          text.includes(needle), `"${needle}" not found in ${file}`);
+      }
+    }
+    // Checkbook: no current doc may claim a single portal once there are more.
+    if (cb.length > 1) {
+      for (const [file, stale] of [["README.md", "one portal today"], ["README.ko.md", "포털 1개"], ["README.ja.md", "1 ポータルのみ"]]) {
+        ok(`76-d ${file} no longer says open_checkbook_search has ONE portal (there are ${cb.length}) — reintroduce it ⇒ RED`,
+          !rfDoc(file, "utf8").includes(stale), `${file} still says "${stale}"`);
+      }
+    }
+  }
 
   // (c-1) FALSE-ZERO guard on socrata_discover_datasets. The catalog behaves as if
   // every q term must match, and datasets rarely repeat their jurisdiction's name —
