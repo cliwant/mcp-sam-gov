@@ -202,6 +202,11 @@ Agent-readable lookup: jurisdiction → data type → exact tool call → verifi
 | **Texas** | DIR Cooperative & Tele Contract Sales FY2026 | `socrata_query` domain=data.texas.gov, datasetId=`a743-wj72` | 2,077,855 | historical FY2026 purchase lines (same shape as w64c-ndf7); not bids |
 | **Texas** | DIR Current Active Cooperative Contracts | `socrata_query` domain=data.texas.gov, datasetId=`vipt-h4ye` | 5,167 | a solicitation feed; active cooperative contract register (not TxDOT lettings) |
 | **Texas** | TCEQ Current Contracts & Purchase Orders | `socrata_query` domain=data.texas.gov, datasetId=`svjm-sdfz` | 2,067 | statewide; one agency (TCEQ) only |
+| **Maryland** | eMaryland Marketplace (eMMA) bids — FY2018 exemplar | `socrata_query` domain=opendata.maryland.gov, datasetId=`pgna-cxjh` | 107,303 | rows are bid LINE ITEMS not bids — FY2018 is 107,303 rows for only 3,067 bids (35× overcount); always use `$select=count(distinct bid_number)` for actual bid count. Coverage stops at FY2019 — eMMA migrated to Periscope mid-FY2019; no FY2020+ mirror exists and this cannot answer current Maryland bid questions. All six FY datasetIds: FY2018=`pgna-cxjh`, FY2017=`qkjf-rv4t` (64,331/4,943), FY2016=`7ang-84wj` (45,204/4,818), FY2015=`3hzs-sazv` (46,895/4,898), FY2014=`itax-4ccz` (45,551/4,884), FY2019=`ttg5-zfzj` (4,623/388). |
+| **Oregon** | OregonBuys Purchases and Contracts FY2022–FY2025 | `socrata_query` domain=data.oregon.gov, datasetId=`qyug-f2km` | 109,119 | open solicitations — issued purchase orders and contracts (not bids). 92,224 distinct `po_nbr`. Historical ORPIN datasets (retired system): Contracts Issued=`6e9e-sfc4` (93,846 rows), Contracts Expired=`8izy-bwhd` (92,755), Statewide Price Agreement Spend=`gart-52me` (5,224). |
+| **Vermont** | Purchase Orders with Vendor Information (current FY, live-ish) | `socrata_query` domain=data.vermont.gov, datasetId=`8ewu-igdm` | 111,271 | a bid or award register — issued purchase orders. 39,882 distinct `po_id` (~2.8 line items per PO). `po_date` 2025-07-02 → 2026-06-19 (current fiscal year, live-ish state spend, not an archive). |
+| **City of Denver** | City of Denver Procurement Transactions (on CO state portal) | `socrata_query` domain=data.colorado.gov, datasetId=`66zf-qjdd` | 76,357 | Colorado STATE procurement — City of Denver spend hosted on the CO state portal; the domain does NOT indicate jurisdiction. Updated 2026-09-20. |
+| **City of Denver** | City of Denver Checkbook (on CO state portal) | `socrata_query` domain=data.colorado.gov, datasetId=`wnau-xrqi` | 154,595 | Colorado STATE procurement — City of Denver checkbook data hosted on the CO state portal; the domain does NOT indicate jurisdiction. Updated 2026-09-20. |
 
 **County & city — Socrata hosts (use `socrata_discover_datasets` to find dataset IDs):**
 
@@ -220,7 +225,7 @@ Agent-readable lookup: jurisdiction → data type → exact tool call → verifi
 
 **State portals with no keyless procurement content (measured absence, 2026-09-21):**
 - **Login-gated or WAF-blocked live-bid portals:** CA (Cal eProcure), TX ESBD/TxSmartBuy non-TxDOT (TxDOT lettings ARE available via `qh8x-rm8r` above), OH (OH|ID), NC (NC eProcurement), MI (SIGMA), and the Periscope-based portals for IL, MA, and NJ. These states have Socrata/CKAN mirrors for past spend (rows above); what they lack is a keyless live non-TxDOT bid feed.
-- **Portal live, no procurement data:** PA (`data.pa.gov` is live and allowlisted; scoped catalog returns 0 bid/vendor/procurement datasets).
+- **Portal live, no procurement data:** PA (`data.pa.gov` is live and allowlisted; scoped catalog returns 0 bid/vendor/procurement datasets). Michigan (`data.michigan.gov`) was checked 2026-09-21 and carries only NIGP commodity code reference tables (`w3u3-uptp` 9,333 rows; `jv5q-yp8x` 235 rows) — not procurement transactions.
 - **No state-level open-data portal:** FL (`data.fl.gov` NXDOMAIN — domain does not exist), GA (`data.georgia.gov` NXDOMAIN). These are measured absences, not connectivity blocks — there is no state portal to reach.
 
 ### Dataset & registry discovery — data.gov · get.gov (2)
