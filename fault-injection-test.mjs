@@ -25419,6 +25419,18 @@ async function testDataMapResource() {
       { id: "cthru.data.socrata.com", label: "MA CTHRU host" },
       { id: "qh8x-rm8r", label: "TX TxDOT lettings datasetId" },
       { id: "w64c-ndf7", label: "TX DIR archive datasetId" },
+      // New states verified 2026-09-21
+      { id: "pgna-cxjh", label: "MD eMMA FY2018 exemplar datasetId" },
+      { id: "qkjf-rv4t", label: "MD eMMA FY2017 datasetId" },
+      { id: "opendata.maryland.gov", label: "MD eMMA host" },
+      { id: "qyug-f2km", label: "OR OregonBuys datasetId" },
+      { id: "6e9e-sfc4", label: "OR ORPIN Contracts Issued datasetId" },
+      { id: "data.oregon.gov", label: "OR OregonBuys host" },
+      { id: "8ewu-igdm", label: "VT Purchase Orders datasetId" },
+      { id: "data.vermont.gov", label: "VT host" },
+      { id: "66zf-qjdd", label: "Denver Procurement Transactions datasetId" },
+      { id: "wnau-xrqi", label: "Denver Checkbook datasetId" },
+      { id: "data.colorado.gov", label: "CO/Denver host" },
     ];
     for (const { id, label } of anchors) {
       const inSkill = skillMd.includes(id);
@@ -25431,6 +25443,56 @@ async function testDataMapResource() {
         `inSkill=${inSkill} inMap=${inMap}`
       );
     }
+
+    // (f2) Specific honesty guards for the new entries — the critical caveats that
+    //      prevent the most likely agent errors.  Mutating dist/data-map.js to remove
+    //      a datasetId or the caveat text turns these assertions RED.
+    const mdEntry = DATA_MAP_ENTRIES.find(
+      (e) => e.state === "MD" && e.keyArgs.includes("pgna-cxjh")
+    );
+    ok("76-f2 MD entry present with FY2018 exemplar id pgna-cxjh — remove entry ⇒ RED",
+      !!mdEntry, "MD/eMMA entry missing");
+    ok("76-f2 MD notNote warns about LINE ITEM trap (35× overcount) — remove caveat ⇒ RED",
+      (mdEntry?.notNote ?? "").includes("35×"), `notNote=${mdEntry?.notNote ?? "(none)"}`);
+    ok("76-f2 MD notNote mentions FY2019 coverage-stop (Periscope migration) — remove caveat ⇒ RED",
+      (mdEntry?.notNote ?? "").includes("FY2019") && (mdEntry?.notNote ?? "").includes("Periscope"),
+      `notNote=${mdEntry?.notNote ?? "(none)"}`);
+    ok("76-f2 MD extra lists all six FY dataset ids including ttg5-zfzj (FY2019) — remove any id ⇒ RED",
+      (mdEntry?.extra ?? "").includes("ttg5-zfzj"), `extra=${mdEntry?.extra ?? "(none)"}`);
+
+    const orEntry = DATA_MAP_ENTRIES.find(
+      (e) => e.state === "OR" && e.keyArgs.includes("qyug-f2km")
+    );
+    ok("76-f2 OR OregonBuys entry present with datasetId qyug-f2km — remove entry ⇒ RED",
+      !!orEntry, "OR/OregonBuys entry missing");
+    ok("76-f2 OR extra lists historical ORPIN id 6e9e-sfc4 — remove id ⇒ RED",
+      (orEntry?.extra ?? "").includes("6e9e-sfc4"), `extra=${orEntry?.extra ?? "(none)"}`);
+
+    const vtEntry = DATA_MAP_ENTRIES.find(
+      (e) => e.state === "VT" && e.keyArgs.includes("8ewu-igdm")
+    );
+    ok("76-f2 VT Purchase Orders entry present with datasetId 8ewu-igdm — remove entry ⇒ RED",
+      !!vtEntry, "VT entry missing");
+    ok("76-f2 VT notNote specifies distinct po_id count (39,882) — remove count ⇒ RED",
+      (vtEntry?.notNote ?? "").includes("39,882"), `notNote=${vtEntry?.notNote ?? "(none)"}`);
+
+    const coEntries = DATA_MAP_ENTRIES.filter(
+      (e) => e.state === "CO" && e.keyArgs.includes("data.colorado.gov")
+    );
+    ok("76-f2 CO has exactly 2 City-of-Denver entries (Procurement + Checkbook) — remove one ⇒ RED",
+      coEntries.length === 2, `got ${coEntries.length}`);
+    const denverProcEntry = coEntries.find((e) => e.keyArgs.includes("66zf-qjdd"));
+    ok("76-f2 Denver Procurement Transactions id 66zf-qjdd present — change id ⇒ RED",
+      !!denverProcEntry, "66zf-qjdd missing");
+    ok("76-f2 Denver entry notNote warns 'NOT Colorado STATE procurement' — remove caveat ⇒ RED",
+      coEntries.every((e) => (e.notNote ?? "").includes("Colorado STATE procurement")),
+      `notNotes=${coEntries.map((e) => e.notNote).join(" | ")}`);
+
+    // Michigan measured-absence check — data-map rendered text must include the
+    // Michigan note so an agent reading the resource does not think MI is unchecked.
+    const mdText = renderDataMapMarkdown();
+    ok("76-f2 rendered resource text mentions Michigan measured absence (w3u3-uptp) — remove note ⇒ RED",
+      mdText.includes("w3u3-uptp"), "Michigan NIGP table id missing from resource text");
   }
 
   // (g) E2E: spawn the built server over stdio and call resources/list + resources/read.

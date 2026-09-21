@@ -176,6 +176,62 @@ export const DATA_MAP_ENTRIES = [
         approximate: false,
         notNote: "statewide; one agency (TCEQ) only",
     },
+    // ── Maryland — verified 2026-09-21 ───────────────────────────────────────
+    {
+        state: "MD",
+        jurisdiction: "Maryland",
+        dataLabel: "eMaryland Marketplace (eMMA) bids — FY2018 exemplar",
+        tool: "socrata_query",
+        keyArgs: "domain=opendata.maryland.gov, datasetId=pgna-cxjh",
+        rows: 107303,
+        approximate: false,
+        notNote: "rows are bid LINE ITEMS not bids — FY2018 is 107,303 rows for only 3,067 bids (35× overcount); always use $select=count(distinct bid_number) for actual bid count. Coverage stops at FY2019 — eMMA migrated to Periscope mid-FY2019; there is no FY2020+ mirror and this dataset cannot answer questions about current Maryland bids",
+        extra: "All six FY datasetIds: FY2018=pgna-cxjh (107,303 rows/3,067 bids), FY2017=qkjf-rv4t (64,331/4,943), FY2016=7ang-84wj (45,204/4,818), FY2015=3hzs-sazv (46,895/4,898), FY2014=itax-4ccz (45,551/4,884), FY2019=ttg5-zfzj (4,623/388 — small because eMMA migrated to Periscope mid-year; first row is a sparse placeholder, subsequent rows are complete).",
+    },
+    // ── Oregon — verified 2026-09-21 ─────────────────────────────────────────
+    {
+        state: "OR",
+        jurisdiction: "Oregon",
+        dataLabel: "OregonBuys Purchases and Contracts FY2022–FY2025",
+        tool: "socrata_query",
+        keyArgs: "domain=data.oregon.gov, datasetId=qyug-f2km",
+        rows: 109119,
+        approximate: false,
+        notNote: "open solicitations — these are issued purchase orders and contracts (not bids). ORPIN was the retired system; OregonBuys is its replacement. qyug-f2km covers sent_date 2021-07-01 → 2025-07-01 (FY2022–FY2025); 92,224 distinct po_nbr",
+        extra: "Historical ORPIN datasets (retired system, same domain): Contracts Issued=6e9e-sfc4 (93,846 rows), Contracts Expired=8izy-bwhd (92,755 rows), Statewide Price Agreement Spend=gart-52me (5,224 rows). All keyless.",
+    },
+    // ── Vermont — verified 2026-09-21 ────────────────────────────────────────
+    {
+        state: "VT",
+        jurisdiction: "Vermont",
+        dataLabel: "Purchase Orders with Vendor Information (current FY, live-ish)",
+        tool: "socrata_query",
+        keyArgs: "domain=data.vermont.gov, datasetId=8ewu-igdm",
+        rows: 111271,
+        approximate: false,
+        notNote: "a bid or award register — issued purchase orders. 39,882 distinct po_id (~2.8 line items per PO). po_date 2025-07-02 → 2026-06-19 (current fiscal year, so this is live-ish state spend, not an archive)",
+    },
+    // ── Colorado (City of Denver on state portal) — verified 2026-09-21 ──────
+    {
+        state: "CO",
+        jurisdiction: "City of Denver",
+        dataLabel: "City of Denver Procurement Transactions (on CO state portal)",
+        tool: "socrata_query",
+        keyArgs: "domain=data.colorado.gov, datasetId=66zf-qjdd",
+        rows: 76357,
+        approximate: false,
+        notNote: "Colorado STATE procurement — this is City of Denver spend hosted on the Colorado state portal (data.colorado.gov). An agent that reads the domain as the jurisdiction gets this wrong. Updated 2026-09-20.",
+    },
+    {
+        state: "CO",
+        jurisdiction: "City of Denver",
+        dataLabel: "City of Denver Checkbook (on CO state portal)",
+        tool: "socrata_query",
+        keyArgs: "domain=data.colorado.gov, datasetId=wnau-xrqi",
+        rows: 154595,
+        approximate: false,
+        notNote: "Colorado STATE procurement — this is City of Denver checkbook data hosted on the Colorado state portal (data.colorado.gov). An agent that reads the domain as the jurisdiction gets this wrong. Updated 2026-09-20.",
+    },
 ];
 /**
  * Format a row count for display.
@@ -226,7 +282,7 @@ ${renderStateTableMarkdown()}
 
 **State portals with no keyless procurement content (measured absence, not unexplored):**
 - Login-gated or WAF-blocked live-bid portals: CA (Cal eProcure), TX ESBD/TxSmartBuy non-TxDOT (TxDOT lettings ARE available via qh8x-rm8r above), OH, NC, MI, and Periscope-based portals for IL/MA/NJ live bids.
-- Portal exists but carries no procurement datasets: PA (data.pa.gov is live; scoped catalog has 0 bid/vendor/procurement datasets matching).
+- Portal exists but carries no procurement datasets: PA (data.pa.gov is live; scoped catalog has 0 bid/vendor/procurement datasets matching). Michigan (data.michigan.gov) was checked 2026-09-21 and carries only NIGP commodity code reference tables (w3u3-uptp 9,333 rows; jv5q-yp8x 235 rows) — not procurement transactions.
 - No state-level open-data portal: FL (data.fl.gov NXDOMAIN), GA (data.georgia.gov NXDOMAIN). These states have no keyless state procurement data source — this is a measured absence, not a connectivity block.
 `;
 }
