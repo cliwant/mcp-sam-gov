@@ -25446,28 +25446,19 @@ async function testDataMapResource() {
   } catch { /* file may not exist in some test environments */ }
   if (skillMd) {
     // Each of these ids/hosts must appear in BOTH skill.md AND the data-map entries.
-    const anchors = [
-      { id: "pegc-naaa", label: "MA CTHRU datasetId" },
-      { id: "ubnu-tqu7", label: "NJ datasetId" },
-      { id: "ehig-g5x3", label: "NY datasetId" },
-      { id: "s8d5-pj78", label: "WA datasetId" },
-      { id: "3c7f1bde", label: "VA resourceId prefix" },
-      { id: "cthru.data.socrata.com", label: "MA CTHRU host" },
-      { id: "qh8x-rm8r", label: "TX TxDOT lettings datasetId" },
-      { id: "w64c-ndf7", label: "TX DIR archive datasetId" },
-      // New states verified 2026-09-21
-      { id: "pgna-cxjh", label: "MD eMMA FY2018 exemplar datasetId" },
-      { id: "qkjf-rv4t", label: "MD eMMA FY2017 datasetId" },
-      { id: "opendata.maryland.gov", label: "MD eMMA host" },
-      { id: "qyug-f2km", label: "OR OregonBuys datasetId" },
-      { id: "6e9e-sfc4", label: "OR ORPIN Contracts Issued datasetId" },
-      { id: "data.oregon.gov", label: "OR OregonBuys host" },
-      { id: "8ewu-igdm", label: "VT Purchase Orders datasetId" },
-      { id: "data.vermont.gov", label: "VT host" },
-      { id: "66zf-qjdd", label: "Denver Procurement Transactions datasetId" },
-      { id: "wnau-xrqi", label: "Denver Checkbook datasetId" },
-      { id: "data.colorado.gov", label: "CO/Denver host" },
-    ];
+    // DERIVED, not hand-listed. A hand-maintained anchor list let PR #295 add three
+    // data-map entries while SKILL.md kept none of them — the table silently drifted
+    // from its own source of truth, which is the exact failure src/data-map.ts exists
+    // to prevent. Deriving the anchors from DATA_MAP_ENTRIES makes forgetting SKILL.md
+    // a test failure instead of a silent omission.
+    const anchors = [];
+    for (const e of DATA_MAP_ENTRIES) {
+      // Every entry's dataset/resource id and its host must both appear in SKILL.md.
+      const ids = (e.keyArgs.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9]{4}-[a-z0-9]{4}/g) ?? []);
+      const hosts = (e.keyArgs.match(/(?:domain|host)=([a-z0-9.\-]+)/g) ?? []).map((h) => h.split("=")[1]);
+      for (const id of ids) anchors.push({ id, label: `${e.jurisdiction} ${e.dataLabel} id` });
+      for (const h of hosts) anchors.push({ id: h, label: `${e.jurisdiction} host` });
+    }
     for (const { id, label } of anchors) {
       const inSkill = skillMd.includes(id);
       const inMap = DATA_MAP_ENTRIES.some(
@@ -25529,6 +25520,54 @@ async function testDataMapResource() {
     const mdText = renderDataMapMarkdown();
     ok("76-f2 rendered resource text mentions Michigan measured absence (w3u3-uptp) — remove note ⇒ RED",
       mdText.includes("w3u3-uptp"), "Michigan NIGP table id missing from resource text");
+
+    // 76-i CA (data.ca.gov) entries — DGS Purchase Order Data + Non-Competitive Bids.
+    const caEntries = DATA_MAP_ENTRIES.filter((e) => e.state === "CA");
+    ok("76-i CA has ≥2 CKAN entries (PO Data + Non-Competitive Bids) — remove entries ⇒ RED",
+      caEntries.length >= 2, `CA entries: ${caEntries.length}`);
+    const caPoEntry = caEntries.find((e) => e.keyArgs.includes("bb82edc5-9c78-44e2-8947-68ece26197c5"));
+    ok("76-i CA DGS Purchase Order Data resource id bb82edc5 present — change id ⇒ RED",
+      !!caPoEntry, "CA PO entry with bb82edc5 missing");
+    ok("76-i CA PO rows=344504 exact (not approximate) — change count ⇒ RED",
+      caPoEntry?.rows === 344504 && caPoEntry?.approximate === false,
+      `rows=${caPoEntry?.rows} approximate=${caPoEntry?.approximate}`);
+    ok("76-i CA PO notNote warns FY2012–2015 only — remove caveat ⇒ RED",
+      caPoEntry?.notNote.includes("FY2012") && caPoEntry?.notNote.includes("2015"),
+      `notNote=${JSON.stringify(caPoEntry?.notNote)}`);
+    const caNcEntry = caEntries.find((e) => e.keyArgs.includes("14932789-485b-481b-910a-dafb40d3471c"));
+    ok("76-i CA DGS Non-Competitive Bids resource id 14932789 present — change id ⇒ RED",
+      !!caNcEntry, "CA Non-Competitive Bids entry with 14932789 missing");
+    ok("76-i CA Non-Competitive Bids rows=480 exact — change count ⇒ RED",
+      caNcEntry?.rows === 480 && caNcEntry?.approximate === false,
+      `rows=${caNcEntry?.rows} approximate=${caNcEntry?.approximate}`);
+
+    // 76-i OK (data.ok.gov) entry — Vendor Payments FY2019 Q1.
+    const okEntry = DATA_MAP_ENTRIES.find((e) => e.state === "OK" && e.keyArgs.includes("cc443616-15eb-4a1f-8d87-93e5711ac43c"));
+    ok("76-i OK Vendor Payments FY2019 Q1 resource id cc443616 present — change id ⇒ RED",
+      !!okEntry, "OK entry with cc443616 missing");
+    ok("76-i OK rows=286185 exact (not approximate) — change count ⇒ RED",
+      okEntry?.rows === 286185 && okEntry?.approximate === false,
+      `rows=${okEntry?.rows} approximate=${okEntry?.approximate}`);
+    ok("76-i OK notNote warns vendor PAYMENTS not bids — remove caveat ⇒ RED",
+      okEntry?.notNote.toLowerCase().includes("payment"),
+      `notNote=${JSON.stringify(okEntry?.notNote)}`);
+    ok("76-i OK notNote warns per-quarter (4 calls per FY) — remove caveat ⇒ RED",
+      okEntry?.notNote.includes("4 calls") || okEntry?.notNote.includes("quarterly"),
+      `notNote=${JSON.stringify(okEntry?.notNote)}`);
+
+    // 76-i CKAN_HOSTS allowlist check: data.ok.gov must be present.
+    const { CKAN_HOSTS: ckHosts } = await import("./dist/ckan.js");
+    ok("76-i data.ok.gov in CKAN_HOSTS allowlist — remove host ⇒ RED",
+      ckHosts.includes("data.ok.gov"), `CKAN_HOSTS: ${ckHosts.join(", ")}`);
+    ok("76-i data.ca.gov in CKAN_HOSTS allowlist — remove host ⇒ RED",
+      ckHosts.includes("data.ca.gov"), `CKAN_HOSTS: ${ckHosts.join(", ")}`);
+
+    // 76-i E2E content check: resources/read text includes CA and OK entries.
+    const mapText = renderDataMapMarkdown();
+    ok("76-i rendered map text contains CA bb82edc5 id — change id ⇒ RED",
+      mapText.includes("bb82edc5"), "CA PO resource id missing from rendered map");
+    ok("76-i rendered map text contains OK cc443616 id — change id ⇒ RED",
+      mapText.includes("cc443616"), "OK Vendor Payments resource id missing from rendered map");
   }
 
   // (g) E2E: spawn the built server over stdio and call resources/list + resources/read.

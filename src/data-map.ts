@@ -42,6 +42,36 @@ export interface DataMapEntry {
 export const DATA_MAP_ENTRIES: DataMapEntry[] = [
   // ── State-level ──────────────────────────────────────────────────────────
   {
+    state: "CA",
+    jurisdiction: "California",
+    dataLabel: "DGS Purchase Order Data 2012–2015",
+    tool: "ckan_query",
+    keyArgs: "host=data.ca.gov, resourceId=bb82edc5-9c78-44e2-8947-68ece26197c5",
+    rows: 344504,
+    approximate: false,
+    notNote: "live Cal eProcure portal (WAF-403); FY2012–2015 only — no post-2015 rows",
+  },
+  {
+    state: "CA",
+    jurisdiction: "California",
+    dataLabel: "DGS-Approved Non-Competitive Bids",
+    tool: "ckan_query",
+    keyArgs: "host=data.ca.gov, resourceId=14932789-485b-481b-910a-dafb40d3471c",
+    rows: 480,
+    approximate: false,
+    notNote: "open competitive solicitations; sole-source/non-competitive award register",
+  },
+  {
+    state: "OK",
+    jurisdiction: "Oklahoma",
+    dataLabel: "Vendor Payments FY2019 Q1 (OMES)",
+    tool: "ckan_query",
+    keyArgs: "host=data.ok.gov, resourceId=cc443616-15eb-4a1f-8d87-93e5711ac43c",
+    rows: 286185,
+    approximate: false,
+    notNote: "bids or awards; vendor PAYMENTS — per-quarter resources, one fiscal year = 4 calls",
+  },
+  {
     state: "VA",
     jurisdiction: "Virginia",
     dataLabel: "eVA PO line items 2023",

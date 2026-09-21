@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CKAN: California `data.ca.gov` — 2 new data-map entries** (host already allowlisted). DGS Purchase Order Data 2012–2015 (`bb82edc5`, 344,504 rows exact) + DGS-Approved Non-Competitive Bids (`14932789`, 480 rows exact). NOT: FY2012–2015 only; live Cal eProcure portal remains WAF-403; non-competitive bids are sole-source award register, not open solicitations.
+- **CKAN: Oklahoma `data.ok.gov` — lifts documented SOURCE_BACKLOG deferral**. Deferral bar (2nd procurement-relevant >1k-row resource) met: Vendor Payments FY2019 Q1 (`cc443616`, 286,185 rows exact). FY2011/FY2017/FY2018/FY2019 each have 4 quarterly resources; one fiscal year = 4 calls. NOT: vendor PAYMENTS, not bids or awards. Host comment updated in `src/ckan.ts`; host added to CKAN_HOSTS; data-map entry added to `src/data-map.ts`.
+- **Hawaii `opendata.hawaii.gov` — measured and NOT added**. Best procurement resource found: "Projects Awarded 2003–2020" (`a5d67ba9`, 848 rows, `total_was_estimated:false`); OIMT Spending FY13-FY14 (`4a786681`, 119 rows). Neither clears the >1k-row admission bar; host is not added to CKAN_HOSTS.
+
 ## [1.15.0] - 2026-09-21
 
 ### Added

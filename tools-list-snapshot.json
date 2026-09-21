@@ -660,6 +660,7 @@
           "type": "string",
           "enum": [
             "data.ca.gov",
+            "data.ok.gov",
             "data.virginia.gov",
             "data.boston.gov"
           ],
@@ -695,6 +696,7 @@
           "type": "string",
           "enum": [
             "data.ca.gov",
+            "data.ok.gov",
             "data.virginia.gov",
             "data.boston.gov"
           ],
