@@ -2601,7 +2601,7 @@ const BonfireSearchOpportunitiesInput = z.object({
 const OpenCheckbookSearchInput = z.object({
     portal: z
         .enum(openCheckbook.OPEN_CHECKBOOK_PORTALS.map((p) => p.key))
-        .describe("The curated Open-Checkbook portal (SSRF allowlist enum). 'sd' = State of South Dakota Open Checkbook (~740,980 vendor payments, ~$8.41B, ~3 most-recent fiscal years)."),
+        .describe("The curated Open-Checkbook portal (SSRF allowlist enum). 'sd' = State of South Dakota Open Checkbook (~740,980 vendor payments, ~$8.41B, ~3 most-recent fiscal years). 'ak' = State of Alaska Open Checkbook (41,751 payments, $1.18B — FY2026 ONLY; FY2019–2025 return count:0 meaning not published, NOT zero spend)."),
     year: z.string().min(1).max(40).optional().describe("Fiscal-year filter (EXACT match), e.g. '2025'. Default 'All Years' = the exposed ~3-year window (NOT full history)."),
     vendor: z.string().min(1).max(200).optional().describe("Vendor name filter (EXACT match, e.g. 'US BANK NA' → 917). A partial/misspelled value returns an honest count:0."),
     org: z.string().min(1).max(200).optional().describe("Department filter (org1, EXACT match, e.g. 'TRANSPORTATION' → 109,887)."),

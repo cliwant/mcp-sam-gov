@@ -14092,6 +14092,54 @@ async function testOpenCheckbookHonesty() {
   // ── allowlist structural (SSRF): portals ≥1 + every host is a real domain + has a key. ──
   ok("45OC portals allowlist ≥1 + every portal has an https-able host + a key (curated Socrata Open-Expenditures checkbook portals)",
     OPEN_CHECKBOOK_PORTALS.length >= 1 && OPEN_CHECKBOOK_PORTALS.every((p) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(p.host) && p.key && p.label), JSON.stringify(OPEN_CHECKBOOK_PORTALS.map((p) => p.key)));
+  // ── 45OC-ak: Alaska portal structural + FY-caveat honesty ──
+  // NON-VACUOUS: remove ak entry from OPEN_CHECKBOOK_PORTALS ⇒ RED; change host ⇒ RED;
+  // remove "FY2026" or "not published" from note ⇒ RED.
+  const akPortal = OPEN_CHECKBOOK_PORTALS.find((p) => p.key === "ak");
+  ok("45OC-ak 'ak' portal is in OPEN_CHECKBOOK_PORTALS — remove entry ⇒ RED",
+    akPortal !== undefined, JSON.stringify({ present: !!akPortal }));
+  ok("45OC-ak 'ak' portal host is checkbook.alaska.gov — change host ⇒ RED",
+    akPortal?.host === "checkbook.alaska.gov", JSON.stringify({ host: akPortal?.host }));
+  ok("45OC-ak 'ak' portal note contains 'FY2026' (year-coverage caveat) — remove year ⇒ RED",
+    typeof akPortal?.note === "string" && akPortal.note.includes("FY2026"), JSON.stringify({ noteSnippet: akPortal?.note?.slice(0, 60) }));
+  ok("45OC-ak 'ak' portal note warns 'does not publish' (year not published, not zero spend) — remove distinction ⇒ RED",
+    typeof akPortal?.note === "string" && akPortal.note.toLowerCase().includes("does not publish"), JSON.stringify({ noteSnippet: akPortal?.note?.slice(0, 120) }));
+  ok("45OC-ak 'ak' portal note warns FY2019–2025 return count:0 — remove years ⇒ RED",
+    typeof akPortal?.note === "string" && akPortal.note.includes("2019") && akPortal.note.includes("2025"), JSON.stringify({ has2019: akPortal?.note?.includes("2019"), has2025: akPortal?.note?.includes("2025") }));
+  // ── 45OC-ak-sharefulton: sharefulton.fultoncountyga.gov is in Socrata allowlist ──
+  ok("45OC-ak sharefulton.fultoncountyga.gov is in SOCRATA_DOMAINS — remove host ⇒ RED",
+    SOCRATA_DOMAINS.includes("sharefulton.fultoncountyga.gov"), JSON.stringify({ present: SOCRATA_DOMAINS.includes("sharefulton.fultoncountyga.gov") }));
+  // ── 45OC-ak data-map entries ──
+  {
+    const { DATA_MAP_ENTRIES, renderDataMapMarkdown } = await import("./dist/data-map.js");
+    const akEntry = DATA_MAP_ENTRIES.find((e) => e.state === "AK" && e.tool === "open_checkbook_search");
+    ok("45OC-ak data-map has Alaska open_checkbook_search entry — remove entry ⇒ RED",
+      akEntry !== undefined, JSON.stringify({ present: !!akEntry }));
+    ok("45OC-ak Alaska data-map rows = 41751 (exact) — change count ⇒ RED",
+      akEntry?.rows === 41751 && akEntry?.approximate === false, JSON.stringify({ rows: akEntry?.rows, approx: akEntry?.approximate }));
+    ok("45OC-ak Alaska data-map notNote warns FY2026 only — remove caveat ⇒ RED",
+      typeof akEntry?.notNote === "string" && akEntry.notNote.includes("FY2026"), JSON.stringify({ noteSnippet: akEntry?.notNote?.slice(0, 60) }));
+    const gaEntry = DATA_MAP_ENTRIES.find((e) => e.state === "GA" && e.tool === "socrata_query" && e.keyArgs.includes("sharefulton.fultoncountyga.gov"));
+    ok("45OC-ak data-map has sharefulton.fultoncountyga.gov Fulton County entry — remove entry ⇒ RED",
+      gaEntry !== undefined, JSON.stringify({ present: !!gaEntry }));
+    ok("45OC-ak Fulton County sharefulton data-map rows = 226797 (exact) — change count ⇒ RED",
+      gaEntry?.rows === 226797 && gaEntry?.approximate === false, JSON.stringify({ rows: gaEntry?.rows, approx: gaEntry?.approximate }));
+    ok("45OC-ak Fulton County data-map keyArgs contains kp4p-scak — change id ⇒ RED",
+      typeof gaEntry?.keyArgs === "string" && gaEntry.keyArgs.includes("kp4p-scak"), JSON.stringify({ keyArgs: gaEntry?.keyArgs }));
+    const md = renderDataMapMarkdown();
+    ok("45OC-ak rendered data-map text contains Alaska open_checkbook_search row — remove entry ⇒ RED",
+      md.includes("Alaska") && md.includes("open_checkbook_search") && md.includes("41,751"), JSON.stringify({ hasAlaska: md.includes("Alaska"), hasOCS: md.includes("open_checkbook_search"), hasCount: md.includes("41,751") }));
+    ok("45OC-ak rendered data-map text contains sharefulton.fultoncountyga.gov — remove host ⇒ RED",
+      md.includes("sharefulton.fultoncountyga.gov"), JSON.stringify({ present: md.includes("sharefulton.fultoncountyga.gov") }));
+    ok("45OC-ak rendered data-map text contains kp4p-scak dataset id — change id ⇒ RED",
+      md.includes("kp4p-scak"), JSON.stringify({ present: md.includes("kp4p-scak") }));
+    ok("45OC-ak rendered data-map measured-absence section mentions New Orleans — remove note ⇒ RED",
+      md.includes("New Orleans"), JSON.stringify({ present: md.includes("New Orleans") }));
+    ok("45OC-ak rendered data-map New Orleans measured-absence specifies data.nola.gov — remove host ⇒ RED",
+      md.includes("data.nola.gov"), JSON.stringify({ present: md.includes("data.nola.gov") }));
+    ok("45OC-ak rendered data-map New Orleans note says DBE directory — remove detail ⇒ RED",
+      md.includes("DBE directory"), JSON.stringify({ present: md.includes("DBE directory") }));
+  }
 }
 
 // §45E: GSA Federal Travel Per-Diem (api.gsa.gov, ADR-0050) — a NEW travel-cost lane

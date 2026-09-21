@@ -201,6 +201,7 @@ export const SOCRATA_DOMAINS = [
     "data.coloradosprings.gov", // Colorado Springs CO (.gov) — e.g. yn6y-xikx (Open Checkbook Vendors ~19k)
     "data.framinghamma.gov", // Framingham MA (.gov) — e.g. cqve-ehkr (Checkbook ~324k)
     "data.fultoncountyga.gov", // Fulton County GA (.gov) — e.g. mxhc-krcg (Vendor Payments/disbursements ~217k)
+    "sharefulton.fultoncountyga.gov", // Fulton County GA (.gov, second portal) — e.g. kp4p-scak (Vendor Payments 226,797 rows 2014–present, updated 2026-09-14, attribution: "Fulton County Government (GA)")
     "atlanta.data.socrata.com", // City of Atlanta GA (Socrata-hosted official portal) — e.g. jmke-icfi (Open Checkbook Ledger ~1.78M)
     "opendata.cityofmesquite.com", // Mesquite TX (.com, official) — e.g. 6tva-azs5 (Check Register ~144k)
     // ── County/city procurement sweep, wave 3 (loop cycle 20, 2026-07-20). Expanded

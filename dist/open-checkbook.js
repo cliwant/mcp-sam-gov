@@ -45,6 +45,12 @@ export const OPEN_CHECKBOOK_PORTALS = [
         label: "South Dakota — Open Checkbook",
         note: "State of South Dakota vendor-payment checkbook (row fields: expense_category, description, fund, payment_date, vendor, org1=department, amount, custom_checkbook_field7=invoice ref, payment_id). ~740,980 rows / ~$8.41B across the ~3 most-recent fiscal years (NOT full history). The underlying Socrata SODA dataset is login-gated; this public app-proxy is the keyless door.",
     },
+    {
+        key: "ak",
+        host: "checkbook.alaska.gov",
+        label: "Alaska — Open Checkbook",
+        note: "State of Alaska vendor-payment checkbook (official .gov CNAME to alaska-state.spending.socrata.com). Verified live 2026-09-21: 41,751 rows / $1,179,091,896.12 for FY2026. ★ FY COVERAGE CAVEAT: ONLY FY2026 is published by this portal — years 2019–2025 and no-year all return count:0 / empty data. A count:0 result for a non-2026 year means 'this portal does not publish that year', NOT 'Alaska spent nothing'. Do NOT interpret zero results for FY2019–FY2025 as an absence of spending.",
+    },
 ];
 const PORTAL_BY_KEY = new Map(OPEN_CHECKBOOK_PORTALS.map((p) => [p.key, p]));
 // Sort fields the product supports (validated — an SSRF/injection + silent-noop guard).
