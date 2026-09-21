@@ -41,6 +41,14 @@ export type OpenCheckbookPortal = {
     host: string;
     label: string;
     note: string;
+    /**
+     * What fiscal-year span this portal actually publishes, as MEASURED (not assumed).
+     * Portals differ: SD exposes roughly the three most recent FYs, AK exposes exactly
+     * one. Emitting a single hardcoded coverage sentence for both made the envelope
+     * contradict itself — the generic line claimed "~3 most-recent fiscal years" while
+     * the AK portal note in the same response said FY2026 only.
+     */
+    coverageNote: string;
 };
 export declare const OPEN_CHECKBOOK_PORTALS: readonly OpenCheckbookPortal[];
 export type OpenCheckbookSearchArgs = {

@@ -4083,9 +4083,10 @@
         "portal": {
           "type": "string",
           "enum": [
-            "sd"
+            "sd",
+            "ak"
           ],
-          "description": "The curated Open-Checkbook portal (SSRF allowlist enum). 'sd' = State of South Dakota Open Checkbook (~740,980 vendor payments, ~$8.41B, ~3 most-recent fiscal years)."
+          "description": "The curated Open-Checkbook portal (SSRF allowlist enum). 'sd' = State of South Dakota Open Checkbook (~740,980 vendor payments, ~$8.41B, ~3 most-recent fiscal years). 'ak' = State of Alaska Open Checkbook (41,751 payments, $1.18B — FY2026 ONLY; FY2019–2025 return count:0 meaning not published, NOT zero spend)."
         },
         "year": {
           "type": "string",
@@ -5108,6 +5109,7 @@
             "data.coloradosprings.gov",
             "data.framinghamma.gov",
             "data.fultoncountyga.gov",
+            "sharefulton.fultoncountyga.gov",
             "atlanta.data.socrata.com",
             "opendata.cityofmesquite.com",
             "datahub.usac.org",
@@ -5189,6 +5191,7 @@
             "data.coloradosprings.gov",
             "data.framinghamma.gov",
             "data.fultoncountyga.gov",
+            "sharefulton.fultoncountyga.gov",
             "atlanta.data.socrata.com",
             "opendata.cityofmesquite.com",
             "datahub.usac.org",

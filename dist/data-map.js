@@ -134,6 +134,17 @@ export const DATA_MAP_ENTRIES = [
         approximate: true,
         notNote: "an award register; only ~3 most-recent FYs, exact-match filters",
     },
+    // ── Alaska — verified 2026-09-21 ─────────────────────────────────────────
+    {
+        state: "AK",
+        jurisdiction: "Alaska",
+        dataLabel: "Open Checkbook vendor payments (FY2026 ONLY)",
+        tool: "open_checkbook_search",
+        keyArgs: "portal=ak, year=2026",
+        rows: 41751,
+        approximate: false,
+        notNote: "historical FY coverage — ONLY FY2026 is published by this portal. FY2019–FY2025 return count:0, meaning 'not published', NOT 'no spending'. Probed years 2019–2026 and no-year on 2026-09-21: 2019–2025 = 0 rows each; 2026 = 41,751 rows ($1,179,091,896.12); no-year = 0 rows. Always pass year='2026' to get results.",
+    },
     {
         state: "IL",
         jurisdiction: "Illinois",
@@ -262,6 +273,17 @@ export const DATA_MAP_ENTRIES = [
         approximate: false,
         notNote: "Colorado STATE procurement — this is City of Denver checkbook data hosted on the Colorado state portal (data.colorado.gov). An agent that reads the domain as the jurisdiction gets this wrong. Updated 2026-09-20.",
     },
+    // ── Fulton County GA (second portal) — verified 2026-09-21 ───────────────
+    {
+        state: "GA",
+        jurisdiction: "Fulton County GA",
+        dataLabel: "Vendor Payments 2014–present (sharefulton portal)",
+        tool: "socrata_query",
+        keyArgs: "domain=sharefulton.fultoncountyga.gov, datasetId=kp4p-scak",
+        rows: 226797,
+        approximate: false,
+        notNote: "data.fultoncountyga.gov (a DIFFERENT host that is also allowlisted — both are official Fulton County portals). Fields: fiscal_year, fy_period, disb_date, dept, department_name, unit, unit_name, object, object_name, fund, fund_name, amount, vendor_code, vendor_legal_name. Updated 2026-09-14, attribution: 'Fulton County Government (GA)', 226,797 rows spanning 2014-01-01 to present.",
+    },
 ];
 /**
  * Format a row count for display.
@@ -314,6 +336,9 @@ ${renderStateTableMarkdown()}
 - Login-gated or WAF-blocked live-bid portals: CA (Cal eProcure), TX ESBD/TxSmartBuy non-TxDOT (TxDOT lettings ARE available via qh8x-rm8r above), OH, NC, MI, and Periscope-based portals for IL/MA/NJ live bids.
 - Portal exists but carries no procurement datasets: PA (data.pa.gov is live; scoped catalog has 0 bid/vendor/procurement datasets matching). Michigan (data.michigan.gov) was checked 2026-09-21 and carries only NIGP commodity code reference tables (w3u3-uptp 9,333 rows; jv5q-yp8x 235 rows) — not procurement transactions.
 - No state-level open-data portal: FL (data.fl.gov NXDOMAIN), GA (data.georgia.gov NXDOMAIN). These states have no keyless state procurement data source — this is a measured absence, not a connectivity block.
+
+**City-level measured absences (portals exist but carry no procurement data):**
+- New Orleans LA (rank 46, 383,997 people): data.nola.gov exists but has NO procurement dataset. Full scan across 9 terms (procurement, solicitation, bid opportunities, vendor payments, purchase orders, contracts awarded, checkbook, supplier diversity, expenditure) on 2026-09-21 found only a 626-row DBE directory last updated 2019-11-11. Largest datasets are permits (347,839) and traffic citations (4M+) — not procurement. Use opengov_search_solicitations or bonfire_search_opportunities for New Orleans live bids.
 `;
 }
 //# sourceMappingURL=data-map.js.map
