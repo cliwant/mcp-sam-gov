@@ -2451,6 +2451,69 @@ async function testFarSearch() {
 // Proves the assertions are real (not vacuously green). We re-run the D2
 // invariant against a DELIBERATELY-WRONG expectation and confirm it would fail;
 // this is done via a scoped counter so it does not affect the suite tally.
+// ---------------------------------------------------------------------------
+// §drift-canary: offline classification tests
+// ---------------------------------------------------------------------------
+async function testDriftCanaryClassification() {
+  section("drift-canary: classifyStatus() — status → class mapping");
+
+  // Import the pure classification functions from the canary (no network calls)
+  const { classifyStatus, classifyRowDrift, isWafChallengePage, THRESHOLDS } =
+    await import("./drift-canary.mjs");
+
+  // 200 OK
+  eq("classifyStatus(200) = ok — change return ⇒ RED", classifyStatus(200), "ok");
+  // 200 + WAF body → blocked
+  const wafBody = "Just a moment...cloudflare checking your browser";
+  eq("classifyStatus(200, wafBody) = blocked — remove WAF detection ⇒ RED",
+    classifyStatus(200, wafBody), "blocked");
+  // 301 → redirect (the SF case that motivated this whole canary)
+  eq("classifyStatus(301) = redirect — change return ⇒ RED (breaks SF detection)",
+    classifyStatus(301), "redirect");
+  eq("classifyStatus(302) = redirect", classifyStatus(302), "redirect");
+  // 401/403/429 → blocked
+  eq("classifyStatus(401) = blocked", classifyStatus(401), "blocked");
+  eq("classifyStatus(403) = blocked", classifyStatus(403), "blocked");
+  eq("classifyStatus(429) = blocked", classifyStatus(429), "blocked");
+  // 404/410 → not-found
+  eq("classifyStatus(404) = not-found", classifyStatus(404), "not-found");
+  eq("classifyStatus(410) = not-found", classifyStatus(410), "not-found");
+  // 5xx → server-error
+  eq("classifyStatus(500) = server-error", classifyStatus(500), "server-error");
+  eq("classifyStatus(503) = server-error", classifyStatus(503), "server-error");
+
+  section("drift-canary: isWafChallengePage() — WAF body detection");
+  ok("cloudflare + 'just a moment' → true — remove check ⇒ RED",
+    isWafChallengePage("just a moment...cloudflare checking your browser"));
+  ok("cloudflare + 'attention required' → true",
+    isWafChallengePage("attention required | cloudflare please wait"));
+  ok("normal JSON body → false", !isWafChallengePage('{"count":42}'));
+  ok("empty body → false", !isWafChallengePage(""));
+
+  section("drift-canary: classifyRowDrift() — row-count drift thresholds");
+  // Below 50% of recorded → collapse
+  const rec = 100_000;
+  eq("49% of recorded → collapse — raise threshold ⇒ RED",
+    classifyRowDrift(rec, Math.floor(rec * 0.49)), "collapse");
+  eq("50% of recorded → ok (boundary — lower threshold ⇒ RED)",
+    classifyRowDrift(rec, Math.floor(rec * THRESHOLDS.COLLAPSE_RATIO)), "ok");
+  eq("100% → ok", classifyRowDrift(rec, rec), "ok");
+  eq("200% → ok (upper boundary)", classifyRowDrift(rec, rec * THRESHOLDS.GROWTH_RATIO), "ok");
+  eq("201% → growth — lower threshold ⇒ RED",
+    classifyRowDrift(rec, Math.ceil(rec * 2.01)), "growth");
+  eq("0 rows → collapse (total data loss)", classifyRowDrift(rec, 0), "collapse");
+
+  section("drift-canary: THRESHOLDS config — changing them would affect canary correctness");
+  ok("COLLAPSE_RATIO = 0.50 — change ⇒ RED", THRESHOLDS.COLLAPSE_RATIO === 0.50,
+    `got ${THRESHOLDS.COLLAPSE_RATIO}`);
+  ok("GROWTH_RATIO = 2.00 — change ⇒ RED", THRESHOLDS.GROWTH_RATIO === 2.00,
+    `got ${THRESHOLDS.GROWTH_RATIO}`);
+  ok("CONCURRENCY ≤ 16 (politeness cap)", THRESHOLDS.CONCURRENCY <= 16,
+    `got ${THRESHOLDS.CONCURRENCY}`);
+  ok("REQUEST_TIMEOUT_MS reasonable (5s–60s)", THRESHOLDS.REQUEST_TIMEOUT_MS >= 5_000 && THRESHOLDS.REQUEST_TIMEOUT_MS <= 60_000,
+    `got ${THRESHOLDS.REQUEST_TIMEOUT_MS}`);
+}
+
 async function selfCheck() {
   section("self-check: assertions are non-vacuous (a broken guarantee WOULD fail)");
   // Temporarily divert the global counters.
@@ -22575,6 +22638,7 @@ async function main() {
   await testToolsets();
   await testToolAnnotations();
   await testDataMapResource();
+  await testDriftCanaryClassification();
 
   // Prove the harness bites.
   await selfCheck();
