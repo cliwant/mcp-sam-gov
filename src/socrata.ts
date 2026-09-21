@@ -246,7 +246,7 @@ const SOCRATA_DOMAIN_SET: ReadonlySet<string> = new Set(SOCRATA_DOMAINS);
  *
  *   data.sfgov.org → data.sf.gov   (confirmed 2026-09-21; all paths 301)
  */
-const MIGRATED_SOCRATA_HOSTS: ReadonlyMap<string, string> = new Map([
+export const MIGRATED_SOCRATA_HOSTS: ReadonlyMap<string, string> = new Map([
   ["data.sfgov.org", "data.sf.gov"],
 ]);
 

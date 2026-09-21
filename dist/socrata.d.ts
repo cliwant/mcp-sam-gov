@@ -111,6 +111,21 @@ import { type MetaBundle } from "./meta.js";
 export { num };
 export declare const SOCRATA_DOMAINS: readonly ["data.ny.gov", "data.colorado.gov", "data.ct.gov", "data.texas.gov", "data.wa.gov", "opendata.maryland.gov", "data.vermont.gov", "data.nj.gov", "data.oregon.gov", "data.pa.gov", "data.mo.gov", "data.delaware.gov", "data.austintexas.gov", "data.kingcounty.gov", "data.montgomerycountymd.gov", "data.mesaaz.gov", "data.cambridgema.gov", "data.transportation.gov", "data.cdc.gov", "data.bts.gov", "datacatalog.cookcountyil.gov", "data.illinois.gov", "data.cincinnati-oh.gov", "data.cityofnewyork.us", "data.cityofchicago.org", "data.sfgov.org", "data.sf.gov", "controllerdata.lacity.org", "opendata.usac.org", "data.kcmo.org", "data.brla.gov", "www.dallasopendata.com", "data.lacity.org", "data.ramseycountymn.gov", "data.richmondgov.com", "opendata.howardcountymd.gov", "data.providenceri.gov", "fiscalfocus.pittsburghpa.gov", "data.coloradosprings.gov", "data.framinghamma.gov", "data.fultoncountyga.gov", "sharefulton.fultoncountyga.gov", "atlanta.data.socrata.com", "opendata.cityofmesquite.com", "datahub.usac.org", "performance.ci.janesville.wi.us", "datahub.austintexas.gov", "cthru.data.socrata.com", "data.macoupincountyil.gov", "data.oaklandca.gov", "data.princegeorgescountymd.gov", "data.cstx.gov", "datahub.transportation.gov", "citydata.mesaaz.gov", "data.weho.org"];
 export type SocrataDomain = (typeof SOCRATA_DOMAINS)[number];
+/**
+ * Known host migrations (permanent 301 redirects). A domain here has permanently
+ * moved; redirect:"error" means any fetch to the old host will fail immediately.
+ * Rather than returning a retryable upstream_unavailable (which implies the
+ * problem may resolve on its own), we pre-flight check this map and return
+ * invalid_input — non-retryable, naming the replacement — so the caller can
+ * update the `domain` parameter instead of spinning on a doomed retry loop.
+ *
+ * Keep the old host in SOCRATA_DOMAINS so it passes the allowlist gate (invalid
+ * domains are rejected before reaching this check). Only add an entry here when
+ * the migration is confirmed by a live 301 probe with a stable redirect_url.
+ *
+ *   data.sfgov.org → data.sf.gov   (confirmed 2026-09-21; all paths 301)
+ */
+export declare const MIGRATED_SOCRATA_HOSTS: ReadonlyMap<string, string>;
 export type SocrataRow = Record<string, unknown>;
 /**
  * Query rows from an allowlisted Socrata SODA dataset. The workhorse: reaches

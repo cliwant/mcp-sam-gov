@@ -1,0 +1,83 @@
+name: Drift Canary
+
+# Weekly endpoint health check + data-map row-count drift detection.
+#
+# REPORT-ONLY: this job uploads a JSON/Markdown artifact and writes the
+# Markdown to $GITHUB_STEP_SUMMARY.  It does NOT open issues, comment on
+# PRs, push, or post anywhere.
+#
+# Exits non-zero (red) on real regressions: redirect, not-found, dns, collapse.
+# Exits zero  (green) on transient-looking issues: blocked, timeout, server-error.
+#
+# Keep OFF the required PR gate — it touches live upstreams.
+
+on:
+  schedule:
+    # Every Monday at 03:00 UTC (quiet off-peak; most US government servers
+    # see minimal traffic at that hour).
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      report_json:
+        description: "Output path for JSON report (relative to repo root)"
+        required: false
+        default: "drift-canary-report.json"
+      report_md:
+        description: "Output path for Markdown report (relative to repo root)"
+        required: false
+        default: "drift-canary-report.md"
+
+permissions:
+  contents: read   # read-only: no push, no comment, no issue creation
+
+jobs:
+  canary:
+    name: Drift Canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run drift canary
+        id: canary
+        env:
+          REPORT_JSON: ${{ github.event.inputs.report_json || 'drift-canary-report.json' }}
+          REPORT_MD: ${{ github.event.inputs.report_md || 'drift-canary-report.md' }}
+        # Exit 1 on real regressions (redirect/not-found/dns/collapse);
+        # the step goes red and the job fails — that is the intended signal.
+        run: node drift-canary.mjs
+
+      - name: Write Markdown to job summary
+        if: always()
+        run: |
+          MD="${{ github.event.inputs.report_md || 'drift-canary-report.md' }}"
+          if [ -f "$MD" ]; then
+            cat "$MD" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No Markdown report found at $MD" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload reports as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-canary-${{ github.run_id }}
+          path: |
+            ${{ github.event.inputs.report_json || 'drift-canary-report.json' }}
+            ${{ github.event.inputs.report_md || 'drift-canary-report.md' }}
+          retention-days: 30
+          if-no-files-found: warn
