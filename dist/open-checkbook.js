@@ -44,12 +44,14 @@ export const OPEN_CHECKBOOK_PORTALS = [
         host: "southdakota.spending.socrata.com",
         label: "South Dakota — Open Checkbook",
         note: "State of South Dakota vendor-payment checkbook (row fields: expense_category, description, fund, payment_date, vendor, org1=department, amount, custom_checkbook_field7=invoice ref, payment_id). ~740,980 rows / ~$8.41B across the ~3 most-recent fiscal years (NOT full history). The underlying Socrata SODA dataset is login-gated; this public app-proxy is the keyless door.",
+        coverageNote: "COVERAGE: this portal exposes only the ~3 most-recent fiscal years — NOT South Dakota's full payment history.",
     },
     {
         key: "ak",
         host: "checkbook.alaska.gov",
         label: "Alaska — Open Checkbook",
         note: "State of Alaska vendor-payment checkbook (official .gov CNAME to alaska-state.spending.socrata.com). Verified live 2026-09-21: 41,751 rows / $1,179,091,896.12 for FY2026. ★ FY COVERAGE CAVEAT: ONLY FY2026 is published by this portal — years 2019–2025 and no-year all return count:0 / empty data. A count:0 result for a non-2026 year means 'this portal does not publish that year', NOT 'Alaska spent nothing'. Do NOT interpret zero results for FY2019–FY2025 as an absence of spending.",
+        coverageNote: "COVERAGE: this portal publishes ONLY FY2026 (measured 2026-09-21: FY2019-FY2025 and an omitted year each return count:0). A count:0 for any other year means the portal does not publish that year — it does NOT mean Alaska made no payments.",
     },
 ];
 const PORTAL_BY_KEY = new Map(OPEN_CHECKBOOK_PORTALS.map((p) => [p.key, p]));
@@ -152,7 +154,7 @@ export async function openCheckbookSearch(args) {
         `Source: ${portal.label} (Socrata Open Expenditures app-proxy /api/checkbook_data.json, keyless). ${portal.note}`,
         "totalAvailable = the API's exact match count (matches the product's totals.json), NOT the page length.",
         "Filters (year/vendor/org/expenseCategory) are EXACT-match — a partial/misspelled value returns an honest count:0, not an error. amount is number|null (a real $0 is 0, an absent value is null, never a fabricated 0).",
-        "COVERAGE: only the ~3 most-recent fiscal years are exposed by this product — this is NOT the state's full payment history.",
+        portal.coverageNote,
         "FRESHNESS is set by the publisher: the portal says it refreshes each payment cycle, but refreshes can lag by weeks. To check recency, sort by payment_date (sortBy='payment_date', sortOrder='desc') and read the newest date.",
     ];
     if (servedOffset !== offset)

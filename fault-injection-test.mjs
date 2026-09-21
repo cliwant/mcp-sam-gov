@@ -25397,6 +25397,38 @@ async function testDataMapResource() {
   ok("76-c MA cthru entry datasetId=pegc-naaa — change the id ⇒ RED",
     maEntry?.keyArgs?.includes("pegc-naaa") ?? false, maEntry?.keyArgs ?? "(no entry)");
 
+  // (c0) Every Open-Checkbook portal must carry its OWN measured coverage note.
+  // A single hardcoded "~3 most-recent fiscal years" line was emitted for all
+  // portals, so an Alaska response asserted a 3-year span in one note while its
+  // portal note said FY2026 only — the envelope contradicted itself, and a caller
+  // trusting the generic line would read FY2023's count:0 as "Alaska paid nothing".
+  {
+    const { OPEN_CHECKBOOK_PORTALS: PORTALS } = await import("./dist/open-checkbook.js");
+    for (const p of PORTALS) {
+      ok(`76-c0 portal ${p.key} has a coverageNote — delete the field ⇒ RED`,
+        typeof p.coverageNote === "string" && p.coverageNote.length > 40,
+        `coverageNote=${JSON.stringify(p.coverageNote)}`);
+      ok(`76-c0 portal ${p.key} coverageNote names its own limit, not a shared guess — genericize it ⇒ RED`,
+        /COVERAGE:/.test(p.coverageNote), p.coverageNote?.slice(0, 80) ?? "(none)");
+    }
+    const ak = PORTALS.find((p) => p.key === "ak");
+    ok("76-c0 AK coverageNote says FY2026 ONLY — widen it to ~3 years ⇒ RED",
+      /ONLY FY2026/.test(ak?.coverageNote ?? ""), ak?.coverageNote?.slice(0, 120) ?? "(no ak)");
+    ok("76-c0 AK coverageNote denies the zero-means-no-spending reading — drop that clause ⇒ RED",
+      /does NOT mean Alaska made no payments/.test(ak?.coverageNote ?? ""),
+      ak?.coverageNote?.slice(0, 160) ?? "(no ak)");
+    const sd = PORTALS.find((p) => p.key === "sd");
+    ok("76-c0 SD coverageNote still states its own ~3-FY span — drop it ⇒ RED",
+      /3-most-recent|~3 most-recent/.test(sd?.coverageNote ?? ""),
+      sd?.coverageNote?.slice(0, 120) ?? "(no sd)");
+    // The generic sentence must no longer be hardcoded in the module source.
+    const { readFileSync: rfOc } = await import("node:fs");
+    const srcOc = rfOc("dist/open-checkbook.js", "utf8");
+    ok("76-c0 the shared hardcoded coverage sentence is gone — reinstate it ⇒ RED",
+      !srcOc.includes("only the ~3 most-recent fiscal years are exposed by this product"),
+      "dist/open-checkbook.js still hardcodes the shared coverage sentence");
+  }
+
   // (c1) The `domain` parameter of BOTH socrata tools must name the jurisdiction of
   // every host whose HOSTNAME DOES NOT reveal it. Measured, not cosmetic: with the
   // bare 54-value enum, an eval agent read it and answered "no statewide
