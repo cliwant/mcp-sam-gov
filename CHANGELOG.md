@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`socrata_query` / `socrata_discover_datasets`: the `domain` parameter now names the jurisdiction of every allowlisted host whose hostname does not reveal it** (`cthru.data.socrata.com` = Massachusetts statewide, `data.brla.gov` = Baton Rouge, `data.kcmo.org` = Kansas City, and so on), and warns that `data.colorado.gov`'s procurement datasets are City of Denver rather than Colorado state. Measured, not cosmetic: with the bare 54-value enum an agent answered "no statewide Massachusetts portal" while the ~49M-row MA dataset sat in that enum. Adding the legend flipped that eval task from FAIL to PASS and raised right-tool selection from 2/6 to 4/6.
+
 ### Added
 
 - **State & local data map: 4 new jurisdictions verified 2026-09-21** — Maryland (`opendata.maryland.gov`), Oregon (`data.oregon.gov`), Vermont (`data.vermont.gov`), and City of Denver (on Colorado state portal `data.colorado.gov`). All hosts were already in the Socrata allowlist; this is a discoverability/documentation addition. Key honesty caveats: MD eMMA rows are bid LINE ITEMS (FY2018 is 107,303 rows for 3,067 bids — 35× overcount; use `$select=count(distinct bid_number)`); eMMA coverage stops at FY2019 (Periscope migration). OR OregonBuys (`qyug-f2km`) and historical ORPIN datasets (`6e9e-sfc4`, `8izy-bwhd`, `gart-52me`) are purchase orders and contracts, not open solicitations. VT (`8ewu-igdm`) is issued purchase orders for the current fiscal year (live-ish). Denver (`66zf-qjdd` Procurement Transactions, `wnau-xrqi` Checkbook) is City of Denver spend hosted on the CO state portal — NOT Colorado state procurement; placed in the state table with jurisdiction="City of Denver" to prevent domain-as-jurisdiction misreads. Michigan (`data.michigan.gov`) added to measured-absence section: carries only NIGP commodity code reference tables, not procurement transactions. 14 new non-vacuous fault assertions (76-f anchors + 76-f2) cover dataset ids, MD 35× caveat, VT distinct po_id count, Denver "NOT Colorado STATE" caveat, and Michigan measured-absence text.

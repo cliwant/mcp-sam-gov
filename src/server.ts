@@ -1943,7 +1943,8 @@ const EdgarCompanyConceptInput = z.object({
 const SocrataDomainEnum = z
   .enum(socrata.SOCRATA_DOMAINS)
   .describe(
-    "Which allowlisted Socrata portal to query (curated .gov hosts + USAC E-rate .org; the SSRF host allowlist — no free host). e.g. data.ny.gov, data.texas.gov, data.wa.gov, opendata.usac.org.",
+    "Which allowlisted Socrata portal to query (the SSRF host allowlist — no free host). " +
+    "Jurisdiction of non-obvious hosts: cthru.data.socrata.com=MASSACHUSETTS statewide (CTHRU); atlanta.data.socrata.com=Atlanta GA; controllerdata.lacity.org+data.lacity.org=Los Angeles; www.dallasopendata.com=Dallas TX; data.brla.gov=Baton Rouge LA; data.kcmo.org=Kansas City MO; data.cstx.gov=College Station TX; data.weho.org=West Hollywood CA; opendata.usac.org+datahub.usac.org=federal USAC E-rate. data.colorado.gov's procurement data is CITY OF DENVER, not CO state.",
   );
 
 const SocrataQueryInput = z.object({
@@ -2004,7 +2005,8 @@ const SocrataDiscoverDatasetsInput = z.object({
     .min(1)
     .describe("Keyword(s) to find datasets, e.g. 'procurement', 'vendor payments', 'checkbook'."),
   domain: SocrataDomainEnum.optional().describe(
-    "Optional: scope discovery to ONE allowlisted portal. Omit to search the whole allowlist. NOTE: the federated catalog does not index every host (e.g. USAC E-rate returns 0) — those remain queryable via socrata_query with a known 4x4.",
+    "Optional: scope discovery to ONE portal; omit to search all. The catalog does not index every host (USAC returns 0); those stay queryable via socrata_query with a known 4x4. " +
+    "Jurisdiction of non-obvious hosts: cthru.data.socrata.com=MASSACHUSETTS statewide (CTHRU); atlanta.data.socrata.com=Atlanta GA; controllerdata.lacity.org+data.lacity.org=Los Angeles; www.dallasopendata.com=Dallas TX; data.brla.gov=Baton Rouge LA; data.kcmo.org=Kansas City MO; data.cstx.gov=College Station TX; data.weho.org=West Hollywood CA; opendata.usac.org+datahub.usac.org=federal USAC E-rate. data.colorado.gov's procurement data is CITY OF DENVER, not CO state.",
   ),
   limit: z
     .number()
