@@ -78,9 +78,11 @@
  * returned HTTP 200 + the envelope above). NO commercial-vendor domains (the
  * Socrata Tyler-Technologies M1 mistake is avoided). `data.virginia.gov` is the
  * same VA that CHURNED OFF Socrata (excluded from the SODA allowlist) — it belongs
- * HERE on CKAN. `data.ok.gov` is DEFERRED to SOURCE_BACKLOG (only a 9-row thin
- * datastore verified — require a 2nd procurement-relevant >1k-row resource before
- * adding). `catalog.data.gov` (federal harvester, no active datastore) is dropped.
+ * HERE on CKAN. `data.ok.gov` deferral LIFTED 2026-09-21: Vendor Payments FY2019 Q1
+ * (resource_id cc443616-15eb-4a1f-8d87-93e5711ac43c, 286,185 rows exact,
+ * `total_was_estimated:false`). FY2011/FY2017/FY2018/FY2019 each have 4 quarterly
+ * resources; one fiscal year = 4 calls. NOT bids or awards — vendor PAYMENTS.
+ * `catalog.data.gov` (federal harvester, no active datastore) is dropped.
  * Adding a host later = a CKAN_HOSTS SOURCE edit + a live `datastore_search?
  * limit=1` verification + an ownership note + a test-fixture note — NEVER a free
  * runtime param.
@@ -88,7 +90,7 @@
 import { num } from "./coerce.js";
 import { type MetaBundle } from "./meta.js";
 export { num };
-export declare const CKAN_HOSTS: readonly ["data.ca.gov", "data.virginia.gov", "data.boston.gov"];
+export declare const CKAN_HOSTS: readonly ["data.ca.gov", "data.ok.gov", "data.virginia.gov", "data.boston.gov"];
 export type CkanHost = (typeof CKAN_HOSTS)[number];
 export type CkanRecord = Record<string, unknown>;
 /**

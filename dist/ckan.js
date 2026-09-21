@@ -78,9 +78,11 @@
  * returned HTTP 200 + the envelope above). NO commercial-vendor domains (the
  * Socrata Tyler-Technologies M1 mistake is avoided). `data.virginia.gov` is the
  * same VA that CHURNED OFF Socrata (excluded from the SODA allowlist) — it belongs
- * HERE on CKAN. `data.ok.gov` is DEFERRED to SOURCE_BACKLOG (only a 9-row thin
- * datastore verified — require a 2nd procurement-relevant >1k-row resource before
- * adding). `catalog.data.gov` (federal harvester, no active datastore) is dropped.
+ * HERE on CKAN. `data.ok.gov` deferral LIFTED 2026-09-21: Vendor Payments FY2019 Q1
+ * (resource_id cc443616-15eb-4a1f-8d87-93e5711ac43c, 286,185 rows exact,
+ * `total_was_estimated:false`). FY2011/FY2017/FY2018/FY2019 each have 4 quarterly
+ * resources; one fiscal year = 4 calls. NOT bids or awards — vendor PAYMENTS.
+ * `catalog.data.gov` (federal harvester, no active datastore) is dropped.
  * Adding a host later = a CKAN_HOSTS SOURCE edit + a live `datastore_search?
  * limit=1` verification + an ownership note + a test-fixture note — NEVER a free
  * runtime param.
@@ -104,8 +106,19 @@ export { num };
 // resource_id={uuid}&limit=1` when touching this list.
 export const CKAN_HOSTS = [
     // State of California (CDT/GovOps) — Statewide Purchase Order Data 2012–2015,
-    // resource_id bb82edc5-9c78-44e2-8947-68ece26197c5 (~344,504 rows).
+    // resource_id bb82edc5-9c78-44e2-8947-68ece26197c5 (344,504 rows exact,
+    // total_was_estimated:false). DGS-Approved Non-Competitive Bids resource_id
+    // 14932789-485b-481b-910a-dafb40d3471c (480 rows exact). Live Cal eProcure
+    // portal remains WAF-403. Ownership: CDT/GovOps open.data.ca.gov.
+    // Test fixture: resource bb82edc5 rows=344504 exact; resource 14932789 rows=480 exact.
     "data.ca.gov",
+    // State of Oklahoma (OMES/Office of Management & Enterprise Services) —
+    // Vendor Payments FY2019 Q1, resource_id cc443616-15eb-4a1f-8d87-93e5711ac43c
+    // (286,185 rows exact, total_was_estimated:false). FY2011/2017/2018/2019 each
+    // have 4 quarterly resources; one fiscal year = 4 calls. NOT bids or awards —
+    // vendor PAYMENTS. Deferral lifted 2026-09-21. Ownership: data.ok.gov (OMES).
+    // Test fixture: resource cc443616 rows=286185 exact.
+    "data.ok.gov",
     // Commonwealth of Virginia (VITA) — the VA that churned off Socrata. Norfolk
     // SWaM Certified Businesses, resource_id f6804560-bf9e-44a4-92bf-bf3dd7d1fd60.
     "data.virginia.gov",
