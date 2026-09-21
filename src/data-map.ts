@@ -209,13 +209,26 @@ export const DATA_MAP_ENTRIES: DataMapEntry[] = [
   },
 ];
 
-/** Format a row count for display */
+/**
+ * Format a row count for display.
+ *
+ * HONESTY: an EXACT count (approximate:false) is printed in full with thousands
+ * separators — never rounded. The table header promises a "verified row count",
+ * so rounding a measured 1,693,227 to "2M" would overstate it by 18% while still
+ * reading as exact. Only an entry explicitly marked `approximate` is rounded, and
+ * that form always carries a leading `~` so the reader can tell the two apart.
+ */
 function fmtRows(e: DataMapEntry): string {
   if (e.rows === null) return "?";
-  const n = e.rows >= 1000000 ? `${Math.round(e.rows / 1000000)}M` :
-    e.rows >= 1000 ? `${(e.rows / 1000).toFixed(0).replace(/\.0$/, "")}k` :
+  if (!e.approximate) return e.rows.toLocaleString("en-US");
+  // Keep 2 significant figures below 10 units so "~5k" never stands in for a
+  // measured 4,554 (a 10% overstatement); 49,000,000 still renders "~49M".
+  const scale = (v: number, suffix: string) =>
+    `${v < 10 ? v.toFixed(1).replace(/\.0$/, "") : String(Math.round(v))}${suffix}`;
+  const n = e.rows >= 1000000 ? scale(e.rows / 1000000, "M") :
+    e.rows >= 1000 ? scale(e.rows / 1000, "k") :
     String(e.rows);
-  return e.approximate ? `~${n}` : n;
+  return `~${n}`;
 }
 
 /**

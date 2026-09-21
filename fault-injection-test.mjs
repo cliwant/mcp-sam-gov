@@ -25300,6 +25300,35 @@ async function testDataMapResource() {
   ok("76-c MA cthru entry datasetId=pegc-naaa — change the id ⇒ RED",
     maEntry?.keyArgs?.includes("pegc-naaa") ?? false, maEntry?.keyArgs ?? "(no entry)");
 
+  // (c2) HONESTY of the Rows column. The table header promises a "verified row
+  // count", so an entry measured exactly must render exactly — rounding
+  // 1,693,227 to "2M" reads as exact while overstating by 18%. Only an entry
+  // flagged `approximate` may be rounded, and it must then carry a leading '~'
+  // so a reader can tell a measurement from an estimate.
+  {
+    const table = renderStateTableMarkdown();
+    const cellFor = (needle) => {
+      const line = table.split(String.fromCharCode(10)).find((l) => l.includes(needle));
+      return line ? line.split("|")[4].trim() : null;
+    };
+    for (const e of DATA_MAP_ENTRIES) {
+      if (e.rows === null) continue;
+      const cell = cellFor(e.keyArgs);
+      if (e.approximate) {
+        ok(`76-c2 approximate entry ${e.jurisdiction}/${e.tool} renders with '~' — drop the tilde ⇒ RED`,
+          (cell ?? "").startsWith("~"), `got ${cell}`);
+      } else {
+        ok(`76-c2 exact entry ${e.jurisdiction}/${e.tool} renders the exact count — round it ⇒ RED`,
+          cell === e.rows.toLocaleString("en-US"),
+          `expected ${e.rows.toLocaleString("en-US")}, got ${cell}`);
+      }
+    }
+    // The specific regression this locks: VA must not appear as "2M".
+    const vaCell = cellFor("3c7f1bde");
+    ok("76-c2 VA renders 1,693,227 not a rounded 2M — reinstate rounding ⇒ RED",
+      vaCell === "1,693,227", `got ${vaCell}`);
+  }
+
   // (d) VA ckan entry is present with 3c7f1bde resourceId.
   const vaEntry = DATA_MAP_ENTRIES.find(
     (e) => e.state === "VA" && e.tool === "ckan_query"
