@@ -25349,6 +25349,42 @@ async function testDataMapResource() {
   ok("76-c MA cthru entry datasetId=pegc-naaa — change the id ⇒ RED",
     maEntry?.keyArgs?.includes("pegc-naaa") ?? false, maEntry?.keyArgs ?? "(no entry)");
 
+  // (c1) The `domain` parameter of BOTH socrata tools must name the jurisdiction of
+  // every host whose HOSTNAME DOES NOT reveal it. Measured, not cosmetic: with the
+  // bare 54-value enum, an eval agent read it and answered "no statewide
+  // Massachusetts portal" while cthru.data.socrata.com (~49M MA payment rows) sat in
+  // that very enum. Adding this legend flipped sled-ma-cthru-vendor FAIL -> PASS and
+  // right-tool 2/6 -> 4/6 (haiku, direct mode, 2026-09-21).
+  {
+    const { readFileSync: rfSnap } = await import("node:fs");
+    const snap = JSON.parse(rfSnap("tools-list-snapshot.json", "utf8"));
+    const OPAQUE = [
+      ["cthru.data.socrata.com", "MASSACHUSETTS"],
+      ["atlanta.data.socrata.com", "Atlanta"],
+      ["controllerdata.lacity.org", "Los Angeles"],
+      ["www.dallasopendata.com", "Dallas"],
+      ["data.brla.gov", "Baton Rouge"],
+      ["data.kcmo.org", "Kansas City"],
+      ["data.cstx.gov", "College Station"],
+      ["data.weho.org", "West Hollywood"],
+    ];
+    for (const toolName of ["socrata_query", "socrata_discover_datasets"]) {
+      const tool = snap.find((t) => t.name === toolName);
+      const desc = tool?.inputSchema?.properties?.domain?.description ?? "";
+      ok(`76-c1 ${toolName}.domain has a jurisdiction legend — delete it ⇒ RED`,
+        desc.length > 300, `domain param description is only ${desc.length} chars`);
+      for (const [host, place] of OPAQUE) {
+        ok(`76-c1 ${toolName}.domain maps ${host} to ${place} — drop the mapping ⇒ RED`,
+          desc.includes(host) && desc.includes(place),
+          `host=${desc.includes(host)} place=${desc.includes(place)}`);
+      }
+      // The Denver trap: data.colorado.gov's procurement data is city, not state.
+      ok(`76-c1 ${toolName}.domain warns data.colorado.gov is DENVER not CO state — drop it ⇒ RED`,
+        desc.includes("data.colorado.gov") && /DENVER/i.test(desc),
+        desc.slice(0, 120));
+    }
+  }
+
   // (c2) HONESTY of the Rows column. The table header promises a "verified row
   // count", so an entry measured exactly must render exactly — rounding
   // 1,693,227 to "2M" reads as exact while overstating by 18%. Only an entry
