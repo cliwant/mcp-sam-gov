@@ -722,10 +722,13 @@ export async function discoverDatasets(args: {
   // agent took that zero at face value and told the user no Illinois procurement
   // datasets exist. So a zero is reported as possibly false, with the fix.
   if (returned === 0) {
-    const terms = args.q.trim().split(/\s+/).filter(Boolean);
+    // Only "more than one word?" matters here, so test for it directly rather than
+    // splitting: a raw whitespace split is reserved for disclosure tokenizing
+    // (tokenizeForDisclosure, ADR-0022) and this is not a disclosure.
+    const multiWord = /\S\s+\S/.test(args.q);
     notes.push(
-      terms.length > 1
-        ? `0 matches for a ${terms.length}-word q — likely a FALSE zero, not proof the data is absent: the catalog behaves as if every term must match, and datasets rarely repeat their jurisdiction's name in their title. Put the place in \`domain\` (not in q) and retry with ONE topical term, e.g. 'solicitations', 'bids', 'contract', 'vendor', 'payments', 'purchase'.`
+      multiWord
+        ? `0 matches for a multi-word q — likely a FALSE zero, not proof the data is absent: the catalog behaves as if every term must match, and datasets rarely repeat their jurisdiction's name in their title. Put the place in \`domain\` (not in q) and retry with ONE topical term, e.g. 'solicitations', 'bids', 'contract', 'vendor', 'payments', 'purchase'.`
         : `0 matches for q=${JSON.stringify(args.q)} — this is not proof the data is absent: publishers title the same thing differently. Retry with a synonym ('solicitations', 'bids', 'contract', 'vendor', 'payments', 'purchase') before concluding the portal has none.`,
     );
   }
