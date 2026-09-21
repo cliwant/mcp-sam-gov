@@ -239,7 +239,7 @@ const SOCRATA_DOMAIN_SET = new Set(SOCRATA_DOMAINS);
  *
  *   data.sfgov.org → data.sf.gov   (confirmed 2026-09-21; all paths 301)
  */
-const MIGRATED_SOCRATA_HOSTS = new Map([
+export const MIGRATED_SOCRATA_HOSTS = new Map([
     ["data.sfgov.org", "data.sf.gov"],
 ]);
 const CATALOG_HOST = "api.us.socrata.com";
