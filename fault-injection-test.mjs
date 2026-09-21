@@ -13722,6 +13722,30 @@ async function testBonfireHonesty() {
 
   // ── seed integrity + num parity. ──
   ok("45BF seed directory is non-empty, all slugs charclass-valid, all .gov-adjacent US states", BONFIRE_ORGS.length > 150 && BONFIRE_ORGS.every((o) => /^[a-z0-9-]{1,64}$/.test(o.org) && o.name && o.state), JSON.stringify({ n: BONFIRE_ORGS.length, bad: BONFIRE_ORGS.filter((o) => !/^[a-z0-9-]+$/.test(o.org)).map((o) => o.org).slice(0, 3) }));
+  // Depth seeds (loop, 2026-09-21): 9 new orgs bring total from 186 to 195.
+  // NON-VACUOUS assertions:
+  //   (a) count: BONFIRE_ORGS.length >= 195 — remove any new entry ⇒ RED.
+  //   (b) slug identity traps: pcc=OR, dps=OH, maricopa=AZ (slug traps documented in source).
+  //       Mutating the state tag or removing the entry ⇒ RED (a user asking for OR/OH/AZ orgs gets wrong results).
+  //   (c) calwater must NOT be present (private investor-owned utility, out of scope — add it ⇒ RED).
+  ok("45BF DEPTH seed count ≥195 (186 + 9 new depth orgs; remove any new entry ⇒ RED)", BONFIRE_ORGS.length >= 195, JSON.stringify({ actual: BONFIRE_ORGS.length }));
+  ok("45BF DEPTH slug-trap pcc=Portland Community College OR (NOT Pima CC AZ — wrong state ⇒ RED = wrong entity in OR filter)", (() => {
+    const pcc = BONFIRE_ORGS.find((o) => o.org === "pcc");
+    return pcc !== undefined && pcc.state === "OR" && pcc.name === "Portland Community College";
+  })(), JSON.stringify(BONFIRE_ORGS.find((o) => o.org === "pcc")));
+  ok("45BF DEPTH slug-trap dps=Dayton Public Schools OH (NOT Denver PS CO — wrong state ⇒ RED = wrong entity in OH filter)", (() => {
+    const dps = BONFIRE_ORGS.find((o) => o.org === "dps");
+    return dps !== undefined && dps.state === "OH" && dps.name === "Dayton Public Schools";
+  })(), JSON.stringify(BONFIRE_ORGS.find((o) => o.org === "dps")));
+  ok("45BF DEPTH slug-trap maricopa=Maricopa County Community Colleges AZ (NOT Maricopa County govt — wrong name ⇒ RED = agent misidentifies entity)", (() => {
+    const m = BONFIRE_ORGS.find((o) => o.org === "maricopa");
+    return m !== undefined && m.state === "AZ" && m.name === "Maricopa County Community Colleges";
+  })(), JSON.stringify(BONFIRE_ORGS.find((o) => o.org === "maricopa")));
+  ok("45BF DEPTH calwater NOT in seed (private investor-owned utility Cal Water Group/NYSE:CWT, out of scope — add it ⇒ RED = scope creep)", !BONFIRE_ORGS.some((o) => o.org === "calwater"), JSON.stringify({ found: BONFIRE_ORGS.filter((o) => o.org === "calwater") }));
+  ok("45BF DEPTH montcopa=Montgomery County PA (DEPTH gap rank 59 — remove ⇒ RED = gap unclosed)", (() => {
+    const m = BONFIRE_ORGS.find((o) => o.org === "montcopa");
+    return m !== undefined && m.state === "PA";
+  })(), JSON.stringify(BONFIRE_ORGS.find((o) => o.org === "montcopa")));
   eq("45BF num('48') ⇒ 48", bonfireNum("48"), 48);
   ok("45BF bonfire.num === coerce.num (one shared audited impl)", bonfireNum === coerceNum, "bonfire.num diverged from coerce.num");
 }
@@ -13809,13 +13833,35 @@ async function testArcgisFeatureHonesty() {
   });
 
   // ── num parity. ──
-  ok("45AR services allowlist ≥26 + every base is https on a curated ArcGIS host (maps2.dcgis.dc.gov OR services*.arcgis.com) + has a key (multi-gov incl. state DOTs: Texas/Alaska/Iowa/Oklahoma/N.Dakota DOT + DC/Asheville/Bellevue/Miami-Dade/Suffolk/Mat-Su/Las Vegas/Baltimore/Naperville/Worcester)", ARCGIS_SERVICES.length >= 26 && ARCGIS_SERVICES.every((s) => s.base.startsWith("https://") && s.key && /(^https:\/\/maps2\.dcgis\.dc\.gov\/|^https:\/\/services\d*\.arcgis\.com\/)/.test(s.base)), JSON.stringify(ARCGIS_SERVICES.filter((s) => !/(maps2\.dcgis\.dc\.gov|services\d*\.arcgis\.com)/.test(s.base)).map((s) => s.key)));
+  // Updated for depth seeds: allowlist now includes gis.hennepin.us and gis.charlottenc.gov (county CIP hosts).
+  // The allowed-host set is: maps2.dcgis.dc.gov, services*.arcgis.com, gis.hennepin.us, gis.charlottenc.gov.
+  // Remove any entry from this set ⇒ RED (would open SSRF to unvetted hosts).
+  const ARCGIS_ALLOWED_HOST_RE = /^https:\/\/(maps2\.dcgis\.dc\.gov|services\d*\.arcgis\.com|gis\.hennepin\.us|gis\.charlottenc\.gov)\//;
+  ok("45AR services allowlist ≥29 + every base is https on a curated ArcGIS host (maps2.dcgis.dc.gov OR services*.arcgis.com OR gis.hennepin.us OR gis.charlottenc.gov) + has a key (multi-gov incl. state DOTs + county CIP: Hennepin MN + Charlotte-Mecklenburg NC)", ARCGIS_SERVICES.length >= 29 && ARCGIS_SERVICES.every((s) => s.base.startsWith("https://") && s.key && ARCGIS_ALLOWED_HOST_RE.test(s.base)), JSON.stringify(ARCGIS_SERVICES.filter((s) => !ARCGIS_ALLOWED_HOST_RE.test(s.base)).map((s) => s.key)));
   // ND dark-state closure (loop cycle 74): the 4 NDDOT Flex-Funding AWARD layers must be present, each a distinct FeatureServer layer on the NDDOT org (services1.arcgis.com/EDijJFsQQwgz8X53) — remove/misconfigure any ⇒ RED (ND falls back to dark; a wrong host = SSRF-allowlist breach).
   ok("45AR ND closure: 4 NDDOT Flex-Funding award layers present on services1.arcgis.com/EDijJFsQQwgz8X53 (setaside/partner × road/bridge), distinct layer ids", (() => {
     const nd = ["nddot_flex_setaside_road", "nddot_flex_partner_road", "nddot_flex_setaside_bridge", "nddot_flex_partner_bridge"].map((k) => ARCGIS_SERVICES.find((s) => s.key === k));
     const ids = new Set(nd.map((s) => s && s.base.match(/\/FeatureServer\/(\d+)$/)?.[1]));
     return nd.every((s) => s && /^https:\/\/services1\.arcgis\.com\/EDijJFsQQwgz8X53\/arcgis\/rest\/services\/Flex_Funding_Awarded_WFL1\/FeatureServer\/\d+$/.test(s.base)) && ids.size === 4;
   })(), JSON.stringify(ARCGIS_SERVICES.filter((s) => s.key.startsWith("nddot_")).map((s) => s.key)));
+  // Depth seeds (loop, 2026-09-21): Hennepin County MN + Charlotte-Mecklenburg NC county CIP pipeline layers.
+  // NON-VACUOUS: the note must contain "CAPITAL-PROJECT PIPELINE" (drop that phrase ⇒ RED = an agent could present rows as open bids).
+  // The host assertion catches a wrong host slipping in (gis.hennepin.us → any other host ⇒ RED = SSRF).
+  ok("45AR DEPTH hennepin_transportation_cip: present on gis.hennepin.us, note says CAPITAL-PROJECT PIPELINE (not a solicitation register — drop phrase ⇒ RED)", (() => {
+    const svc = ARCGIS_SERVICES.find((s) => s.key === "hennepin_transportation_cip");
+    return svc !== undefined
+      && svc.base.startsWith("https://gis.hennepin.us/")
+      && svc.note.includes("CAPITAL-PROJECT PIPELINE, NOT a solicitation or award register");
+  })(), JSON.stringify({ found: !!ARCGIS_SERVICES.find((s) => s.key === "hennepin_transportation_cip") }));
+  ok("45AR DEPTH charlotte_mecklenburg_cip: present on gis.charlottenc.gov, note says CAPITAL-PROJECT PIPELINE (not a solicitation register — drop phrase ⇒ RED)", (() => {
+    const svc = ARCGIS_SERVICES.find((s) => s.key === "charlotte_mecklenburg_cip");
+    return svc !== undefined
+      && svc.base.startsWith("https://gis.charlottenc.gov/")
+      && svc.note.includes("CAPITAL-PROJECT PIPELINE, NOT a solicitation or award register");
+  })(), JSON.stringify({ found: !!ARCGIS_SERVICES.find((s) => s.key === "charlotte_mecklenburg_cip") }));
+  // Non-allowlisted service keys must still ⇒ invalid_input (SSRF gate unchanged with new hosts).
+  ok("45AR DEPTH: 'hennepin_transportation_cip' IS in the Zod service enum (depth seed wired)", ARCGIS_SERVICES.some((s) => s.key === "hennepin_transportation_cip"), "key missing from ARCGIS_SERVICES");
+  ok("45AR DEPTH: 'charlotte_mecklenburg_cip' IS in the Zod service enum (depth seed wired)", ARCGIS_SERVICES.some((s) => s.key === "charlotte_mecklenburg_cip"), "key missing from ARCGIS_SERVICES");
   eq("45AR num('25104') ⇒ 25104", arcfeatNum("25104"), 25104);
   ok("45AR arcgis-feature.num === coerce.num (one shared audited impl)", arcfeatNum === coerceNum, "arcgis-feature.num diverged from coerce.num");
 }
