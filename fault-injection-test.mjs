@@ -2458,8 +2458,29 @@ async function testDriftCanaryClassification() {
   section("drift-canary: classifyStatus() — status → class mapping");
 
   // Import the pure classification functions from the canary (no network calls)
-  const { classifyStatus, classifyRowDrift, isWafChallengePage, THRESHOLDS } =
+  const { classifyStatus, classifyRowDrift, isWafChallengePage, THRESHOLDS, isKnownMigration } =
     await import("./drift-canary.mjs");
+
+  // Known migrations: a host deliberately KEPT allowlisted after it moved (so the
+  // adapter can return a helpful non-retryable error) must not paint the weekly run
+  // red forever — an always-red canary is ignored. But only while it still points
+  // where we recorded: a redirect anywhere else is a fresh regression.
+  {
+    const migrated = new Map([["data.sfgov.org", "data.sf.gov"]]);
+    eq("isKnownMigration: sfgov -> data.sf.gov is the recorded move — drop the check ⇒ RED",
+      isKnownMigration("data.sfgov.org", "https://data.sf.gov/api/catalog/v1?q=test", migrated), true);
+    eq("isKnownMigration: relative Location resolves against the host — mishandle it ⇒ RED",
+      isKnownMigration("data.sfgov.org", "/api/catalog/v1", migrated), false);
+    eq("isKnownMigration: sfgov -> SOMEWHERE ELSE is a fresh regression, not known — accept any target ⇒ RED",
+      isKnownMigration("data.sfgov.org", "https://evil.example.com/", migrated), false);
+    eq("isKnownMigration: an unlisted host's 301 is never excused — excuse all 301s ⇒ RED",
+      isKnownMigration("data.ny.gov", "https://data.sf.gov/", migrated), false);
+    eq("isKnownMigration: no Location header is never excused",
+      isKnownMigration("data.sfgov.org", null, migrated), false);
+    const { MIGRATED_SOCRATA_HOSTS: shipped } = await import("./dist/socrata.js");
+    eq("MIGRATED_SOCRATA_HOSTS is exported so the canary reads the SAME map the adapter uses — un-export it ⇒ RED",
+      shipped instanceof Map && shipped.get("data.sfgov.org"), "data.sf.gov");
+  }
 
   // 200 OK
   eq("classifyStatus(200) = ok — change return ⇒ RED", classifyStatus(200), "ok");

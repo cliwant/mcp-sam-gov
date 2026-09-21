@@ -99,6 +99,29 @@ export function isWafChallengePage(body) {
  * @param {number} measured   rows actually returned by the live API
  * @returns {'ok'|'collapse'|'growth'}
  */
+/**
+ * A host we KEEP on the allowlist after it permanently moved, so a request reaches
+ * the adapter's migration handler (which returns a non-retryable error naming the
+ * replacement) instead of a generic "not allowlisted". Its 301 is therefore EXPECTED
+ * and must not paint the weekly run red forever — a canary that is always red gets
+ * ignored, which is worse than no canary. It is only "known-migrated" if it still
+ * points where we recorded; a redirect anywhere else is a fresh regression.
+ *
+ * @param {string} host
+ * @param {string|null} location  the Location header of the 3xx
+ * @param {ReadonlyMap<string,string>} migrated  host -> recorded replacement host
+ * @returns {boolean}
+ */
+export function isKnownMigration(host, location, migrated) {
+  const target = migrated.get(host);
+  if (!target || !location) return false;
+  try {
+    return new URL(location, `https://${host}/`).hostname === target;
+  } catch {
+    return false;
+  }
+}
+
 export function classifyRowDrift(recorded, measured) {
   const ratio = measured / recorded;
   if (ratio < THRESHOLDS.COLLAPSE_RATIO) return "collapse";
@@ -109,7 +132,7 @@ export function classifyRowDrift(recorded, measured) {
 // ---------------------------------------------------------------------------
 // Import allowlists from BUILT dist/ (exactly what ships)
 // ---------------------------------------------------------------------------
-const { SOCRATA_DOMAINS } = await import("./dist/socrata.js");
+const { SOCRATA_DOMAINS, MIGRATED_SOCRATA_HOSTS } = await import("./dist/socrata.js");
 const { CKAN_HOSTS } = await import("./dist/ckan.js");
 const { OPEN_CHECKBOOK_PORTALS } = await import("./dist/open-checkbook.js");
 const { ARCGIS_SERVICES } = await import("./dist/arcgis-feature.js");
@@ -183,6 +206,9 @@ function buildSocrataTask(domain) {
   return async () => {
     const url = `https://${domain}/api/catalog/v1?q=test&limit=1`;
     const r = await probe(url);
+    if (r.cls === "redirect" && isKnownMigration(domain, r.location, MIGRATED_SOCRATA_HOSTS)) {
+      return { rail: "socrata", id: domain, url, ...r, cls: "known-migrated" };
+    }
     return { rail: "socrata", id: domain, url, ...r };
   };
 }
@@ -392,7 +418,7 @@ for (const entry of DATA_MAP_ENTRIES) {
 // ---------------------------------------------------------------------------
 // Tally
 // ---------------------------------------------------------------------------
-const ALL_CLASSES = ["ok", "redirect", "not-found", "blocked", "server-error", "timeout", "dns"];
+const ALL_CLASSES = ["ok", "known-migrated", "redirect", "not-found", "blocked", "server-error", "timeout", "dns"];
 const REGRESSION_CLASSES = new Set(["redirect", "not-found", "dns"]);
 const TRANSIENT_CLASSES  = new Set(["blocked", "timeout", "server-error"]);
 const DM_REGRESSION_CLASSES = new Set(["collapse"]);
