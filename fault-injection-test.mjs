@@ -25446,28 +25446,19 @@ async function testDataMapResource() {
   } catch { /* file may not exist in some test environments */ }
   if (skillMd) {
     // Each of these ids/hosts must appear in BOTH skill.md AND the data-map entries.
-    const anchors = [
-      { id: "pegc-naaa", label: "MA CTHRU datasetId" },
-      { id: "ubnu-tqu7", label: "NJ datasetId" },
-      { id: "ehig-g5x3", label: "NY datasetId" },
-      { id: "s8d5-pj78", label: "WA datasetId" },
-      { id: "3c7f1bde", label: "VA resourceId prefix" },
-      { id: "cthru.data.socrata.com", label: "MA CTHRU host" },
-      { id: "qh8x-rm8r", label: "TX TxDOT lettings datasetId" },
-      { id: "w64c-ndf7", label: "TX DIR archive datasetId" },
-      // New states verified 2026-09-21
-      { id: "pgna-cxjh", label: "MD eMMA FY2018 exemplar datasetId" },
-      { id: "qkjf-rv4t", label: "MD eMMA FY2017 datasetId" },
-      { id: "opendata.maryland.gov", label: "MD eMMA host" },
-      { id: "qyug-f2km", label: "OR OregonBuys datasetId" },
-      { id: "6e9e-sfc4", label: "OR ORPIN Contracts Issued datasetId" },
-      { id: "data.oregon.gov", label: "OR OregonBuys host" },
-      { id: "8ewu-igdm", label: "VT Purchase Orders datasetId" },
-      { id: "data.vermont.gov", label: "VT host" },
-      { id: "66zf-qjdd", label: "Denver Procurement Transactions datasetId" },
-      { id: "wnau-xrqi", label: "Denver Checkbook datasetId" },
-      { id: "data.colorado.gov", label: "CO/Denver host" },
-    ];
+    // DERIVED, not hand-listed. A hand-maintained anchor list let PR #295 add three
+    // data-map entries while SKILL.md kept none of them — the table silently drifted
+    // from its own source of truth, which is the exact failure src/data-map.ts exists
+    // to prevent. Deriving the anchors from DATA_MAP_ENTRIES makes forgetting SKILL.md
+    // a test failure instead of a silent omission.
+    const anchors = [];
+    for (const e of DATA_MAP_ENTRIES) {
+      // Every entry's dataset/resource id and its host must both appear in SKILL.md.
+      const ids = (e.keyArgs.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9]{4}-[a-z0-9]{4}/g) ?? []);
+      const hosts = (e.keyArgs.match(/(?:domain|host)=([a-z0-9.\-]+)/g) ?? []).map((h) => h.split("=")[1]);
+      for (const id of ids) anchors.push({ id, label: `${e.jurisdiction} ${e.dataLabel} id` });
+      for (const h of hosts) anchors.push({ id: h, label: `${e.jurisdiction} host` });
+    }
     for (const { id, label } of anchors) {
       const inSkill = skillMd.includes(id);
       const inMap = DATA_MAP_ENTRIES.some(
