@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`courtlistener_search_opinions`: new `party` parameter** — builds `caseName:"…"` fielded query so a bare company name finds actual-party cases (~327 for "Lockheed Martin") instead of text-mention results (~5,954 bare). Query param description updated to explain the difference. Fixes: vendor vetting missed actual-party opinions (user-eval 2026-09-22).
+- **`courtlistener_search_dockets` (new tool)** — RECAP dockets (`type=r`) via CourtListener for FCA / False Claims Act / qui tam matters that rarely produce published opinions and were previously invisible. `suitNature:"…"` is a real filterable field on dockets (not folded into `q` like opinions `natureOfSuit`). Returns `{ dockets:[{ caseName, caseNameFull, court, courtId, dateFiled, dateTerminated, docketNumber, natureOfSuit, cause, assignedTo, jurisdictionType, url }] }`. `dateTerminated` is null when case is still open (never ""). `url` is the full `https://www.courtlistener.com/…` docket page URL. Provenance note updated: docket = case record; outcome/settlement not in it — read docket page or DOJ for that. 152 → 153 tools.
+
 ## [1.16.0] - 2026-09-22
 
 ### Added

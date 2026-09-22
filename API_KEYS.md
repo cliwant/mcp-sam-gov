@@ -32,7 +32,7 @@ Checklist:
 | `SOCRATA_APP_TOKEN` | Socrata (state/city open-data portals) | [https://evergreen.data.socrata.com/signup](https://evergreen.data.socrata.com/signup) | higher Socrata throttling limits |
 | `LDA_API_KEY` | US Senate LDA lobbying (lda_search_filings) | [https://lda.senate.gov/api/register/](https://lda.senate.gov/api/register/) | higher LDA API rate limits (anonymous access already works without it) |
 | `OPENFDA_API_KEY` | openFDA enforcement (openfda_enforcement) | [https://open.fda.gov/apis/authentication/](https://open.fda.gov/apis/authentication/) | higher openFDA rate limits (keyless works without it — ~1000/day) |
-| `COURTLISTENER_API_TOKEN` | CourtListener federal court opinions (courtlistener_search_opinions) | [https://www.courtlistener.com/help/api/rest/](https://www.courtlistener.com/help/api/rest/) | higher CourtListener rate limits (anonymous search works without it) |
+| `COURTLISTENER_API_TOKEN` | CourtListener federal court opinions (courtlistener_search_opinions); CourtListener RECAP dockets (courtlistener_search_dockets) | [https://www.courtlistener.com/help/api/rest/](https://www.courtlistener.com/help/api/rest/) | higher CourtListener rate limits (anonymous search works without it) |
 
 Checklist:
 - [ ] `DATA_GOV_API_KEY` — https://api.data.gov/signup/

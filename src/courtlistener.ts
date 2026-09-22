@@ -207,7 +207,8 @@ export function extractNextCursor(next: unknown, label: string): string | null {
 
 // ─── Tool: courtlistener_search_opinions ──────────────────────────
 export type CourtlistenerSearchOpinionsArgs = {
-  query?: string; // → q
+  query?: string; // → q (full-text; bare company name → text mentions, NOT actual-party)
+  party?: string; // → caseName:"…" fielded query; finds actual-party cases (~327 for "Lockheed Martin" vs ~5,954 bare)
   court?: string; // a court id (e.g. uscfc|cafc|scotus); ^[a-z0-9]+$
   dateFiledAfter?: string; // → filed_after; ^\d{4}-\d{2}-\d{2}$
   dateFiledBefore?: string; // → filed_before; ^\d{4}-\d{2}-\d{2}$
@@ -280,7 +281,12 @@ export async function searchOpinions(
   const filtersApplied: string[] = [];
   // natureOfSuit has no verified dedicated filter on the v4 opinions search, so it
   // is folded into the `q` full-text query (disclosed via NATURE_OF_SUIT_QUERY_NOTE).
+  // `party` builds a caseName:"…" fielded query (actual-party match, not text mention).
   const qParts: string[] = [];
+  if (args.party !== undefined && args.party !== "") {
+    qParts.push(`caseName:"${args.party}"`);
+    filtersApplied.push("party");
+  }
   if (args.query !== undefined && args.query !== "") {
     qParts.push(args.query);
     filtersApplied.push("query");
@@ -462,4 +468,241 @@ function summarizeDrfError(body: unknown): string | null {
     if (msg) parts.push(`${k}: ${msg}`);
   }
   return parts.length > 0 ? parts.join(" | ") : null;
+}
+
+// ─── Tool: courtlistener_search_dockets ───────────────────────────
+// RECAP dockets (type=r) — the CASE-RECORD lane. FCA/qui tam matters are DOCKETS:
+// they rarely produce a published opinion (settlements close out of court) so they
+// are invisible to type=o. suitNature:"…" is a REAL fielded filter on dockets (not
+// folded into q like the opinions natureOfSuit). Each docket row carries parties,
+// filing date, status, assignee, and the docket page URL — the case record the judge
+// wanted. `dateTerminated` is null when the case is still open (never "").
+// Same SSRF / auth / cursor / provenance machinery as searchOpinions.
+
+export type CourtlistenerDocket = {
+  caseName: string | null;
+  caseNameFull: string | null;
+  court: string | null; // court_citation_string / court
+  courtId: string | null; // court_id (e.g. "gand", "flmd")
+  dateFiled: string | null;
+  dateTerminated: string | null; // null when still open — NEVER ""
+  docketNumber: string | null;
+  natureOfSuit: string | null; // from suitNature — the FCA filter field
+  cause: string | null;
+  assignedTo: string | null;
+  jurisdictionType: string | null;
+  url: string | null; // full https://www.courtlistener.com/... docket URL
+};
+
+export type CourtlistenerSearchDocketsArgs = {
+  party?: string; // → caseName:"…" fielded query
+  query?: string; // additional free-text → folded into q alongside caseName
+  natureOfSuit?: string; // → suitNature:"…" REAL fielded filter on dockets
+  court?: string; // court id; ^[a-z0-9]+$
+  dateFiledAfter?: string; // → filed_after; ^\d{4}-\d{2}-\d{2}$
+  dateFiledBefore?: string; // → filed_before; ^\d{4}-\d{2}-\d{2}$
+  order?: string; // default "dateFiled desc"
+  cursor?: string; // opaque continuation
+};
+
+const DOCKET_PROVENANCE_NOTE =
+  "Data = US FEDERAL COURT PUBLIC RECORDS (dockets) served by CourtListener (Free Law Project, a non-profit) — NOT a .gov API. CourtListener republishes these records keyless; the .gov primary source (PACER) is PAYWALLED. Docket = case record (parties, filing, status); outcome/settlement is NOT in the docket record — read the docket page or DOJ press releases for that detail.";
+
+const DOCKET_SUIT_NATURE_NOTE =
+  "natureOfSuit was applied as a fielded suitNature:\"…\" query — this IS a real filterable field on dockets (unlike opinions where it is folded into free-text q).";
+
+/** Map ONE RECAP docket result row → curated CourtlistenerDocket shape. */
+function mapDocket(raw: unknown): CourtlistenerDocket {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  return {
+    caseName: str(o.caseName) ?? str(o.case_name),
+    caseNameFull: str(o.caseNameFull) ?? str(o.case_name_full),
+    court: str(o.court_citation_string) ?? str(o.court),
+    courtId: str(o.court_id),
+    dateFiled: str(o.dateFiled) ?? str(o.date_filed),
+    // null when open — NEVER coerce undefined/"" to ""
+    dateTerminated: (() => {
+      const raw2 = o.dateTerminated ?? o.date_terminated;
+      const s = str(raw2);
+      return s === "" ? null : s;
+    })(),
+    docketNumber: str(o.docketNumber) ?? str(o.docket_number),
+    natureOfSuit: str(o.suitNature) ?? str(o.suit_nature),
+    cause: str(o.cause),
+    assignedTo: str(o.assignedTo) ?? str(o.assigned_to_str),
+    jurisdictionType: str(o.jurisdictionType) ?? str(o.jurisdiction_type),
+    url: resolveAbsoluteUrl(o.docket_absolute_url ?? o.absolute_url),
+  };
+}
+
+/**
+ * Search RECAP dockets via CourtListener (`/api/rest/v4/search/`, type=r).
+ * FCA/qui tam matters are DOCKETS — they rarely produce published opinions and are
+ * invisible to courtlistener_search_opinions (type=o). suitNature:"…" is a REAL
+ * fielded filter on dockets. KEYLESS / CURSOR / provenance same as searchOpinions.
+ */
+export async function searchDockets(
+  args: CourtlistenerSearchDocketsArgs,
+): Promise<MetaBundle> {
+  const label = COURTLISTENER_SEARCH_LABEL;
+
+  // ── Validate (SSRF + honesty). Same guards as searchOpinions. ──
+  if (args.court !== undefined && !COURT_RE.test(args.court)) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      retryable: false,
+      message: `Invalid court ${JSON.stringify(args.court)} — expected a CourtListener court id (lowercase alphanumerics, ^[a-z0-9]+$), e.g. "gand", "flmd", "cafc".`,
+      upstreamEndpoint: label,
+    });
+  }
+  if (args.dateFiledAfter !== undefined && !DATE_RE.test(args.dateFiledAfter)) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      retryable: false,
+      message: `Invalid dateFiledAfter ${JSON.stringify(args.dateFiledAfter)} — expected an ISO date (^\\d{4}-\\d{2}-\\d{2}$), e.g. "2020-01-01".`,
+      upstreamEndpoint: label,
+    });
+  }
+  if (args.dateFiledBefore !== undefined && !DATE_RE.test(args.dateFiledBefore)) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      retryable: false,
+      message: `Invalid dateFiledBefore ${JSON.stringify(args.dateFiledBefore)} — expected an ISO date (^\\d{4}-\\d{2}-\\d{2}$), e.g. "2024-12-31".`,
+      upstreamEndpoint: label,
+    });
+  }
+  if (args.cursor !== undefined && !COURTLISTENER_CURSOR_RE.test(args.cursor)) {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      retryable: false,
+      message: `Invalid cursor — must be a ≤8192-char URL-safe token. Pass back the _meta.nextCursor from the previous page.`,
+      upstreamEndpoint: label,
+    });
+  }
+
+  // ── Build query. party → caseName:"…"; natureOfSuit → suitNature:"…" (a REAL
+  //    docket field, NOT folded into q). Both ride URLSearchParams. ──
+  const params = new URLSearchParams();
+  const filtersApplied: string[] = [];
+  const qParts: string[] = [];
+  if (args.party !== undefined && args.party !== "") {
+    qParts.push(`caseName:"${args.party}"`);
+    filtersApplied.push("party");
+  }
+  if (args.query !== undefined && args.query !== "") {
+    qParts.push(args.query);
+    filtersApplied.push("query");
+  }
+  if (args.natureOfSuit !== undefined && args.natureOfSuit !== "") {
+    qParts.push(`suitNature:"${args.natureOfSuit}"`);
+    filtersApplied.push("natureOfSuit");
+  }
+  if (qParts.length > 0) params.set("q", qParts.join(" "));
+  if (args.court !== undefined) {
+    params.set("court", args.court);
+    filtersApplied.push("court");
+  }
+  if (args.dateFiledAfter !== undefined) {
+    params.set("filed_after", args.dateFiledAfter);
+    filtersApplied.push("dateFiledAfter");
+  }
+  if (args.dateFiledBefore !== undefined) {
+    params.set("filed_before", args.dateFiledBefore);
+    filtersApplied.push("dateFiledBefore");
+  }
+  params.set("type", "r"); // FIXED — RECAP dockets only
+  params.set("order_by", args.order && args.order !== "" ? args.order : DEFAULT_ORDER);
+  if (args.cursor !== undefined) {
+    params.set("cursor", args.cursor);
+    filtersApplied.push("cursor");
+  }
+
+  const url = `https://${COURTLISTENER_HOST}${COURTLISTENER_SEARCH_PATH}?${params.toString()}`;
+  const built = new URL(url);
+  if (built.hostname !== COURTLISTENER_HOST || built.protocol !== "https:") {
+    throw new ToolErrorCarrier({
+      kind: "invalid_input",
+      retryable: false,
+      message: `Constructed CourtListener URL host ${JSON.stringify(built.hostname)} is not ${COURTLISTENER_HOST} over https — refusing to fetch (SSRF safety).`,
+      upstreamEndpoint: label,
+    });
+  }
+
+  const headers = courtlistenerAuthHeader();
+  let body: unknown;
+  try {
+    body = await getJson<unknown>(url, {
+      label,
+      headers,
+      redirect: "error",
+    });
+  } catch (e) {
+    if (e instanceof SyntaxError) {
+      throw driftError(
+        label,
+        "CourtListener /api/rest/v4/search (type=r) returned a non-JSON body at HTTP 200 — schema drift.",
+      );
+    }
+    if (e instanceof ToolErrorCarrier && e.toolError.upstreamStatus === 400) {
+      const apiMsg = await readCourtlistenerErrorMessage(url, headers);
+      throw new ToolErrorCarrier({
+        kind: "invalid_input",
+        retryable: false,
+        message: apiMsg
+          ? `CourtListener rejected the docket request (HTTP 400): ${apiMsg}. Check the filter parameters.`
+          : "CourtListener rejected the docket request (HTTP 400) — check the filter parameters.",
+        upstreamStatus: 400,
+        upstreamEndpoint: label,
+      });
+    }
+    throw e;
+  }
+
+  const b = (body ?? {}) as { results?: unknown; count?: unknown; next?: unknown };
+  if (!Array.isArray(b.results)) {
+    throw driftError(
+      label,
+      "CourtListener /api/rest/v4/search (type=r) shape drift — `results` must be an array.",
+    );
+  }
+  const rawCount = b.count;
+  const countIsNumber = typeof rawCount === "number" && Number.isFinite(rawCount);
+  if (!countIsNumber && rawCount !== null && rawCount !== undefined) {
+    throw driftError(
+      label,
+      "CourtListener /api/rest/v4/search (type=r) shape drift — `count` must be a number or null.",
+    );
+  }
+
+  const dockets = (b.results as unknown[]).map(mapDocket);
+  const returned = dockets.length;
+  const totalAvailable = countIsNumber ? (rawCount as number) : null;
+  const nextCursor = extractNextCursor(b.next, label);
+  const hasMore = nextCursor !== null;
+
+  const notes: string[] = [DOCKET_PROVENANCE_NOTE, COUNT_TOTAL_NOTE];
+  if (!countIsNumber) notes.push(DEEP_PAGE_NO_COUNT_NOTE);
+  if (args.natureOfSuit !== undefined && args.natureOfSuit !== "") {
+    notes.push(DOCKET_SUIT_NATURE_NOTE);
+  }
+  notes.push(KEYLESS_NOTE);
+  notes.push(
+    `CourtListener token: ${courtlistenerTokenPresent() ? "present (Authorization: Token … sent; value never logged)" : "absent (keyless; a free COURTLISTENER_API_TOKEN lifts the rate limit)"}.`,
+  );
+
+  return withMeta(
+    { dockets },
+    {
+      source: `${COURTLISTENER_HOST} /api/rest/v4/search (CourtListener (Free Law Project) — US federal court RECAP dockets; PACER (.gov) is paywalled; keyless)`,
+      keylessMode: true,
+      returned,
+      totalAvailable,
+      filtersApplied,
+      filtersDropped: [],
+      fieldsUnavailable: [],
+      pagination: { offset: null, limit: returned, hasMore, nextOffset: null },
+      nextCursor,
+      notes,
+    } satisfies Partial<ResponseMeta>,
+  );
 }

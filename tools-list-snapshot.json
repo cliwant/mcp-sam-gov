@@ -1242,14 +1242,64 @@
     }
   },
   {
-    "name": "courtlistener_search_opinions",
-    "description": "Search US federal court opinions via CourtListener (www.courtlistener.com/api/rest/v4/search, type=o). ★PROVENANCE: DATA is US federal court PUBLIC RECORDS; the API is CourtListener (Free Law Project, NON-PROFIT) — NOT a .gov API; the .gov primary source (PACER) is PAYWALLED. KEYLESS (optional free COURTLISTENER_API_TOKEN only raises the rate limit). Filters (all optional): `query` (full-text → q), `court` (^[a-z0-9]+$ — e.g. 'uscfc' US Court of Federal Claims, 'cafc' Federal Circuit, 'scotus'), `dateFiledAfter`/`dateFiledBefore` (ISO YYYY-MM-DD), `natureOfSuit` (folded into q — no verified dedicated filter, disclosed in notes), `cursor` (opaque continuation), `order` (default 'dateFiled desc'). Returns { opinions:[{ caseName, court, courtId, dateFiled, docketNumber, natureOfSuit, status, judge, citation, absoluteUrl }] } + honest _meta. HONESTY: totalAvailable is the API's REAL `count` (total match count) — NOT rows on this page. Pagination is OPAQUE CURSOR (pass _meta.nextCursor back as `cursor`; nextCursor:null/hasMore:false = last page). CourtListener v4 stops counting on deep cursor pages (count:null) → totalAvailable:null DISCLOSED, never faked as results.length. dateFiled is a date STRING; citation → flattened to string/string[]; judge/natureOfSuit/docketNumber null when absent; absoluteUrl is the full CL link. Genuine no-match → honest empty; 400 → invalid_input; 429 → rate_limited (Retry-After honored); 5xx/timeout THROWS; 200 non-JSON/count not number or null → schema_drift; off-host `next` REFUSED (SSRF). Token rides ONLY in the Authorization: Token header.",
+    "name": "courtlistener_search_dockets",
+    "description": "Search US federal court RECAP DOCKETS via CourtListener (www.courtlistener.com/api/rest/v4/search, type=r). ★USE THIS for FCA / False Claims Act / qui tam matters — these are DOCKETS, not opinions; settlements rarely produce published opinions. ★PROVENANCE: DATA is US federal court PUBLIC RECORDS; the API is CourtListener (Free Law Project, NON-PROFIT) — NOT a .gov API; the .gov primary source (PACER) is PAYWALLED. KEYLESS. Key filters: `party` → caseName:\"…\" FIELDED (actual-party cases, e.g. 'Lockheed Martin' → ~9 FCA dockets). `natureOfSuit` → suitNature:\"…\" REAL DOCKET FIELD (e.g. 'False Claims' to find FCA/qui tam). `query` (free-text AND-ed with caseName when party also given). `court` (^[a-z0-9]+$). `dateFiledAfter`/`dateFiledBefore` (ISO). `cursor`. `order` (default 'dateFiled desc'). Returns { dockets:[{ caseName, caseNameFull, court, courtId, dateFiled, dateTerminated, docketNumber, natureOfSuit, cause, assignedTo, jurisdictionType, url }] } + honest _meta. dateTerminated is null when case still open (NEVER \"\"). url is the full https://www.courtlistener.com/... docket page URL. Docket = case record; outcome/settlement NOT in it — read docket page or DOJ for that. totalAvailable is the API REAL count; CURSOR pagination. Token rides ONLY Authorization header.",
     "inputSchema": {
       "type": "object",
       "properties": {
+        "party": {
+          "type": "string",
+          "description": "Company or person name to match as an ACTUAL PARTY — builds caseName:\"…\" fielded query. Use for vendor/contractor due-diligence (FCA, False Claims Act, qui tam). E.g. 'Lockheed Martin' → ~9 FCA dockets."
+        },
         "query": {
           "type": "string",
-          "description": "Full-text query (maps to q), e.g. 'bid protest' or a party name. Matches across the opinion text/metadata."
+          "description": "Additional free-text keywords (combined with caseName:\"…\" when `party` is given). E.g. 'qui tam' or 'whistleblower'."
+        },
+        "natureOfSuit": {
+          "type": "string",
+          "description": "Nature-of-suit filter — builds suitNature:\"…\" fielded query (THIS IS A REAL DOCKET FIELD, not folded into q). E.g. 'False Claims' to find FCA/qui tam dockets. Disclosed in _meta.notes."
+        },
+        "court": {
+          "type": "string",
+          "description": "CourtListener court id (lowercase alphanumerics ^[a-z0-9]+$), e.g. 'gand' (N.D. Ga.), 'flmd' (M.D. Fla.), 'cafc'. Filters to one court."
+        },
+        "dateFiledAfter": {
+          "type": "string",
+          "description": "Only dockets filed on/after this ISO date (→ filed_after), e.g. '2015-01-01'."
+        },
+        "dateFiledBefore": {
+          "type": "string",
+          "description": "Only dockets filed on/before this ISO date (→ filed_before), e.g. '2024-12-31'."
+        },
+        "order": {
+          "type": "string",
+          "description": "Sort order (maps to order_by), default 'dateFiled desc'. E.g. 'dateFiled asc'."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque continuation token — pass back _meta.nextCursor from the previous page."
+        }
+      }
+    },
+    "annotations": {
+      "title": "CourtListener: Search Dockets",
+      "readOnlyHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "courtlistener_search_opinions",
+    "description": "Search US federal court opinions via CourtListener (www.courtlistener.com/api/rest/v4/search, type=o). ★PROVENANCE: DATA is US federal court PUBLIC RECORDS; the API is CourtListener (Free Law Project, NON-PROFIT) — NOT a .gov API; the .gov primary source (PACER) is PAYWALLED. KEYLESS (optional COURTLISTENER_API_TOKEN only raises the rate limit). Filters (all optional): `party` → caseName:\"…\" FIELDED QUERY — finds actual-party cases (~327 for 'Lockheed Martin'); a bare company name in `query` matches text mentions (~5,954). `query` (free-text → q, AND-ed with caseName when party given). `court` (^[a-z0-9]+$ — e.g. 'uscfc','cafc','scotus'). `dateFiledAfter`/`dateFiledBefore` (ISO). `natureOfSuit` (folded into q — no dedicated filter, disclosed). `cursor`. `order` (default 'dateFiled desc'). Returns { opinions:[{ caseName, court, courtId, dateFiled, docketNumber, natureOfSuit, status, judge, citation, absoluteUrl }] } + honest _meta. HONESTY: totalAvailable is the API's REAL count; CURSOR pagination (pass _meta.nextCursor as cursor); count:null on deep pages → totalAvailable:null DISCLOSED. For FCA/qui tam DOCKETS (rarely produce opinions) use courtlistener_search_dockets instead. Token rides ONLY the Authorization header.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "party": {
+          "type": "string",
+          "description": "Company or person name to match as an ACTUAL PARTY — builds caseName:\"…\" fielded query. A bare company name in `query` matches text mentions (~5,954 for 'Lockheed Martin'); `party` finds cases where the company is actually named as a party (~327). Use `party` for vendor/contractor vetting; use `query` for full-text topic search."
+        },
+        "query": {
+          "type": "string",
+          "description": "Additional full-text query (maps to q) — topic keywords such as 'False Claims Act' or 'bid protest'. Combined with caseName:\"…\" when `party` is also given. A bare company name here matches text mentions, not actual-party cases — use `party` for that."
         },
         "court": {
           "type": "string",

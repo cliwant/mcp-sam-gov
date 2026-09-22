@@ -159,6 +159,7 @@ export const KEY_REGISTRY: readonly KeyRegistryEntry[] = [
     envVar: "COURTLISTENER_API_TOKEN",
     sources: [
       "CourtListener federal court opinions (courtlistener_search_opinions)",
+      "CourtListener RECAP dockets (courtlistener_search_dockets)",
     ],
     required: false,
     signupUrl: "https://www.courtlistener.com/help/api/rest/",

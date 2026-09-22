@@ -195,6 +195,7 @@ export const TOOL_TOOLSET_MAP: Readonly<Record<string, ToolsetName>> = {
   echo_facility_report:        "vetting",
   epa_tri_facilities:          "vetting",
   courtlistener_search_opinions: "vetting",
+  courtlistener_search_dockets: "vetting",
   nonprofit_search:            "vetting",
   nonprofit_financials:        "vetting",
   lda_search_filings:          "vetting",
