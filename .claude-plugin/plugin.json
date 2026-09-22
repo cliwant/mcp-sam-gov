@@ -1,7 +1,7 @@
 {
   "name": "sam-gov",
   "description": "Keyless-first MCP server + Skill workflow guide for US federal and state/local (SLED) government contracting, spending, regulation and partner vetting — 152 tools over 54 public data sources (SAM.gov, USAspending, Federal Register, eCFR, Grants.gov and more); 147 tools need no API key, 5 need a free one. Independent project, not affiliated with or endorsed by SAM.gov or the U.S. GSA.",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "author": {
     "name": "Cliwant contributors",
     "url": "https://github.com/cliwant"
