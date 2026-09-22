@@ -1,8 +1,8 @@
 # @cliwant/mcp-sam-gov
 
 > **가장 포괄적인 keyless 우선 연방 데이터 MCP 서버.**
-> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) 외 **54개 데이터 소스, 152개 도구.** keyless 우선 — Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 50개 소스는 키가 필요 없습니다.
-> 152개 도구 중 147개는 API 키·등록·가입이 필요 없습니다. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
+> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) 외 **54개 데이터 소스, 153개 도구.** keyless 우선 — Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 50개 소스는 키가 필요 없습니다.
+> 153개 도구 중 147개는 API 키·등록·가입이 필요 없습니다. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
 >
 > **독립 프로젝트** — SAM.gov, 미국 연방조달청(GSA) 등 어떤 정부 기관과도 제휴 관계가 없으며, 승인이나 후원을 받지 않았습니다.
 
@@ -33,7 +33,7 @@
 | 🏙 **주·지방정부 조달 입찰 (SLED)** | "이 시·카운티 조달 포털에 지금 열려 있는 입찰은? 체크북·낙찰 계약·벤더 지급 내역, 주 교통국(DOT) 입찰·낙찰 대장까지" | OpenGov Procurement (525곳+ 정부), Bonfire, ArcGIS (feature + Hub), Socrata (54개 호스트), Tableau Server 게스트 뷰 1개 (몬태나주), Socrata Open Expenditures 체크북 1개 (사우스다코타주) |
 | 🎓 **grant·데이터셋** | "최근 30일 사이버보안 grant, 연방 오픈 데이터셋 발굴" | Grants.gov, data.gov |
 
-**54개 데이터 소스, 총 152개 도구 — keyless 우선: Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 50개 소스는 키가 필요 없습니다.** (초기 52-도구 빌드 기준 대략 p50 ~0.25s / p95 ~0.8s 측정 — 소스·업스트림 부하에 따라 변동하는 근사치이며 보장값이 아님.)
+**54개 데이터 소스, 총 153개 도구 — keyless 우선: Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 50개 소스는 키가 필요 없습니다.** (초기 52-도구 빌드 기준 대략 p50 ~0.25s / p95 ~0.8s 측정 — 소스·업스트림 부하에 따라 변동하는 근사치이며 보장값이 아님.)
 
 ---
 
@@ -60,7 +60,7 @@ PowerShell, npm 등 필요 없음.
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP 서버 + Claude 가 152개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
+MCP 서버 + Claude 가 153개 도구를 언제 / 어떻게 호출할지 가르치는 [SKILL.md 워크플로 가이드](./skills/sam-gov/SKILL.md) 동시 등록.
 
 ### 🔵 경로 3 — Codex / Cursor / Continue / Gemini 등 수동 설치
 
@@ -194,7 +194,7 @@ npm install --omit=dev
 
 ## 도구셋 선택 (컨텍스트 절약)
 
-기본값은 전체 152개 도구를 로드하며 세션당 약 80k 토큰이 소요됩니다. `MCP_SAM_GOV_TOOLSETS` 환경 변수에 필요한 도구셋 이름을 쉼표로 구분해 지정하면 컨텍스트를 줄일 수 있습니다. 빈 값이나 `all`로 설정하면 전체 도구가 로드됩니다. 사용 가능한 도구셋: `core`(58개, SAM/Grants/USAspending/FAR/eCFR/Federal Register/SBA 등), `sled`(13개, 주·지자체 조달), `vetting`(17개, OFAC/FDIC/FAC/EPA ECHO 등), `disclosure`(8개, SEC EDGAR), `regulatory`(9개, Regulations.gov/Congress/GovInfo), `pricing`(15개, GSA/BLS/Treasury/FRED/DOL 등), `health`(17개, CMS/NIH/NSF/openFDA 등), `safety`(3개, NHTSA/CPSC), `geo`(9개, Census geocode/FEMA/NWS 등), `cyber`(3개, NVD/CISA KEV/NIST 800-53). 로드되지 않은 도구를 호출하면 어느 도구셋에서 활성화할 수 있는지를 알려주는 `tool_not_loaded` 오류가 반환됩니다.
+기본값은 전체 153개 도구를 로드하며 세션당 약 80k 토큰이 소요됩니다. `MCP_SAM_GOV_TOOLSETS` 환경 변수에 필요한 도구셋 이름을 쉼표로 구분해 지정하면 컨텍스트를 줄일 수 있습니다. 빈 값이나 `all`로 설정하면 전체 도구가 로드됩니다. 사용 가능한 도구셋: `core`(58개, SAM/Grants/USAspending/FAR/eCFR/Federal Register/SBA 등), `sled`(13개, 주·지자체 조달), `vetting`(17개, CMS/NIH/NSF/openFDA 등), `safety`(3개, NHTSA/CPSC), `geo`(9개, Census geocode/FEMA/NWS 등), `cyber`(3개, NVD/CISA KEV/NIST 800-53). 로드되지 않은 도구를 호출하면 어느 도구셋에서 활성화할 수 있는지를 알려주는 `tool_not_loaded` 오류가 반환됩니다.
 
 ---
 
@@ -215,15 +215,15 @@ npm은 설치한 사용자에게 새 버전을 알려주지 않으므로, 서버
 
 **자동 제출은 절대 없습니다.** 서버엔 토큰·계정이 없고 링크만 만들며, 열어서 제출하는 건 **사용자**입니다. 프리필 링크에는 툴명·에러종류·서버버전만 담기고 쿼리값은 담기지 않습니다. 공개 레포이니 민감한 내용은 지우고 제출하세요. 직접 열기: [**New issue**](https://github.com/cliwant/mcp-sam-gov/issues/new/choose).
 
-## 도구 카탈로그 (152개)
+## 도구 카탈로그 (153개)
 
-워크플로별 그룹. keyless 우선 — 대부분 키가 필요 없고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트는 무료 키가 필요합니다. 몇몇 다른 소스는 선택적 무료 키를 넣으면 한도가 올라갑니다(위 키 섹션 참고). 전체 per-tool 목록과 입력 schema·정직성 caveat 원문은 [영문 README 의 카탈로그 섹션](./README.md#tool-catalog-152-tools)을 기준으로 하세요.
+워크플로별 그룹. keyless 우선 — 대부분 키가 필요 없고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트는 무료 키가 필요합니다. 몇몇 다른 소스는 선택적 무료 키를 넣으면 한도가 올라갑니다(위 키 섹션 참고). 전체 per-tool 목록과 입력 schema·정직성 caveat 원문은 [영문 README 의 카탈로그 섹션](./README.md#tool-catalog-153-tools)을 기준으로 하세요.
 
 - **입찰 + 솔리시테이션 — SAM.gov + Grants.gov (10)**: `sam_search_opportunities` `sam_search_shaping` `sam_get_opportunity` `sam_fetch_description` `sam_fetch_attachment_text` `sam_attachment_url` `sam_lookup_organization` `sam_lookup_notice_fields` `grants_search` `grants_get_opportunity`
 - **spending·수주·경쟁 — USAspending + FPDS + GAO (31)**: `usas_search_awards` `usas_search_individual_awards` `usas_get_award_detail` `usas_search_awards_by_recipient` `usas_search_subawards` `usas_search_recompetes` `usas_search_expiring_contracts`(deprecated) `usas_analyze_incumbent` `usas_search_teaming_partners` `usas_spending_over_time` `usas_search_agency_spending` `usas_search_subagency_spending` `usas_search_psc_spending` `usas_search_cfda_spending` `usas_search_state_spending` `usas_search_federal_account_spending` `usas_search_recipients` `usas_get_recipient_profile` `usas_get_agency_profile` `usas_get_agency_awards_summary` `usas_get_agency_budget_function` `usas_list_toptier_agencies` `usas_lookup_agency` `usas_autocomplete_naics` `usas_autocomplete_recipient` `usas_naics_hierarchy` `usas_glossary` `usas_list_disaster_codes`(재난긴급자금코드(DEFC) 목록 — COVID-19·IIJA/인프라 등 긴급세출 태그) `usas_disaster_spending`(지정 DEFC의 재난/긴급자금 지출 지역별 분해 — 어느 주/카운티/선거구가 COVID/IIJA 구호금 수령) `fpds_search_awards` `gao_protest_lookup`
 - **파트너·기업 검증 — OFAC · SAM · FAC · FDIC · EPA (15)**: `ofac_screen_entity` `sam_check_exclusions` `sam_integrity_lookup` `fac_search_audits` `fac_get_findings` `fdic_search_institutions` `fdic_institution_financials` `fdic_risk_ratios` `fdic_institution_history` `fdic_branch_deposits` `fdic_bank_failures` `fdic_industry_summary` `echo_search_facilities` `echo_facility_report` `epa_tri_facilities`(EPA Envirofacts TRI 독성물질 배출 시설 — 환경/ESG 검증)
 - **제품 안전·리콜 — openFDA · NHTSA · CPSC (6)**: `openfda_enforcement`(FDA 의약품·의료기기·식품 리콜·집행) `openfda_device_clearances`(FDA 510(k) 의료기기 승인) `openfda_drug_approvals`(openFDA Drugs@FDA 의약품 승인 신청 — 스폰서·승인 제품·제출/승인 이력) `nhtsa_recalls`(NHTSA 차량 리콜) `nhtsa_complaints`(NHTSA 차량 안전 불만) `cpsc_recalls`(CPSC 소비자 제품 리콜)
-- **소송·법원 — CourtListener (1)**: `courtlistener_search_opinions`(미 연방 법원 판례 — 연방청구법원 계약 청구/입찰 이의, 연방순회항소법원; CourtListener/Free Law Project 경유, 명시)
+- **소송·법원 — CourtListener (2)**: `courtlistener_search_opinions`(미 연방 법원 판례; `party` 파라미터로 실제 당사자 사건 검색 — CourtListener/Free Law Project 경유) + `courtlistener_search_dockets`(RECAP 도켓 — FCA/False Claims Act/qui tam 사건용; suitNature 필드 필터; CourtListener 경유)
 - **비영리 벤더 — IRS 990 via ProPublica (2)**: `nonprofit_search`(IRS-990 비영리 검색 by 이름/주/NTEE) `nonprofit_financials`(IRS-990 비영리 재무 by EIN) — ProPublica Nonprofit Explorer 경유(명시)
 - **재무 공시 — SEC EDGAR (8)**: `edgar_lookup_cik` `edgar_company_filings` `edgar_company_facts` `edgar_company_concept` `edgar_xbrl_frames` `edgar_full_text_search` `edgar_filing_index` `edgar_daily_filing_index`
 - **규정·입법 — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (19)**: `fed_register_search_documents` `fed_register_get_document` `fed_register_public_inspection` `fed_register_list_agencies` `regulations_search_dockets` `regulations_search_documents` `regulations_search_comments` `regulations_get_docket` `ecfr_search` `ecfr_get_section`(CFR 조항 하나의 전문을 인용번호로 조회 — 모든 title 대상, FAR/DFARS는 `far_clause_lookup` 권장) `ecfr_list_titles` `far_clause_lookup` `far_search` `far_compliance_matrix` `congress_search_bills` `congress_get_bill` `govinfo_search_packages` `govinfo_get_package` `govinfo_list_collections`
@@ -247,7 +247,7 @@ npm은 설치한 사용자에게 새 버전을 알려주지 않으므로, 서버
 
 이 서버의 원칙은 하나입니다: **그럴듯한 조작보다 정직한 실패.** 아래는 모두 공개 데이터의 *가용성*에 관한 것이며, 어떤 접근 통제도 우회하지 않습니다.
 
-- **Keyless 우선, 다운된 소스는 예외를 *던진다*.** 54개 소스 중 50개(152개 도구 중 147개)는 API 키 없이 동작하고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트만 무료 키가 필요합니다. 소스가 rate-limit·차단·다운되면 도구는 **타입이 지정된 에러**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)를 반환하며, 행을 지어내거나 다운된 서비스를 "결과 0" / "없음"으로 보고하지 않습니다. 진짜 빈 결과와 장애는 항상 구별됩니다.
+- **Keyless 우선, 다운된 소스는 예외를 *던진다*.** 54개 소스 중 50개(153개 도구 중 147개)는 API 키 없이 동작하고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트만 무료 키가 필요합니다. 소스가 rate-limit·차단·다운되면 도구는 **타입이 지정된 에러**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)를 반환하며, 행을 지어내거나 다운된 서비스를 "결과 0" / "없음"으로 보고하지 않습니다. 진짜 빈 결과와 장애는 항상 구별됩니다.
 - **오프라인 스냅샷 (기본 on).** 느리게 바뀌는 참조 데이터(toptier 기관 목록, 상위 NAICS 트리, USAspending 용어집, SBA 규모 기준, 최신 Treasury "Debt to the Penny")는, 라이브 연방 소스가 egress 에서 잠시 도달 불가일 때 서버가 기본적으로 `raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots` 에 호스팅된 **공개·주간 갱신 스냅샷**으로 폴백합니다. 라이브 **하드 실패**(장애 / IP 평판 차단) 시에만 가져오며 평상시엔 절대 아닙니다 — 공개 데이터, 텔레메트리 없음. 스냅샷이 서빙되면 **절대 라이브처럼 표시하지 않습니다** — 응답에 `_meta.dataPath: "snapshot"` + `asOf` 타임스탬프가 붙고 `complete` 는 강제로 꺼집니다. rate limit(429)은 항상 **준수**하며 미러로 우회하지 않습니다.
 - **끄기(순수 라이브 전용):** `SAMGOV_SNAPSHOT_BASE_URL=off` 설정 시 스냅샷 경로가 추가되지 않고 라이브 전용 클라이언트와 byte-identical.
 - **자체 미러 지정:** `SAMGOV_SNAPSHOT_BASE_URL` 을 자신의 base URL 로 설정하면 공개 기본값 대신 직접 호스팅.

@@ -203,7 +203,7 @@ import { perdiemRates as gpPerdiemRates, GSA_PERDIEM_HOST, defaultPerdiemYear, f
 import { borderWaitTimes as cbpBorderWaitTimes } from "./dist/cbp-border.js";
 import { dolApiKey } from "./dist/dol.js";
 import { searchFilings as ldaSearchFilings, ldaAuthHeader, ldaKeyPresent, nameOf as ldaNameOf, LDA_HOST, num as ldaNum } from "./dist/lda.js";
-import { searchOpinions as clSearchOpinions, courtlistenerAuthHeader, courtlistenerTokenPresent, flattenCitation as clFlattenCitation, extractNextCursor as clExtractNextCursor, COURTLISTENER_HOST, COURTLISTENER_CURSOR_RE } from "./dist/courtlistener.js";
+import { searchOpinions as clSearchOpinions, searchDockets as clSearchDockets, courtlistenerAuthHeader, courtlistenerTokenPresent, flattenCitation as clFlattenCitation, extractNextCursor as clExtractNextCursor, COURTLISTENER_HOST, COURTLISTENER_CURSOR_RE } from "./dist/courtlistener.js";
 import { search as npSearch, financials as npFinancials, num as npNum, NONPROFIT_HOST } from "./dist/nonprofit.js";
 import { tokenizeForDisclosure as disclosureTok, DISCLOSURE_SPLIT_RE } from "./dist/disclosure.js";
 import { findDisclosureSplitViolations } from "./lint-invariants.mjs";
@@ -21803,6 +21803,143 @@ async function testCourtlistenerSearchOpinions() {
   }
 }
 
+// §55h: courtlistener_search_opinions `party` param + courtlistener_search_dockets (ADR-0064)
+// NON-VACUOUS, OFFLINE, deterministic.
+//   [party→caseName] party:"Lockheed Martin" ⇒ q contains caseName:"Lockheed Martin"; bare
+//                    query does NOT add caseName: ⇒ drop the caseName: wrapping ⇒ RED.
+//   [party+query AND]  party + query ⇒ q="caseName:\"X\" free-text" ⇒ omit caseName: ⇒ RED.
+//   [dockets-suitNature] natureOfSuit:"False Claims" ⇒ suitNature:"False Claims" in q ⇒ fold
+//                        into q without suitNature: prefix ⇒ RED.
+//   [dockets-row]      docket_absolute_url → full https://…; dateTerminated absent → null (NEVER "");
+//                      suitNature → natureOfSuit; caseName/courtId/docketNumber surfaced.
+//   [dockets-cursor]   nextCursor extracted; hasMore true when next present.
+//   [dockets-prov]     _meta.source names CourtListener + Free Law Project + PACER + "RECAP dockets".
+async function testCourtlistenerPartyAndDockets() {
+  section("§55h. courtlistener party param + dockets (ADR-0064) — caseName: fielding(opinions+dockets) + suitNature: fielded docket filter + row mapping(dateTerminated null, url prefixed) + cursor + provenance (OFFLINE, deterministic)");
+  const sam = new SamGovClient({});
+  const priorTok = process.env.COURTLISTENER_API_TOKEN;
+  delete process.env.COURTLISTENER_API_TOKEN;
+  try {
+    // ── [party→caseName opinions] party:"Lockheed Martin" ⇒ q=caseName:"Lockheed Martin" ──
+    await withFetch(clMock(clBody(327, [clOpinion()])), async (calls) => {
+      await runTool("courtlistener_search_opinions", { party: "Lockheed Martin" }, sam);
+      const q = clQuery(calls);
+      ok('55h-party opinions: party:"Lockheed Martin" ⇒ q includes caseName:\\"Lockheed Martin\\" (fielded, NOT bare text) ⇒ pass bare name ⇒ RED',
+        q.get("q") === 'caseName:"Lockheed Martin"', JSON.stringify(q.get("q")));
+    });
+
+    // ── [party+query AND] both present ⇒ q="caseName:\"X\" extra-term" ──
+    await withFetch(clMock(clBody(20, [clOpinion()])), async (calls) => {
+      await runTool("courtlistener_search_opinions", { party: "Lockheed Martin", query: "False Claims Act" }, sam);
+      const q = clQuery(calls);
+      ok('55h-party+query: party + query ⇒ q="caseName:\\"Lockheed Martin\\" False Claims Act" (AND-ed) ⇒ drop the caseName: part ⇒ RED',
+        q.get("q") === 'caseName:"Lockheed Martin" False Claims Act', JSON.stringify(q.get("q")));
+    });
+
+    // ── [no party → no caseName:] bare query without party stays as-is ──
+    await withFetch(clMock(clBody(5954, [clOpinion()])), async (calls) => {
+      await runTool("courtlistener_search_opinions", { query: "Lockheed Martin" }, sam);
+      const q = clQuery(calls);
+      ok('55h-no-party: no party ⇒ q="Lockheed Martin" (no caseName: prefix) ⇒ add caseName: without party ⇒ RED',
+        q.get("q") === "Lockheed Martin" && !q.get("q").includes("caseName:"), JSON.stringify(q.get("q")));
+    });
+
+    // One FCA docket fixture.
+    const clDocket = (overrides = {}) => ({
+      caseName: "United States v. Lockheed Martin",
+      caseNameFull: "United States of America v. Lockheed Martin Corporation",
+      court: "N.D. Ga.",
+      court_citation_string: "N.D. Ga.",
+      court_id: "gand",
+      dateFiled: "2022-03-03",
+      docket_absolute_url: "/docket/63718893/united-states-v-lockheed-martin/",
+      docketNumber: "1:22-cv-00893",
+      suitNature: "False Claims Act",
+      cause: "31 U.S.C. § 3729",
+      assignedTo: "Judge John J. Jones",
+      jurisdictionType: "Federal Question",
+      ...overrides,
+    });
+
+    // ── [dockets party→caseName:] party ⇒ caseName:"…" in q ──
+    await withFetch(clMock(clBody(9, [clDocket()])), async (calls) => {
+      await runTool("courtlistener_search_dockets", { party: "Lockheed Martin" }, sam);
+      const q = clQuery(calls);
+      ok('55h-dockets-party: party:"Lockheed Martin" ⇒ q=caseName:\\"Lockheed Martin\\" + type=r FIXED ⇒ drop caseName: ⇒ RED',
+        q.get("q") === 'caseName:"Lockheed Martin"' && q.get("type") === "r", JSON.stringify({ q: q.get("q"), t: q.get("type") }));
+    });
+
+    // ── [dockets suitNature: FIELDED] natureOfSuit:"False Claims" ⇒ suitNature:"False Claims" in q ──
+    await withFetch(clMock(clBody(9, [clDocket()])), async (calls) => {
+      await runTool("courtlistener_search_dockets", { party: "Lockheed Martin", natureOfSuit: "False Claims" }, sam);
+      const q = clQuery(calls);
+      ok('55h-dockets-suitNature: natureOfSuit:"False Claims" ⇒ q includes suitNature:\\"False Claims\\" (a REAL docket field, not bare q) ⇒ fold without suitNature: prefix ⇒ RED',
+        q.get("q").includes('suitNature:"False Claims"'), JSON.stringify(q.get("q")));
+      ok('55h-dockets-suitNature: suitNature AND caseName both present in q ⇒ RED if one is missing',
+        q.get("q").includes('caseName:"Lockheed Martin"') && q.get("q").includes('suitNature:"False Claims"'), JSON.stringify(q.get("q")));
+    });
+
+    // ── [dockets row mapping] docket_absolute_url → full https URL; suitNature → natureOfSuit;
+    //    dateTerminated absent → null (NEVER ""); caseName/courtId/docketNumber surfaced. ──
+    await withFetch(clMock(clBody(9, [clDocket()])), async () => {
+      const r = await runTool("courtlistener_search_dockets", { party: "Lockheed Martin" }, sam);
+      const d0 = r.data.dockets[0];
+      ok('55h-dockets-row: docket_absolute_url → full https://www.courtlistener.com/… URL ⇒ omit host prefix ⇒ RED',
+        d0.url === "https://www.courtlistener.com/docket/63718893/united-states-v-lockheed-martin/", JSON.stringify(d0.url));
+      ok('55h-dockets-row: suitNature → natureOfSuit; caseName/courtId/docketNumber surfaced; dateFiled string ⇒ drop a field ⇒ RED',
+        d0.natureOfSuit === "False Claims Act" && d0.caseName === "United States v. Lockheed Martin" && d0.courtId === "gand" && d0.docketNumber === "1:22-cv-00893" && d0.dateFiled === "2022-03-03", JSON.stringify(d0));
+      ok('55h-dockets-row: dateTerminated absent → null (NEVER "") ⇒ return "" ⇒ RED',
+        d0.dateTerminated === null, JSON.stringify(d0.dateTerminated));
+    });
+
+    // ── [dockets row dateTerminated explicit null and string] ──
+    await withFetch(clMock(clBody(2, [
+      clDocket({ dateTerminated: "2023-11-01" }),
+      clDocket({ dateTerminated: "" }),
+    ])), async () => {
+      const r = await runTool("courtlistener_search_dockets", { party: "Lockheed Martin" }, sam);
+      const [terminated, emptyStr] = r.data.dockets;
+      ok('55h-dockets-dateTerminated: "2023-11-01" → "2023-11-01" (string preserved); empty string "" → null (null-never-empty) ⇒ pass "" through ⇒ RED',
+        terminated.dateTerminated === "2023-11-01" && emptyStr.dateTerminated === null, JSON.stringify({ t: terminated.dateTerminated, e: emptyStr.dateTerminated }));
+    });
+
+    // ── [dockets cursor passthrough] cursor in args ⇒ cursor= in URL; nextCursor extracted ──
+    const CL_DOCKET_NEXT = "https://www.courtlistener.com/api/rest/v4/search/?cursor=cXVlcnk9Mg&type=r";
+    await withFetch(clMock(clBody(9, [clDocket()], CL_DOCKET_NEXT)), async (calls) => {
+      const r = await runTool("courtlistener_search_dockets", { party: "Lockheed Martin", cursor: "cXVlcnk9Mg" }, sam);
+      const m = buildMeta(r.meta);
+      const q = clQuery(calls);
+      ok('55h-dockets-cursor: cursor arg ⇒ cursor= in URL; next URL ⇒ nextCursor extracted; hasMore:true ⇒ drop cursor passthrough ⇒ RED',
+        q.get("cursor") === "cXVlcnk9Mg" && m.nextCursor === "cXVlcnk9Mg" && m.pagination.hasMore === true, JSON.stringify({ cursorSent: q.get("cursor"), nc: m.nextCursor }));
+    });
+
+    // ── [dockets provenance] _meta.source + notes name CourtListener + Free Law Project + PACER
+    //    + that a docket ≠ outcome/settlement. ──
+    await withFetch(clMock(clBody(9, [clDocket()])), async () => {
+      const r = await runTool("courtlistener_search_dockets", { party: "Lockheed Martin" }, sam);
+      const m = buildMeta(r.meta);
+      ok('55h-dockets-prov: _meta.source names CourtListener + Free Law Project + PACER-paywall + "RECAP dockets" ⇒ drop PACER disclosure ⇒ RED',
+        /CourtListener/.test(m.source) && /Free Law Project/.test(m.source) && /PACER/.test(m.source) && /dockets/.test(m.source), JSON.stringify(m.source));
+      ok('55h-dockets-prov: a note explains docket ≠ outcome/settlement ⇒ drop the outcome note ⇒ RED',
+        m.notes.some((n) => /settlement/i.test(n) || /outcome/i.test(n)), JSON.stringify(m.notes.length));
+      ok('55h-dockets-prov: keylessMode:true (anonymous CourtListener 200) ⇒ RED',
+        m.keylessMode === true, JSON.stringify(m.keylessMode));
+    });
+
+    // ── [dockets suitNature note] natureOfSuit applied ⇒ a note says it is a REAL field ──
+    await withFetch(clMock(clBody(1, [clDocket()])), async () => {
+      const r = await runTool("courtlistener_search_dockets", { natureOfSuit: "False Claims" }, sam);
+      const m = buildMeta(r.meta);
+      ok('55h-dockets-suitNature-note: natureOfSuit applied ⇒ a note says suitNature:"…" is a REAL fielded docket filter (not folded into q) ⇒ drop the note ⇒ RED',
+        m.notes.some((n) => /suitNature/.test(n) && /real/i.test(n)), JSON.stringify(m.notes.find((n) => /suitNature/.test(n))));
+    });
+
+  } finally {
+    if (priorTok === undefined) delete process.env.COURTLISTENER_API_TOKEN;
+    else process.env.COURTLISTENER_API_TOKEN = priorTok;
+  }
+}
+
 // §55g: US tax-exempt nonprofits — IRS Form 990 via ProPublica Nonprofit Explorer
 // (projects.propublica.org/nonprofits/api/v2, ADR-0060 — the nonprofit/grantee vetting
 // lane; KEYLESS). NON-VACUOUS, OFFLINE, deterministic. Each assertion pins a value +
@@ -23015,6 +23152,7 @@ async function main() {
   await testDolDataApi();
   await testLdaSearchFilings();
   await testCourtlistenerSearchOpinions();
+  await testCourtlistenerPartyAndDockets();
   await testNonprofit();
   await testDisclosurePort();
   await testFetchWithRetryTimeout();
@@ -25544,15 +25682,15 @@ async function testNvdCveKev() {
 
 // §75: Toolset profile (MCP_SAM_GOV_TOOLSETS). NON-VACUITY: each assertion is backed
 // by a revert-and-confirm step documented in the fault-count report. Tests:
-//   (a) mapping completeness — every TOOLS entry maps to exactly one toolset; union = 152
+//   (a) mapping completeness — every TOOLS entry maps to exactly one toolset; union = 153
 //   (b) no phantom entry — TOOL_TOOLSET_MAP has no key absent from TOOLS
-//   (c) resolveToolsets: unset/empty/all/ALL → 152 tools, sets=["all"], fellBack=false
+//   (c) resolveToolsets: unset/empty/all/ALL → 153 tools, sets=["all"], fellBack=false
 //   (d) resolveToolsets: "core" → the core list (58 tools, no sled/vetting/… names)
 //   (e) resolveToolsets: "core,sled" → union of core+sled (71 tools)
-//   (f) resolveToolsets: "bogus" → 152 tools (fall-back to all), fellBack=true
+//   (f) resolveToolsets: "bogus" → 153 tools (fall-back to all), fellBack=true
 //   (g) resolveToolsets: "core,bogus" → core (58) + unknown=["bogus"], fellBack=false
 //   (h) CallTool on an unloaded tool → tool_not_loaded envelope (ok:false, has toolset)
-//   (i) ListTools with a profile → exactly the loaded set (not the full 152)
+//   (i) ListTools with a profile → exactly the loaded set (not the full 153)
 async function testToolsets() {
   section("75. Toolset profiles — mapping completeness, resolveToolsets variants, CallTool unloaded, ListTools filtered");
 
@@ -25565,13 +25703,13 @@ async function testToolsets() {
   // (a) every tool has a mapping; union of mapping === registered TOOLS set.
   const unmapped = allToolNames.filter((n) => !mapKeys.has(n));
   ok("75-a every TOOLS entry has a TOOL_TOOLSET_MAP entry — add a tool without updating the map ⇒ RED",
-    unmapped.length === 0, unmapped.length ? `unmapped: ${unmapped.slice(0, 5).join(", ")}` : "all 152 mapped");
+    unmapped.length === 0, unmapped.length ? `unmapped: ${unmapped.slice(0, 5).join(", ")}` : "all 153 mapped");
   // Check the union of the mapping (i.e., all keys in TOOL_TOOLSET_MAP that are
-  // also in TOOLS) equals 152 — distinct from checking TOOLS.length, which would
+  // also in TOOLS) equals 153 — distinct from checking TOOLS.length, which would
   // not catch a map key for a removed tool.
   const unionOfMapping = [...mapKeys].filter((k) => toolSet.has(k));
-  ok("75-a union of mapping keys ∩ TOOLS = 152 — a map key removed from TOOLS without removing from map would not shrink this; unmapped tools above catch the other direction",
-    unionOfMapping.length === 152, `got ${unionOfMapping.length}`);
+  ok("75-a union of mapping keys ∩ TOOLS = 153 — a map key removed from TOOLS without removing from map would not shrink this; unmapped tools above catch the other direction",
+    unionOfMapping.length === 153, `got ${unionOfMapping.length}`);
 
   // (b) no phantom entry (a key in the map that no TOOLS entry references).
   const phantom = [...mapKeys].filter((k) => !toolSet.has(k));
@@ -25581,8 +25719,8 @@ async function testToolsets() {
   // (c) resolveToolsets: unset → all.
   for (const [label, envVal] of [["undefined", undefined], ["empty string", ""], ["all", "all"], ["ALL", "ALL"]]) {
     const r = resolveToolsets(envVal, allToolNames);
-    ok(`75-c resolveToolsets(${JSON.stringify(envVal)}) → all 152 tools, sets=["all"], fellBack=false — break the empty/all branch ⇒ RED`,
-      r.loaded.size === 152 && r.sets.length === 1 && r.sets[0] === "all" && !r.fellBack,
+    ok(`75-c resolveToolsets(${JSON.stringify(envVal)}) → all 153 tools, sets=["all"], fellBack=false — break the empty/all branch ⇒ RED`,
+      r.loaded.size === 153 && r.sets.length === 1 && r.sets[0] === "all" && !r.fellBack,
       JSON.stringify({ size: r.loaded.size, sets: r.sets, fellBack: r.fellBack }));
   }
 
@@ -25619,8 +25757,8 @@ async function testToolsets() {
 
   // (f) resolveToolsets: unknown only → fall back to all.
   const bogusResult = resolveToolsets("bogus", allToolNames);
-  ok("75-f resolveToolsets('bogus') → falls back to all 152 tools + fellBack=true — remove the fallback ⇒ RED",
-    bogusResult.loaded.size === 152 && bogusResult.fellBack === true && bogusResult.unknown.includes("bogus"),
+  ok("75-f resolveToolsets('bogus') → falls back to all 153 tools + fellBack=true — remove the fallback ⇒ RED",
+    bogusResult.loaded.size === 153 && bogusResult.fellBack === true && bogusResult.unknown.includes("bogus"),
     JSON.stringify({ size: bogusResult.loaded.size, fellBack: bogusResult.fellBack, unknown: bogusResult.unknown }));
 
   // (g) resolveToolsets: valid + unknown → valid set, unknown list, no fallback.

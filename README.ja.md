@@ -1,8 +1,8 @@
 # @cliwant/mcp-sam-gov
 
 > **最も包括的なキーレス優先の連邦データ MCP サーバー。**
-> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) ほか **54 のデータソース、152 ツール。** キーレス優先 — Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 50 ソースはキー不要。
-> 152 ツール中 147 ツールは API キー・登録・サインアップ不要。Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI、すべての MCP ホスト対応。
+> SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) ほか **54 のデータソース、153 ツール。** キーレス優先 — Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 50 ソースはキー不要。
+> 153 ツール中 147 ツールは API キー・登録・サインアップ不要。Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI、すべての MCP ホスト対応。
 >
 > **独立プロジェクト** — SAM.gov、米国一般調達局(GSA)を含むいかなる政府機関とも提携しておらず、承認や後援も受けていません。
 
@@ -33,7 +33,7 @@
 | 🏙 **州・地方政府の調達入札 (SLED)** | "この市/郡の調達ポータルで今募集中の案件は? その checkbook・締結済み契約・ベンダー支払、州 DOT の入札/落札登録" | OpenGov Procurement (525+ 政府), Bonfire, ArcGIS (feature + Hub), Socrata (54 ホスト), Tableau Server Guest ビュー 1 件 (モンタナ州), Socrata Open Expenditures checkbook 1 件 (サウスダコタ州) |
 | 🎓 **grant・データセット** | "過去 30 日のサイバーセキュリティ grant、連邦オープンデータセット発見" | Grants.gov, data.gov |
 
-**54 のデータソース、合計 152 ツール — キーレス優先: Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 50 ソースはキー不要。** (初期の 52 ツール版でおおよそ p50 ~0.25s / p95 ~0.8s を計測 — ソースや上流負荷で変動する近似値であり保証値ではありません。)
+**54 のデータソース、合計 153 ツール — キーレス優先: Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 50 ソースはキー不要。** (初期の 52 ツール版でおおよそ p50 ~0.25s / p95 ~0.8s を計測 — ソースや上流負荷で変動する近似値であり保証値ではありません。)
 
 ---
 
@@ -60,7 +60,7 @@ Claude Code (CLI) を既に使用している場合：
 /plugin install cliwant/mcp-sam-gov
 ```
 
-MCP サーバー + Claude が 152 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
+MCP サーバー + Claude が 153 ツールをいつ・どう呼ぶかを教える [SKILL.md ワークフローガイド](./skills/sam-gov/SKILL.md) を同時登録。
 
 ### 🔵 パス 3 — Codex / Cursor / Continue / Gemini 等の手動インストール
 
@@ -194,7 +194,7 @@ npm install --omit=dev
 
 ## ツールセットの選択 (コンテキスト削減)
 
-デフォルトでは全 152 ツールがロードされ、セッションあたり約 80k トークンを消費します。`MCP_SAM_GOV_TOOLSETS` 環境変数に必要なツールセット名をカンマ区切りで指定することでコンテキストを削減できます。空値または `all` で全ツールがロードされます。利用可能なツールセット: `core`(58 ツール, SAM/Grants/USAspending/FAR/eCFR/Federal Register/SBA 等), `sled`(13 ツール, 州・地方調達), `vetting`(17 ツール, OFAC/FDIC/FAC/EPA ECHO 等), `disclosure`(8 ツール, SEC EDGAR), `regulatory`(9 ツール, Regulations.gov/Congress/GovInfo), `pricing`(15 ツール, GSA/BLS/Treasury/FRED/DOL 等), `health`(17 ツール, CMS/NIH/NSF/openFDA 等), `safety`(3 ツール, NHTSA/CPSC), `geo`(9 ツール, Census geocode/FEMA/NWS 等), `cyber`(3 ツール, NVD/CISA KEV/NIST 800-53)。ロードされていないツールを呼び出すと、どのツールセットで有効化できるかを示す `tool_not_loaded` エラーが返されます。
+デフォルトでは全 153 ツールがロードされ、セッションあたり約 80k トークンを消費します。`MCP_SAM_GOV_TOOLSETS` 環境変数に必要なツールセット名をカンマ区切りで指定することでコンテキストを削減できます。空値または `all` で全ツールがロードされます。利用可能なツールセット: `core`(58 ツール, SAM/Grants/USAspending/FAR/eCFR/Federal Register/SBA 等), `sled`(13 ツール, 州・地方調達), `vetting`(17 ツール, OFAC/FDIC/FAC/EPA ECHO 等), `disclosure`(8 ツール, SEC EDGAR), `regulatory`(9 ツール, Regulations.gov/Congress/GovInfo), `pricing`(15 ツール, GSA/BLS/Treasury/FRED/DOL 等), `health`(17 ツール, CMS/NIH/NSF/openFDA 等), `safety`(3 ツール, NHTSA/CPSC), `geo`(9 ツール, Census geocode/FEMA/NWS 等), `cyber`(3 ツール, NVD/CISA KEV/NIST 800-53)。ロードされていないツールを呼び出すと、どのツールセットで有効化できるかを示す `tool_not_loaded` エラーが返されます。
 
 ---
 
@@ -215,15 +215,15 @@ npm はインストール済みユーザーに新バージョンを通知しな�
 
 **自動投稿は一切ありません。** サーバーにトークンもアカウントもなく、リンクを作るだけで、開いて送信するのは**あなた**です。事前入力リンクにはツール名・エラー種別・サーバーバージョンのみが含まれ、クエリ値は含まれません。公開リポジトリなので、機微な内容は削除してから送信してください。直接開く: [**New issue**](https://github.com/cliwant/mcp-sam-gov/issues/new/choose)。
 
-## ツールカタログ (152)
+## ツールカタログ (153)
 
-ワークフロー別グループ。キーレス優先 — 大半はキー不要、Census business-patterns · FRED · BEA · DOL データエンドポイントは無料キーが必要。全 per-tool 一覧と入力 schema・誠実性 caveat の原文は [英語 README のカタログセクション](./README.md#tool-catalog-152-tools) を正とします。
+ワークフロー別グループ。キーレス優先 — 大半はキー不要、Census business-patterns · FRED · BEA · DOL データエンドポイントは無料キーが必要。全 per-tool 一覧と入力 schema・誠実性 caveat の原文は [英語 README のカタログセクション](./README.md#tool-catalog-153-tools) を正とします。
 
 - **案件 + ソリシテーション — SAM.gov + Grants.gov (10)**: `sam_search_opportunities` `sam_search_shaping` `sam_get_opportunity` `sam_fetch_description` `sam_fetch_attachment_text` `sam_attachment_url` `sam_lookup_organization` `sam_lookup_notice_fields` `grants_search` `grants_get_opportunity`
 - **spending・受注・競合 — USAspending + FPDS + GAO (31)**: `usas_search_awards` `usas_search_individual_awards` `usas_get_award_detail` `usas_search_awards_by_recipient` `usas_search_subawards` `usas_search_recompetes` `usas_search_expiring_contracts`(deprecated) `usas_analyze_incumbent` `usas_search_teaming_partners` `usas_spending_over_time` `usas_search_agency_spending` `usas_search_subagency_spending` `usas_search_psc_spending` `usas_search_cfda_spending` `usas_search_state_spending` `usas_search_federal_account_spending` `usas_search_recipients` `usas_get_recipient_profile` `usas_get_agency_profile` `usas_get_agency_awards_summary` `usas_get_agency_budget_function` `usas_list_toptier_agencies` `usas_lookup_agency` `usas_autocomplete_naics` `usas_autocomplete_recipient` `usas_naics_hierarchy` `usas_glossary` `usas_list_disaster_codes`(災害緊急基金コード(DEFC)一覧 — COVID-19·IIJA/インフラ等の緊急歳出タグ) `usas_disaster_spending`(指定 DEFC の災害/緊急基金支出の地域別内訳 — どの州/郡/選挙区が COVID/IIJA 救済金を受領) `fpds_search_awards` `gao_protest_lookup`
 - **パートナー・企業の検証 — OFAC · SAM · FAC · FDIC · EPA (15)**: `ofac_screen_entity` `sam_check_exclusions` `sam_integrity_lookup` `fac_search_audits` `fac_get_findings` `fdic_search_institutions` `fdic_institution_financials` `fdic_risk_ratios` `fdic_institution_history` `fdic_branch_deposits` `fdic_bank_failures` `fdic_industry_summary` `echo_search_facilities` `echo_facility_report` `epa_tri_facilities`(EPA Envirofacts TRI 有害物質排出施設 — 環境/ESG 検証)
 - **製品安全・リコール — openFDA · NHTSA · CPSC (6)**: `openfda_enforcement`(FDA 医薬品・医療機器・食品のリコール・執行) `openfda_device_clearances`(FDA 510(k) 医療機器承認) `openfda_drug_approvals`(openFDA Drugs@FDA 医薬品承認申請 — スポンサー・承認製品・提出/承認履歴) `nhtsa_recalls`(NHTSA 車両リコール) `nhtsa_complaints`(NHTSA 車両安全苦情) `cpsc_recalls`(CPSC 消費者製品リコール)
-- **訴訟・裁判所 — CourtListener (1)**: `courtlistener_search_opinions`(米連邦裁判所の判例 — 連邦請求裁判所の契約請求/入札異議、連邦巡回控訴裁判所; CourtListener/Free Law Project 経由、明示)
+- **訴訟・裁判所 — CourtListener (2)**: `courtlistener_search_opinions`(米連邦裁判所の判例 — 連邦請求裁判所の契約請求/入札異議、連邦巡回控訴裁判所; CourtListener/Free Law Project 経由、明示)
 - **非営利ベンダー — IRS 990 via ProPublica (2)**: `nonprofit_search`(IRS-990 非営利検索 by 名称/州/NTEE) `nonprofit_financials`(IRS-990 非営利財務 by EIN) — ProPublica Nonprofit Explorer 経由(明示)
 - **財務開示 — SEC EDGAR (8)**: `edgar_lookup_cik` `edgar_company_filings` `edgar_company_facts` `edgar_company_concept` `edgar_xbrl_frames` `edgar_full_text_search` `edgar_filing_index` `edgar_daily_filing_index`
 - **規制・立法 — Federal Register · Regulations.gov · eCFR · FAR · Congress · GovInfo (19)**: `fed_register_search_documents` `fed_register_get_document` `fed_register_public_inspection` `fed_register_list_agencies` `regulations_search_dockets` `regulations_search_documents` `regulations_search_comments` `regulations_get_docket` `ecfr_search` `ecfr_get_section`(引用指定で CFR の 1 セクション全文を取得 — 全タイトル対応; FAR/DFARS は `far_clause_lookup` を推奨) `ecfr_list_titles` `far_clause_lookup` `far_search` `far_compliance_matrix` `congress_search_bills` `congress_get_bill` `govinfo_search_packages` `govinfo_get_package` `govinfo_list_collections`
@@ -247,7 +247,7 @@ npm はインストール済みユーザーに新バージョンを通知しな�
 
 本サーバーの原則は一つ: **もっともらしい捏造より誠実な失敗。** 以下はすべて公開データの*可用性*に関するものであり、いかなるアクセス制御も回避しません。
 
-- **キーレス優先、ダウンしたソースは例外を*投げる*。** 54 ソース中 50 ソース(152 ツール中 147 ツール)は API キーなしで動作し、Census business-patterns · FRED · BEA · DOL データエンドポイントのみ無料キーが必要です。ソースが rate-limit・ブロック・ダウンした場合、ツールは**型付きエラー**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)を返し、行を捏造したりダウンしたサービスを「結果 0」/「見つからない」と報告しません。本物の空結果と障害は常に区別できます。
+- **キーレス優先、ダウンしたソースは例外を*投げる*。** 54 ソース中 50 ソース(153 ツール中 147 ツール)は API キーなしで動作し、Census business-patterns · FRED · BEA · DOL データエンドポイントのみ無料キーが必要です。ソースが rate-limit・ブロック・ダウンした場合、ツールは**型付きエラー**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)を返し、行を捏造したりダウンしたサービスを「結果 0」/「見つからない」と報告しません。本物の空結果と障害は常に区別できます。
 - **オフラインスナップショット (既定 on)。** ゆっくり変わる参照データ(toptier 機関一覧、上位 NAICS ツリー、USAspending 用語集、SBA 規模基準、最新 Treasury「Debt to the Penny」)は、ライブの連邦ソースが egress から一時的に到達不能なとき、サーバーが既定で `raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots` にホストされた**公開・週次更新スナップショット**へフォールバックします。ライブの**ハード障害**(障害 / IP 評判ブロック)時のみ取得し、通常運用中は決して取得しません — 公開データ、テレメトリなし。スナップショットが提供されるとき**決してライブとして表示しません** — 応答に `_meta.dataPath: "snapshot"` + `asOf` タイムスタンプが付き、`complete` は強制的に off。rate limit(429)は常に**尊重**し、ミラーへ回避しません。
 - **無効化(純ライブ専用):** `SAMGOV_SNAPSHOT_BASE_URL=off` を設定するとスナップショット経路は追加されず、ライブ専用クライアントと byte-identical。
 - **自前ミラーを指定:** `SAMGOV_SNAPSHOT_BASE_URL` を自分の base URL に設定すれば、公開既定値の代わりに自前ホスティング。

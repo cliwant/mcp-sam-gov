@@ -96,6 +96,7 @@ export declare function flattenCitation(x: unknown): string | string[] | null;
 export declare function extractNextCursor(next: unknown, label: string): string | null;
 export type CourtlistenerSearchOpinionsArgs = {
     query?: string;
+    party?: string;
     court?: string;
     dateFiledAfter?: string;
     dateFiledBefore?: string;
@@ -112,4 +113,35 @@ export type CourtlistenerSearchOpinionsArgs = {
  * API's REAL `count`; CURSOR pagination (nextCursor extracted from `next`).
  */
 export declare function searchOpinions(args: CourtlistenerSearchOpinionsArgs): Promise<MetaBundle>;
+export type CourtlistenerDocket = {
+    caseName: string | null;
+    caseNameFull: string | null;
+    court: string | null;
+    courtId: string | null;
+    dateFiled: string | null;
+    dateTerminated: string | null;
+    docketNumber: string | null;
+    natureOfSuit: string | null;
+    cause: string | null;
+    assignedTo: string | null;
+    jurisdictionType: string | null;
+    url: string | null;
+};
+export type CourtlistenerSearchDocketsArgs = {
+    party?: string;
+    query?: string;
+    natureOfSuit?: string;
+    court?: string;
+    dateFiledAfter?: string;
+    dateFiledBefore?: string;
+    order?: string;
+    cursor?: string;
+};
+/**
+ * Search RECAP dockets via CourtListener (`/api/rest/v4/search/`, type=r).
+ * FCA/qui tam matters are DOCKETS — they rarely produce published opinions and are
+ * invisible to courtlistener_search_opinions (type=o). suitNature:"…" is a REAL
+ * fielded filter on dockets. KEYLESS / CURSOR / provenance same as searchOpinions.
+ */
+export declare function searchDockets(args: CourtlistenerSearchDocketsArgs): Promise<MetaBundle>;
 //# sourceMappingURL=courtlistener.d.ts.map
