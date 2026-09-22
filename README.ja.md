@@ -2,7 +2,7 @@
 
 > **最も包括的なキーレス優先の連邦データ MCP サーバー。**
 > SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) ほか **54 のデータソース、153 ツール。** キーレス優先 — Census business-patterns · FRED · BEA · DOL データエンドポイントの 4 ソースのみ無料キーが必要で、残り 50 ソースはキー不要。
-> 153 ツール中 147 ツールは API キー・登録・サインアップ不要。Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI、すべての MCP ホスト対応。
+> 153 ツール中 148 ツールは API キー・登録・サインアップ不要。Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI、すべての MCP ホスト対応。
 >
 > **独立プロジェクト** — SAM.gov、米国一般調達局(GSA)を含むいかなる政府機関とも提携しておらず、承認や後援も受けていません。
 
@@ -247,7 +247,7 @@ npm はインストール済みユーザーに新バージョンを通知しな�
 
 本サーバーの原則は一つ: **もっともらしい捏造より誠実な失敗。** 以下はすべて公開データの*可用性*に関するものであり、いかなるアクセス制御も回避しません。
 
-- **キーレス優先、ダウンしたソースは例外を*投げる*。** 54 ソース中 50 ソース(153 ツール中 147 ツール)は API キーなしで動作し、Census business-patterns · FRED · BEA · DOL データエンドポイントのみ無料キーが必要です。ソースが rate-limit・ブロック・ダウンした場合、ツールは**型付きエラー**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)を返し、行を捏造したりダウンしたサービスを「結果 0」/「見つからない」と報告しません。本物の空結果と障害は常に区別できます。
+- **キーレス優先、ダウンしたソースは例外を*投げる*。** 54 ソース中 50 ソース(153 ツール中 148 ツール)は API キーなしで動作し、Census business-patterns · FRED · BEA · DOL データエンドポイントのみ無料キーが必要です。ソースが rate-limit・ブロック・ダウンした場合、ツールは**型付きエラー**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)を返し、行を捏造したりダウンしたサービスを「結果 0」/「見つからない」と報告しません。本物の空結果と障害は常に区別できます。
 - **オフラインスナップショット (既定 on)。** ゆっくり変わる参照データ(toptier 機関一覧、上位 NAICS ツリー、USAspending 用語集、SBA 規模基準、最新 Treasury「Debt to the Penny」)は、ライブの連邦ソースが egress から一時的に到達不能なとき、サーバーが既定で `raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots` にホストされた**公開・週次更新スナップショット**へフォールバックします。ライブの**ハード障害**(障害 / IP 評判ブロック)時のみ取得し、通常運用中は決して取得しません — 公開データ、テレメトリなし。スナップショットが提供されるとき**決してライブとして表示しません** — 応答に `_meta.dataPath: "snapshot"` + `asOf` タイムスタンプが付き、`complete` は強制的に off。rate limit(429)は常に**尊重**し、ミラーへ回避しません。
 - **無効化(純ライブ専用):** `SAMGOV_SNAPSHOT_BASE_URL=off` を設定するとスナップショット経路は追加されず、ライブ専用クライアントと byte-identical。
 - **自前ミラーを指定:** `SAMGOV_SNAPSHOT_BASE_URL` を自分の base URL に設定すれば、公開既定値の代わりに自前ホスティング。

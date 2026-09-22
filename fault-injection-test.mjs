@@ -25991,6 +25991,34 @@ async function testDataMapResource() {
   ok("76-c MA cthru entry datasetId=pegc-naaa — change the id ⇒ RED",
     maEntry?.keyArgs?.includes("pegc-naaa") ?? false, maEntry?.keyArgs ?? "(no entry)");
 
+  // (c-3) TOOL COUNT and KEYLESS COUNT in the docs are derived from the shipped
+  // snapshot. Adding courtlistener_search_dockets (152 -> 153) left SKILL.md saying
+  // "152 tools" in three places and every doc saying "147 of the 15x" when the
+  // keyless count had become 148 — the 76-d guard only covered host/seed counts.
+  {
+    const { readFileSync: rfT } = await import("node:fs");
+    const snapT = JSON.parse(rfT("tools-list-snapshot.json", "utf8"));
+    const total = snapT.length;
+    const required = snapT.filter((t) => /REQUIRES a free \w+_API_KEY|there is no keyless tier/i.test(t.description)).length;
+    const keyless = total - required;
+    ok("76-t the required-key tool set is the documented five (Census, FRED x2, BEA, DOL data) — add a key-gated tool without updating docs ⇒ RED",
+      required === 5, `required=${required}`);
+    const docs = {
+      "README.md": [`${keyless} of the ${total} tools`],
+      "README.ko.md": [`${keyless}개`],
+      "README.ja.md": [`${keyless} ツール`],
+      "manifest.json": [`${keyless} of them with no API key`],
+      "skills/sam-gov/SKILL.md": [`${total} tools across`, `Tool inventory — ${total} tools`, `${keyless} of the ${total} tools`],
+    };
+    for (const [file, needles] of Object.entries(docs)) {
+      const text = rfT(file, "utf8");
+      for (const needle of needles) {
+        ok(`76-t ${file} states the CURRENT tool/keyless count "${needle}" — let it drift ⇒ RED`,
+          text.includes(needle), `"${needle}" not found in ${file}`);
+      }
+    }
+  }
+
   // (c-2) Doc counts are DERIVED from the code, not hand-maintained. On 2026-09-21
   // ten current claims had drifted at once: the Bonfire seed was 187 while KO/JA
   // READMEs and SKILL.md said 195, Socrata reached 54 hosts while READMEs said 53,

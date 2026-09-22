@@ -2,7 +2,7 @@
 
 > **가장 포괄적인 keyless 우선 연방 데이터 MCP 서버.**
 > SAM.gov · USAspending · SEC EDGAR · OFAC · FDIC · Federal Register · Regulations.gov · eCFR · FAR/DFARS · BLS · Treasury · NIH · NSF · ClinicalTrials · CMS · NVD/CISA · USITC · Census · FRED · BEA · DOL · FEMA · openFDA · NHTSA · CPSC · EPA Envirofacts · CourtListener · IRS-990(ProPublica) 외 **54개 데이터 소스, 153개 도구.** keyless 우선 — Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트 4개 소스만 무료 키가 필요하고 나머지 50개 소스는 키가 필요 없습니다.
-> 153개 도구 중 147개는 API 키·등록·가입이 필요 없습니다. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
+> 153개 도구 중 148개는 API 키·등록·가입이 필요 없습니다. Claude Desktop, Claude Code, Codex CLI, Cursor, Continue, Gemini CLI, 모든 MCP 호스트 호환.
 >
 > **독립 프로젝트** — SAM.gov, 미국 연방조달청(GSA) 등 어떤 정부 기관과도 제휴 관계가 없으며, 승인이나 후원을 받지 않았습니다.
 
@@ -247,7 +247,7 @@ npm은 설치한 사용자에게 새 버전을 알려주지 않으므로, 서버
 
 이 서버의 원칙은 하나입니다: **그럴듯한 조작보다 정직한 실패.** 아래는 모두 공개 데이터의 *가용성*에 관한 것이며, 어떤 접근 통제도 우회하지 않습니다.
 
-- **Keyless 우선, 다운된 소스는 예외를 *던진다*.** 54개 소스 중 50개(153개 도구 중 147개)는 API 키 없이 동작하고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트만 무료 키가 필요합니다. 소스가 rate-limit·차단·다운되면 도구는 **타입이 지정된 에러**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)를 반환하며, 행을 지어내거나 다운된 서비스를 "결과 0" / "없음"으로 보고하지 않습니다. 진짜 빈 결과와 장애는 항상 구별됩니다.
+- **Keyless 우선, 다운된 소스는 예외를 *던진다*.** 54개 소스 중 50개(153개 도구 중 148개)는 API 키 없이 동작하고, Census business-patterns · FRED · BEA · DOL 데이터 엔드포인트만 무료 키가 필요합니다. 소스가 rate-limit·차단·다운되면 도구는 **타입이 지정된 에러**(`rate_limited` / `upstream_unavailable` / `schema_drift` …)를 반환하며, 행을 지어내거나 다운된 서비스를 "결과 0" / "없음"으로 보고하지 않습니다. 진짜 빈 결과와 장애는 항상 구별됩니다.
 - **오프라인 스냅샷 (기본 on).** 느리게 바뀌는 참조 데이터(toptier 기관 목록, 상위 NAICS 트리, USAspending 용어집, SBA 규모 기준, 최신 Treasury "Debt to the Penny")는, 라이브 연방 소스가 egress 에서 잠시 도달 불가일 때 서버가 기본적으로 `raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots` 에 호스팅된 **공개·주간 갱신 스냅샷**으로 폴백합니다. 라이브 **하드 실패**(장애 / IP 평판 차단) 시에만 가져오며 평상시엔 절대 아닙니다 — 공개 데이터, 텔레메트리 없음. 스냅샷이 서빙되면 **절대 라이브처럼 표시하지 않습니다** — 응답에 `_meta.dataPath: "snapshot"` + `asOf` 타임스탬프가 붙고 `complete` 는 강제로 꺼집니다. rate limit(429)은 항상 **준수**하며 미러로 우회하지 않습니다.
 - **끄기(순수 라이브 전용):** `SAMGOV_SNAPSHOT_BASE_URL=off` 설정 시 스냅샷 경로가 추가되지 않고 라이브 전용 클라이언트와 byte-identical.
 - **자체 미러 지정:** `SAMGOV_SNAPSHOT_BASE_URL` 을 자신의 base URL 로 설정하면 공개 기본값 대신 직접 호스팅.

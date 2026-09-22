@@ -44,7 +44,7 @@ The most comprehensive **keyless-first** MCP server for US federal **and state/l
    SOW preview:   "RFQ# 36C24526Q0460 — Bulk Oxygen Tank Rental, Fill, Telemetry…"        
 ```
 
-**No API key, registration or signup for 147 of the 153 tools.** Just plug it in and ask.
+**No API key, registration or signup for 148 of the 153 tools.** Just plug it in and ask.
 
 ---
 
@@ -814,7 +814,7 @@ Grouped by workflow. Keyless-first — most tools need no key; Census business-p
 
 This server is built around one rule: **honest failure over confident fabrication.** Everything below is about *availability* of public data — none of it bypasses access controls.
 
-**Keyless-first, and a down source *throws*.** 50 of the 54 sources (147 of the 153 tools) work with no API key; Census business-patterns, FRED, BEA and DOL's data endpoint need a free one. When a source is rate-limited, blocked, or down, the tool returns a **typed error** (`rate_limited` / `upstream_unavailable` / `schema_drift` / …) — it never invents rows and never reports a DOWN service as "0 results" or "not found". A genuine empty result and an outage are always distinguishable.
+**Keyless-first, and a down source *throws*.** 50 of the 54 sources (148 of the 153 tools) work with no API key; Census business-patterns, FRED, BEA and DOL's data endpoint need a free one. When a source is rate-limited, blocked, or down, the tool returns a **typed error** (`rate_limited` / `upstream_unavailable` / `schema_drift` / …) — it never invents rows and never reports a DOWN service as "0 results" or "not found". A genuine empty result and an outage are always distinguishable.
 
 **Offline snapshots (on by default).** Some reference data changes slowly — the toptier-agency list, the top-level NAICS tree, the USAspending glossary, SBA size standards, the latest Treasury "Debt to the Penny." By default, when a live federal source is briefly unreachable from your egress, the server falls back to a **public, weekly-refreshed snapshot** of that slow-changing reference data, hosted at `raw.githubusercontent.com/cliwant/mcp-sam-gov/snapshots`. It only fetches on a **live hard-failure** (an outage / IP-reputation block), never during normal operation — public data, no telemetry. A served snapshot is **never presented as live** — the response carries `_meta.dataPath: "snapshot"` plus an `asOf` timestamp, and `complete` is forced off, so an AI agent (and you) always see the staleness. A rate limit (429) is always **honored**, never routed around onto the mirror.
 
