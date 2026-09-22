@@ -65,6 +65,11 @@ export type PerdiemRate = {
     state: string | null;
     zip: string | null;
     year: number | null;
+    /** Explicit U.S. federal fiscal year label (Oct 1–Sep 30). Same numeric value as
+     * `year` (the GSA API's year field IS the FY number). Surfaced as a separate named
+     * field so callers never confuse it with a calendar year. E.g. fiscalYear:2027 means
+     * rates run Oct 2026–Sep 2027; October 2026 travel uses FY2027 rates. */
+    fiscalYear: number | null;
     isOconus: boolean | null;
     standardRate: boolean | null;
     mealsUsd: number | null;

@@ -9961,6 +9961,52 @@ async function testSocrataHonesty() {
     if (priorToken === undefined) delete process.env.SOCRATA_APP_TOKEN;
     else process.env.SOCRATA_APP_TOKEN = priorToken;
   }
+
+  // ── Weakness-A: aggregation guidance must appear in BOTH the tool description
+  //    AND the `select` parameter description (2026-09-22 user-eval fix). Non-vacuous:
+  //    remove the guidance text from either place ⇒ the assertion goes RED. ──
+  const socrataQueryTool = TOOLS.find((t) => t.name === "socrata_query");
+  const sqDesc = socrataQueryTool?.description ?? "";
+  const sqSelectDesc = socrataQueryTool?.inputSchema?.shape?.select?._def?.description ?? "";
+  ok("42-aggA tool description contains aggregate guidance (sum + group-by examples) — remove the aggregate guidance from the tool description ⇒ RED",
+    /sum\(amount\)/i.test(sqDesc) && /top-N|top-n|top N|ranking/i.test(sqDesc),
+    JSON.stringify({ mentionsSum: /sum\(amount\)/i.test(sqDesc), mentionsTopN: /top-N|top-n|top N|ranking/i.test(sqDesc), len: sqDesc.length }));
+  ok("42-aggA `select` param description contains aggregate guidance with concrete examples (sum/group-by) — remove it ⇒ RED",
+    /sum\(amount\)/i.test(sqSelectDesc) && /top-N|top-n|top N|ranking/i.test(sqSelectDesc) && /NEVER sum rows/i.test(sqSelectDesc),
+    JSON.stringify({ sum: /sum\(amount\)/i.test(sqSelectDesc), topN: /top-N|top-n|top N|ranking/i.test(sqSelectDesc), never: /NEVER sum rows/i.test(sqSelectDesc), len: sqSelectDesc.length }));
+
+  // ── Weakness-A: response-side nudge — truncated raw query ⇒ nudge present;
+  //    aggregate query ⇒ nudge absent; complete raw result ⇒ nudge absent. ──
+  // (q1) Truncated raw rows (hasMore:true, no aggregate select) ⇒ nudge note present.
+  await withFetch(socrataRowsAndCount([{ payment_amount: "500" }, { payment_amount: "600" }], 10000), async () => {
+    const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", limit: 2 }, sam);
+    const m = buildMeta(r.meta);
+    ok("42-aggQ1 truncated raw rows (hasMore:true, no aggregate) ⇒ notes contain aggregate nudge — remove the nudge from socrata.ts ⇒ RED",
+      m.pagination.hasMore === true && m.notes.some((n) => /PAGE of raw rows/i.test(n) && /sum\(/i.test(n) && /NEVER.*sum this page|Do NOT sum this page/i.test(n)),
+      JSON.stringify({ hasMore: m.pagination.hasMore, nudgePresent: m.notes.some((n) => /PAGE of raw rows/i.test(n)) }));
+    ok("42-aggQ1 amount-like column detected from row keys (payment_amount) ⇒ nudge names the column — hard-code '<amount column>' regardless of row keys ⇒ RED",
+      m.notes.some((n) => /payment_amount/i.test(n)),
+      JSON.stringify(m.notes.filter((n) => /PAGE of raw rows/i.test(n))));
+  });
+  // (q2) Aggregate select ⇒ nudge ABSENT.
+  await withFetch(
+    (u) => (isSocrataRow(u) ? mockResponse({ status: 200, json: [{ sum_amount: "99999" }] }) : failClosed()()),
+    async () => {
+      const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", select: "sum(payment_amount)", limit: 1 }, sam);
+      const m = buildMeta(r.meta);
+      ok("42-aggQ2 aggregate select ⇒ nudge note ABSENT (it is an aggregate result, not a truncated raw page) — emit the nudge on aggregates ⇒ RED",
+        !m.notes.some((n) => /PAGE of raw rows/i.test(n)),
+        JSON.stringify({ nudgeAbsent: !m.notes.some((n) => /PAGE of raw rows/i.test(n)) }));
+    },
+  );
+  // (q3) Complete raw result (hasMore:false) ⇒ nudge ABSENT.
+  await withFetch(socrataRowsAndCount([{ amount: "100" }], 1), async () => {
+    const r = await runTool("socrata_query", { domain: "data.ny.gov", datasetId: "kwxv-fwze", limit: 100 }, sam);
+    const m = buildMeta(r.meta);
+    ok("42-aggQ3 complete raw result (hasMore:false) ⇒ nudge note ABSENT — emit the nudge on complete results ⇒ RED",
+      m.pagination.hasMore === false && !m.notes.some((n) => /PAGE of raw rows/i.test(n)),
+      JSON.stringify({ hasMore: m.pagination.hasMore, nudgeAbsent: !m.notes.some((n) => /PAGE of raw rows/i.test(n)) }));
+  });
 }
 
 // §43: DataSource port (ADR-0005 R2) — the byte-identical refactor's contract.
@@ -14636,6 +14682,47 @@ async function testGsaPerdiemHonesty() {
     federalFiscalYear(new Date("2026-09-30T00:00:00Z")) === 2026 &&
     federalFiscalYear(new Date("2025-09-30T00:00:00Z")) === 2025,
     JSON.stringify({ oct1_25: federalFiscalYear(new Date("2025-10-01T00:00:00Z")), sep30_25: federalFiscalYear(new Date("2025-09-30T00:00:00Z")), jul_26: federalFiscalYear(new Date("2026-07-20T00:00:00Z")) }));
+
+  // ── Weakness-B: fiscalYear field and Oct-Sep convention (2026-09-22 user-eval fix).
+  //    Non-vacuous: remove `fiscalYear` from PerdiemRate or change the note ⇒ RED. ──
+
+  // (fy1) Response carries `fiscalYear` equal to `year` (both are the FY number).
+  const twelveFy = [196, 196, 276, 276, 276, 276, 183, 183, 275, 275, 196, 0];
+  await withFetch(gpMock(gpBody({ rates: [gpGroup({ year: 2027, rate: [gpRate({ months: gpMonths(twelveFy) })] })] })), async () => {
+    const r = await runTool("gsa_perdiem_rates", { city: "San Diego", state: "CA", year: "2027" }, sam);
+    const row = r.data.rates[0];
+    ok("45E-fy1 response carries fiscalYear field equal to year (GSA year IS the FY) — remove fiscalYear from PerdiemRate ⇒ RED",
+      row.fiscalYear === 2027 && row.year === 2027,
+      JSON.stringify({ fy: row.fiscalYear, year: row.year }));
+    ok("45E-fy1 ALWAYS-present FY convention note (Oct 1–Sep 30 + Oct 2026 = FY2027 example) — remove the permanent FY note ⇒ RED",
+      r.meta.notes.some((n) => /Oct.*2026.*FY2027|FY2027.*Oct.*2026/i.test(n)),
+      JSON.stringify(r.meta.notes.filter((n) => /fiscal/i.test(n))));
+  });
+
+  // (fy2) October 2026 = FY2027: federalFiscalYear(Oct 1, 2026) === 2027.
+  ok("45E-fy2 federalFiscalYear: Oct 1 2026 = FY2027, Sep 30 2026 = FY2026, Oct 1 2027 = FY2028 — wrong Oct cutoff ⇒ RED",
+    federalFiscalYear(new Date("2026-10-01T00:00:00Z")) === 2027 &&
+    federalFiscalYear(new Date("2026-09-30T23:59:59Z")) === 2026 &&
+    federalFiscalYear(new Date("2027-10-01T00:00:00Z")) === 2028,
+    JSON.stringify({
+      oct1_2026: federalFiscalYear(new Date("2026-10-01T00:00:00Z")),
+      sep30_2026: federalFiscalYear(new Date("2026-09-30T23:59:59Z")),
+      oct1_2027: federalFiscalYear(new Date("2027-10-01T00:00:00Z")),
+    }));
+
+  // (fy3) year param description says "fiscal year" and explains Oct-Sep convention.
+  const gsaPerdiemTool = TOOLS.find((t) => t.name === "gsa_perdiem_rates");
+  const yearParamDesc = gsaPerdiemTool?.inputSchema?.shape?.year?._def?.innerType?._def?.description
+    ?? gsaPerdiemTool?.inputSchema?.shape?.year?._def?.description ?? "";
+  ok("45E-fy3 `year` param description explains Oct-Sep convention and gives Oct 2026 = FY2027 example — remove it ⇒ RED",
+    /Oct.*Sep|Oct 1.*Sep 30/i.test(yearParamDesc) && /October 2026.*FY2027|FY2027.*October 2026/i.test(yearParamDesc),
+    JSON.stringify({ octsep: /Oct.*Sep/i.test(yearParamDesc), example: /October 2026/i.test(yearParamDesc), desc: yearParamDesc.slice(0, 120) }));
+
+  // (fy4) tool description mentions fiscalYear in the response shape.
+  const gpToolDesc = gsaPerdiemTool?.description ?? "";
+  ok("45E-fy4 gsa_perdiem_rates tool description mentions fiscalYear in the response shape — remove it ⇒ RED",
+    /fiscalYear/i.test(gpToolDesc),
+    JSON.stringify({ mentionsFY: /fiscalYear/i.test(gpToolDesc), len: gpToolDesc.length }));
 }
 
 // §46: EPA ECHO REST source (ADR-0009) — the THIRD source on the R2 port. KEYLESS,

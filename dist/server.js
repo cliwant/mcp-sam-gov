@@ -1599,7 +1599,12 @@ const SocrataQueryInput = z.object({
     select: z
         .string()
         .optional()
-        .describe("Optional SoQL $select (column projection / aggregate), e.g. 'agency,SUM(amount)'."),
+        .describe("Optional SoQL $select (column projection or aggregate). " +
+        "For a TOTAL: 'sum(amount)' (add a where for vendor/fiscal-year filter). " +
+        "For a TOP-N ranking: 'vendor_name, sum(amount) as total' — pair with order='total DESC'. " +
+        "Any SoQL function call (sum/count/avg/min/max) or 'distinct' activates aggregate mode: " +
+        "totalAvailable becomes null (no raw-row total for aggregates) and the count(*) companion is skipped. " +
+        "NEVER sum rows from one page to get a total — always use an aggregate select."),
     where: z
         .string()
         .optional()
@@ -3732,7 +3737,7 @@ const GsaPerdiemRatesInput = z
         .string()
         .regex(/^\d{4}$/)
         .optional()
-        .describe("The per-diem fiscal year (default: the current U.S. federal fiscal year, computed at call time — GSA sets rates per FY, Oct 1–Sep 30). Validated ^\\d{4}$ (it rides in the request path)."),
+        .describe("U.S. federal fiscal year number (Oct 1–Sep 30). Default: current FY at call time. IMPORTANT: October 2026 = FY2027; September 2026 = FY2026. To get October 2026 rates, pass year='2027'. Validated ^\d{4}$ (it rides in the request path)."),
 })
     .describe("Look up GSA per-diem rates by EITHER (city + state) OR zip. Supplying both, or neither, ⇒ invalid_input.");
 // ─── US DOL Data API v4 (apiprod.dol.gov) — the labor-enforcement lane ──
@@ -4928,7 +4933,7 @@ export const TOOLS = [
     // ━━━ Socrata / SODA — keyless SLED + E-rate open data (2) ━━━ ADR-0004
     defineTool({
         name: "socrata_query",
-        description: "Query rows from an allowlisted Socrata/SODA open-data portal (keyless; ~a dozen US state portals + USAC E-rate on one identical API — state spend/checkbook/contract/vendor-payment datasets). State procurement mirrors: NY ehig-g5x3, NJ ubnu-tqu7, WA s8d5-pj78, MA cthru.data.socrata.com pegc-naaa (~49M payment rows). Full map: read resource samgov://data-map/state-local. Input `domain` (curated allowlist enum — the SSRF host guard), `datasetId` (4x4, from socrata_discover_datasets), optional SoQL `select`/`where`/`order`/`q`, `limit` (≤1000, def 100), `offset`, `withTotal` (def true). HONESTY: SODA's row response has no total, so a count(*) companion supplies an exact totalAvailable; if it fails the rows still return with totalAvailable:null + a note (hasMore is then inferred from page-fill, never a false complete). Genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). Value fields are strings.",
+        description: "Query rows from an allowlisted Socrata/SODA open-data portal (keyless; ~a dozen US state portals + USAC E-rate on one identical API — state spend/checkbook/contract/vendor-payment datasets). State procurement mirrors: NY ehig-g5x3, NJ ubnu-tqu7, WA s8d5-pj78, MA cthru.data.socrata.com pegc-naaa (~49M payment rows). Full map: read resource samgov://data-map/state-local. Input `domain` (curated allowlist enum — the SSRF host guard), `datasetId` (4x4, from socrata_discover_datasets), optional SoQL `select`/`where`/`order`/`q`, `limit` (≤1000, def 100), `offset`, `withTotal` (def true). AGGREGATES: for a grand total pass select='sum(amount)' with a where filter; for top-N vendors pass select='vendor_name, sum(amount) as total' with order='total DESC' — these return the final answer directly, NOT a page to manually sum. HONESTY: SODA's row response has no total, so a count(*) companion supplies an exact totalAvailable; if it fails the rows still return with totalAvailable:null + a note (hasMore is then inferred from page-fill, never a false complete). Genuine-empty ⇒ complete:true/total:0; an outage/400/404 THROWS (never a fake empty). Value fields are strings.",
         inputSchema: SocrataQueryInput,
         handler: (input) => socrata.query(input),
     }),
@@ -5565,7 +5570,7 @@ export const TOOLS = [
     // never-0; standardRate/isOconus are STRING booleans coerced to real booleans.
     defineTool({
         name: "gsa_perdiem_rates",
-        description: "Look up GSA Federal Travel PER-DIEM rates — the max lodging + Meals & Incidental Expenses (M&IE) reimbursement ceilings for official U.S. government travel (api.gsa.gov /travel/perdiem/v2, keyed — DATA_GOV_API_KEY or the shared DEMO_KEY). Input: EITHER `city` + `state` (2-letter) OR `zip` (5-digit) — supplying BOTH or NEITHER → invalid_input with 0 fetch; optional `year` (default: current federal fiscal year). Returns { rates:[{ city, county, state, zip, year, isOconus, standardRate, mealsUsd, monthlyLodgingUsd:[{ month (1-12), monthName, lodgingUsd }] }] } + honest _meta. HONESTY: lodgingUsd is the MAX nightly lodging ceiling for that month — VARIES SEASONALLY (hence a per-month array); mealsUsd is the daily M&IE ceiling; both are integer US dollars, null-when-withheld (NEVER 0 — genuine 0 preserved). standardRate/isOconus are booleans coerced from the API's string 'true'/'false' (unrecognized → null, never fabricated false); months array preserved AS-IS (never padded to 12). API returns COMPLETE rate set (no pagination) → totalAvailable = row count, complete:true. Genuine no-match → honest empty; `errors` field non-null → invalid_input; 429 (DEMO_KEY ~10 req/hr) → rate_limited THROWS; set DATA_GOV_API_KEY (free, api.data.gov/signup) for 1000/hr. 5xx/timeout → upstream_unavailable THROWS; 200 non-JSON → schema_drift. Key rides ONLY in the X-Api-Key header.",
+        description: "Look up GSA Federal Travel PER-DIEM rates — the max lodging + Meals & Incidental Expenses (M&IE) reimbursement ceilings for official U.S. government travel (api.gsa.gov /travel/perdiem/v2, keyed — DATA_GOV_API_KEY or the shared DEMO_KEY). Input: EITHER `city` + `state` (2-letter) OR `zip` (5-digit) — supplying BOTH or NEITHER → invalid_input with 0 fetch; optional `year` (default: current federal fiscal year). Returns { rates:[{ city, county, state, zip, year, fiscalYear (= year, the U.S. FY: Oct 2026 = FY2027), isOconus, standardRate, mealsUsd, monthlyLodgingUsd:[{ month (1-12), monthName, lodgingUsd }] }] } + honest _meta. HONESTY: lodgingUsd is the MAX nightly lodging ceiling for that month — VARIES SEASONALLY (hence a per-month array); mealsUsd is the daily M&IE ceiling; both are integer US dollars, null-when-withheld (NEVER 0 — genuine 0 preserved). standardRate/isOconus are booleans coerced from the API's string 'true'/'false' (unrecognized → null, never fabricated false); months array preserved AS-IS (never padded to 12). API returns COMPLETE rate set (no pagination) → totalAvailable = row count, complete:true. Genuine no-match → honest empty; `errors` field non-null → invalid_input; 429 (DEMO_KEY ~10 req/hr) → rate_limited THROWS; set DATA_GOV_API_KEY (free, api.data.gov/signup) for 1000/hr. 5xx/timeout → upstream_unavailable THROWS; 200 non-JSON → schema_drift. Key rides ONLY in the X-Api-Key header.",
         inputSchema: GsaPerdiemRatesInput,
         handler: (input) => gsaPerdiem.perdiemRates(input),
     }),
