@@ -48,9 +48,10 @@ const FPDS_HOST = "www.fpds.gov";
 const FPDS_PATH = "/ezsearch/FEEDS/ATOM";
 const FPDS_ORIGIN_PATH = `https://${FPDS_HOST}${FPDS_PATH}`;
 const FPDS_LABEL = "www.fpds.gov";
-// WAF-friendly browser-ish UA (mirrors gao.ts convention).
+// Identify this client honestly — same string used by every other module in the
+// project. Live-verified 2026-09-22: FPDS returns 200 to this UA and with no UA.
 const FPDS_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (compatible; @cliwant/mcp-sam-gov; +https://github.com/cliwant/mcp-sam-gov)";
 
 const PAGE_SIZE = 10;
 /** Hard cap on entries sliced per feed (page size is 10; anything past a small
