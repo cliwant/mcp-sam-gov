@@ -29,6 +29,7 @@ export declare function searchWageDeterminations(args: {
     coverage: string;
     state?: string;
     county?: string;
+    constructionType?: string;
     query?: string;
     activeOnly?: boolean;
     standardOnly?: boolean;

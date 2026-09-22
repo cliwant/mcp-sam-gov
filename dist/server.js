@@ -593,11 +593,15 @@ const WageSearchInput = z.object({
     state: z
         .string()
         .optional()
-        .describe("2-letter USPS state code (e.g. 'VA'), applied SERVER-SIDE. A full name is applied client-side instead."),
+        .describe("2-letter USPS state code (e.g. 'IL'), applied SERVER-SIDE. A full name is applied client-side instead."),
     county: z
         .string()
         .optional()
-        .describe("County name (substring match), applied CLIENT-SIDE over the fetched page only (the API has no county filter)."),
+        .describe("County name (substring match, e.g. 'Cook'). When given, ALL pages for the state are scanned before filtering so no WDs are missed."),
+    constructionType: z
+        .enum(["Building", "Residential", "Heavy", "Highway"])
+        .optional()
+        .describe("DBA construction type (Building | Residential | Heavy | Highway). This is the PRIMARY key for a Davis-Bacon lookup: pass state + county + constructionType to pinpoint the correct WD. E.g. Building = federal buildings, schools; Heavy = bridges, utilities; Highway = roads."),
     query: z
         .string()
         .optional()
@@ -607,8 +611,8 @@ const WageSearchInput = z.object({
         .boolean()
         .optional()
         .describe("Only standard (non-non-standard) WDs (default true)."),
-    limit: z.number().min(1).max(50).optional().describe("Page size (default 20, max 50)."),
-    page: z.number().min(0).optional().describe("0-based page index (default 0)."),
+    limit: z.number().min(1).max(50).optional().describe("Page size (default 20, max 50). Ignored when county or constructionType is given — a full-state scan is performed instead."),
+    page: z.number().min(0).optional().describe("0-based page index (default 0). Ignored when county or constructionType is given — a full-state scan is performed instead."),
 });
 const WageRatesInput = z.object({
     reference: z
@@ -4740,7 +4744,7 @@ export const TOOLS = [
     // ━━━ Pricing / Wage (3) ━━━
     defineTool({
         name: "sam_search_wage_determinations",
-        description: "Find the Service Contract Act (SCA) or Davis-Bacon (DBA) wage determination(s) governing a locality (keyless SAM SGS). Filter by coverage (sca|dba), state (2-letter, server-side), county (client-side), or WD number/title. Returns the structured WD list; follow with sam_get_wage_rates to read the rate table. NOTE: `query` matches WD number/title only, NOT occupation.",
+        description: "Find the Service Contract Act (SCA) or Davis-Bacon Act (DBA) wage determination(s) for a locality (keyless SAM SGS). For a Davis-Bacon lookup pass state + county + constructionType (e.g. 'IL', 'Cook', 'Building') — the tool scans ALL pages for the state so no WDs are missed, ranks single-county WDs first (the most specific match), and reports real match counts. Then call sam_get_wage_rates on the top result to read the rate table. SCA: pass state + county. constructionType is DBA-only: Building (federal buildings/schools), Residential, Heavy (bridges/utilities), Highway (roads). NOTE: `query` matches WD number/title only, NOT occupation.",
         inputSchema: WageSearchInput,
         handler: (input) => pricing.searchWageDeterminations(input),
     }),
