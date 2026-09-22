@@ -164,10 +164,26 @@ function epochToIso(v: number | string | undefined): string | null {
   return null;
 }
 
+// Maximum pages to scan when a client-side filter (county / constructionType)
+// requires a full-state sweep.  10 pages × 50 rows = 500 WDs — well above any
+// real state's active DBA stock (IL has 70 as of 2026-09-22).
+const WD_SCAN_PAGE_CAP = 10;
+const WD_SCAN_SIZE = 50; // max the SGS API accepts per request
+
+/** Extract constructionTypes as a lowercase string array (handles string[] or unknown). */
+function resultConstructionTypes(r: SgsResult): string[] {
+  const ct = r.constructionTypes;
+  if (!ct) return [];
+  if (Array.isArray(ct)) return ct.map((v) => String(v).toLowerCase());
+  if (typeof ct === "string") return [ct.toLowerCase()];
+  return [];
+}
+
 export async function searchWageDeterminations(args: {
   coverage: string;
   state?: string;
   county?: string;
+  constructionType?: string;
   query?: string;
   activeOnly?: boolean;
   standardOnly?: boolean;
@@ -181,35 +197,47 @@ export async function searchWageDeterminations(args: {
   const page = Math.max(0, Math.floor(args.page ?? 0));
   const stateFilter = args.state?.trim().toUpperCase() || undefined;
   const countyFilter = args.county?.trim().toLowerCase() || undefined;
+  const ctFilter = args.constructionType?.trim().toLowerCase() || undefined;
 
-  const params = new URLSearchParams({
-    index,
-    size: String(limit),
-    page: String(page),
-    mode: "search",
-    sort: "-modifiedDate",
-  });
-  if (activeOnly) params.set("is_active", "true");
-  if (standardOnly) params.set("is_standard", "true");
-  // `q` matches WD number/title ONLY (NOT occupation) — verified q=guard→0.
-  if (args.query) params.set("q", args.query);
-  // `state` IS honored server-side (LIVE-VERIFIED 2026-07-03: index=sca&state=VA
-  // → 30 vs 1028 unfiltered, and every returned WD's location contains VA;
-  // state=ZZ → 0). It wants the 2-letter USPS code (a full name like "Virginia"
-  // → 0). This CORRECTS the earlier brief which assumed state was ignored.
+  // When county or constructionType is given, we must scan ALL pages for the
+  // state to avoid missing matching WDs (e.g. IL has 70 DBA WDs — the target
+  // Cook County Building WD is on page 1).  We use max size=50 per fetch and
+  // cap at WD_SCAN_PAGE_CAP pages to keep the request count bounded.
+  const needsFullScan = Boolean(countyFilter || ctFilter);
+
   const filtersApplied: string[] = [`coverage(${index})`];
   const filtersDropped: string[] = [];
   const notes: string[] = [];
   if (activeOnly) filtersApplied.push("activeOnly");
   if (standardOnly) filtersApplied.push("standardOnly");
   if (args.query) filtersApplied.push("query(WD number/title only)");
+
+  // Build the base URLSearchParams that are shared across every page fetch.
+  function buildParams(pg: number, sz: number): URLSearchParams {
+    const p = new URLSearchParams({
+      index,
+      size: String(sz),
+      page: String(pg),
+      mode: "search",
+      sort: "-modifiedDate",
+    });
+    if (activeOnly) p.set("is_active", "true");
+    if (standardOnly) p.set("is_standard", "true");
+    // `q` matches WD number/title ONLY (NOT occupation) — verified q=guard→0.
+    if (args.query) p.set("q", args.query);
+    return p;
+  }
+
+  // `state` IS honored server-side (LIVE-VERIFIED 2026-07-03: index=sca&state=VA
+  // → 30 vs 1028 unfiltered, and every returned WD's location contains VA;
+  // state=ZZ → 0). It wants the 2-letter USPS code (a full name like "Virginia"
+  // → 0). This CORRECTS the earlier brief which assumed state was ignored.
+  const needsClientState =
+    stateFilter !== undefined && !/^[A-Z]{2}$/.test(stateFilter);
   if (stateFilter) {
-    if (/^[A-Z]{2}$/.test(stateFilter)) {
-      params.set("state", stateFilter);
+    if (!needsClientState) {
       filtersApplied.push("state(server-side)");
     } else {
-      // Not a 2-letter code → the server would return 0; apply client-side
-      // instead so a full name still works, and disclose it.
       filtersDropped.push("state(server-side; not a 2-letter code)");
       notes.push(
         `The state value '${args.state}' is not a 2-letter USPS code; the SGS 'state' param only matches 2-letter codes (a full name returns 0), so it was applied CLIENT-SIDE over the fetched page instead. Pass a 2-letter code (e.g. 'VA') for a precise server-side filter.`,
@@ -217,28 +245,73 @@ export async function searchWageDeterminations(args: {
     }
   }
 
-  const url = `${SGS_BASE}?${params.toString()}`;
-  const json = await getJson<SgsSearchResp>(url, SAM_HAL_HEADERS, `sam:sgs:${index}`);
-  const rawResults = json._embedded?.results ?? [];
-  const serverTotal = json.page?.totalElements ?? null;
+  // ── Fetch: one page (no client filters) OR full-state scan ──────
+  let allRaw: SgsResult[];
+  let serverTotal: number | null;
+  let scanCapHit = false;
 
-  // Client-side filtering: county is NOT a documented SGS server param, so it
-  // is applied here over the fetched page. A non-2-letter state also lands here.
-  const needsClientState = filtersDropped.some((f) => f.startsWith("state"));
-  let filtered = rawResults;
+  if (!needsFullScan) {
+    // Original single-page path (no county/constructionType filter).
+    const params = buildParams(page, limit);
+    if (!needsClientState && stateFilter) params.set("state", stateFilter);
+    const url = `${SGS_BASE}?${params.toString()}`;
+    const json = await getJson<SgsSearchResp>(url, SAM_HAL_HEADERS, `sam:sgs:${index}`);
+    allRaw = json._embedded?.results ?? [];
+    serverTotal = json.page?.totalElements ?? null;
+  } else {
+    // Full-state scan: fetch all pages with size=50 until exhausted or cap.
+    const scanParams = buildParams(0, WD_SCAN_SIZE);
+    if (!needsClientState && stateFilter) scanParams.set("state", stateFilter);
+    const firstUrl = `${SGS_BASE}?${scanParams.toString()}`;
+    const firstJson = await getJson<SgsSearchResp>(firstUrl, SAM_HAL_HEADERS, `sam:sgs:${index}`);
+    allRaw = firstJson._embedded?.results ?? [];
+    serverTotal = firstJson.page?.totalElements ?? null;
+    const totalPages = firstJson.page?.totalPages ?? 1;
+
+    const pagesToFetch = Math.min(totalPages, WD_SCAN_PAGE_CAP);
+    if (totalPages > WD_SCAN_PAGE_CAP) scanCapHit = true;
+
+    for (let pg = 1; pg < pagesToFetch; pg++) {
+      const p = buildParams(pg, WD_SCAN_SIZE);
+      if (!needsClientState && stateFilter) p.set("state", stateFilter);
+      const pgJson = await getJson<SgsSearchResp>(
+        `${SGS_BASE}?${p.toString()}`,
+        SAM_HAL_HEADERS,
+        `sam:sgs:${index}`,
+      );
+      allRaw = allRaw.concat(pgJson._embedded?.results ?? []);
+    }
+  }
+
+  // ── Client-side filtering ────────────────────────────────────────
+  let filtered = allRaw;
   if (needsClientState && stateFilter) {
     filtered = filtered.filter((r) =>
-      resultStateCodes(r).some((c) => c === stateFilter || r.location?.state?.name?.toUpperCase() === stateFilter),
+      resultStateCodes(r).some(
+        (c) => c === stateFilter || r.location?.state?.name?.toUpperCase() === stateFilter,
+      ),
     );
   }
   if (countyFilter) {
-    filtersApplied.push("county(client-side)");
+    filtersApplied.push("county(client-side, full-state scan)");
     filtered = filtered.filter((r) =>
       resultCounties(r).some((c) => c.name.toLowerCase().includes(countyFilter)),
     );
-    notes.push(
-      "County is filtered CLIENT-SIDE over the fetched page only (the SGS API has no county filter). A county filter combined with a small limit can miss WDs on later pages — raise `limit` or narrow by `state` (server-side) to be sure.",
+  }
+  if (ctFilter) {
+    filtersApplied.push(`constructionType(client-side, value=${args.constructionType})`);
+    filtered = filtered.filter((r) =>
+      resultConstructionTypes(r).includes(ctFilter),
     );
+  }
+
+  // ── Specificity ranking: single-county WDs before multi-county ──
+  if (countyFilter) {
+    filtered.sort((a, b) => {
+      const aCount = resultCounties(a).length;
+      const bCount = resultCounties(b).length;
+      return aCount - bCount; // 1-county first, then 2-county, etc.
+    });
   }
 
   const determinations = filtered.map((r) => {
@@ -273,27 +346,48 @@ export async function searchWageDeterminations(args: {
     "The `q` parameter matches the WD number/title only — it does NOT search by occupation or job title (e.g. q=guard returns 0). To find rates for a specific occupation, open the WD and read its rate table.",
   );
 
-  // totalAvailable: the server total is REAL for the coverage/active/standard/
-  // query/state filters (state is server-side). But when we additionally filter
-  // client-side (county, or a non-code state), the returned page count no longer
-  // reflects a full server total for THAT combined filter → null it out and say so.
-  const clientFiltered = Boolean(countyFilter) || needsClientState;
-  const totalAvailable = clientFiltered ? null : serverTotal;
+  // ── Honest meta ──────────────────────────────────────────────────
+  const clientFiltered = Boolean(countyFilter) || Boolean(ctFilter) || needsClientState;
+  const scannedCount = allRaw.length;
   const returned = determinations.length;
-  const truncated = clientFiltered
-    ? true // page-bounded client filter → can't prove completeness
-    : serverTotal !== null && page * limit + returned < serverTotal;
 
-  if (clientFiltered) {
+  // When we did a full-state scan, totalAvailable is the REAL count of matching
+  // WDs across the scanned pages (not null).  Only null it when the scan cap was
+  // hit (we didn't see all pages) or when there was no client filter.
+  let totalAvailable: number | null;
+  let truncated: boolean;
+
+  if (!clientFiltered) {
+    // No client filter: server total is accurate for this result set.
+    totalAvailable = serverTotal;
+    truncated = serverTotal !== null && page * limit + returned < serverTotal;
+  } else if (needsFullScan && !scanCapHit) {
+    // Full scan completed: real match count is known.
+    totalAvailable = returned;
+    truncated = false;
+  } else {
+    // Scan cap hit or no full scan (shouldn't happen but be safe).
+    totalAvailable = null;
+    truncated = true;
+  }
+
+  if (needsFullScan) {
+    const stateLabel = stateFilter ?? "all states";
+    const capNote = scanCapHit
+      ? ` (scan cap of ${WD_SCAN_PAGE_CAP * WD_SCAN_SIZE} WDs reached — some WDs may have been missed)`
+      : "";
     notes.push(
-      "totalAvailable is null because a client-side filter (county and/or a non-code state) was applied over just the fetched page — the true match count for the combined filter is unknown. The server-side total for the coverage/state/active filters was " +
-        (serverTotal ?? "unknown") +
-        ".",
+      `Scanned ${scannedCount} of ${serverTotal ?? scannedCount} ${stateLabel} ${index.toUpperCase()} WDs across all pages${capNote}. ` +
+        (countyFilter ? `County filter applied across all scanned WDs. ` : "") +
+        (ctFilter ? `constructionType filter (${args.constructionType}) applied. ` : "") +
+        (countyFilter
+          ? "Single-county WDs ranked first — they are almost always the most specific match for a given locality. "
+          : ""),
     );
   }
 
   return withMeta(
-    { determinations, coverageIndex: index, page, limit },
+    { determinations, coverageIndex: index, page: needsFullScan ? 0 : page, limit: needsFullScan ? returned : limit },
     {
       source: WD_SEARCH_SOURCE,
       keylessMode: true,
@@ -301,9 +395,9 @@ export async function searchWageDeterminations(args: {
       totalAvailable,
       truncated,
       pagination: {
-        offset: page * limit,
-        limit,
-        nextOffset: truncated ? (page + 1) * limit : null,
+        offset: 0,
+        limit: needsFullScan ? returned : limit,
+        nextOffset: truncated && !needsFullScan ? (page + 1) * limit : null,
         hasMore: truncated,
       },
       filtersApplied,

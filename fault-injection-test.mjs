@@ -5045,6 +5045,173 @@ async function testPricingHonesty() {
         threw && error?.toolError?.kind === "not_found", JSON.stringify(error?.toolError));
     },
   );
+
+  // 7–12. county + constructionType full-state scan (fixes Davis-Bacon Cook County IL bug).
+  // Setup: 2-page state listing, target WD IL20260009 (Cook, Building) sits on PAGE 1 only.
+  section("16b. pricing WD county+constructionType full-state scan (Davis-Bacon IL Cook County fix)");
+  const isWdSearchIL = (u) => /sgs\/v1\/search.*index=dbra/.test(u);
+  // Page 0: 50 WDs, none matching Cook county with Building type.
+  function makeSgsPage0() {
+    // 50 records, multi-county or wrong type — target IL20260009 is absent.
+    const results = [];
+    for (let i = 0; i < 50; i++) {
+      results.push({
+        fullReferenceNumber: `IL202600${String(i + 10).padStart(2, "0")}`,
+        type: { code: "DBA" },
+        isActive: true, isStandard: true,
+        constructionTypes: ["Heavy", "Highway"],
+        location: {
+          state: {
+            code: "IL", name: "Illinois",
+            counties: [
+              { code: 1001, value: "Adams" },
+              { code: 1002, value: "Lake" },
+            ],
+          },
+        },
+      });
+    }
+    return mockResponse({
+      status: 200,
+      json: {
+        _embedded: { results },
+        page: { size: 50, totalElements: 51, totalPages: 2, number: 0, maxAllowedRecords: 10000 },
+      },
+    });
+  }
+  // Page 1: 1 record — the target single-county Cook Building WD.
+  function makeSgsPage1() {
+    return mockResponse({
+      status: 200,
+      json: {
+        _embedded: {
+          results: [{
+            fullReferenceNumber: "IL20260009",
+            type: { code: "DBA" },
+            isActive: true, isStandard: true,
+            constructionTypes: ["Building", "Heavy", "Highway", "Residential"],
+            location: {
+              state: {
+                code: "IL", name: "Illinois",
+                counties: [{ code: 1003, value: "Cook" }],
+              },
+            },
+          }],
+        },
+        page: { size: 1, totalElements: 51, totalPages: 2, number: 1, maxAllowedRecords: 10000 },
+      },
+    });
+  }
+  let pageCallCount = 0;
+  await withFetch(
+    (u) => {
+      if (!isWdSearchIL(u)) return failClosed()();
+      pageCallCount++;
+      const pg = parseInt(new URL(u).searchParams.get("page") ?? "0", 10);
+      return pg === 0 ? makeSgsPage0() : makeSgsPage1();
+    },
+    async () => {
+      pageCallCount = 0;
+      const res = await searchWageDeterminations({
+        coverage: "dba", state: "IL", county: "Cook", constructionType: "Building",
+      });
+      ok("WD county+ct scan fetches ALL pages (both page 0 and page 1 called)",
+        pageCallCount === 2, `pageCallCount=${pageCallCount}`);
+      const found = res.data.determinations.find((d) => d.fullReferenceNumber === "IL20260009");
+      ok("WD county+ct scan finds IL20260009 on page 1 (not missed by single-page fetch)",
+        Boolean(found), JSON.stringify(res.data.determinations.map((d) => d.fullReferenceNumber)));
+      ok("WD county+ct scan IL20260009 is ranked first (single-county before multi-county)",
+        res.data.determinations[0]?.fullReferenceNumber === "IL20260009",
+        `first=${res.data.determinations[0]?.fullReferenceNumber}`);
+      ok("WD county+ct scan totalAvailable is real count (not null) when scan is complete",
+        res.meta.totalAvailable === 1, `totalAvailable=${res.meta.totalAvailable}`);
+      ok("WD county+ct scan truncated:false when scan completes without hitting cap",
+        res.meta.truncated === false, `truncated=${res.meta.truncated}`);
+      const scanNote = res.meta.notes?.join(" ") ?? "";
+      ok("WD county+ct scan notes contain 'Scanned N of M' disclosure",
+        /Scanned \d+ of \d+/.test(scanNote), `notes=${scanNote.slice(0, 200)}`);
+    },
+  );
+
+  // 8. county filter only (no constructionType) — still scans all pages, ranks single-county first
+  await withFetch(
+    (u) => {
+      if (!isWdSearchIL(u)) return failClosed()();
+      const pg = parseInt(new URL(u).searchParams.get("page") ?? "0", 10);
+      return pg === 0 ? makeSgsPage0() : makeSgsPage1();
+    },
+    async () => {
+      const res = await searchWageDeterminations({
+        coverage: "dba", state: "IL", county: "Cook",
+      });
+      // IL20260009 (1 county) should rank before IL202600xx (2 counties)
+      ok("WD county-only scan finds IL20260009 on page 1",
+        res.data.determinations.some((d) => d.fullReferenceNumber === "IL20260009"),
+        JSON.stringify(res.data.determinations.map((d) => d.fullReferenceNumber)));
+      ok("WD county-only scan single-county WD ranks before multi-county WD",
+        res.data.determinations[0]?.counties?.length === 1,
+        `first counties=${JSON.stringify(res.data.determinations[0]?.counties)}`);
+    },
+  );
+
+  // 9. constructionType filter excludes non-matching WDs (Heavy/Highway only on page 0)
+  await withFetch(
+    (u) => {
+      if (!isWdSearchIL(u)) return failClosed()();
+      const pg = parseInt(new URL(u).searchParams.get("page") ?? "0", 10);
+      return pg === 0 ? makeSgsPage0() : makeSgsPage1();
+    },
+    async () => {
+      const res = await searchWageDeterminations({
+        coverage: "dba", state: "IL", constructionType: "Building",
+      });
+      // page 0 WDs are Heavy/Highway only — none should pass Building filter
+      // page 1 has IL20260009 which IS Building
+      const ids = res.data.determinations.map((d) => d.fullReferenceNumber);
+      ok("WD constructionType=Building filters out Heavy/Highway page-0 WDs",
+        ids.every((id) => id === "IL20260009"), `remaining=${JSON.stringify(ids)}`);
+    },
+  );
+
+  // 10. NON-VACUITY: prove that stopping after page 0 breaks the county test (red gate).
+  // We temporarily monkey-patch the dist module to stop at page 0, run the same test,
+  // assert it FAILS to find IL20260009, then restore.
+  {
+    // Read the built js to find the page loop, patch the page cap to 1, rebuild in-memory.
+    const distSrc = await import("fs").then((fs) => fs.promises.readFile(
+      new URL("./dist/pricing.js", import.meta.url), "utf-8",
+    ));
+    // Replace 'const WD_SCAN_PAGE_CAP = 10' with 1 to force stop after page 0.
+    if (!distSrc.includes("WD_SCAN_PAGE_CAP = 10")) {
+      ok("non-vacuity: WD_SCAN_PAGE_CAP constant found in dist/pricing.js",
+        false, "WD_SCAN_PAGE_CAP = 10 not found — dist may be stale");
+    } else {
+      const patched = distSrc.replace("WD_SCAN_PAGE_CAP = 10", "WD_SCAN_PAGE_CAP = 1");
+      const tmpPath = new URL("./dist/pricing_vacuity_test.mjs", import.meta.url);
+      await import("fs").then((fs) => fs.promises.writeFile(tmpPath, patched, "utf-8"));
+      try {
+        const { searchWageDeterminations: searchPatched } = await import(tmpPath.href + "?bust=" + Date.now());
+        let foundTarget = false;
+        await withFetch(
+          (u) => {
+            if (!isWdSearchIL(u)) return failClosed()();
+            const pg = parseInt(new URL(u).searchParams.get("page") ?? "0", 10);
+            return pg === 0 ? makeSgsPage0() : makeSgsPage1();
+          },
+          async () => {
+            const res2 = await searchPatched({
+              coverage: "dba", state: "IL", county: "Cook", constructionType: "Building",
+            });
+            foundTarget = res2.data.determinations.some((d) => d.fullReferenceNumber === "IL20260009");
+          },
+        );
+        ok("non-vacuity: cap=1 (page 0 only) MISSES IL20260009 — proves full scan is load-bearing",
+          foundTarget === false, `foundTarget=${foundTarget} (should be false to prove non-vacuity)`);
+      } finally {
+        await import("fs").then((fs) => fs.promises.unlink(tmpPath).catch(() => {}));
+      }
+    }
+  }
 }
 
 // GAO protests (gao_protest_lookup) — HTML/RSS-scraped (getText→fetchWithRetry→

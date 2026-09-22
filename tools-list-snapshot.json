@@ -4933,7 +4933,7 @@
   },
   {
     "name": "sam_search_wage_determinations",
-    "description": "Find the Service Contract Act (SCA) or Davis-Bacon (DBA) wage determination(s) governing a locality (keyless SAM SGS). Filter by coverage (sca|dba), state (2-letter, server-side), county (client-side), or WD number/title. Returns the structured WD list; follow with sam_get_wage_rates to read the rate table. NOTE: `query` matches WD number/title only, NOT occupation.",
+    "description": "Find the Service Contract Act (SCA) or Davis-Bacon Act (DBA) wage determination(s) for a locality (keyless SAM SGS). For a Davis-Bacon lookup pass state + county + constructionType (e.g. 'IL', 'Cook', 'Building') — the tool scans ALL pages for the state so no WDs are missed, ranks single-county WDs first (the most specific match), and reports real match counts. Then call sam_get_wage_rates on the top result to read the rate table. SCA: pass state + county. constructionType is DBA-only: Building (federal buildings/schools), Residential, Heavy (bridges/utilities), Highway (roads). NOTE: `query` matches WD number/title only, NOT occupation.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -4947,11 +4947,21 @@
         },
         "state": {
           "type": "string",
-          "description": "2-letter USPS state code (e.g. 'VA'), applied SERVER-SIDE. A full name is applied client-side instead."
+          "description": "2-letter USPS state code (e.g. 'IL'), applied SERVER-SIDE. A full name is applied client-side instead."
         },
         "county": {
           "type": "string",
-          "description": "County name (substring match), applied CLIENT-SIDE over the fetched page only (the API has no county filter)."
+          "description": "County name (substring match, e.g. 'Cook'). When given, ALL pages for the state are scanned before filtering so no WDs are missed."
+        },
+        "constructionType": {
+          "type": "string",
+          "enum": [
+            "Building",
+            "Residential",
+            "Heavy",
+            "Highway"
+          ],
+          "description": "DBA construction type (Building | Residential | Heavy | Highway). This is the PRIMARY key for a Davis-Bacon lookup: pass state + county + constructionType to pinpoint the correct WD. E.g. Building = federal buildings, schools; Heavy = bridges, utilities; Highway = roads."
         },
         "query": {
           "type": "string",
@@ -4967,11 +4977,11 @@
         },
         "limit": {
           "type": "number",
-          "description": "Page size (default 20, max 50)."
+          "description": "Page size (default 20, max 50). Ignored when county or constructionType is given — a full-state scan is performed instead."
         },
         "page": {
           "type": "number",
-          "description": "0-based page index (default 0)."
+          "description": "0-based page index (default 0). Ignored when county or constructionType is given — a full-state scan is performed instead."
         }
       },
       "required": [
