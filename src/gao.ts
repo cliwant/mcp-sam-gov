@@ -42,11 +42,12 @@ import { withMeta } from "./meta.js";
 
 // ─── Shared HTTP ─────────────────────────────────────────────────
 
-// GAO's edge (Cloudflare/WAF) will 403 a bare client — always send a realistic
-// browser User-Agent. Mirror the shape the rest of the server uses for GAO-ish
-// public HTML/RSS scraping so behavior is consistent.
+// Identify this client honestly — same string used by every other module in the
+// project. Live-verified 2026-09-22: GAO's RSS feed returns 200 to this UA, to
+// the formerly-used fake Chrome UA, and even with no UA at all. GAO per-decision
+// pages 403 from Akamai regardless of UA, so spoofing a browser gains nothing.
 const GAO_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (compatible; @cliwant/mcp-sam-gov; +https://github.com/cliwant/mcp-sam-gov)";
 
 const RSS_URL = "https://www.gao.gov/rss/reportslegal.xml";
 const PRODUCT_BASE = "https://www.gao.gov/products/";
@@ -58,9 +59,9 @@ const SOURCE = "gao.gov Legal Products RSS + decision pages (keyless)";
  * in `data` and inside `_meta.notes` so no consumer can miss the scope boundary.
  */
 const ACCESS_NOTE =
-  "Keyless GAO access covers only RECENT decisions from the public Legal-Products RSS feed (a rolling ~25-item window). GAO's faceted historical protest search (by protester/agency/outcome/date across all years) is WAF-blocked to automated clients and available only via a paid third-party API. Do NOT treat these results as the complete protest history.";
+  "Keyless GAO access covers only RECENT decisions from the public Legal-Products RSS feed (a rolling ~25-item window). GAO's faceted historical protest search (by protester/agency/outcome/date across all years) is WAF-blocked to automated clients — keyless programmatic access is unavailable (a human can search at https://www.gao.gov/search). Do NOT treat these results as the complete protest history.";
 
-// Thin LOCAL wrapper (ADR-0013) that injects GAO's WAF-friendly UA + RSS Accept
+// Thin LOCAL wrapper (ADR-0013) that injects the project's honest UA + RSS Accept
 // for the tool's two call sites, then delegates to the shared `getText` port
 // (retry defaults true → fetchWithRetry, byte-identical to the former
 // hand-rolled fetcher). `timeoutMs` is preserved as a param default (never
@@ -707,6 +708,19 @@ export async function gaoProtestLookup(args: {
   if (outcomeFilter && !enrich) {
     notes.push(
       "The outcome filter was NOT applied because it requires reading each decision page (enrich=false). Results are unfiltered on outcome.",
+    );
+  }
+
+  // When a protester/agency/solicitationNumber filter was given and the window
+  // contains no matching decisions, give the caller a precise next step: GAO's
+  // own search pre-filtered to bid-protest decisions with the term filled in.
+  // (This is NOT a reading list — it is a single direct link to the full
+  // historical database that a human can open immediately.)
+  const searchTerm = (args.protester ?? args.agency ?? args.solicitationNumber)?.trim();
+  if (decisions.length === 0 && filtersApplied.length > 0 && searchTerm) {
+    const encoded = encodeURIComponent(searchTerm);
+    notes.push(
+      `"${searchTerm}" does not appear in the current ~25-decision window. GAO's full protest database is searchable at https://www.gao.gov/search?f%5B0%5D=ctype_search%3ABid%20Protest%20Decision&keyword=${encoded} — each result shows parties, agency, date and outcome. Keyless programmatic access to the historical archive is unavailable; the link above goes directly to the relevant results.`,
     );
   }
 
