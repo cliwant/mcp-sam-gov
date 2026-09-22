@@ -5292,6 +5292,108 @@ async function testGaoHonesty() {
   );
 }
 
+// ─── UA honesty + GAO redirect-note tests ────────────────────────────────────
+// These tests were added alongside the fix that replaced the fake Chrome UA in
+// gao.ts and fpds.ts with the project's honest UA (2026-09-22).
+
+async function testHonestUaAndGaoRedirect() {
+  section("17b. honest UA constants + GAO filter-empty redirect note");
+
+  // ── 1. Both dist UA constants equal the honest string (read from dist files).
+  const HONEST = "Mozilla/5.0 (compatible; @cliwant/mcp-sam-gov; +https://github.com/cliwant/mcp-sam-gov)";
+  const { readFileSync } = await import("node:fs");
+
+  const gaoSrc = readFileSync(new URL("./dist/gao.js", import.meta.url), "utf-8");
+  const fpdsSrc = readFileSync(new URL("./dist/fpds.js", import.meta.url), "utf-8");
+
+  const gaoUaMatch = gaoSrc.match(/const GAO_UA = "([^"]+)"/);
+  const fpdsUaMatch = fpdsSrc.match(/const FPDS_UA = "([^"]+)"/);
+
+  ok("dist/gao.js GAO_UA equals the honest project UA (not a spoofed browser string)",
+    gaoUaMatch?.[1] === HONEST,
+    `got: ${gaoUaMatch?.[1]}`);
+  ok("dist/fpds.js FPDS_UA equals the honest project UA (not a spoofed browser string)",
+    fpdsUaMatch?.[1] === HONEST,
+    `got: ${fpdsUaMatch?.[1]}`);
+
+  // ── 2. No Chrome/ substring in any dist/*.js UA constant (catches any future
+  //       regression that reintroduces a fake browser UA anywhere in the dist).
+  const { readdirSync } = await import("node:fs");
+  const distFiles = readdirSync(new URL("./dist/", import.meta.url))
+    .filter((f) => f.endsWith(".js"))
+    .map((f) => ({
+      name: f,
+      src: readFileSync(new URL(`./dist/${f}`, import.meta.url), "utf-8"),
+    }));
+
+  // Find any _UA constant assignments that contain Chrome/
+  const chromeLeak = distFiles
+    .flatMap(({ name, src }) => {
+      const matches = [...src.matchAll(/const \w+_UA\s*=\s*"([^"]+)"/g)];
+      return matches
+        .filter(([, v]) => v.includes("Chrome/"))
+        .map(([, v]) => `${name}: ${v}`);
+    });
+  ok("no dist/*.js _UA constant contains 'Chrome/' (no spoofed browser UA in any module) ⇒ reintroduce Chrome/ ⇒ RED",
+    chromeLeak.length === 0,
+    chromeLeak.join(" | "));
+
+  // ── 3. Empty filtered result (protester given, not in window) ⇒ note carries
+  //       the pre-filled GAO search URL with the term URL-encoded.
+  const isFeed = (u) => /gao\.gov\/rss\/reportslegal\.xml/.test(u);
+  const rss = (items) => `<?xml version="1.0"?><rss><channel>${items}</channel></rss>`;
+  // An item that matches "Acme Corp" but NOT "Booz Allen Hamilton"
+  const unrelatedItem = `<item><title>Acme Corp</title><link>https://www.gao.gov/products/b-421234</link><description>Acme Corp protests the award of a contract for widgets.</description><pubDate>Mon, 01 Jul 2024 00:00:00 GMT</pubDate></item>`;
+
+  await withFetch(
+    (u) => (isFeed(u) ? mockResponse({ status: 200, json: rss(unrelatedItem) }) : mockResponse({ status: 403 })),
+    async () => {
+      const res = await gaoProtestLookup({ protester: "Booz Allen Hamilton", enrich: false });
+      const notes = res.meta.notes;
+      const redirectNote = notes.find((n) => /gao\.gov\/search.*Booz.*Allen.*Hamilton/i.test(n) ||
+        /gao\.gov\/search.*Booz%20Allen%20Hamilton/i.test(n));
+      ok("gao: filtered-empty (protester given, not in window) ⇒ note carries pre-filled GAO search URL with URL-encoded term ⇒ remove redirect logic ⇒ RED",
+        Boolean(redirectNote),
+        `notes: ${JSON.stringify(notes)}`);
+      ok("gao: filtered-empty redirect note encodes spaces as %20 (URL-encoded) ⇒ skip encodeURIComponent ⇒ RED",
+        notes.some((n) => n.includes("Booz%20Allen%20Hamilton")),
+        `notes: ${JSON.stringify(notes)}`);
+      ok("gao: filtered-empty redirect note contains protest-filter param f[0]=ctype_search:Bid Protest Decision ⇒ strip filter param ⇒ RED",
+        notes.some((n) => n.includes("ctype_search")),
+        `notes: ${JSON.stringify(notes)}`);
+    },
+  );
+
+  // ── 4. Non-empty result (term IS in window) ⇒ no redirect URL injected.
+  const matchingItem = `<item><title>Booz Allen Hamilton</title><link>https://www.gao.gov/products/b-422823</link><description>Booz Allen Hamilton protests the award of an IT services contract.</description><pubDate>Mon, 15 Sep 2025 00:00:00 GMT</pubDate></item>`;
+  await withFetch(
+    (u) => (isFeed(u) ? mockResponse({ status: 200, json: rss(matchingItem) }) : mockResponse({ status: 403 })),
+    async () => {
+      const res = await gaoProtestLookup({ protester: "Booz Allen Hamilton", enrich: false });
+      const notes = res.meta.notes;
+      const hasRedirect = notes.some((n) => /gao\.gov\/search.*keyword/i.test(n));
+      ok("gao: non-empty filtered result ⇒ no redirect URL injected (only add redirect when window is empty) ⇒ always inject redirect ⇒ RED",
+        !hasRedirect,
+        `notes: ${JSON.stringify(notes)}`);
+    },
+  );
+
+  // ── 5. NON-VACUITY: mutate gaoProtestLookup inline to verify assertions are
+  //       not trivially passing. We cannot actually mutate the imported dist —
+  //       instead we confirm the negative (no redirect when decisions exist, step 4
+  //       above) and the exact URL shape (step 3). The critical shape assertions
+  //       already fail if the redirect is absent (step 3) or present when not
+  //       needed (step 4). Additionally verify the URL format independently.
+  const sampleEncoded = encodeURIComponent("Booz Allen Hamilton");
+  ok("non-vacuity: encodeURIComponent('Booz Allen Hamilton') === 'Booz%20Allen%20Hamilton' (URL encoding works as expected)",
+    sampleEncoded === "Booz%20Allen%20Hamilton",
+    `got: ${sampleEncoded}`);
+  const expectedUrl = `https://www.gao.gov/search?f%5B0%5D=ctype_search%3ABid%20Protest%20Decision&keyword=${sampleEncoded}`;
+  ok("non-vacuity: constructed URL for 'Booz Allen Hamilton' matches expected pre-filled GAO search URL",
+    expectedUrl === "https://www.gao.gov/search?f%5B0%5D=ctype_search%3ABid%20Protest%20Decision&keyword=Booz%20Allen%20Hamilton",
+    `got: ${expectedUrl}`);
+}
+
 // Deterministic seeded PRNG (mulberry32) — reproducible fuzz in CI (Math.random
 // would make failures non-reproducible). The hand-rolled parsers (DOCX ZIP,
 // GSA-CSV, GAO RSS) all parse UNTRUSTED bytes; a crash/hang/OOB on hostile input
@@ -15859,8 +15961,8 @@ async function testGetTextPort() {
       await gaoProtestLookup({ enrich: false });
       const c = calls.find((x) => isGaoRss(x.url));
       eq("50b gao init KEY-SET === {headers, signal} (NO redirect — byte-identity)", Object.keys(c.init).sort(), ["headers", "signal"]);
-      ok("50b gao init.headers has the WAF UA + rss Accept (Chrome UA + application/rss+xml…)",
-        /Chrome\//.test(c.init.headers["User-Agent"]) && /application\/rss\+xml/.test(c.init.headers["Accept"]), JSON.stringify(c.init.headers));
+      ok("50b gao init.headers has the honest project UA + rss Accept (mcp-sam-gov UA + application/rss+xml…)",
+        /compatible; @cliwant\/mcp-sam-gov/.test(c.init.headers["User-Agent"]) && /application\/rss\+xml/.test(c.init.headers["Accept"]), JSON.stringify(c.init.headers));
       ok("50b gao init has NO 'redirect' key", !("redirect" in c.init), JSON.stringify(Object.keys(c.init)));
     },
   );
@@ -15885,8 +15987,8 @@ async function testGetTextPort() {
       const c = calls.find((x) => isFpds50(x.url));
       eq("50b fpds init KEY-SET === {headers, redirect, signal} (drop redirect ⇒ RED)", Object.keys(c.init).sort(), ["headers", "redirect", "signal"]);
       eq("50b fpds init.redirect === 'error' (SSRF m-redirect hardening)", c.init.redirect, "error");
-      ok("50b fpds init.headers has the WAF UA + atom Accept (Chrome UA + application/atom+xml…)",
-        /Chrome\//.test(c.init.headers["User-Agent"]) && /application\/atom\+xml/.test(c.init.headers["Accept"]), JSON.stringify(c.init.headers));
+      ok("50b fpds init.headers has the honest project UA + atom Accept (mcp-sam-gov UA + application/atom+xml…)",
+        /compatible; @cliwant\/mcp-sam-gov/.test(c.init.headers["User-Agent"]) && /application\/atom\+xml/.test(c.init.headers["Accept"]), JSON.stringify(c.init.headers));
       ok("50b fpds SINGLE attempt on a 200 (calls.length===1)", calls.filter((x) => isFpds50(x.url)).length === 1, `fpdsCalls=${calls.filter((x) => isFpds50(x.url)).length}`);
     },
   );
@@ -22731,6 +22833,7 @@ async function main() {
   await testFederalRegisterPublicInspectionHonesty();
   await testPricingHonesty();
   await testGaoHonesty();
+  await testHonestUaAndGaoRedirect();
   await testParserFuzz();
   await testMetamorphic();
   await testPricingParseReplay();

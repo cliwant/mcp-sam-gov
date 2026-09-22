@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`gao_protest_lookup` and `fpds_search_awards` now send the project's honest User-Agent** (`Mozilla/5.0 (compatible; @cliwant/mcp-sam-gov; +https://github.com/cliwant/mcp-sam-gov)`) instead of a fake Chrome browser string. Live-verified 2026-09-22: GAO's RSS feed returns 200 to the honest UA; FPDS returns 200 to the honest UA. The previously-used Chrome UA did not help — GAO per-decision pages 403 regardless of UA. Pretending to be a browser gains nothing and is contrary to the project's honesty policy.
+
 ### Fixed
+
+- **`gao_protest_lookup` now gives a precise next step when a protester/agency/solicitationNumber filter is given and the term is not in the current ~25-decision window.** Previously, the tool returned a bare "not in window" message that agents scored poorly against plain web search. The tool now adds a note with GAO's own search pre-filtered to bid-protest decisions with the search term URL-encoded: `https://www.gao.gov/search?f%5B0%5D=ctype_search%3ABid%20Protest%20Decision&keyword=<term>`. The `accessNote` was also corrected: historical search is unavailable as keyless *programmatic* access, but a human can search it at that URL (it is not "only via a paid third-party API").
 
 - **`sam_search_wage_determinations` now returns the correct Davis-Bacon WD for a county+constructionType lookup.** Previously, county filtering was applied only over the first fetched page (max 50 records), so Illinois's IL20260009 (the Cook County Building WD) was silently skipped because it lives on page 1 of IL's 70 active DBA WDs. The tool now scans ALL pages for the state (cap: 10 pages / 500 WDs) when a `county` or `constructionType` filter is given. A new `constructionType` parameter (Building | Residential | Heavy | Highway) enables precise DBA lookup: pass `state` + `county` + `constructionType` to get the right WD on the first call. Single-county WDs are ranked before multi-county WDs (a single-county WD is almost always the most specific match). `totalAvailable` and the scan note now report real numbers after the full scan instead of `null` with a "may miss" warning. (`IL20260009`, Cook County Building, correctly returned first with base $57.75 / fringe $42.89 electrician rate confirmed live.)
 
