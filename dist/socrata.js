@@ -541,6 +541,18 @@ export async function query(args) {
     if (totalAvailable === null && !hasMore) {
         notes.push("totalAvailable is unknown but completeness is INFERRED from a short page (returned < $limit): SODA returns fewer than $limit only when the result set is exhausted.");
     }
+    // ── Response-side aggregate nudge (§A-nudge) ──
+    // When the result is truncated (hasMore) and the caller used no aggregate select,
+    // the agent only sees a PAGE of rows — NOT the total. Nudge toward an aggregate
+    // query so the agent does not try to sum one page manually.
+    if (!isAggregateSelect && hasMore) {
+        // Find the most likely amount-like column from the first row's keys.
+        const firstRow = rows[0];
+        const amountKey = firstRow !== undefined
+            ? (Object.keys(firstRow).find((k) => /amount|amt|total|paid|payment/i.test(k)) ?? "<amount column>")
+            : "<amount column>";
+        notes.push(`This is a PAGE of raw rows (truncated — more rows exist). Do NOT sum this page to get a total. For a grand total: re-query with select='sum(${amountKey})' plus a where filter for vendor/fiscal year. For a top-N ranking: select='vendor_name, sum(${amountKey}) as total' with order='total DESC'. These are aggregate queries — the result is the final answer, not another page.`);
+    }
     return withMeta({ domain: args.domain, datasetId: args.datasetId, rows }, {
         source: `${args.domain} ${SOURCE_SUFFIX}`,
         keylessMode: true,

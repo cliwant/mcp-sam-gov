@@ -93,6 +93,10 @@ const STANDARD_RATE_NOTE =
   "standardRate:true means this location falls under the CONUS STANDARD rate (not an individually-set non-standard rate). standardRate/isOconus are booleans coerced from the API's string 'true'/'false'.";
 const NO_PAGINATION_NOTE =
   "The per-diem API returns the COMPLETE rate set for the lookup (no pagination); totalAvailable equals the number of rows returned.";
+const FISCAL_YEAR_NOTE =
+  "fiscalYear (= year) is the U.S. FEDERAL FISCAL YEAR (Oct 1–Sep 30). " +
+  "Example: October 2026 falls in FY2027 (FY runs Oct 2026–Sep 2027); September 2026 falls in FY2026. " +
+  "To look up October 2026 rates, pass year='2027'. To look up September 2026 rates, pass year='2026'.";
 
 // ─── STRING-boolean coercion (null-never-fabricate) ───────────────
 /** Coerce the API's string 'true'/'false' → a real boolean; anything else ⇒ null. */
@@ -119,6 +123,11 @@ export type PerdiemRate = {
   state: string | null;
   zip: string | null;
   year: number | null;
+  /** Explicit U.S. federal fiscal year label (Oct 1–Sep 30). Same numeric value as
+   * `year` (the GSA API's year field IS the FY number). Surfaced as a separate named
+   * field so callers never confuse it with a calendar year. E.g. fiscalYear:2027 means
+   * rates run Oct 2026–Sep 2027; October 2026 travel uses FY2027 rates. */
+  fiscalYear: number | null;
   isOconus: boolean | null; // OCONUS (outside-CONUS) flag — coerced from string boolean
   standardRate: boolean | null; // CONUS standard-rate flag — coerced from string boolean
   mealsUsd: number | null; // M&IE ceiling ($) — null-never-0
@@ -350,6 +359,8 @@ export async function perdiemRates(
         state: gState,
         zip: str(r.zip),
         year: gYear,
+        fiscalYear: gYear, // same numeric value as year; surfaced separately so callers
+                           // never confuse it with a calendar year (GSA year IS the FY)
         isOconus: gOconus,
         standardRate: strBool(r.standardRate),
         mealsUsd: num(r.meals),
@@ -359,7 +370,7 @@ export async function perdiemRates(
   }
 
   const returned = rows.length;
-  const notes: string[] = [RATE_MEANING_NOTE, STANDARD_RATE_NOTE, NO_PAGINATION_NOTE];
+  const notes: string[] = [RATE_MEANING_NOTE, STANDARD_RATE_NOTE, NO_PAGINATION_NOTE, FISCAL_YEAR_NOTE];
   if (yearWasDefaulted) {
     notes.push(
       `No \`year\` was supplied, so it defaulted to the CURRENT U.S. federal fiscal year (FY${year}). GSA per-diem ceilings are set per fiscal year (Oct 1–Sep 30); pass an explicit \`year\` for a prior or upcoming FY.`,
