@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-09-29
+
 ### Added
 
 - **`courtlistener_search_opinions`: new `party` parameter** — builds `caseName:"…"` fielded query so a bare company name finds actual-party cases (~327 for "Lockheed Martin") instead of text-mention results (~5,954 bare). Query param description updated to explain the difference. Fixes: vendor vetting missed actual-party opinions (user-eval 2026-09-22).
